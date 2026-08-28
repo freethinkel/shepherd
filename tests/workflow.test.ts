@@ -514,6 +514,14 @@ test("an approved change with green checks is merged by shepherd", async () => {
   await h.workflow.advance(reload(h, run.id));
   assert.equal(h.code.merged, 1);
   assert.equal(reload(h, run.id).status, "review", "completion waits for the forge to say merged");
+  assert.equal(db.countEvents(h.db, run.id, "ChangeMerged"), 1);
+
+  // the forge can lag reporting the merge (queue, gated pipeline, API lag) — the button
+  // is not pressed twice while shepherd waits for it to catch up
+  await new Promise((r) => setTimeout(r, 350));
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.code.merged, 1);
+  assert.equal(db.countEvents(h.db, run.id, "MergeFailed"), 0);
 
   await new Promise((r) => setTimeout(r, 350));
   h.code.state = "merged";

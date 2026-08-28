@@ -386,6 +386,10 @@ export class Workflow {
    */
   private async merge(run: AgentRun, change: Change): Promise<void> {
     if (!this.deps.config.orchestrator.auto_merge) return;
+    // the forge can report "open" for a while after a successful merge (queue, gated
+    // pipeline, API lag) — pressing the button twice fails and would wrongly tell a
+    // human the merge failed when it actually went through
+    if (db.countEvents(this.deps.db, run.id, "ChangeMerged") > 0) return;
     const failures = db.countEvents(this.deps.db, run.id, "MergeFailed");
     if (failures >= 3) return;
     try {
