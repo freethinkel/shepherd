@@ -65,6 +65,15 @@ event, and pushes the derived status back to the tracker. Agent state comes verb
 - **Events are state.** `ReviewAgentStarted` is how a review agent is prevented from starting twice;
   `ValidationRejected` is the retry counter for `max_validation_rounds`. Adding a "did we already do
   X" flag means appending an event, not adding a column.
+- **Todo during `review` means rework.** `checkChange` reads the synced task status; `ReviewRejected`
+  is the round counter for `max_review_rounds`, and its timestamp (the newest of `ReviewRejected` or
+  `ChangeCreated`) is the cutoff for which comments are sent. `ensureReviewAgent` keeps the review
+  agent to one pass per round by comparing counts, not timestamps: it skips whenever
+  `ReviewAgentStarted` events for the run outnumber `ReviewRejected` events for the run.
+- **Merge is executed, never decided.** `approved && checks === "success"` from `getChange` calls
+  `mergeChange`; a `ChangeMerged` event short-circuits every later attempt, since a forge can still
+  report the change as open for a while after a real merge. `MergeFailed` is capped at three so a
+  conflict does not spam the log every minute, and the run stays in `review` for a human.
 - **Idle needs two consecutive polls** before a run moves to `validating` — a single idle tick is a
   pause, not completion.
 - **A run in `review` never times out**; every other status is killed after `run_timeout_ms`.

@@ -141,9 +141,16 @@ Review runs with the same agent as development unless you say otherwise.
 `prompt` is what goes in front of the task text: plain text, or a slash command the agent itself
 understands. The dev agent works in the workspace root tab. The review agent comes up as a sibling
 tab in the same workspace right after the change is created, and gets the link to it. It leaves its
-notes as comments on the merge request. The orchestrator does not parse its answer and does not merge
-based on it. A `ReviewAgentStarted` event keeps review from starting twice, and a failed review does
-not fail the run.
+notes as comments on the merge request. The orchestrator does not parse its answer. A failed review
+does not fail the run.
+
+Sending the task back to Todo in the tracker while the change is open means "rework": the
+comments on the change (since it was opened, or since the last round) go to the dev agent, the task
+returns to In Progress, and after validation the same change goes back to In Review with a fresh
+review pass. `max_review_rounds` (default 3) caps that loop. Once a human approves the change and
+checks are green, shepherd merges it; `auto_merge = false` leaves that to a human as well. On GitHub
+an approving review counts even without a required-review rule; on GitLab an approval by a person is
+required, since `approved` is true by itself when a project has no approval rules.
 
 ## Daemon
 
@@ -184,7 +191,8 @@ src/
 ```
 
 Run lifecycle:
-`queued → starting → working → (blocked) → validating → creating_change → review → completed | failed`.
+`queued → starting → working → (blocked) → validating → creating_change → review → completed | failed`,
+with `review → working` when a human sends the task back to Todo.
 Agent state (`working/blocked/done/idle`) comes from Herdr in full. Nothing parses terminal output.
 
 Guarantees: a partial unique index in SQLite keeps a task from being picked up twice and a run from
@@ -208,4 +216,4 @@ worktrees, commits and pushes are genuine, nothing touches the network.
 
 ## Not there yet
 
-A TUI, auto-merge, Jira and Bitbucket as built-ins rather than plugins.
+A TUI, Jira and Bitbucket as built-ins rather than plugins.
