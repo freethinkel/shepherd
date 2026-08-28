@@ -62,9 +62,8 @@ event, and pushes the derived status back to the tracker. Agent state comes verb
 
 - **One run per task** is enforced by a partial unique index (`one_active_run_per_task`), not by
   application code. Same for one change per run (`changes.run_id UNIQUE`).
-- **Events are state.** `ReviewAgentStarted` is how a review agent is prevented from starting twice;
-  `ValidationRejected` is the retry counter for `max_validation_rounds`. Adding a "did we already do
-  X" flag means appending an event, not adding a column.
+- **Events are state.** `ValidationRejected` is the retry counter for `max_validation_rounds`.
+  Adding a "did we already do X" flag means appending an event, not adding a column.
 - **Todo during `review` means rework.** `checkChange` reads the synced task status; `ReviewRejected`
   is the round counter for `max_review_rounds`, and its timestamp (the newest of `ReviewRejected` or
   `ChangeCreated`) is the cutoff for which comments are sent. `ensureReviewAgent` keeps the review

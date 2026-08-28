@@ -46,8 +46,13 @@ export async function deleteBranch(repoRoot: string, branch: string): Promise<vo
 export const isDirty = async (worktree: string) =>
   (await git(worktree, ["status", "--porcelain"])).length > 0;
 
+/**
+ * Leased force: shepherd owns this branch, and a rework round where the agent rebased or
+ * amended would otherwise be rejected as non-fast-forward and fail the run. The lease still
+ * refuses if someone else moved the remote ref out from under us.
+ */
 export async function pushBranch(worktree: string, branch: string): Promise<void> {
-  await git(worktree, ["push", "--set-upstream", "origin", branch]);
+  await git(worktree, ["push", "--force-with-lease", "--set-upstream", "origin", branch]);
 }
 
 /** Validation: the configured command, run inside the worktree. */

@@ -106,7 +106,8 @@ export class GitHubCodeProvider implements CodeProvider {
     });
     return [
       ...line.map((c) => toComment(c, c.path, c.line ?? c.original_line ?? undefined)),
-      ...reviews.filter((r) => r.body?.trim()).map((r) => toComment(r)),
+      // an unsubmitted review is a draft nobody sent yet: submitted_at is null on it
+      ...reviews.filter((r) => r.submitted_at && r.body?.trim()).map((r) => toComment(r)),
       ...plain.map((c) => toComment(c)),
     ].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }

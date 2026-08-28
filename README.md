@@ -43,6 +43,8 @@ max_attempts = 3                 # failed runs per task before it needs a human
 poll_interval_ms = 5000          # how often Herdr is asked for agent state
 task_sync_interval_ms = 60000    # how often trackers are polled
 change_poll_interval_ms = 60000  # how often an open MR/PR is re-checked
+# max_review_rounds = 3          # rework rounds before the run gives up
+# auto_merge = true              # merge approved changes with green checks
 
 [[projects]]
 name = "Mochi"

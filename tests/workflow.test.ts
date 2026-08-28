@@ -554,3 +554,23 @@ test("a merge that fails is reported once and stops being retried", async () => 
   assert.equal(reload(h, run.id).status, "review");
   assert.equal(h.tasks.comments.filter((c) => /merge conflict/.test(c)).length, 1);
 });
+
+test("a retried run takes over the change row of the change it finds again", async () => {
+  const h = harness();
+  const run1 = await parkedInReview(h);
+  db.updateRun(h.db, run1.id, { status: "failed", finishedAt: new Date() });
+
+  const run2 = await h.workflow.start(h.project, h.task);
+  db.updateRun(h.db, run2.id, { status: "creating_change" });
+  await h.workflow.advance(reload(h, run2.id));
+
+  // the forge hands back the same open change, so the row has to follow the live run:
+  // left on the dead one, checkChange finds nothing and bounces back here every tick
+  assert.equal(db.getChangeForRun(h.db, run2.id)?.id, "7");
+  assert.equal(reload(h, run2.id).status, "review");
+  assert.equal(h.code.created, 1);
+
+  await h.workflow.advance(reload(h, run2.id));
+  assert.equal(reload(h, run2.id).status, "review");
+  assert.equal(h.code.created, 1, "no second change, and no second 'Pull request:' comment");
+});
