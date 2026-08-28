@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { githubChecks } from "../src/providers/code/github.ts";
 import { projectPathFromRemote } from "../src/providers/code/gitlab.ts";
 import { loadCustomProviders } from "../src/providers/load.ts";
 import { buildIssueFilter, targetState } from "../src/providers/tasks/linear.ts";
@@ -60,4 +61,27 @@ test("plugins register under their file name and a broken one is isolated", asyn
   assert.match(custom.errors[0]!, /^broken\.ts:/);
   assert.equal((custom.tasks.jira as any)({ url: "https://jira" }).url, "https://jira");
   assert.ok(custom.code.gitlab);
+});
+
+test("GitHub: the check rollup collapses to one verdict, and no checks means green", () => {
+  assert.equal(githubChecks([]), "success");
+  assert.equal(
+    githubChecks([{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" }]),
+    "success",
+  );
+  assert.equal(
+    githubChecks([{ __typename: "CheckRun", status: "IN_PROGRESS", conclusion: null }]),
+    "pending",
+  );
+  assert.equal(
+    githubChecks([
+      { __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" },
+      { __typename: "StatusContext", state: "FAILURE" },
+    ]),
+    "failure",
+  );
+  assert.equal(
+    githubChecks([{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SKIPPED" }]),
+    "success",
+  );
 });
