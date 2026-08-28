@@ -374,6 +374,32 @@ export class Workflow {
       db.closeWorkspaceRow(this.deps.db, run.herdrWorkspaceId);
     } else if (fresh.status === "closed") {
       this.fail(run, `change ${fresh.url} was closed`);
+    } else if (fresh.approved && fresh.checks === "success") {
+      await this.merge(run, change);
+    }
+  }
+
+  /**
+   * The human's approval is the decision; shepherd only presses the button. A merge that
+   * keeps failing (conflict, protected branch) is not the run's fault, so the run stays in
+   * review for a human, and the attempts are capped so the log is not spammed every minute.
+   */
+  private async merge(run: AgentRun, change: Change): Promise<void> {
+    if (!this.deps.config.orchestrator.auto_merge) return;
+    const failures = db.countEvents(this.deps.db, run.id, "MergeFailed");
+    if (failures >= 3) return;
+    try {
+      await this.codeProvider(run).mergeChange(change.id, run.worktreePath);
+      this.event("ChangeMerged", run, { change: change.url });
+    } catch (err: any) {
+      const error = briefError(err);
+      this.event("MergeFailed", run, { error });
+      this.log(`merge ${run.id}: ${error}`);
+      if (failures === 0) {
+        this.taskProvider(run.taskId)
+          .addComment(run.taskId, `Approved, but merging ${change.url} failed:\n\n\`${error}\``)
+          .catch(() => {});
+      }
     }
   }
 

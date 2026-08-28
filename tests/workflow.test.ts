@@ -500,3 +500,49 @@ test("the review agent comes back for the next round", async () => {
   await h.workflow.advance(reload(h, run.id));
   assert.equal(h.herdr.tabs, 2);
 });
+
+test("an approved change with green checks is merged by shepherd", async () => {
+  const h = harness();
+  const run = await parkedInReview(h);
+  h.code.approved = true;
+  h.code.checks = "pending";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.code.merged, 0, "not while checks are still running");
+
+  await new Promise((r) => setTimeout(r, 350));
+  h.code.checks = "success";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.code.merged, 1);
+  assert.equal(reload(h, run.id).status, "review", "completion waits for the forge to say merged");
+
+  await new Promise((r) => setTimeout(r, 350));
+  h.code.state = "merged";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "completed");
+});
+
+test("auto_merge = false leaves merging to a human", async () => {
+  const h = harness({ orchestrator: { auto_merge: false } });
+  const run = await parkedInReview(h);
+  h.code.approved = true;
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.code.merged, 0);
+  assert.equal(reload(h, run.id).status, "review");
+});
+
+test("a merge that fails is reported once and stops being retried", async () => {
+  const h = harness();
+  const run = await parkedInReview(h);
+  h.code.approved = true;
+  h.code.mergeChange = async () => {
+    h.code.merged++;
+    throw new Error("merge conflict");
+  };
+  for (let i = 0; i < 5; i++) {
+    await h.workflow.advance(reload(h, run.id));
+    await new Promise((r) => setTimeout(r, 350));
+  }
+  assert.equal(h.code.merged, 3);
+  assert.equal(reload(h, run.id).status, "review");
+  assert.equal(h.tasks.comments.filter((c) => /merge conflict/.test(c)).length, 1);
+});
