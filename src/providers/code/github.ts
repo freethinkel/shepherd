@@ -24,6 +24,19 @@ export function githubChecks(rollup: unknown[]): "pending" | "success" | "failur
   return pending ? "pending" : "success";
 }
 
+/**
+ * `reviewDecision` is only set when branch protection requires review. Without such a
+ * rule a human's Approve still has to count, so the latest review per author decides.
+ */
+export function githubApproved(pr: {
+  reviewDecision?: string | null;
+  latestReviews?: { state: string }[] | null;
+}): boolean {
+  if (pr.reviewDecision) return pr.reviewDecision === "APPROVED";
+  const states = (pr.latestReviews ?? []).map((r) => r.state);
+  return states.includes("APPROVED") && !states.includes("CHANGES_REQUESTED");
+}
+
 export class GitHubCodeProvider implements CodeProvider {
   readonly name = "github";
 
@@ -59,12 +72,12 @@ export class GitHubCodeProvider implements CodeProvider {
       "view",
       id,
       "--json",
-      "number,url,state,reviewDecision,statusCheckRollup",
+      "number,url,state,reviewDecision,statusCheckRollup,latestReviews",
     ]);
     const pr = JSON.parse(raw);
     return {
       ...this.toChange(pr),
-      approved: pr.reviewDecision === "APPROVED",
+      approved: githubApproved(pr),
       checks: githubChecks(pr.statusCheckRollup ?? []),
     };
   }

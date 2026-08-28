@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { githubChecks } from "../src/providers/code/github.ts";
+import { githubApproved, githubChecks } from "../src/providers/code/github.ts";
 import { projectPathFromRemote } from "../src/providers/code/gitlab.ts";
 import { loadCustomProviders } from "../src/providers/load.ts";
 import { buildIssueFilter, targetState } from "../src/providers/tasks/linear.ts";
@@ -84,4 +84,24 @@ test("GitHub: the check rollup collapses to one verdict, and no checks means gre
     githubChecks([{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SKIPPED" }]),
     "success",
   );
+});
+
+test("GitHub: without a required-review rule the latest reviews decide", () => {
+  assert.equal(githubApproved({ reviewDecision: "APPROVED", latestReviews: [] }), true);
+  assert.equal(
+    githubApproved({ reviewDecision: "REVIEW_REQUIRED", latestReviews: [{ state: "APPROVED" }] }),
+    false,
+  );
+  assert.equal(
+    githubApproved({ reviewDecision: "", latestReviews: [{ state: "APPROVED" }] }),
+    true,
+  );
+  assert.equal(
+    githubApproved({
+      reviewDecision: "",
+      latestReviews: [{ state: "APPROVED" }, { state: "CHANGES_REQUESTED" }],
+    }),
+    false,
+  );
+  assert.equal(githubApproved({ reviewDecision: null, latestReviews: null }), false);
 });
