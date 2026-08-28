@@ -8,6 +8,9 @@ import { isRunActive } from "../domain/status.ts";
 // ponytail: the whole schema is applied on open (CREATE IF NOT EXISTS).
 // Real migrations once a second schema version ships to production.
 const SCHEMA = `
+-- busy_timeout first: setting journal_mode itself needs a lock, and with a zero timeout
+-- it fails instantly whenever the daemon happens to be writing
+PRAGMA busy_timeout = 5000;
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
@@ -24,7 +27,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, provider_id TEXT NOT NULL,
   project_id TEXT NOT NULL REFERENCES projects(id),
   title TEXT NOT NULL, description TEXT, status TEXT NOT NULL, url TEXT,
-  synced_at TEXT NOT NULL);
+  provider TEXT NOT NULL DEFAULT '', synced_at TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS agent_runs (
   id TEXT PRIMARY KEY,
@@ -57,11 +60,20 @@ CREATE TABLE IF NOT EXISTS events (
 
 export type Db = DatabaseSync;
 
-export function openDb(path = process.env.SHEPHERD_DB ?? join(homedir(), ".shepherd", "state.db")): Db {
+export function openDb(
+  path = process.env.SHEPHERD_DB ?? join(homedir(), ".shepherd", "state.db"),
+): Db {
   const file = resolve(path);
   mkdirSync(dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec(SCHEMA);
+  // ponytail: one column added after the fact. A real migration runner can wait for the second one.
+  const columns = db.prepare(`SELECT name FROM pragma_table_info('tasks')`).all() as {
+    name: string;
+  }[];
+  if (!columns.some((c) => c.name === "provider")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN provider TEXT NOT NULL DEFAULT ''`);
+  }
   return db;
 }
 
@@ -85,13 +97,21 @@ export function upsertProject(db: Db, project: Project): void {
 
 export function upsertTask(db: Db, task: Task): void {
   db.prepare(
-    `INSERT INTO tasks (id, provider_id, project_id, title, description, status, url, synced_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO tasks (id, provider_id, project_id, title, description, status, url, provider, synced_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description,
-       status = excluded.status, url = excluded.url, synced_at = excluded.synced_at`,
+       status = excluded.status, url = excluded.url, provider = excluded.provider,
+       synced_at = excluded.synced_at`,
   ).run(
-    task.id, task.providerId, task.projectId, task.title,
-    n(task.description), task.status, n(task.url), new Date().toISOString(),
+    task.id,
+    task.providerId,
+    task.projectId,
+    task.title,
+    n(task.description),
+    task.status,
+    n(task.url),
+    task.provider ?? "",
+    new Date().toISOString(),
   );
 }
 
@@ -110,16 +130,19 @@ export const getProject = (db: Db, id: string): Project | undefined => {
 export const getRepository = (db: Db, id: string): Repository | undefined => {
   const row = db.prepare(`SELECT * FROM repositories WHERE id = ?`).get(id) as any;
   return row
-    ? { id: row.id, path: row.path, remote: row.remote ?? undefined, defaultBranch: row.default_branch }
+    ? {
+        id: row.id,
+        path: row.path,
+        remote: row.remote ?? undefined,
+        defaultBranch: row.default_branch,
+      }
     : undefined;
 };
 
 export const listTasks = (db: Db, projectId?: string): Task[] =>
   (
     db
-      .prepare(
-        `SELECT * FROM tasks ${projectId ? "WHERE project_id = ?" : ""} ORDER BY id`,
-      )
+      .prepare(`SELECT * FROM tasks ${projectId ? "WHERE project_id = ?" : ""} ORDER BY id`)
       .all(...(projectId ? [projectId] : [])) as any[]
   ).map(rowToTask);
 
@@ -134,20 +157,44 @@ export function insertRun(db: Db, run: AgentRun & { attempt?: number }): void {
        branch, worktree_path, status, started_at, attempt)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    run.id, run.projectId, run.taskId, run.herdrWorkspaceId, run.herdrAgentId, run.agentKind,
-    run.branch, run.worktreePath, run.status, run.startedAt.toISOString(), run.attempt ?? 1,
+    run.id,
+    run.projectId,
+    run.taskId,
+    run.herdrWorkspaceId,
+    run.herdrAgentId,
+    run.agentKind,
+    run.branch,
+    run.worktreePath,
+    run.status,
+    run.startedAt.toISOString(),
+    run.attempt ?? 1,
   );
 }
 
 type RunPatch = Partial<
-  Pick<AgentRun, "status" | "error" | "changeId" | "blockedReason" | "herdrWorkspaceId" | "herdrAgentId" | "finishedAt">
+  Pick<
+    AgentRun,
+    | "status"
+    | "error"
+    | "changeId"
+    | "blockedReason"
+    | "herdrWorkspaceId"
+    | "herdrAgentId"
+    | "finishedAt"
+    | "worktreePath"
+  >
 >;
 
 export function updateRun(db: Db, id: string, patch: RunPatch): void {
   const cols: Record<string, unknown> = {
-    status: patch.status, error: patch.error, change_id: patch.changeId,
-    blocked_reason: patch.blockedReason, herdr_workspace_id: patch.herdrWorkspaceId,
-    herdr_agent_id: patch.herdrAgentId, finished_at: iso(patch.finishedAt),
+    status: patch.status,
+    error: patch.error,
+    change_id: patch.changeId,
+    blocked_reason: patch.blockedReason,
+    herdr_workspace_id: patch.herdrWorkspaceId,
+    herdr_agent_id: patch.herdrAgentId,
+    worktree_path: patch.worktreePath,
+    finished_at: iso(patch.finishedAt),
   };
   const entries = Object.entries(cols).filter(([, v]) => v !== undefined);
   if (entries.length === 0) return;
@@ -157,7 +204,9 @@ export function updateRun(db: Db, id: string, patch: RunPatch): void {
 }
 
 export const getRun = (db: Db, id: string): AgentRun | undefined => {
-  const row = db.prepare(`SELECT * FROM agent_runs WHERE id = ? OR id LIKE ?`).get(id, `${id}%`) as any;
+  const row = db
+    .prepare(`SELECT * FROM agent_runs WHERE id = ? OR id LIKE ?`)
+    .get(id, `${id}%`) as any;
   return row ? rowToRun(row) : undefined;
 };
 
@@ -173,10 +222,16 @@ export const listRuns = (db: Db, projectId?: string): AgentRun[] =>
 export const activeRuns = (db: Db): AgentRun[] => listRuns(db).filter((r) => isRunActive(r.status));
 
 export const runsForTask = (db: Db, taskId: string): AgentRun[] =>
-  (db.prepare(`SELECT * FROM agent_runs WHERE task_id = ? ORDER BY started_at`).all(taskId) as any[])
-    .map(rowToRun);
+  (
+    db
+      .prepare(`SELECT * FROM agent_runs WHERE task_id = ? ORDER BY started_at`)
+      .all(taskId) as any[]
+  ).map(rowToRun);
 
-export function recordWorkspace(db: Db, ws: { id: string; runId: string; label: string; cwd: string }): void {
+export function recordWorkspace(
+  db: Db,
+  ws: { id: string; runId: string; label: string; cwd: string },
+): void {
   db.prepare(
     `INSERT INTO workspaces (id, run_id, label, cwd) VALUES (?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET label = excluded.label`,
@@ -191,12 +246,21 @@ export function recordChange(db: Db, change: Change): void {
   db.prepare(
     `INSERT OR IGNORE INTO changes (id, run_id, provider, url, status, created_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(change.id, change.runId, change.provider, change.url, change.status, new Date().toISOString());
+  ).run(
+    change.id,
+    change.runId,
+    change.provider,
+    change.url,
+    change.status,
+    new Date().toISOString(),
+  );
 }
 
 export const getChangeForRun = (db: Db, runId: string): Change | undefined => {
   const row = db.prepare(`SELECT * FROM changes WHERE run_id = ?`).get(runId) as any;
-  return row ? { id: row.id, runId: row.run_id, provider: row.provider, url: row.url, status: row.status } : undefined;
+  return row
+    ? { id: row.id, runId: row.run_id, provider: row.provider, url: row.url, status: row.status }
+    : undefined;
 };
 
 export function appendEvent(
@@ -204,38 +268,73 @@ export function appendEvent(
   type: string,
   ctx: { projectId?: string; taskId?: string; runId?: string; data?: unknown } = {},
 ): void {
-  db.prepare(`INSERT INTO events (at, type, project_id, task_id, run_id, data) VALUES (?, ?, ?, ?, ?, ?)`).run(
-    new Date().toISOString(), type, n(ctx.projectId), n(ctx.taskId), n(ctx.runId),
+  db.prepare(
+    `INSERT INTO events (at, type, project_id, task_id, run_id, data) VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    new Date().toISOString(),
+    type,
+    n(ctx.projectId),
+    n(ctx.taskId),
+    n(ctx.runId),
     ctx.data === undefined ? null : JSON.stringify(ctx.data),
   );
 }
 
 export const hasEvent = (db: Db, runId: string, type: string): boolean =>
-  db.prepare(`SELECT 1 FROM events WHERE run_id = ? AND type = ? LIMIT 1`).get(runId, type) !== undefined;
+  db.prepare(`SELECT 1 FROM events WHERE run_id = ? AND type = ? LIMIT 1`).get(runId, type) !==
+  undefined;
+
+export const countEvents = (db: Db, runId: string, type: string): number =>
+  (
+    db
+      .prepare(`SELECT count(*) AS n FROM events WHERE run_id = ? AND type = ?`)
+      .get(runId, type) as { n: number }
+  ).n;
+
+/** When something last happened to a task, used to forget runs from before a reset. */
+export const lastEventAt = (db: Db, taskId: string, type: string): Date | undefined => {
+  const row = db
+    .prepare(`SELECT at FROM events WHERE task_id = ? AND type = ? ORDER BY seq DESC LIMIT 1`)
+    .get(taskId, type) as { at: string } | undefined;
+  return row ? new Date(row.at) : undefined;
+};
 
 export const listEvents = (db: Db, limit = 50, runId?: string) =>
   db
-    .prepare(
-      `SELECT * FROM events ${runId ? "WHERE run_id = ?" : ""} ORDER BY seq DESC LIMIT ?`,
-    )
+    .prepare(`SELECT * FROM events ${runId ? "WHERE run_id = ?" : ""} ORDER BY seq DESC LIMIT ?`)
     .all(...(runId ? [runId] : []), limit) as any[];
 
 const rowToProject = (r: any): Project => ({
-  id: r.id, name: r.name, repositoryId: r.repository_id,
+  id: r.id,
+  name: r.name,
+  repositoryId: r.repository_id,
   taskProviderProjectId: r.task_provider_project_id ?? undefined,
 });
 
 const rowToTask = (r: any): Task => ({
-  id: r.id, providerId: r.provider_id, projectId: r.project_id, title: r.title,
-  description: r.description ?? undefined, status: r.status, url: r.url ?? undefined,
+  id: r.id,
+  providerId: r.provider_id,
+  projectId: r.project_id,
+  title: r.title,
+  description: r.description ?? undefined,
+  status: r.status,
+  url: r.url ?? undefined,
+  provider: r.provider || undefined,
 });
 
 const rowToRun = (r: any): AgentRun => ({
-  id: r.id, projectId: r.project_id, taskId: r.task_id,
-  herdrWorkspaceId: r.herdr_workspace_id, herdrAgentId: r.herdr_agent_id,
-  agentKind: r.agent_kind, branch: r.branch, worktreePath: r.worktree_path,
-  status: r.status as RunStatus, startedAt: new Date(r.started_at),
+  id: r.id,
+  projectId: r.project_id,
+  taskId: r.task_id,
+  herdrWorkspaceId: r.herdr_workspace_id,
+  herdrAgentId: r.herdr_agent_id,
+  agentKind: r.agent_kind,
+  branch: r.branch,
+  worktreePath: r.worktree_path,
+  status: r.status as RunStatus,
+  startedAt: new Date(r.started_at),
   finishedAt: r.finished_at ? new Date(r.finished_at) : undefined,
-  error: r.error ?? undefined, changeId: r.change_id ?? undefined,
+  error: r.error ?? undefined,
+  changeId: r.change_id ?? undefined,
   blockedReason: r.blocked_reason ?? undefined,
 });

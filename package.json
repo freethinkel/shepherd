@@ -2,7 +2,25 @@
   "name": "shepherd",
   "version": "0.0.1",
   "type": "module",
-  "packageManager": "nub@0.6.0",
+  "scripts": {
+    "start": "nub src/cli/index.ts",
+    "typecheck": "tsc --noEmit",
+    "install:bin": "nubx -y esbuild src/cli/index.ts --bundle --platform=node --format=esm --outfile=dist/shepherd.mjs --banner:js='#!/usr/bin/env -S node --disable-warning=ExperimentalWarning' && install -m 755 dist/shepherd.mjs \"${SHEPHERD_BIN_DIR:-$HOME/.local/bin}/shepherd\" && echo \"installed: ${SHEPHERD_BIN_DIR:-$HOME/.local/bin}/shepherd\" && { launchctl kickstart -k \"gui/$(id -u)/dev.shepherd.orchestrator\" >/dev/null 2>&1 && echo 'daemon restarted'; true; }",
+    "test": "nub --node --test \"tests/**/*.test.ts\"",
+    "fmt": "oxfmt .",
+    "lint": "oxlint ."
+  },
+  "dependencies": {
+    "smol-toml": "^1.8.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@nubjs/types": ">=0.4.13 <=0.6.0",
+    "@types/node": "^26",
+    "oxfmt": "^0.65.0",
+    "oxlint": "^1.80.0",
+    "typescript": "^7"
+  },
   "devEngines": {
     "packageManager": {
       "name": "nub",
@@ -10,19 +28,5 @@
       "onFail": "warn"
     }
   },
-  "scripts": {
-    "start": "nub src/cli/index.ts",
-    "check": "nub src/selfcheck.ts",
-    "typecheck": "nub exec tsc --noEmit",
-    "install:bin": "nub dlx esbuild src/cli/index.ts --bundle --platform=node --format=esm --outfile=dist/shepherd.mjs --banner:js='#!/usr/bin/env -S node --disable-warning=ExperimentalWarning' && install -m 755 dist/shepherd.mjs \"${SHEPHERD_BIN_DIR:-$HOME/.local/bin}/shepherd\" && echo \"installed: ${SHEPHERD_BIN_DIR:-$HOME/.local/bin}/shepherd\" && { launchctl kickstart -k \"gui/$(id -u)/dev.shepherd.orchestrator\" >/dev/null 2>&1 && echo 'daemon restarted'; true; }"
-  },
-  "devDependencies": {
-    "@nubjs/types": ">=0.4.13 <=0.6.0",
-    "@types/node": "^26",
-    "typescript": "^7"
-  },
-  "dependencies": {
-    "smol-toml": "^1.8.0",
-    "zod": "^4.4.3"
-  }
+  "packageManager": "nub@0.6.0"
 }

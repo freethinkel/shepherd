@@ -11,13 +11,26 @@ const gh = async (cwd: string, args: string[]) =>
 export class GitHubCodeProvider implements CodeProvider {
   readonly name = "github";
 
+  async check(repoPath?: string): Promise<void> {
+    await exec("gh", ["auth", "status"], repoPath ? { cwd: repoPath } : {}).catch(() => {
+      throw new Error("gh is not authenticated: run `gh auth login`");
+    });
+  }
+
   async createChange(input: CreateChangeInput): Promise<Omit<Change, "runId">> {
     const existing = await this.findByBranch(input.repoPath, input.branch);
     if (existing) return existing;
     await gh(input.repoPath, [
-      "pr", "create",
-      "--head", input.branch, "--base", input.baseBranch,
-      "--title", input.title, "--body", input.body,
+      "pr",
+      "create",
+      "--head",
+      input.branch,
+      "--base",
+      input.baseBranch,
+      "--title",
+      input.title,
+      "--body",
+      input.body,
     ]);
     const created = await this.findByBranch(input.repoPath, input.branch);
     if (!created) throw new Error("github: pull request was not created");
@@ -33,9 +46,21 @@ export class GitHubCodeProvider implements CodeProvider {
     await gh(repoPath, ["pr", "merge", id, "--squash"]);
   }
 
-  private async findByBranch(repoPath: string, branch: string): Promise<Omit<Change, "runId"> | undefined> {
+  private async findByBranch(
+    repoPath: string,
+    branch: string,
+  ): Promise<Omit<Change, "runId"> | undefined> {
     const raw = await gh(repoPath, [
-      "pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "number,url,state",
+      "pr",
+      "list",
+      "--head",
+      branch,
+      "--state",
+      "all",
+      "--limit",
+      "1",
+      "--json",
+      "number,url,state",
     ]).catch(() => "[]");
     const [pr] = JSON.parse(raw || "[]");
     return pr ? this.toChange(pr) : undefined;

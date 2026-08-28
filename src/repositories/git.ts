@@ -1,7 +1,5 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
 import { promisify } from "node:util";
 import { expandPath } from "../config/schema.ts";
 import type { Repository } from "../domain/types.ts";
@@ -24,28 +22,12 @@ export async function resolveRepository(pathLike: string): Promise<Repository> {
 }
 
 export function branchName(taskId: string, title: string): string {
-  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
   return `agent/${taskId.toLowerCase()}${slug ? `-${slug}` : ""}`.replace(/-$/, "");
-}
-
-/** One worktree per run: agents never fight over a working copy. */
-export async function createWorktree(input: {
-  repoRoot: string; branch: string; base: string; worktreesDir: string; name: string;
-}): Promise<string> {
-  const dir = expandPath(input.worktreesDir);
-  mkdirSync(dir, { recursive: true });
-  const path = join(dir, input.name);
-  if (existsSync(path)) return path;
-  await git(input.repoRoot, ["fetch", "--quiet", "origin", input.base]).catch(() => {});
-  const base = await git(input.repoRoot, ["rev-parse", "--verify", `origin/${input.base}`])
-    .catch(() => git(input.repoRoot, ["rev-parse", "--verify", input.base]));
-  await git(input.repoRoot, ["worktree", "add", "-b", input.branch, path, base]);
-  return path;
-}
-
-export async function removeWorktree(repoRoot: string, path: string): Promise<void> {
-  await git(repoRoot, ["worktree", "remove", "--force", path]).catch(() => {});
-  await git(repoRoot, ["worktree", "prune"]).catch(() => {});
 }
 
 /** git errors are not swallowed: zero commits and a broken path are different problems. */
@@ -54,6 +36,11 @@ export async function commitCount(worktree: string, base: string): Promise<numbe
     .then(() => `origin/${base}..HEAD`)
     .catch(() => `${base}..HEAD`);
   return Number(await git(worktree, ["rev-list", "--count", range])) || 0;
+}
+
+/** Drops the local branch. The remote one is left alone: a change may already point at it. */
+export async function deleteBranch(repoRoot: string, branch: string): Promise<void> {
+  await git(repoRoot, ["branch", "-D", branch]).catch(() => {});
 }
 
 export const isDirty = async (worktree: string) =>
@@ -70,7 +57,11 @@ export async function runCommand(
   timeoutMs = 15 * 60_000,
 ): Promise<{ ok: boolean; output: string }> {
   try {
-    const { stdout, stderr } = await exec("/bin/sh", ["-lc", command], { cwd, timeout: timeoutMs, maxBuffer: 8 << 20 });
+    const { stdout, stderr } = await exec("/bin/sh", ["-lc", command], {
+      cwd,
+      timeout: timeoutMs,
+      maxBuffer: 8 << 20,
+    });
     return { ok: true, output: `${stdout}${stderr}`.trim() };
   } catch (err: any) {
     return { ok: false, output: `${err.stdout ?? ""}${err.stderr ?? err.message ?? ""}`.trim() };

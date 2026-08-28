@@ -2,7 +2,11 @@ import type { Task, TaskFilter, TaskProvider, TaskStatus } from "../../domain/ty
 
 const API = "https://api.linear.app/graphql";
 
-export interface LinearState { id: string; name: string; type: string }
+export interface LinearState {
+  id: string;
+  name: string;
+  type: string;
+}
 
 /** The key comes from the environment only; the config keeps no secrets. */
 function apiKey(): string {
@@ -18,7 +22,8 @@ async function gql<T>(query: string, variables: Record<string, unknown> = {}): P
     body: JSON.stringify({ query, variables }),
   });
   const body = (await res.json()) as { data?: T; errors?: { message: string }[] };
-  if (body.errors?.length) throw new Error(`linear: ${body.errors.map((e) => e.message).join("; ")}`);
+  if (body.errors?.length)
+    throw new Error(`linear: ${body.errors.map((e) => e.message).join("; ")}`);
   if (!res.ok || !body.data) throw new Error(`linear: HTTP ${res.status}`);
   return body.data;
 }
@@ -33,10 +38,14 @@ export function targetState(status: TaskStatus, states: LinearState[]): LinearSt
   const byType = (t: string) => states.find((s) => s.type === t);
   const started = (re: RegExp) => states.find((s) => s.type === "started" && re.test(s.name));
   switch (status) {
-    case "todo": return byType("unstarted") ?? byType("backlog");
-    case "in_review": return started(/review/i) ?? byType("started");
-    case "done": return byType("completed");
-    default: return started(/progress/i) ?? byType("started");
+    case "todo":
+      return byType("unstarted") ?? byType("backlog");
+    case "in_review":
+      return started(/review/i) ?? byType("started");
+    case "done":
+      return byType("completed");
+    default:
+      return started(/progress/i) ?? byType("started");
   }
 }
 
@@ -48,7 +57,8 @@ export function buildIssueFilter(filter: TaskFilter): Record<string, unknown> {
   const where: Record<string, unknown> = { state: { type: { eq: "unstarted" } } };
   if (filter.taskProviderProjectId) where.project = { name: { eq: filter.taskProviderProjectId } };
   if (filter.assignee === "me") where.assignee = { isMe: { eq: true } };
-  else if (filter.assignee && filter.assignee !== "any") where.assignee = { email: { eq: filter.assignee } };
+  else if (filter.assignee && filter.assignee !== "any")
+    where.assignee = { email: { eq: filter.assignee } };
   return where;
 }
 
@@ -81,7 +91,8 @@ export class LinearTaskProvider implements TaskProvider {
 
   async updateStatus(id: string, status: TaskStatus): Promise<void> {
     const issue = await gql<{ issue: any }>(
-      `query($id: String!) { issue(id: $id) { id team { id } } }`, { id },
+      `query($id: String!) { issue(id: $id) { id team { id } } }`,
+      { id },
     );
     const states = await this.statesFor(issue.issue.team.id);
     const state = targetState(status, states);
@@ -94,7 +105,9 @@ export class LinearTaskProvider implements TaskProvider {
   }
 
   async addComment(id: string, body: string): Promise<void> {
-    const issue = await gql<{ issue: any }>(`query($id: String!) { issue(id: $id) { id } }`, { id });
+    const issue = await gql<{ issue: any }>(`query($id: String!) { issue(id: $id) { id } }`, {
+      id,
+    });
     await gql(
       `mutation($issueId: String!, $body: String!) {
          commentCreate(input: { issueId: $issueId, body: $body }) { success } }`,
@@ -106,7 +119,8 @@ export class LinearTaskProvider implements TaskProvider {
     const cached = this.stateCache.get(teamId);
     if (cached) return cached;
     const data = await gql<{ team: { states: { nodes: LinearState[] } } }>(
-      `query($id: String!) { team(id: $id) { states { nodes { id name type } } } }`, { id: teamId },
+      `query($id: String!) { team(id: $id) { states { nodes { id name type } } } }`,
+      { id: teamId },
     );
     this.stateCache.set(teamId, data.team.states.nodes);
     return data.team.states.nodes;
@@ -120,7 +134,12 @@ export class LinearTaskProvider implements TaskProvider {
       title: n.title,
       description: n.description ?? undefined,
       url: n.url,
-      status: n.state?.type === "completed" ? "done" : n.state?.type === "started" ? "in_progress" : "todo",
+      status:
+        n.state?.type === "completed"
+          ? "done"
+          : n.state?.type === "started"
+            ? "in_progress"
+            : "todo",
     };
   }
 }

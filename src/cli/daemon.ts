@@ -94,6 +94,17 @@ export async function uninstall(): Promise<void> {
   rmSync(plistPath(), { force: true });
 }
 
-export const start = () => exec("launchctl", ["kickstart", "-k", `${domain()}/${LABEL}`]);
+const loaded = () =>
+  exec("launchctl", ["print", `${domain()}/${LABEL}`])
+    .then(() => true)
+    .catch(() => false);
+
+/** Starts the agent, bootstrapping it again if `stop` had unloaded it. */
+export async function start(): Promise<void> {
+  if (await loaded()) await exec("launchctl", ["kickstart", `${domain()}/${LABEL}`]);
+  else await exec("launchctl", ["bootstrap", domain(), plistPath()]);
+}
+
+export const restart = () => exec("launchctl", ["kickstart", "-k", `${domain()}/${LABEL}`]);
 export const stop = () => exec("launchctl", ["bootout", `${domain()}/${LABEL}`]);
 export const installed = () => existsSync(plistPath());

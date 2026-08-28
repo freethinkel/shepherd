@@ -1,11 +1,6 @@
 // Orchestrator domain. Knows nothing about Linear / GitHub / Codex / Herdr internals.
 
-export type TaskStatus =
-  | "todo"
-  | "in_progress"
-  | "waiting_for_agent"
-  | "in_review"
-  | "done";
+export type TaskStatus = "todo" | "in_progress" | "waiting_for_agent" | "in_review" | "done";
 
 export type RunStatus =
   | "queued"
@@ -21,13 +16,7 @@ export type RunStatus =
 /** Normalized agent state owned by Herdr. */
 export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
-export type ProjectStatus =
-  | "blocked"
-  | "working"
-  | "validating"
-  | "review"
-  | "queued"
-  | "idle";
+export type ProjectStatus = "blocked" | "working" | "validating" | "review" | "queued" | "idle";
 
 export interface Repository {
   id: string;
@@ -51,6 +40,8 @@ export interface Task {
   description?: string | undefined;
   status: TaskStatus;
   url?: string | undefined;
+  /** Which registered provider this task came from, so updates go back to the same tracker. */
+  provider?: string | undefined;
 }
 
 export interface AgentRun {
@@ -103,6 +94,11 @@ export interface CreateChangeInput {
 }
 
 export interface CodeProvider {
+  /**
+   * Optional preflight: throw with a human-readable reason when credentials are missing.
+   * The repository path matters, because a CLI resolves the host from its remote.
+   */
+  check?(repoPath?: string): Promise<void>;
   createChange(input: CreateChangeInput): Promise<Omit<Change, "runId">>;
   getChange(id: string, repoPath: string): Promise<Omit<Change, "runId">>;
   mergeChange(id: string, repoPath: string): Promise<void>;

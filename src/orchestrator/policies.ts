@@ -4,7 +4,10 @@ import type { Config, ProjectConfig } from "../config/schema.ts";
 import type { AgentRun, Project, Task } from "../domain/types.ts";
 
 export const slug = (s: string) =>
-  s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
 
 export const projectId = (name: string) => slug(name);
 
@@ -28,10 +31,55 @@ export function canStart(activeRuns: number, maxConcurrent: number): boolean {
   return activeRuns < maxConcurrent;
 }
 
-/** A task is available when it has no non-failed run and is not done. */
-export function isTaskAvailable(task: Task, runs: AgentRun[]): boolean {
+/**
+ * A task is available when it has no run other than failed ones, is not done,
+ * and has not burned through max_attempts. Without that cap a run failing at
+ * startup would be restarted every tick forever.
+ */
+export function isTaskAvailable(task: Task, runs: AgentRun[], maxAttempts = 3): boolean {
   if (task.status === "done") return false;
-  return !runs.some((r) => r.status !== "failed");
+  if (runs.some((r) => r.status !== "failed")) return false;
+  return runs.length < maxAttempts;
+}
+
+/** Settings handed to a provider: the shared section plus its own [task_providers.<name>] block. */
+export function providerSettings(
+  role: "task_provider" | "code_provider",
+  config: Config,
+  name: string,
+): Record<string, unknown> {
+  const shared = config[role] as Record<string, unknown>;
+  const own = (config[`${role}s`] as Record<string, Record<string, unknown>>)[name] ?? {};
+  return { ...shared, ...own, name };
+}
+
+export function remoteHost(remote: string): string {
+  return (
+    remote
+      .trim()
+      .replace(/^[a-z+]+:\/\//, "")
+      .replace(/^[^@]*@/, "")
+      .split(/[:/]/)[0] ?? ""
+  );
+}
+
+/**
+ * Which code provider owns a repository, decided by its origin remote.
+ * Self-hosted forges are named in [code_providers.<name>] hosts, because a host
+ * like ci.company.net says nothing about what runs on it.
+ */
+export function codeProviderForRemote(
+  remote: string,
+  hosts: Record<string, string[]> = {},
+): string | undefined {
+  const host = remoteHost(remote);
+  for (const [name, owned] of Object.entries(hosts)) {
+    if (owned.some((h) => h === host)) return name;
+  }
+  if (host.includes("github")) return "github";
+  if (host.includes("gitlab")) return "gitlab";
+  if (host.includes("bitbucket")) return "bitbucket";
+  return undefined;
 }
 
 export interface AgentRole {
@@ -66,7 +114,11 @@ export function reviewAgentName(devAgent: string): string {
   return `${devAgent.slice(0, 28)}-rev`;
 }
 
-export function reviewPrompt(prefix: string, task: Task, ctx: { changeUrl: string; branch: string }): string {
+export function reviewPrompt(
+  prefix: string,
+  task: Task,
+  ctx: { changeUrl: string; branch: string },
+): string {
   return withPrefix(
     prefix,
     [
@@ -82,17 +134,20 @@ export function buildPrompt(
   task: Task,
   ctx: { branch: string; validate?: string | undefined; prefix?: string | undefined },
 ): string {
-  return withPrefix(ctx.prefix ?? "", [
-    `Task ${task.id}: ${task.title}`,
-    task.description ? `\n${task.description}` : "",
-    `\nYou are working in a dedicated git worktree on branch ${ctx.branch}.`,
-    `Implement the task and commit your changes to that branch.`,
-    ctx.validate ? `Before finishing, make sure \`${ctx.validate}\` passes.` : "",
-    `Do not push the branch or open a pull request — the orchestrator does that.`,
-    `If the requirements are ambiguous, stop and ask instead of guessing.`,
-  ]
-    .filter(Boolean)
-    .join("\n"));
+  return withPrefix(
+    ctx.prefix ?? "",
+    [
+      `Task ${task.id}: ${task.title}`,
+      task.description ? `\n${task.description}` : "",
+      `\nYou are working in a dedicated git worktree on branch ${ctx.branch}.`,
+      `Implement the task and commit your changes to that branch.`,
+      ctx.validate ? `Before finishing, make sure \`${ctx.validate}\` passes.` : "",
+      `Do not push the branch or open a pull request — the orchestrator does that.`,
+      `If the requirements are ambiguous, stop and ask instead of guessing.`,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  );
 }
 
 export function validationFeedback(command: string, output: string): string {

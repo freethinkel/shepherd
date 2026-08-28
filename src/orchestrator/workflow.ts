@@ -1,17 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type { Config, ProjectConfig } from "../config/schema.ts";
 import { taskStatusForRun } from "../domain/status.ts";
-import type { AgentRun, CodeProvider, Project, RunStatus, Task, TaskProvider } from "../domain/types.ts";
+import type { AgentRun, Project, RunStatus, Task } from "../domain/types.ts";
 import type { HerdrClient } from "../herdr/client.ts";
+import type { ProviderRegistry } from "../providers/registry.ts";
 import * as db from "../persistence/db.ts";
 import * as git from "../repositories/git.ts";
+import { briefError } from "../log.ts";
 import * as policy from "./policies.ts";
 
 export interface WorkflowDeps {
   db: db.Db;
   herdr: HerdrClient;
-  tasks: TaskProvider;
-  code: CodeProvider;
+  registry: ProviderRegistry;
   config: Config;
   projectConfigs: Map<string, ProjectConfig>;
   log?: (msg: string) => void;
@@ -21,8 +22,25 @@ export interface WorkflowDeps {
 export class Workflow {
   private readonly busy = new Set<string>();
   private readonly idleTicks = new Map<string, number>();
+  /** When the agent was last given something to do, and whether it started doing it. */
+  private readonly prompted = new Map<string, { at: number; sawWorking: boolean }>();
+  // ponytail: last check kept in memory. A restart re-checks once, which costs one API call.
+  private readonly lastChangeCheck = new Map<string, number>();
 
   constructor(private readonly deps: WorkflowDeps) {}
+
+  /** Updates go back to the tracker the task came from, recorded at sync time. */
+  private taskProvider(taskId: string) {
+    const name = db.getTask(this.deps.db, taskId)?.provider;
+    return this.deps.registry.tasks(name ?? this.deps.registry.taskProviderNames()[0]!);
+  }
+
+  /** The repository's remote decides where the change is opened. */
+  private codeProvider(run: AgentRun) {
+    const project = db.getProject(this.deps.db, run.projectId);
+    const repo = project ? db.getRepository(this.deps.db, project.repositoryId) : undefined;
+    return this.deps.registry.codeForRemote(repo?.remote);
+  }
 
   private log(msg: string) {
     this.deps.log?.(msg);
@@ -30,11 +48,18 @@ export class Workflow {
 
   private event(type: string, run: AgentRun, data?: unknown) {
     db.appendEvent(this.deps.db, type, {
-      runId: run.id, taskId: run.taskId, projectId: run.projectId, data,
+      runId: run.id,
+      taskId: run.taskId,
+      projectId: run.projectId,
+      data,
     });
   }
 
-  private transition(run: AgentRun, status: RunStatus, patch: Parameters<typeof db.updateRun>[2] = {}) {
+  private transition(
+    run: AgentRun,
+    status: RunStatus,
+    patch: Parameters<typeof db.updateRun>[2] = {},
+  ) {
     db.updateRun(this.deps.db, run.id, { status, ...patch });
     run.status = status;
     this.event("RunStatusChanged", run, { status });
@@ -45,9 +70,9 @@ export class Workflow {
     const taskStatus = taskStatusForRun(status);
     db.setTaskStatus(this.deps.db, run.taskId, taskStatus);
     this.event("TaskStatusChanged", run, { status: taskStatus });
-    this.deps.tasks
+    this.taskProvider(run.taskId)
       .updateStatus(run.taskId, taskStatus)
-      .catch((err) => this.log(`task ${run.taskId}: ${err.message}`));
+      .catch((err) => this.log(`task ${run.taskId}: ${briefError(err)}`));
   }
 
   /** Create a run and bring an agent up in Herdr. */
@@ -58,8 +83,6 @@ export class Workflow {
 
     const dev = policy.resolveAgentRole("dev", this.deps.config, cfg);
     const branch = git.branchName(task.id, task.title);
-    const worktreeName = `${policy.slug(project.name)}-${policy.slug(task.id)}`;
-    const worktree = policy.worktreePath(this.deps.config.orchestrator.worktrees, project, task);
     const run: AgentRun = {
       id: `run_${randomUUID().replace(/-/g, "").slice(0, 10)}`,
       projectId: project.id,
@@ -68,7 +91,7 @@ export class Workflow {
       herdrAgentId: policy.agentName(project, task),
       agentKind: dev.kind,
       branch,
-      worktreePath: worktree,
+      worktreePath: "", // filled in once herdr reports where the worktree landed
       status: "queued",
       startedAt: new Date(),
     };
@@ -80,28 +103,39 @@ export class Workflow {
     this.event("RunCreated", run, { branch });
 
     try {
-      await this.deps.tasks.claimTask(task.id).catch((err) => this.log(`claim ${task.id}: ${err.message}`));
+      await this.taskProvider(task.id)
+        .claimTask(task.id)
+        .catch((err) => this.log(`claim ${task.id}: ${briefError(err)}`));
       this.transition(run, "starting");
 
-      await git.createWorktree({
-        repoRoot: repo.path,
+      // herdr creates the worktree and its workspace together, and reopens the same
+      // one on a retry instead of piling up a second workspace for the task
+      const ws = await this.deps.herdr.openOrCreateWorktree({
+        repoPath: repo.path,
         branch,
         base: cfg.base_branch ?? this.deps.config.code_provider.base_branch ?? repo.defaultBranch,
-        worktreesDir: this.deps.config.orchestrator.worktrees,
-        name: worktreeName,
-      });
-
-      const ws = await this.deps.herdr.createWorkspace({
         label: policy.workspaceLabel(project, task),
-        cwd: worktree,
+        path: this.deps.config.orchestrator.worktrees
+          ? policy.worktreePath(this.deps.config.orchestrator.worktrees, project, task)
+          : undefined,
       });
-      db.recordWorkspace(this.deps.db, { id: ws.workspaceId, runId: run.id, label: ws.label, cwd: worktree });
-      db.updateRun(this.deps.db, run.id, { herdrWorkspaceId: ws.workspaceId });
+      run.worktreePath = ws.path;
+      db.recordWorkspace(this.deps.db, {
+        id: ws.workspaceId,
+        runId: run.id,
+        label: ws.label,
+        cwd: ws.path,
+      });
+      db.updateRun(this.deps.db, run.id, {
+        herdrWorkspaceId: ws.workspaceId,
+        worktreePath: ws.path,
+      });
       run.herdrWorkspaceId = ws.workspaceId;
 
-      await this.deps.herdr.spawnAgent({ name: run.herdrAgentId, kind: dev.kind, paneId: ws.paneId });
+      await this.spawnAgent(run, dev.kind, ws);
       this.event("AgentStarted", run, { agent: run.herdrAgentId, workspace: ws.workspaceId });
 
+      this.prompted.set(run.id, { at: Date.now(), sawWorking: false });
       await this.deps.herdr.prompt(
         run.herdrAgentId,
         policy.buildPrompt(task, {
@@ -113,14 +147,43 @@ export class Workflow {
       this.transition(run, "working");
       return run;
     } catch (err: any) {
-      this.fail(run, err.message ?? String(err));
+      this.fail(run, briefError(err, 500));
       return run;
     }
+  }
+
+  /**
+   * A reopened workspace may already hold the agent from a previous run, and its root pane
+   * may be busy. Reuse a live agent with our name, otherwise start one in a free pane.
+   */
+  private async spawnAgent(
+    run: AgentRun,
+    kind: string,
+    ws: { workspaceId: string; paneId: string },
+  ): Promise<void> {
+    const live = await this.deps.herdr.listAgents().catch(() => []);
+    const ours = live.find((a) => a.name === run.herdrAgentId);
+    if (ours) {
+      this.event("AgentReused", run, { agent: ours.name, pane: ours.paneId });
+      return;
+    }
+    const paneBusy = live.some((a) => a.paneId === ws.paneId);
+    const paneId = paneBusy
+      ? (
+          await this.deps.herdr.createTab({
+            workspaceId: ws.workspaceId,
+            cwd: run.worktreePath,
+            label: "agent",
+          })
+        ).paneId
+      : ws.paneId;
+    await this.deps.herdr.spawnAgent({ name: run.herdrAgentId, kind, paneId });
   }
 
   /** Advance the run based on the agent state reported by Herdr. */
   async advance(run: AgentRun): Promise<void> {
     if (this.busy.has(run.id)) return;
+    if (this.expired(run)) return;
     this.busy.add(run.id);
     try {
       switch (run.status) {
@@ -142,10 +205,23 @@ export class Workflow {
           break;
       }
     } catch (err: any) {
-      this.fail(run, err.message ?? String(err));
+      this.fail(run, briefError(err, 500));
     } finally {
       this.busy.delete(run.id);
     }
+  }
+
+  /**
+   * A hung agent, or a question nobody answers, would otherwise hold its slot forever.
+   * Waiting in review is excluded: a pull request may legitimately sit for days.
+   */
+  private expired(run: AgentRun): boolean {
+    if (run.status === "review") return false;
+    const limit = this.deps.config.orchestrator.run_timeout_ms;
+    const age = Date.now() - run.startedAt.getTime();
+    if (age < limit) return false;
+    this.fail(run, `run timed out after ${Math.round(age / 60_000)} min in status ${run.status}`);
+    return true;
   }
 
   private async observeAgent(run: AgentRun): Promise<void> {
@@ -158,20 +234,39 @@ export class Workflow {
     if (status === "blocked") {
       if (run.status !== "blocked") {
         const tail = await this.deps.herdr.readAgent(run.herdrAgentId, 40).catch(() => "");
-        const reason = tail.split("\n").filter((l) => l.trim()).slice(-6).join("\n");
+        const reason = tail
+          .split("\n")
+          .filter((l) => l.trim())
+          .slice(-6)
+          .join("\n");
         this.event("AgentBlocked", run, { reason });
         this.transition(run, "blocked", { blockedReason: reason });
-        this.deps.tasks
-          .addComment(run.taskId, `Agent is blocked in Herdr (\`${run.herdrWorkspaceId}\`):\n\n${reason}`)
+        this.taskProvider(run.taskId)
+          .addComment(
+            run.taskId,
+            `Agent is blocked in Herdr (\`${run.herdrWorkspaceId}\`):\n\n${reason}`,
+          )
           .catch(() => {});
       }
       return;
     }
     if (status === "working") {
       this.idleTicks.delete(run.id);
+      const prompt = this.prompted.get(run.id);
+      if (prompt) prompt.sawWorking = true;
       if (run.status !== "working") this.transition(run, "working");
       return;
     }
+
+    // The agent is idle after `agent start` too, with the prompt still unread. Until it has
+    // been seen working at least once, idle only counts after the settle window.
+    const prompt = this.prompted.get(run.id);
+    if (prompt && !prompt.sawWorking) {
+      if (Date.now() - prompt.at < this.deps.config.orchestrator.agent_settle_ms) return;
+      this.event("AgentNeverStarted", run, { afterMs: Date.now() - prompt.at });
+      this.prompted.delete(run.id);
+    }
+
     // idle | done — require two polls in a row so a pause is not mistaken for completion
     const ticks = (this.idleTicks.get(run.id) ?? 0) + 1;
     this.idleTicks.set(run.id, ticks);
@@ -204,8 +299,20 @@ export class Workflow {
     this.transition(run, "creating_change");
   }
 
-  /** A failed validation goes back to the same agent; the run continues. */
+  /**
+   * A failed validation goes back to the same agent, but not forever: a check that
+   * can never pass would keep the pair looping and the slot occupied.
+   */
   private async sendBack(run: AgentRun, message: string): Promise<void> {
+    const rounds = db.countEvents(this.deps.db, run.id, "ValidationRejected");
+    const max = this.deps.config.orchestrator.max_validation_rounds;
+    if (rounds >= max) {
+      this.fail(run, `validation still failing after ${max} attempts`);
+      return;
+    }
+    this.event("ValidationRejected", run, { round: rounds + 1 });
+    this.prompted.set(run.id, { at: Date.now(), sawWorking: false });
+    this.idleTicks.delete(run.id);
     await this.deps.herdr.prompt(run.herdrAgentId, message);
     this.transition(run, "working");
   }
@@ -219,7 +326,7 @@ export class Workflow {
     const task = db.getTask(this.deps.db, run.taskId);
     const cfg = this.projectConfigById(run.projectId);
     await git.pushBranch(run.worktreePath, run.branch);
-    const change = await this.deps.code.createChange({
+    const change = await this.codeProvider(run).createChange({
       repoPath: run.worktreePath,
       branch: run.branch,
       baseBranch: cfg?.base_branch ?? this.deps.config.code_provider.base_branch,
@@ -228,7 +335,9 @@ export class Workflow {
     });
     db.recordChange(this.deps.db, { ...change, runId: run.id });
     this.event("ChangeCreated", run, change);
-    this.deps.tasks.addComment(run.taskId, `Pull request: ${change.url}`).catch(() => {});
+    this.taskProvider(run.taskId)
+      .addComment(run.taskId, `Pull request: ${change.url}`)
+      .catch(() => {});
     this.transition(run, "review", { changeId: change.id });
     await this.ensureReviewAgent(run, change.url);
   }
@@ -241,7 +350,12 @@ export class Workflow {
       return;
     }
     await this.ensureReviewAgent(run, change.url);
-    const fresh = await this.deps.code.getChange(change.id, run.worktreePath);
+
+    const since = Date.now() - (this.lastChangeCheck.get(run.id) ?? 0);
+    if (since < this.deps.config.orchestrator.change_poll_interval_ms) return;
+    this.lastChangeCheck.set(run.id, Date.now());
+
+    const fresh = await this.codeProvider(run).getChange(change.id, run.worktreePath);
     if (fresh.status === "merged") {
       this.transition(run, "completed", { finishedAt: new Date() });
       this.event("RunCompleted", run, { change: fresh.url });
@@ -257,7 +371,11 @@ export class Workflow {
    * Its verdict goes into pull request comments — the orchestrator never parses its answer.
    */
   async ensureReviewAgent(run: AgentRun, changeUrl?: string): Promise<boolean> {
-    const role = policy.resolveAgentRole("review", this.deps.config, this.projectConfigById(run.projectId));
+    const role = policy.resolveAgentRole(
+      "review",
+      this.deps.config,
+      this.projectConfigById(run.projectId),
+    );
     if (!role.prompt.trim()) return false;
     if (db.hasEvent(this.deps.db, run.id, "ReviewAgentStarted")) return false;
     const url = changeUrl ?? db.getChangeForRun(this.deps.db, run.id)?.url;
@@ -279,8 +397,8 @@ export class Workflow {
       return true;
     } catch (err: any) {
       // review is a bonus step: the pull request already exists, so do not fail the run
-      this.event("ReviewAgentFailed", run, { error: err.message ?? String(err) });
-      this.log(`review ${run.id}: ${err.message ?? err}`);
+      this.event("ReviewAgentFailed", run, { error: briefError(err) });
+      this.log(`review ${run.id}: ${briefError(err)}`);
       return false;
     }
   }
@@ -290,11 +408,32 @@ export class Workflow {
     this.fail(run, reason);
   }
 
+  /** A failed run hands the task back with the reason, so nothing silently rots in In Progress. */
   private fail(run: AgentRun, error: string): void {
     db.updateRun(this.deps.db, run.id, { status: "failed", error, finishedAt: new Date() });
     run.status = "failed";
     this.event("RunFailed", run, { error });
     this.log(`run ${run.id} failed: ${error}`);
+
+    this.syncTaskStatus(run, "failed"); // back to the tracker's Todo column
+    const attempts = db.runsForTask(this.deps.db, run.taskId).length;
+    const max = this.deps.config.orchestrator.max_attempts;
+    this.taskProvider(run.taskId)
+      .addComment(
+        run.taskId,
+        [
+          `Run \`${run.id}\` failed on attempt ${attempts} of ${max}.`,
+          "",
+          "```",
+          error.slice(0, 2000),
+          "```",
+          `Branch \`${run.branch}\`, Herdr workspace \`${run.herdrWorkspaceId || "none"}\`.`,
+          attempts >= max
+            ? "Automatic retries stopped. Fix the cause and run `shepherd retry` to try again."
+            : "The task is back in the queue and will be picked up again.",
+        ].join("\n"),
+      )
+      .catch((err) => this.log(`comment ${run.taskId}: ${briefError(err)}`));
   }
 
   private projectConfig(project: Project): ProjectConfig {

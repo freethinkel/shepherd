@@ -14,7 +14,14 @@ export interface ProjectView {
   project: Project;
   status: ProjectStatus;
   tasks: TaskView[];
-  counts: { working: number; blocked: number; queued: number; done: number; failed: number };
+  counts: {
+    working: number;
+    blocked: number;
+    queued: number;
+    review: number;
+    done: number;
+    failed: number;
+  };
   attention: boolean;
 }
 
@@ -32,6 +39,7 @@ export function projectView(database: db.Db, project: Project): ProjectView {
     working: tasks.filter((t) => ["starting", "working"].includes(t.status)).length,
     blocked: tasks.filter((t) => t.status === "blocked").length,
     queued: tasks.filter((t) => t.status === "queued").length,
+    review: tasks.filter((t) => t.status === "review").length,
     done: tasks.filter((t) => t.status === "completed").length,
     failed: tasks.filter((t) => t.status === "failed").length,
   };

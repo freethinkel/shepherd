@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { normalizeAgentStatus } from "../domain/status.ts";
+import { briefError } from "../log.ts";
 import type { AgentStatus } from "../domain/types.ts";
 
 const exec = promisify(execFile);
@@ -41,10 +42,13 @@ export class HerdrClient {
       return JSON.parse(stdout).result;
     } catch (err: any) {
       const raw = String(err.stderr ?? err.message ?? err).trim();
-      let message = raw;
+      let message: string;
       try {
-        message = JSON.parse(raw).error?.message ?? JSON.parse(raw).error?.code ?? raw;
-      } catch {}
+        const parsed = JSON.parse(raw).error;
+        message = parsed?.message ?? parsed?.code ?? raw;
+      } catch {
+        message = briefError(raw, 300);
+      }
       throw new HerdrError(`herdr ${args.join(" ")}: ${message}`);
     }
   }
@@ -54,9 +58,73 @@ export class HerdrClient {
     return stdout.trim();
   }
 
+  /** Worktrees that herdr already knows about for this repository. */
+  async listWorktrees(
+    repoPath: string,
+  ): Promise<{ branch: string; path: string; workspaceId?: string }[]> {
+    const r = await this.call(["worktree", "list", "--cwd", repoPath]);
+    return (r.worktrees ?? []).map((w: any) => ({
+      branch: w.branch,
+      path: w.path,
+      workspaceId: w.open_workspace_id ?? undefined,
+    }));
+  }
+
+  /**
+   * One workspace per branch, created through herdr so it owns the worktree:
+   * it shows up in `herdr worktree list` and is removed with the workspace.
+   * Reopening an existing worktree returns the same workspace, so a retry or a
+   * restarted daemon never ends up with two workspaces for the same task.
+   */
+  async openOrCreateWorktree(input: {
+    repoPath: string;
+    branch: string;
+    base: string;
+    label: string;
+    path?: string | undefined;
+  }): Promise<HerdrWorkspace & { path: string }> {
+    const known = await this.listWorktrees(input.repoPath).catch(() => []);
+    const existing = known.find((w) => w.branch === input.branch);
+    const args = existing
+      ? ["worktree", "open", "--cwd", input.repoPath, "--branch", input.branch, "--no-focus"]
+      : [
+          "worktree",
+          "create",
+          "--cwd",
+          input.repoPath,
+          "--branch",
+          input.branch,
+          "--base",
+          input.base,
+          "--label",
+          input.label,
+          ...(input.path ? ["--path", input.path] : []),
+          "--no-focus",
+        ];
+    const r = await this.call(args);
+    return {
+      workspaceId: r.workspace.workspace_id,
+      tabId: r.tab.tab_id,
+      paneId: r.root_pane.pane_id,
+      label: input.label,
+      path: r.root_pane.cwd,
+    };
+  }
+
+  /** Removes the checkout together with its workspace. */
+  async removeWorktree(workspaceId: string): Promise<void> {
+    await this.call(["worktree", "remove", "--workspace", workspaceId, "--force"]);
+  }
+
   async createWorkspace(input: { label: string; cwd: string }): Promise<HerdrWorkspace> {
     const r = await this.call([
-      "workspace", "create", "--cwd", input.cwd, "--label", input.label, "--no-focus",
+      "workspace",
+      "create",
+      "--cwd",
+      input.cwd,
+      "--label",
+      input.label,
+      "--no-focus",
     ]);
     return {
       workspaceId: r.workspace.workspace_id,
@@ -67,25 +135,49 @@ export class HerdrClient {
   }
 
   /** A tab in an existing workspace: workspace = task, tab = agent. */
-  async createTab(input: { workspaceId: string; cwd: string; label: string }): Promise<{ tabId: string; paneId: string }> {
+  async createTab(input: {
+    workspaceId: string;
+    cwd: string;
+    label: string;
+  }): Promise<{ tabId: string; paneId: string }> {
     const r = await this.call([
-      "tab", "create", "--workspace", input.workspaceId, "--cwd", input.cwd,
-      "--label", input.label, "--no-focus",
+      "tab",
+      "create",
+      "--workspace",
+      input.workspaceId,
+      "--cwd",
+      input.cwd,
+      "--label",
+      input.label,
+      "--no-focus",
     ]);
     return { tabId: r.tab.tab_id, paneId: r.root_pane.pane_id };
   }
 
   async spawnAgent(input: {
-    name: string; kind: string; paneId: string; timeoutMs?: number | undefined;
+    name: string;
+    kind: string;
+    paneId: string;
+    timeoutMs?: number | undefined;
   }): Promise<HerdrAgent> {
     const r = await this.call([
-      "agent", "start", input.name, "--kind", input.kind, "--pane", input.paneId,
-      "--timeout", String(input.timeoutMs ?? 60_000),
+      "agent",
+      "start",
+      input.name,
+      "--kind",
+      input.kind,
+      "--pane",
+      input.paneId,
+      "--timeout",
+      String(input.timeoutMs ?? 60_000),
     ]);
     const a = r.agent ?? r;
     return {
-      name: input.name, paneId: a.pane_id ?? input.paneId, workspaceId: a.workspace_id ?? "",
-      kind: input.kind, status: normalizeAgentStatus(a.agent_status),
+      name: input.name,
+      paneId: a.pane_id ?? input.paneId,
+      workspaceId: a.workspace_id ?? "",
+      kind: input.kind,
+      status: normalizeAgentStatus(a.agent_status),
     };
   }
 
@@ -115,9 +207,11 @@ export class HerdrClient {
   }
 
   async readAgent(agent: string, lines = 40): Promise<string> {
-    const { stdout } = await exec(this.bin, [
-      "agent", "read", agent, "--source", "recent-unwrapped", "--lines", String(lines),
-    ], { maxBuffer: 8 << 20 });
+    const { stdout } = await exec(
+      this.bin,
+      ["agent", "read", agent, "--source", "recent-unwrapped", "--lines", String(lines)],
+      { maxBuffer: 8 << 20 },
+    );
     return stdout;
   }
 
@@ -153,13 +247,26 @@ export class HerdrClient {
         const prev = seen.get(a.name);
         seen.set(a.name, a.status);
         if (!first && prev !== a.status) {
-          yield { type: "agent_status_changed", agent: a.name, workspaceId: a.workspaceId, status: a.status, previous: prev };
+          yield {
+            type: "agent_status_changed",
+            agent: a.name,
+            workspaceId: a.workspaceId,
+            status: a.status,
+            previous: prev,
+          };
         }
       }
       for (const [name, prev] of seen) {
         if (!alive.has(name)) {
           seen.delete(name);
-          if (!first) yield { type: "agent_gone", agent: name, workspaceId: "", status: "unknown", previous: prev };
+          if (!first)
+            yield {
+              type: "agent_gone",
+              agent: name,
+              workspaceId: "",
+              status: "unknown",
+              previous: prev,
+            };
         }
       }
       first = false;

@@ -1,9 +1,4 @@
-import type {
-  AgentStatus,
-  ProjectStatus,
-  RunStatus,
-  TaskStatus,
-} from "./types.ts";
+import type { AgentStatus, ProjectStatus, RunStatus, TaskStatus } from "./types.ts";
 
 /** Herdr owns agent state. We only normalize its vocabulary. */
 export function normalizeAgentStatus(raw: string | undefined): AgentStatus {
@@ -32,9 +27,12 @@ export function isRunActive(status: RunStatus): boolean {
   return RUN_ACTIVE.includes(status);
 }
 
-/** Needs a human: the orchestrator cannot move this run any further. */
+/**
+ * Something went wrong and a human is needed. A pull request waiting for review
+ * is deliberately not here: it is the normal end of a run, not a problem.
+ */
 export function needsAttention(status: RunStatus): boolean {
-  return status === "blocked" || status === "failed" || status === "review";
+  return status === "blocked" || status === "failed";
 }
 
 /** Tracker task status derived from the run status. */
@@ -48,6 +46,8 @@ export function taskStatusForRun(status: RunStatus): TaskStatus {
       return "in_review";
     case "completed":
       return "done";
+    case "failed":
+      return "todo"; // nobody is working on it any more, so put it back in the queue
     default:
       return "in_progress";
   }
@@ -82,10 +82,7 @@ function runToProjectStatus(status: RunStatus): ProjectStatus | undefined {
 }
 
 /** Project status is derived from its runs rather than stored separately. */
-export function deriveProjectStatus(
-  runStatuses: RunStatus[],
-  queuedTasks = 0,
-): ProjectStatus {
+export function deriveProjectStatus(runStatuses: RunStatus[], queuedTasks = 0): ProjectStatus {
   const candidates = runStatuses
     .map(runToProjectStatus)
     .filter((s): s is ProjectStatus => s !== undefined);

@@ -2,8 +2,15 @@ import type { RunStatus } from "../domain/types.ts";
 import type { ProjectView } from "../view.ts";
 
 const ICONS: Record<string, string> = {
-  queued: "○", starting: "●", working: "●", blocked: "◉", validating: "◍",
-  creating_change: "◍", review: "◍", completed: "✓", failed: "✗",
+  queued: "○",
+  starting: "●",
+  working: "●",
+  blocked: "◉",
+  validating: "◍",
+  creating_change: "◍",
+  review: "◍",
+  completed: "✓",
+  failed: "✗",
 };
 
 export const icon = (status: RunStatus) => ICONS[status] ?? "·";
@@ -12,7 +19,12 @@ export function table(headers: string[], rows: (string | number)[][]): string {
   const all = [headers, ...rows.map((r) => r.map(String))];
   const widths = headers.map((_, i) => Math.max(...all.map((r) => (r[i] ?? "").length)));
   return all
-    .map((row) => row.map((cell, i) => String(cell).padEnd(widths[i]!)).join("  ").trimEnd())
+    .map((row) =>
+      row
+        .map((cell, i) => String(cell).padEnd(widths[i]!))
+        .join("  ")
+        .trimEnd(),
+    )
     .join("\n");
 }
 
@@ -23,9 +35,14 @@ export function projectsTree(views: ProjectView[]): string {
     const summary = [
       view.counts.working ? `${view.counts.working} running` : "",
       view.counts.blocked ? `${view.counts.blocked} blocked` : "",
+      view.counts.review ? `${view.counts.review} in review` : "",
       view.counts.queued ? `${view.counts.queued} queued` : "",
-    ].filter(Boolean).join(", ");
-    out.push(`${icon(view.status === "idle" ? "queued" : "working")} ${view.project.name}${summary ? `  (${summary})` : ""}`);
+    ]
+      .filter(Boolean)
+      .join(", ");
+    out.push(
+      `${icon(view.status === "idle" ? "queued" : "working")} ${view.project.name}${summary ? `  (${summary})` : ""}`,
+    );
     view.tasks.forEach((task, i) => {
       const branch = i === view.tasks.length - 1 ? "└──" : "├──";
       const agent = task.run ? task.run.agentKind : "—";

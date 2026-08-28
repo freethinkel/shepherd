@@ -1,116 +1,128 @@
 # shepherd
 
-A control plane on top of [Herdr](https://herdr.dev). It decides what coding agents work on and when,
-and shows all autonomous work across projects in one place. Herdr stays the agent runtime, git stays
-the source of truth for code, the tracker stays the source of truth for tasks.
+A control plane over [Herdr](https://herdr.dev). It decides what coding agents work on and when,
+and gives you one view across all projects. Herdr stays the agent runtime, git is the truth about
+code, the tracker is the truth about tasks.
 
 ```
-Task tracker → Orchestrator → Project → Herdr workspace → Agent → Git → PR → Task tracker
+Task tracker → Orchestrator → Project → Herdr workspace → Agent → Git → MR/PR → Task tracker
 ```
 
 ## Install
 
 ```sh
 nub install
-nub run install:bin           # bundles and drops `shepherd` into ~/.local/bin
-shepherd init                 # creates ~/.config/shepherd/config.toml (chmod 600)
+nub run install:bin           # bundles and drops shepherd into ~/.local/bin
+shepherd init                 # writes ~/.config/shepherd/config.toml (chmod 600)
 shepherd doctor
 ```
 
-The script is `install:bin`, not `install`, because npm treats a script named `install` as a
-lifecycle hook and runs it on every `nub install`. Set `SHEPHERD_BIN_DIR` to install elsewhere.
+It is `install:bin` and not `install` because an npm script named `install` is a lifecycle hook.
+It would run on every `nub install`. Set `SHEPHERD_BIN_DIR` to change the target directory.
 
 ## Configuration
 
 Lookup order: `$SHEPHERD_CONFIG`, then `./shepherd.toml`, then `~/.config/shepherd/config.toml`.
-Credentials live in the `[env]` section of that same file, which `init` creates with mode 600.
-Environment variables override it.
+Keys live in the `[env]` section of that same file (mode 600). Environment variables win over it.
 
 ```toml
 [env]
 LINEAR_API_KEY = "lin_api_..."
+# no GITHUB_TOKEN needed, shepherd uses the gh CLI auth
 
-[task_provider]
-type = "linear"
-assignee = "me"   # "me" | email | "any". An unassigned task counts as unfinished.
-# Only the Todo column is picked up. Backlog is left alone.
+[task_provider]                  # shared by every tracker
+assignee = "me"                  # "me" | email | "any" (the last one also picks up unassigned)
+# only the Todo column is pulled, Backlog is left alone
+
+[code_provider]                  # shared by every forge
+base_branch = "main"
 
 [orchestrator]
 max_concurrent_runs = 3
+max_attempts = 3                 # failed runs per task before it needs a human
+poll_interval_ms = 5000          # how often Herdr is asked for agent state
+task_sync_interval_ms = 60000    # how often trackers are polled
+change_poll_interval_ms = 60000  # how often an open MR/PR is re-checked
 
 [[projects]]
 name = "Mochi"
 repository = "~/Developer/dev/pet/mochi"
-task_project = "Mochi"
+task_project = "Mochi"           # project key on the tracker side
 agent = "claude"
-# validate = "flutter test"
+# validate = "flutter test"      # runs in the worktree, empty means validation is skipped
+# base_branch = "develop"        # overrides code_provider.base_branch
 ```
 
-State lives in `~/.shepherd/state.db` (`SHEPHERD_DB`) and `~/.shepherd/worktrees/`.
+State lives in `~/.shepherd/state.db` (`SHEPHERD_DB`). Worktrees belong to herdr, which puts them
+under `~/.herdr/worktrees/<repo>/<branch>`; set `orchestrator.worktrees` only to override that.
+
+## Providers
+
+There is no `type =` key anywhere. Every registered tracker is polled, and the git remote picks the
+forge, so one shepherd can drive a Linear plus GitHub project and a Jira plus self-hosted GitLab one
+side by side. A project joins a tracker through `task_project`.
+
+Built in: Linear for tasks, GitHub (`gh`) and GitLab (`glab`) for changes. Per-provider settings go
+into a section named after the provider:
+
+```toml
+[task_providers.jira]
+url = "https://company.atlassian.net"
+
+[code_providers.gitlab]
+url = "https://ci.unitedline.net"
+hosts = ["ci.unitedline.net"]    # remotes that belong to this provider
+# transport = "token"            # skip glab, talk to the REST API with GITLAB_TOKEN
+```
+
+Remote matching goes through `hosts` first, then falls back to the host name containing `github` or
+`gitlab`. Self-hosted installations need the `hosts` line, nothing else recognises them. GitLab uses
+`glab` credentials when it is logged in and drops to `GITLAB_TOKEN` when it is not.
+
+A tracker plugin is only polled when it has a `[task_providers.<name>]` section, since a plugin with
+no settings has no host to talk to.
+
+### Plugins
+
+Files in `~/.config/shepherd/providers/` (and in a `providers/` folder next to a project-local
+`shepherd.toml`, or in `SHEPHERD_PROVIDERS`) are loaded at startup. A file that exports one factory
+is registered under its own file name, so `jira.ts` becomes the `jira` provider and reads
+`[task_providers.jira]`. A factory gets its whole config section.
+
+```ts
+// ~/.config/shepherd/providers/jira.ts
+export const taskProvider = (settings) => new JiraTaskProvider(settings);
+```
+
+Export `taskProviders` or `codeProviders` maps instead when one file carries several. The core knows
+nothing about plugins. A broken file does not take the CLI down, `shepherd doctor` reports it.
 
 ## Commands
 
 ```
 shepherd init | doctor | cleanup
 shepherd projects            tree of projects, tasks and agents
-shepherd status              agents, queue, what needs attention
+shepherd status              summary: agents / queue / needs attention
 shepherd tasks | agents | runs
 shepherd run                 orchestration loop (foreground)
+shepherd daemon install      start at login via launchd
 shepherd run <task-id>       a single run
+shepherd review [run-id]     start review agents for runs waiting on review
 shepherd stop|retry|open <run-id>
-shepherd review [run-id]     start review agents for runs awaiting review
-shepherd daemon install      autostart on login via launchd
 ```
-
-## Custom providers
-
-shepherd loads every file in `~/.config/shepherd/providers/` at startup. Override the folder with
-`SHEPHERD_PROVIDERS`. Each file exports a map of name to factory, and a factory receives its whole
-config section, so fields like `url` arrive without any schema change.
-
-```ts
-// ~/.config/shepherd/providers/jira.ts
-export const taskProviders = {
-  jira: (settings) => ({
-    listTasks: async (filter) => { /* ... */ },
-    getTask: async (id) => { /* ... */ },
-    claimTask: async (id) => {},
-    updateStatus: async (id, status) => {},
-    addComment: async (id, body) => {},
-  }),
-};
-
-export const codeProviders = {
-  gitlab: (settings) => ({ createChange, getChange, mergeChange }),
-};
-```
-
-```toml
-[task_provider]
-type = "jira"
-url = "https://jira.example.com"
-
-[code_provider]
-type = "gitlab"
-```
-
-Node strips the types, so `.ts` files work as they are. If a plugin needs npm dependencies, put a
-`package.json` next to it and install them there. Resolution follows the plugin's own path. A broken
-plugin never takes the CLI down. It lands in the `shepherd doctor` error list while the rest load.
-Secrets still come from `[env]` or the environment, never from provider code.
 
 ## Agent roles
 
 ```toml
 [agents.dev]
-prompt = ""              # optional prefix before the task text
+prompt = ""              # optional prefix in front of the task text
 
 [agents.review]
 kind = "claude"
-prompt = "/code-review"  # empty value starts no review agent
+prompt = "/code-review"  # empty means no review agent is started
 ```
 
-Override a role for one project with a nested table inside its `[[projects]]`:
+To override a role for one project, nest a table inside its `[[projects]]`:
 
 ```toml
 [[projects]]
@@ -122,38 +134,37 @@ agent = "codex"                        # shorthand for the dev agent kind
 prompt = "/code-review --strict"       # kind is inherited from [agents.review]
 ```
 
-Priority runs `[projects.agents.*]`, then `project.agent`, then `[agents.*]`, then `codex`.
-Inheritance works per field rather than per section, so setting only `prompt` in a project keeps
-`kind` global. Review defaults to the same agent kind as development.
+Precedence: `[projects.agents.*]`, then `project.agent`, then `[agents.*]`, then `codex`. Fields are
+inherited one by one, not as a whole section. Set only `prompt` in a project and `kind` stays global.
+Review runs with the same agent as development unless you say otherwise.
 
-`prompt` goes before the task text and can be plain text or the agent's own slash command. The dev
-agent works in the workspace root tab. The review agent comes up in a sibling tab of the same
-workspace right after the pull request is created and receives its URL. It leaves findings as PR
-comments. The orchestrator never parses its answer and never decides on merging.
-
-Every tick checks whether a run in `review` has its review agent, not just the moment the pull
-request appears. Runs that started before the role existed, or before you changed the prompt, or
-whose agent failed to come up, are caught up on their own. `shepherd review` does the same thing
-right away. The `ReviewAgentStarted` event makes both paths idempotent, so a second reviewer never
-appears, and a failing review never fails the run.
+`prompt` is what goes in front of the task text: plain text, or a slash command the agent itself
+understands. The dev agent works in the workspace root tab. The review agent comes up as a sibling
+tab in the same workspace right after the change is created, and gets the link to it. It leaves its
+notes as comments on the merge request. The orchestrator does not parse its answer and does not merge
+based on it. A `ReviewAgentStarted` event keeps review from starting twice, and a failed review does
+not fail the run.
 
 ## Daemon
 
 ```sh
 shepherd daemon install    # ~/Library/LaunchAgents/dev.shepherd.orchestrator.plist, RunAtLoad + KeepAlive
-shepherd daemon            # is the agent installed, is the loop running, where is the log
+shepherd daemon            # is the agent installed, is the loop running, where the log is
 shepherd daemon start      # restart (launchctl kickstart -k)
+shepherd daemon logs       # path to the log
 shepherd daemon stop|uninstall
 ```
 
-The daemon reads config and code once at startup, so run `shepherd daemon start` after editing
-`config.toml`. `nub run install:bin` already does it: rebuild, install, restart if the agent is
-installed.
+The daemon holds config and code in memory from the moment it starts, so edit `config.toml` and you
+need `shepherd daemon start`. `nub run install:bin` does that for you: it rebuilds, installs the
+binary, and restarts the daemon if one is installed.
 
-The log is `~/.shepherd/shepherd.log`. Only one loop may run at a time, because a second
-orchestrator would double `max_concurrent_runs`. The pid file `~/.shepherd/daemon.pid` enforces
-that, and a pid left by a dead process is cleaned up on the next check. Read-only commands
-(`status`, `projects`, `agents`) read SQLite and work with the daemon stopped.
+The log is `~/.shepherd/shepherd.log`. Errors from command-line tools are cut to their first line:
+a failing `jira` or `gh` answers with a page of help text, and logging that every minute is how a log
+file reaches six megabytes. The loop is exclusive: the pid file `~/.shepherd/daemon.pid`
+stops a second orchestrator from coming up, which would double `max_concurrent_runs`. A pid left by
+a crashed process is cleaned up on its own. Read-only commands (`status`, `projects`, `agents`) do
+not need the daemon, they read SQLite.
 
 ## Architecture
 
@@ -162,8 +173,8 @@ src/
 ├── domain/         types and status derivation (knows nothing about Linear/GitHub/Herdr)
 ├── orchestrator/   scheduler (when) + workflow (how) + policies (rules)
 ├── herdr/          thin wrapper over the herdr CLI
-├── providers/      tasks/linear.ts, code/github.ts, load.ts for custom ones
-├── repositories/   git worktrees, branches, validation
+├── providers/      registry.ts, load.ts, tasks/linear.ts, code/github.ts, code/gitlab.ts
+├── repositories/   branches, commit counting, push, validation
 ├── persistence/    SQLite, the source of truth for orchestration
 ├── view.ts         state for the CLI (and a future TUI)
 └── cli/
@@ -171,28 +182,27 @@ src/
 
 Run lifecycle:
 `queued → starting → working → (blocked) → validating → creating_change → review → completed | failed`.
-Herdr owns agent state (`working/blocked/done/idle`). shepherd never parses terminal output to
-guess it.
+Agent state (`working/blocked/done/idle`) comes from Herdr in full. Nothing parses terminal output.
 
-A task starts a run when four things hold at once. It sits in the tracker's Todo column, it matches
-`assignee`, it has no run that did not fail, and `max_concurrent_runs` leaves a free slot. The
-scheduler takes one task per project per pass, so a single project cannot hog the queue. A run
-waiting in `review` keeps its slot until the pull request is merged or closed.
+Guarantees: a partial unique index in SQLite keeps a task from being picked up twice and a run from
+opening two changes. After a restart, state is restored from the database and the agents in Herdr
+keep living.
 
-shepherd writes task status back to the tracker: In Progress on start, In Review once the pull
-request exists, Done after somebody merges it.
-
-A partial unique index in SQLite prevents claiming a task twice or creating two changes for one run.
-After a restart shepherd rebuilds its state from the database, while the agents keep living in Herdr.
-
-## Checks
+## Tests
 
 ```sh
-nub run check       # status logic, policies, SQLite invariants
+nub run test        # node:test, no framework to install
 nub run typecheck
+nub run fmt         # oxfmt
+nub run lint        # oxlint
 ```
 
-## Not built yet
+oxfmt and oxlint are dev dependencies, run through `nubx` (the local `node_modules/.bin` runner).
 
-A TUI, Jira/GitLab/Bitbucket/GitHub Issues providers, auto-merge. Adding a provider means writing one
-file in `providers/`, either built in or in the config folder. The core stays untouched.
+`tests/` covers the status logic, policies, SQLite invariants and provider parsing, plus the whole
+run lifecycle in `workflow.test.ts` against fake Herdr and providers with a real git repository:
+worktrees, commits and pushes are genuine, nothing touches the network.
+
+## Not there yet
+
+A TUI, auto-merge, Jira and Bitbucket as built-ins rather than plugins.
