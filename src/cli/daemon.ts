@@ -1,4 +1,4 @@
-// ponytail: launchd does the daemonizing, no supervisor of our own.
+// ponytail: the OS service manager does the daemonizing, no supervisor of our own.
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -11,7 +11,11 @@ export const LABEL = "dev.shepherd.orchestrator";
 export const stateDir = () => process.env.SHEPHERD_STATE_DIR ?? join(homedir(), ".shepherd");
 export const logPath = () => join(stateDir(), "shepherd.log");
 export const pidPath = () => join(stateDir(), "daemon.pid");
-const plistPath = () => join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
+const mac = process.platform === "darwin";
+const unitPath = () =>
+  mac
+    ? join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`)
+    : join(homedir(), ".config", "systemd", "user", `${LABEL}.service`);
 const domain = () => `gui/${userInfo().uid}`;
 
 const isAlive = (pid: number) => {
@@ -79,32 +83,67 @@ ${entry("PATH", process.env.PATH ?? "/usr/bin:/bin")}
 `;
 }
 
+function unit(bin: string): string {
+  return `[Unit]
+Description=shepherd orchestrator
+
+[Service]
+ExecStart=${bin} run
+Restart=always
+RestartSec=5
+WorkingDirectory=${homedir()}
+Environment=PATH=${process.env.PATH ?? "/usr/bin:/bin"}
+StandardOutput=append:${logPath()}
+StandardError=append:${logPath()}
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+const launchctl = (...args: string[]) => exec("launchctl", args);
+const systemctl = (...args: string[]) => exec("systemctl", ["--user", ...args]);
+
 export async function install(bin: string): Promise<string> {
-  const path = plistPath();
+  const path = unitPath();
   mkdirSync(dirname(path), { recursive: true });
   mkdirSync(stateDir(), { recursive: true });
-  writeFileSync(path, plist(bin));
-  await exec("launchctl", ["bootout", `${domain()}/${LABEL}`]).catch(() => {}); // in case of a reinstall
-  await exec("launchctl", ["bootstrap", domain(), path]);
+  writeFileSync(path, mac ? plist(bin) : unit(bin));
+  if (mac) {
+    await launchctl("bootout", `${domain()}/${LABEL}`).catch(() => {}); // in case of a reinstall
+    await launchctl("bootstrap", domain(), path);
+  } else {
+    await systemctl("daemon-reload");
+    await systemctl("enable", "--now", LABEL);
+  }
   return path;
 }
 
 export async function uninstall(): Promise<void> {
-  await exec("launchctl", ["bootout", `${domain()}/${LABEL}`]).catch(() => {});
-  rmSync(plistPath(), { force: true });
+  if (mac) await launchctl("bootout", `${domain()}/${LABEL}`).catch(() => {});
+  else await systemctl("disable", "--now", LABEL).catch(() => {});
+  rmSync(unitPath(), { force: true });
+  if (!mac) await systemctl("daemon-reload").catch(() => {});
 }
 
 const loaded = () =>
-  exec("launchctl", ["print", `${domain()}/${LABEL}`])
+  launchctl("print", `${domain()}/${LABEL}`)
     .then(() => true)
     .catch(() => false);
 
 /** Starts the agent, bootstrapping it again if `stop` had unloaded it. */
 export async function start(): Promise<void> {
-  if (await loaded()) await exec("launchctl", ["kickstart", `${domain()}/${LABEL}`]);
-  else await exec("launchctl", ["bootstrap", domain(), plistPath()]);
+  if (!mac) return void (await systemctl("start", LABEL));
+  if (await loaded()) await launchctl("kickstart", `${domain()}/${LABEL}`);
+  else await launchctl("bootstrap", domain(), unitPath());
 }
 
-export const restart = () => exec("launchctl", ["kickstart", "-k", `${domain()}/${LABEL}`]);
-export const stop = () => exec("launchctl", ["bootout", `${domain()}/${LABEL}`]);
-export const installed = () => existsSync(plistPath());
+export const restart = () =>
+  mac ? launchctl("kickstart", "-k", `${domain()}/${LABEL}`) : systemctl("restart", LABEL);
+export const stop = () =>
+  mac ? launchctl("bootout", `${domain()}/${LABEL}`) : systemctl("stop", LABEL);
+export const installed = () => existsSync(unitPath());
+
+/** A user unit dies with the login session unless lingering is on; launchd has no such rule. */
+export const lingerHint = () =>
+  mac ? undefined : `if it must survive logout: loginctl enable-linger ${userInfo().username}`;

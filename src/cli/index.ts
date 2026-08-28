@@ -408,11 +408,14 @@ async function manageDaemon(action = "status") {
     case "install": {
       const bin = process.execPath.endsWith("/node") ? process.argv[1]! : process.execPath;
       const path = await daemon.install(bin);
-      return out(`launchd agent installed: ${path}\nlog: ${daemon.logPath()}`);
+      const linger = daemon.lingerHint();
+      return out(
+        `service installed: ${path}\nlog: ${daemon.logPath()}` + (linger ? `\n${linger}` : ""),
+      );
     }
     case "uninstall":
       await daemon.uninstall();
-      return out("launchd agent removed");
+      return out("service removed");
     case "start":
       await daemon.start();
       return out("started");
@@ -427,7 +430,7 @@ async function manageDaemon(action = "status") {
     default: {
       const pid = daemon.runningPid();
       return out(
-        `agent: ${daemon.installed() ? "installed" : "not installed"}\n` +
+        `service: ${daemon.installed() ? "installed" : "not installed"}\n` +
           `loop: ${pid ? `running (pid ${pid})` : "stopped"}\nlog: ${daemon.logPath()}`,
       );
     }

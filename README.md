@@ -148,12 +148,15 @@ not fail the run.
 ## Daemon
 
 ```sh
-shepherd daemon install    # ~/Library/LaunchAgents/dev.shepherd.orchestrator.plist, RunAtLoad + KeepAlive
-shepherd daemon            # is the agent installed, is the loop running, where the log is
-shepherd daemon start      # restart (launchctl kickstart -k)
+shepherd daemon install    # macOS: ~/Library/LaunchAgents/dev.shepherd.orchestrator.plist (RunAtLoad + KeepAlive)
+                           # Linux: ~/.config/systemd/user/dev.shepherd.orchestrator.service (enable --now)
+shepherd daemon            # is the service installed, is the loop running, where the log is
+shepherd daemon start|restart
 shepherd daemon logs       # path to the log
 shepherd daemon stop|uninstall
 ```
+
+A systemd user unit stops when the login session ends; `loginctl enable-linger $USER` keeps it up.
 
 The daemon holds config and code in memory from the moment it starts, so edit `config.toml` and you
 need `shepherd daemon start`. `nub run install:bin` does that for you: it rebuilds, installs the
