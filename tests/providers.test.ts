@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { githubApproved, githubChecks } from "../src/providers/code/github.ts";
-import { gitlabChecks, projectPathFromRemote } from "../src/providers/code/gitlab.ts";
+import {
+  gitlabApproved,
+  gitlabChecks,
+  projectPathFromRemote,
+} from "../src/providers/code/gitlab.ts";
 import { loadCustomProviders } from "../src/providers/load.ts";
 import { buildIssueFilter, targetState } from "../src/providers/tasks/linear.ts";
 
@@ -114,4 +118,11 @@ test("GitLab: pipeline status collapses to one verdict, and no pipeline means gr
   assert.equal(gitlabChecks({ status: "created" }), "pending");
   assert.equal(gitlabChecks({ status: "failed" }), "failure");
   assert.equal(gitlabChecks({ status: "canceled" }), "failure");
+});
+
+test("GitLab: approved requires a human, not just a satisfied (possibly empty) rule set", () => {
+  assert.equal(gitlabApproved({ approved: true, approved_by: [] }), false);
+  assert.equal(gitlabApproved({ approved: true, approved_by: [{}] }), true);
+  assert.equal(gitlabApproved({}), false);
+  assert.equal(gitlabApproved({ approved: false, approved_by: [{}] }), false);
 });

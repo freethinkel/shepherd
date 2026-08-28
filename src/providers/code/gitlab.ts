@@ -34,6 +34,18 @@ export function gitlabChecks(
 }
 
 /**
+ * `approvals.approved` means "every REQUIRED approval rule is satisfied" — with the default
+ * zero approval rules (rules are a paid-tier feature) that is `true` with `approved_by: []`,
+ * which would merge every MR before a human ever looks at it. Require an actual approver.
+ */
+export function gitlabApproved(approvals: {
+  approved?: boolean;
+  approved_by?: unknown[];
+}): boolean {
+  return approvals.approved === true && (approvals.approved_by?.length ?? 0) > 0;
+}
+
+/**
  * GitLab merge requests through `glab`, which already holds the credentials,
  * falling back to the REST API with GITLAB_TOKEN when glab is missing or logged out.
  * Set transport = "token" in [code_providers.gitlab] to skip glab entirely.
@@ -94,12 +106,15 @@ export class GitLabCodeProvider implements CodeProvider {
 
   async getChange(id: string, repoPath: string): Promise<Omit<Change, "runId">> {
     const [mr, approvals] = await Promise.all([
+      // Not `glab mr view`: head_pipeline only rides on the single-MR REST endpoint.
       this.get(repoPath, `/merge_requests/${id}`),
-      this.get(repoPath, `/merge_requests/${id}/approvals`),
+      // approved is optional by design — a 403 (missing scope), 404 (older instance) or
+      // 5xx here must not fail the whole run and burn an attempt; treat it as "unknown".
+      this.get(repoPath, `/merge_requests/${id}/approvals`).catch(() => ({})),
     ]);
     return {
       ...this.toChange(mr),
-      approved: approvals.approved === true,
+      approved: gitlabApproved(approvals),
       checks: gitlabChecks(mr.head_pipeline),
     };
   }
@@ -123,10 +138,13 @@ export class GitLabCodeProvider implements CodeProvider {
   }
 
   /** MR notes carry both line and general comments; system notes are status noise. */
+  // ponytail: one page of 100 newest notes; --paginate / page loop if an MR ever outgrows it.
   async listComments(id: string, repoPath: string): Promise<ChangeComment[]> {
+    // desc so the 100-note page cap keeps the newest notes on a busy MR, not the oldest;
+    // system notes count toward that cap too, so `asc` here could starve `commentsSince`.
     const notes: any[] = await this.get(
       repoPath,
-      `/merge_requests/${id}/notes?per_page=100&sort=asc`,
+      `/merge_requests/${id}/notes?per_page=100&sort=desc`,
     );
     return notes
       .filter((n) => !n.system && n.body?.trim())
@@ -136,7 +154,8 @@ export class GitLabCodeProvider implements CodeProvider {
         path: n.position?.new_path ?? undefined,
         line: n.position?.new_line ?? undefined,
         createdAt: new Date(n.created_at),
-      }));
+      }))
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }
 
   /**
