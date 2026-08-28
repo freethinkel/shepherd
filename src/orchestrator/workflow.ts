@@ -318,6 +318,9 @@ export class Workflow {
   }
 
   private async createChange(run: AgentRun): Promise<void> {
+    // before the short-circuit: a rework round comes back through here with an existing change,
+    // and the agent is told never to push, so this is the only thing that moves origin
+    await git.pushBranch(run.worktreePath, run.branch);
     const existing = db.getChangeForRun(this.deps.db, run.id);
     if (existing) {
       this.transition(run, "review", { changeId: existing.id });
@@ -325,7 +328,6 @@ export class Workflow {
     }
     const task = db.getTask(this.deps.db, run.taskId);
     const cfg = this.projectConfigById(run.projectId);
-    await git.pushBranch(run.worktreePath, run.branch);
     const change = await this.codeProvider(run).createChange({
       repoPath: run.worktreePath,
       branch: run.branch,
@@ -351,6 +353,9 @@ export class Workflow {
     }
     // A task back in Todo while its run waits in review is a human saying "rework".
     // Our own fail() also parks tasks in Todo, but by then the run is failed, not in review.
+    // ponytail: a tracker whose updateStatus write failed leaves the synced status at todo and
+    // reworks on its own; max_review_rounds is what bounds the burn. Compare the tracker's own
+    // updated-at against the last hand-back if that ever costs a real round.
     if (db.getTask(this.deps.db, run.taskId)?.status === "todo") {
       await this.rework(run, change);
       return;
@@ -398,13 +403,14 @@ export class Workflow {
           return [];
         })
       : [];
-    this.event("ReviewRejected", run, { round: rounds + 1, comments: comments.length });
     this.prompted.set(run.id, { at: Date.now(), sawWorking: false });
     this.idleTicks.delete(run.id);
     await this.deps.herdr.prompt(
       run.herdrAgentId,
       policy.reviewFeedback(change.url, policy.commentsSince(comments, since)),
     );
+    // after the prompt: a round is only spent once the agent actually has the feedback
+    this.event("ReviewRejected", run, { round: rounds + 1, comments: comments.length });
     this.transition(run, "working");
   }
 
@@ -419,10 +425,14 @@ export class Workflow {
       this.projectConfigById(run.projectId),
     );
     if (!role.prompt.trim()) return false;
-    // once per round: after a hand-back the agent reviews the new push, not the old one
-    const started = db.lastEventAt(this.deps.db, run.taskId, "ReviewAgentStarted");
-    const rejected = db.lastEventAt(this.deps.db, run.taskId, "ReviewRejected");
-    if (started && (!rejected || started > rejected)) return false;
+    // once per round: after a hand-back the agent reviews the new push, not the old one.
+    // Counted per run, so a retried run gets its own review instead of inheriting run 1's.
+    if (
+      db.countEvents(this.deps.db, run.id, "ReviewAgentStarted") >
+      db.countEvents(this.deps.db, run.id, "ReviewRejected")
+    ) {
+      return false;
+    }
     const url = changeUrl ?? db.getChangeForRun(this.deps.db, run.id)?.url;
     const task = db.getTask(this.deps.db, run.taskId);
     if (!url || !task) return false;

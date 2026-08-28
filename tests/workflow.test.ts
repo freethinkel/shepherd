@@ -450,9 +450,12 @@ test("a task sent back to Todo during review returns the comments to the agent",
   git(worktree, "-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-m", "fix: review");
   await h.workflow.advance(reload(h, run.id)); // validating -> creating_change
   await h.workflow.advance(reload(h, run.id)); // existing change -> review
-  assert.equal(reload(h, run.id).status, "review");
+  const back = reload(h, run.id);
+  assert.equal(back.status, "review");
   assert.equal(h.code.created, 0);
   assert.equal(db.getTask(h.db, "T-1")?.status, "in_review");
+  // the reviewer has to see the fix: the second round pushes even though the change exists
+  assert.equal(git(h.repo.origin, "rev-parse", back.branch), git(worktree, "rev-parse", "HEAD"));
 });
 
 test("rework does not loop forever", async () => {
@@ -468,6 +471,7 @@ test("rework does not loop forever", async () => {
   await h.workflow.advance(reload(h, run.id));
   assert.equal(reload(h, run.id).status, "failed");
   assert.match(reload(h, run.id).error!, /review rounds/i);
+  assert.equal(db.countEvents(h.db, run.id, "ReviewRoundsExhausted"), 1);
 });
 
 test("the review agent comes back for the next round", async () => {
@@ -486,4 +490,13 @@ test("the review agent comes back for the next round", async () => {
   assert.equal(h.herdr.tabs, 1);
   assert.match(h.herdr.prompts.at(-1)!, /^\/code-review https:\/\/fake\/mr\/7/);
   assert.equal(h.herdr.prompts.length, prompts + 2);
+
+  // but a review agent that died with its pane is spawned again, in a tab of its own
+  db.setTaskStatus(h.db, "T-1", "todo");
+  await h.workflow.advance(reload(h, run.id));
+  db.updateRun(h.db, run.id, { status: "review" });
+  db.setTaskStatus(h.db, "T-1", "in_review");
+  h.herdr.agents.length = 0;
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.herdr.tabs, 2);
 });
