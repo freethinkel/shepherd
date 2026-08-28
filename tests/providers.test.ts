@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { githubApproved, githubChecks } from "../src/providers/code/github.ts";
-import { projectPathFromRemote } from "../src/providers/code/gitlab.ts";
+import { gitlabChecks, projectPathFromRemote } from "../src/providers/code/gitlab.ts";
 import { loadCustomProviders } from "../src/providers/load.ts";
 import { buildIssueFilter, targetState } from "../src/providers/tasks/linear.ts";
 
@@ -104,4 +104,14 @@ test("GitHub: without a required-review rule the latest reviews decide", () => {
     false,
   );
   assert.equal(githubApproved({ reviewDecision: null, latestReviews: null }), false);
+});
+
+test("GitLab: pipeline status collapses to one verdict, and no pipeline means green", () => {
+  assert.equal(gitlabChecks(null), "success");
+  assert.equal(gitlabChecks({ status: "success" }), "success");
+  assert.equal(gitlabChecks({ status: "skipped" }), "success");
+  assert.equal(gitlabChecks({ status: "running" }), "pending");
+  assert.equal(gitlabChecks({ status: "created" }), "pending");
+  assert.equal(gitlabChecks({ status: "failed" }), "failure");
+  assert.equal(gitlabChecks({ status: "canceled" }), "failure");
 });
