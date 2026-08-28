@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Config, ProjectConfig } from "../config/schema.ts";
 import { taskStatusForRun } from "../domain/status.ts";
-import type { AgentRun, Project, RunStatus, Task } from "../domain/types.ts";
+import type { AgentRun, Change, Project, RunStatus, Task } from "../domain/types.ts";
 import type { HerdrClient } from "../herdr/client.ts";
 import type { ProviderRegistry } from "../providers/registry.ts";
 import * as db from "../persistence/db.ts";
@@ -342,11 +342,17 @@ export class Workflow {
     await this.ensureReviewAgent(run, change.url);
   }
 
-  /** The run closes once a human merges the change. */
+  /** The run closes once a human merges the change, or goes round again when they send it back. */
   private async checkChange(run: AgentRun): Promise<void> {
     const change = db.getChangeForRun(this.deps.db, run.id);
     if (!change) {
       this.transition(run, "creating_change");
+      return;
+    }
+    // A task back in Todo while its run waits in review is a human saying "rework".
+    // Our own fail() also parks tasks in Todo, but by then the run is failed, not in review.
+    if (db.getTask(this.deps.db, run.taskId)?.status === "todo") {
+      await this.rework(run, change);
       return;
     }
     await this.ensureReviewAgent(run, change.url);
@@ -367,6 +373,42 @@ export class Workflow {
   }
 
   /**
+   * Review comments go back to the same agent, capped like validation: a reviewer and
+   * an agent who never agree would otherwise trade the task forever.
+   */
+  private async rework(run: AgentRun, change: Change): Promise<void> {
+    const rounds = db.countEvents(this.deps.db, run.id, "ReviewRejected");
+    const max = this.deps.config.orchestrator.max_review_rounds;
+    if (rounds >= max) {
+      this.event("ReviewRoundsExhausted", run, { rounds });
+      this.fail(run, `still sent back after ${max} review rounds`);
+      return;
+    }
+    // only what arrived since this change was opened or last handed back
+    const since = [
+      db.lastEventAt(this.deps.db, run.taskId, "ReviewRejected"),
+      db.lastEventAt(this.deps.db, run.taskId, "ChangeCreated"),
+    ]
+      .filter((d): d is Date => d !== undefined)
+      .sort((a, b) => b.getTime() - a.getTime())[0];
+    const provider = this.codeProvider(run);
+    const comments = provider.listComments
+      ? await provider.listComments(change.id, run.worktreePath).catch((err) => {
+          this.log(`comments ${run.id}: ${briefError(err)}`);
+          return [];
+        })
+      : [];
+    this.event("ReviewRejected", run, { round: rounds + 1, comments: comments.length });
+    this.prompted.set(run.id, { at: Date.now(), sawWorking: false });
+    this.idleTicks.delete(run.id);
+    await this.deps.herdr.prompt(
+      run.herdrAgentId,
+      policy.reviewFeedback(change.url, policy.commentsSince(comments, since)),
+    );
+    this.transition(run, "working");
+  }
+
+  /**
    * The review agent lives in its own tab of the same workspace.
    * Its verdict goes into pull request comments — the orchestrator never parses its answer.
    */
@@ -377,23 +419,31 @@ export class Workflow {
       this.projectConfigById(run.projectId),
     );
     if (!role.prompt.trim()) return false;
-    if (db.hasEvent(this.deps.db, run.id, "ReviewAgentStarted")) return false;
+    // once per round: after a hand-back the agent reviews the new push, not the old one
+    const started = db.lastEventAt(this.deps.db, run.taskId, "ReviewAgentStarted");
+    const rejected = db.lastEventAt(this.deps.db, run.taskId, "ReviewRejected");
+    if (started && (!rejected || started > rejected)) return false;
     const url = changeUrl ?? db.getChangeForRun(this.deps.db, run.id)?.url;
     const task = db.getTask(this.deps.db, run.taskId);
     if (!url || !task) return false;
     try {
-      const tab = await this.deps.herdr.createTab({
-        workspaceId: run.herdrWorkspaceId,
-        cwd: run.worktreePath,
-        label: "review",
-      });
       const name = policy.reviewAgentName(run.herdrAgentId);
-      await this.deps.herdr.spawnAgent({ name, kind: role.kind, paneId: tab.paneId });
+      const live = await this.deps.herdr.listAgents().catch(() => []);
+      let tabId: string | undefined;
+      if (!live.some((a) => a.name === name)) {
+        const tab = await this.deps.herdr.createTab({
+          workspaceId: run.herdrWorkspaceId,
+          cwd: run.worktreePath,
+          label: "review",
+        });
+        tabId = tab.tabId;
+        await this.deps.herdr.spawnAgent({ name, kind: role.kind, paneId: tab.paneId });
+      }
       await this.deps.herdr.prompt(
         name,
         policy.reviewPrompt(role.prompt, task, { changeUrl: url, branch: run.branch }),
       );
-      this.event("ReviewAgentStarted", run, { agent: name, tab: tab.tabId });
+      this.event("ReviewAgentStarted", run, { agent: name, tab: tabId });
       return true;
     } catch (err: any) {
       // review is a bonus step: the pull request already exists, so do not fail the run
