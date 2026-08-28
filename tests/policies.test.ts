@@ -3,15 +3,17 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ConfigSchema } from "../src/config/schema.ts";
-import type { AgentRun, Project, Task } from "../src/domain/types.ts";
+import type { AgentRun, ChangeComment, Project, Task } from "../src/domain/types.ts";
 import {
   agentName,
   buildPrompt,
   codeProviderForRemote,
+  commentsSince,
   isTaskAvailable,
   providerSettings,
   resolveAgentRole,
   reviewAgentName,
+  reviewFeedback,
   withPrefix,
   workspaceLabel,
   worktreePath,
@@ -137,4 +139,34 @@ test("a provider gets the shared section plus its own block", () => {
     assignee: "me",
     name: "linear",
   });
+});
+
+const comment = (body: string, at: string, extra: Partial<ChangeComment> = {}): ChangeComment => ({
+  author: "reviewer",
+  body,
+  createdAt: new Date(at),
+  ...extra,
+});
+
+test("review feedback only carries comments newer than the last round", () => {
+  const all = [comment("old", "2026-01-01T00:00:00Z"), comment("new", "2026-01-02T00:00:00Z")];
+  assert.deepEqual(
+    commentsSince(all, new Date("2026-01-01T12:00:00Z")).map((c) => c.body),
+    ["new"],
+  );
+  assert.equal(commentsSince(all, undefined).length, 2);
+});
+
+test("review feedback names the file and line, and points at the change when there is nothing", () => {
+  const text = reviewFeedback("https://fake/mr/7", [
+    comment("rename this", "2026-01-02T00:00:00Z", { path: "src/a.ts", line: 12 }),
+    comment("LGTM otherwise", "2026-01-02T00:00:00Z"),
+  ]);
+  assert.match(text, /src\/a\.ts:12/);
+  assert.match(text, /rename this/);
+  assert.match(text, /commit .* same branch/i);
+
+  const empty = reviewFeedback("https://fake/mr/7", []);
+  assert.match(empty, /https:\/\/fake\/mr\/7/);
+  assert.match(empty, /read the review/i);
 });
