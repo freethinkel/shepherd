@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { expandPath } from "../config/schema.ts";
 import type { Config, ProjectConfig } from "../config/schema.ts";
-import type { AgentRun, Project, Task } from "../domain/types.ts";
+import type { AgentRun, ChangeComment, Project, Task } from "../domain/types.ts";
 
 export const slug = (s: string) =>
   s
@@ -162,6 +162,29 @@ export function validationFeedback(command: string, output: string): string {
 
 export function noCommitsFeedback(branch: string): string {
   return `Branch ${branch} has no commits. Commit your work, otherwise the task cannot go to review.`;
+}
+
+export function commentsSince(comments: ChangeComment[], since: Date | undefined): ChangeComment[] {
+  return since ? comments.filter((c) => c.createdAt > since) : comments;
+}
+
+export function reviewFeedback(url: string, comments: ChangeComment[]): string {
+  const body =
+    comments.length === 0
+      ? `Read the review on ${url} and address it.`
+      : comments
+          .map((c) => {
+            const where = c.path ? ` (${c.path}${c.line ? `:${c.line}` : ""})` : "";
+            return `- ${c.author}${where}: ${c.body.trim()}`;
+          })
+          .join("\n");
+  return [
+    `The change ${url} was sent back for rework:`,
+    "",
+    body,
+    "",
+    "Address every point and commit the fixes to the same branch.",
+  ].join("\n");
 }
 
 export function changeBody(task: Task, run: AgentRun): string {

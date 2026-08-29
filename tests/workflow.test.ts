@@ -8,6 +8,7 @@ import { ConfigSchema } from "../src/config/schema.ts";
 import type {
   AgentStatus,
   Change,
+  ChangeComment,
   CodeProvider,
   Project,
   Task,
@@ -133,7 +134,11 @@ class FakeTasks implements TaskProvider {
 class FakeCode implements CodeProvider {
   created = 0;
   polled = 0;
+  merged = 0;
   state: "open" | "merged" | "closed" = "open";
+  approved = false;
+  checks: "pending" | "success" | "failure" = "success";
+  comments: ChangeComment[] = [];
   async check() {}
   async createChange(): Promise<Omit<Change, "runId">> {
     this.created++;
@@ -141,9 +146,21 @@ class FakeCode implements CodeProvider {
   }
   async getChange(): Promise<Omit<Change, "runId">> {
     this.polled++;
-    return { id: "7", provider: "fake", url: "https://fake/mr/7", status: this.state };
+    return {
+      id: "7",
+      provider: "fake",
+      url: "https://fake/mr/7",
+      status: this.state,
+      approved: this.approved,
+      checks: this.checks,
+    };
   }
-  async mergeChange() {}
+  async mergeChange() {
+    this.merged++;
+  }
+  async listComments() {
+    return this.comments;
+  }
 }
 
 function harness(overrides: Record<string, unknown> = {}) {
@@ -379,4 +396,181 @@ test("a review agent lands in a sibling tab, exactly once", async () => {
   assert.match(h.herdr.prompts.at(-1)!, /^\/code-review https:\/\/fake\/mr\/7/);
   await h.workflow.advance(reload(h, run.id));
   assert.equal(h.herdr.tabs, 1); // ReviewAgentStarted keeps it to one
+});
+
+/** A run parked in review with its change recorded, the state a human sees a pull request in. */
+async function parkedInReview(h: ReturnType<typeof harness>) {
+  const run = await h.workflow.start(h.project, h.task);
+  db.updateRun(h.db, run.id, { status: "review", changeId: "7" });
+  db.setTaskStatus(h.db, "T-1", "in_review");
+  db.recordChange(h.db, {
+    id: "7",
+    runId: run.id,
+    provider: "fake",
+    url: "https://fake/mr/7",
+    status: "open",
+  });
+  db.appendEvent(h.db, "ChangeCreated", { runId: run.id, taskId: "T-1" });
+  h.herdr.prompts.length = 0;
+  return run;
+}
+
+test("a task sent back to Todo during review returns the comments to the agent", async () => {
+  const h = harness();
+  const run = await parkedInReview(h);
+  // dated past ChangeCreated on purpose: a real review comment is minutes late, and at
+  // millisecond resolution `new Date()` here can tie with the event and be filtered out
+  h.code.comments = [
+    {
+      author: "egor",
+      body: "rename this",
+      path: "src/a.ts",
+      line: 3,
+      createdAt: new Date(Date.now() + 1000),
+    },
+  ];
+
+  // the tracker sync recorded that a human moved the task back
+  db.setTaskStatus(h.db, "T-1", "todo");
+  await h.workflow.advance(reload(h, run.id));
+
+  assert.equal(reload(h, run.id).status, "working");
+  assert.match(h.herdr.prompts.at(-1)!, /src\/a\.ts:3.*rename this/);
+  assert.equal(h.tasks.statuses.at(-1), "in_progress");
+  assert.equal(db.countEvents(h.db, run.id, "ReviewRejected"), 1);
+
+  // back to review through the normal path, and the same change is reused
+  h.herdr.status = "done";
+  await h.workflow.advance(reload(h, run.id));
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "validating");
+  const worktree = reload(h, run.id).worktreePath;
+  writeFileSync(join(worktree, "fix.txt"), "fixed\n");
+  git(worktree, "add", "-A");
+  git(worktree, "-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-m", "fix: review");
+  await h.workflow.advance(reload(h, run.id)); // validating -> creating_change
+  await h.workflow.advance(reload(h, run.id)); // existing change -> review
+  const back = reload(h, run.id);
+  assert.equal(back.status, "review");
+  assert.equal(h.code.created, 0);
+  assert.equal(db.getTask(h.db, "T-1")?.status, "in_review");
+  // the reviewer has to see the fix: the second round pushes even though the change exists
+  assert.equal(git(h.repo.origin, "rev-parse", back.branch), git(worktree, "rev-parse", "HEAD"));
+});
+
+test("rework does not loop forever", async () => {
+  const h = harness({ orchestrator: { max_review_rounds: 1 } });
+  const run = await parkedInReview(h);
+
+  db.setTaskStatus(h.db, "T-1", "todo");
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "working");
+
+  db.updateRun(h.db, run.id, { status: "review" });
+  db.setTaskStatus(h.db, "T-1", "todo");
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "failed");
+  assert.match(reload(h, run.id).error!, /review rounds/i);
+  assert.equal(db.countEvents(h.db, run.id, "ReviewRoundsExhausted"), 1);
+});
+
+test("the review agent comes back for the next round", async () => {
+  const h = harness({ agents: { review: { kind: "claude", prompt: "/code-review" } } });
+  const run = await parkedInReview(h);
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.herdr.tabs, 1);
+  const prompts = h.herdr.prompts.length;
+
+  db.setTaskStatus(h.db, "T-1", "todo");
+  await h.workflow.advance(reload(h, run.id)); // -> working, ReviewRejected
+  db.updateRun(h.db, run.id, { status: "review" });
+  db.setTaskStatus(h.db, "T-1", "in_review");
+  await h.workflow.advance(reload(h, run.id));
+  // the agent is still alive in its tab, so it is prompted again rather than spawned twice
+  assert.equal(h.herdr.tabs, 1);
+  assert.match(h.herdr.prompts.at(-1)!, /^\/code-review https:\/\/fake\/mr\/7/);
+  assert.equal(h.herdr.prompts.length, prompts + 2);
+
+  // but a review agent that died with its pane is spawned again, in a tab of its own
+  db.setTaskStatus(h.db, "T-1", "todo");
+  await h.workflow.advance(reload(h, run.id));
+  db.updateRun(h.db, run.id, { status: "review" });
+  db.setTaskStatus(h.db, "T-1", "in_review");
+  h.herdr.agents.length = 0;
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.herdr.tabs, 2);
+});
+
+test("an approved change with green checks is merged by shepherd", async () => {
+  const h = harness();
+  const run = await parkedInReview(h);
+  h.code.approved = true;
+  h.code.checks = "pending";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.code.merged, 0, "not while checks are still running");
+
+  await new Promise((r) => setTimeout(r, 350));
+  h.code.checks = "success";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.code.merged, 1);
+  assert.equal(reload(h, run.id).status, "review", "completion waits for the forge to say merged");
+  assert.equal(db.countEvents(h.db, run.id, "ChangeMerged"), 1);
+
+  // the forge can lag reporting the merge (queue, gated pipeline, API lag) — the button
+  // is not pressed twice while shepherd waits for it to catch up
+  await new Promise((r) => setTimeout(r, 350));
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.code.merged, 1);
+  assert.equal(db.countEvents(h.db, run.id, "MergeFailed"), 0);
+
+  await new Promise((r) => setTimeout(r, 350));
+  h.code.state = "merged";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "completed");
+});
+
+test("auto_merge = false leaves merging to a human", async () => {
+  const h = harness({ orchestrator: { auto_merge: false } });
+  const run = await parkedInReview(h);
+  h.code.approved = true;
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.code.merged, 0);
+  assert.equal(reload(h, run.id).status, "review");
+});
+
+test("a merge that fails is reported once and stops being retried", async () => {
+  const h = harness();
+  const run = await parkedInReview(h);
+  h.code.approved = true;
+  h.code.mergeChange = async () => {
+    h.code.merged++;
+    throw new Error("merge conflict");
+  };
+  for (let i = 0; i < 5; i++) {
+    await h.workflow.advance(reload(h, run.id));
+    await new Promise((r) => setTimeout(r, 350));
+  }
+  assert.equal(h.code.merged, 3);
+  assert.equal(reload(h, run.id).status, "review");
+  assert.equal(h.tasks.comments.filter((c) => /merge conflict/.test(c)).length, 1);
+});
+
+test("a retried run takes over the change row of the change it finds again", async () => {
+  const h = harness();
+  const run1 = await parkedInReview(h);
+  db.updateRun(h.db, run1.id, { status: "failed", finishedAt: new Date() });
+
+  const run2 = await h.workflow.start(h.project, h.task);
+  db.updateRun(h.db, run2.id, { status: "creating_change" });
+  await h.workflow.advance(reload(h, run2.id));
+
+  // the forge hands back the same open change, so the row has to follow the live run:
+  // left on the dead one, checkChange finds nothing and bounces back here every tick
+  assert.equal(db.getChangeForRun(h.db, run2.id)?.id, "7");
+  assert.equal(reload(h, run2.id).status, "review");
+  assert.equal(h.code.created, 1);
+
+  await h.workflow.advance(reload(h, run2.id));
+  assert.equal(reload(h, run2.id).status, "review");
+  assert.equal(h.code.created, 1, "no second change, and no second 'Pull request:' comment");
 });

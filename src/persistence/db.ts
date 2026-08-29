@@ -244,8 +244,10 @@ export function closeWorkspaceRow(db: Db, id: string): void {
 
 export function recordChange(db: Db, change: Change): void {
   db.prepare(
-    `INSERT OR IGNORE INTO changes (id, run_id, provider, url, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO changes (id, run_id, provider, url, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(provider, id) DO UPDATE SET
+       run_id = excluded.run_id, url = excluded.url, status = excluded.status`,
   ).run(
     change.id,
     change.runId,

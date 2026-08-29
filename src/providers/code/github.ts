@@ -1,12 +1,33 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { Change, CodeProvider, CreateChangeInput } from "../../domain/types.ts";
+import type { Change, ChangeComment, CodeProvider, CreateChangeInput } from "../../domain/types.ts";
 
 const exec = promisify(execFile);
 
 /** ponytail: the gh CLI already does auth and API — no HTTP client of our own. */
 const gh = async (cwd: string, args: string[]) =>
   (await exec("gh", args, { cwd, maxBuffer: 8 << 20 })).stdout.trim();
+
+export function githubChecks(rollup: unknown[]): "pending" | "success" | "failure" {
+  let pending = false;
+  for (const item of rollup as any[]) {
+    const verdict: string =
+      item.__typename === "StatusContext" ? item.state : (item.conclusion ?? "");
+    if (item.__typename !== "StatusContext" && item.status !== "COMPLETED") pending = true;
+    else if (verdict === "PENDING" || verdict === "EXPECTED") pending = true;
+    else if (!["SUCCESS", "SKIPPED", "NEUTRAL"].includes(verdict)) return "failure";
+  }
+  return pending ? "pending" : "success";
+}
+
+export function githubApproved(pr: {
+  reviewDecision?: string | null;
+  latestReviews?: { state: string }[] | null;
+}): boolean {
+  if (pr.reviewDecision) return pr.reviewDecision === "APPROVED";
+  const states = (pr.latestReviews ?? []).map((r) => r.state);
+  return states.includes("APPROVED") && !states.includes("CHANGES_REQUESTED");
+}
 
 export class GitHubCodeProvider implements CodeProvider {
   readonly name = "github";
@@ -38,12 +59,47 @@ export class GitHubCodeProvider implements CodeProvider {
   }
 
   async getChange(id: string, repoPath: string): Promise<Omit<Change, "runId">> {
-    const raw = await gh(repoPath, ["pr", "view", id, "--json", "number,url,state"]);
-    return this.toChange(JSON.parse(raw));
+    const raw = await gh(repoPath, [
+      "pr",
+      "view",
+      id,
+      "--json",
+      "number,url,state,reviewDecision,statusCheckRollup,latestReviews",
+    ]);
+    const pr = JSON.parse(raw);
+    return {
+      ...this.toChange(pr),
+      approved: githubApproved(pr),
+      checks: githubChecks(pr.statusCheckRollup ?? []),
+    };
   }
 
   async mergeChange(id: string, repoPath: string): Promise<void> {
     await gh(repoPath, ["pr", "merge", id, "--squash"]);
+  }
+
+  async listComments(id: string, repoPath: string): Promise<ChangeComment[]> {
+    const api = (path: string) =>
+      gh(repoPath, ["api", "--paginate", `repos/{owner}/{repo}/${path}`]).then(
+        (raw) => JSON.parse(raw || "[]") as any[],
+      );
+    const [line, reviews, plain] = await Promise.all([
+      api(`pulls/${id}/comments`),
+      api(`pulls/${id}/reviews`),
+      api(`issues/${id}/comments`),
+    ]);
+    const toComment = (c: any, path?: string, line?: number): ChangeComment => ({
+      author: c.user?.login ?? "unknown",
+      body: c.body ?? "",
+      path,
+      line,
+      createdAt: new Date(c.created_at ?? c.submitted_at),
+    });
+    return [
+      ...line.map((c) => toComment(c, c.path, c.line ?? c.original_line ?? undefined)),
+      ...reviews.filter((r) => r.submitted_at && r.body?.trim()).map((r) => toComment(r)),
+      ...plain.map((c) => toComment(c)),
+    ].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }
 
   private async findByBranch(

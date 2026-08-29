@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Config, ProjectConfig } from "../config/schema.ts";
 import { taskStatusForRun } from "../domain/status.ts";
-import type { AgentRun, Project, RunStatus, Task } from "../domain/types.ts";
+import type { AgentRun, Change, Project, RunStatus, Task } from "../domain/types.ts";
 import type { HerdrClient } from "../herdr/client.ts";
 import type { ProviderRegistry } from "../providers/registry.ts";
 import * as db from "../persistence/db.ts";
@@ -318,6 +318,7 @@ export class Workflow {
   }
 
   private async createChange(run: AgentRun): Promise<void> {
+    await git.pushBranch(run.worktreePath, run.branch);
     const existing = db.getChangeForRun(this.deps.db, run.id);
     if (existing) {
       this.transition(run, "review", { changeId: existing.id });
@@ -325,7 +326,6 @@ export class Workflow {
     }
     const task = db.getTask(this.deps.db, run.taskId);
     const cfg = this.projectConfigById(run.projectId);
-    await git.pushBranch(run.worktreePath, run.branch);
     const change = await this.codeProvider(run).createChange({
       repoPath: run.worktreePath,
       branch: run.branch,
@@ -342,11 +342,15 @@ export class Workflow {
     await this.ensureReviewAgent(run, change.url);
   }
 
-  /** The run closes once a human merges the change. */
   private async checkChange(run: AgentRun): Promise<void> {
     const change = db.getChangeForRun(this.deps.db, run.id);
     if (!change) {
       this.transition(run, "creating_change");
+      return;
+    }
+    // ponytail: a failed tracker write leaves todo synced and reworks on its own; bounded by the cap
+    if (db.getTask(this.deps.db, run.taskId)?.status === "todo") {
+      await this.rework(run, change);
       return;
     }
     await this.ensureReviewAgent(run, change.url);
@@ -363,7 +367,60 @@ export class Workflow {
       db.closeWorkspaceRow(this.deps.db, run.herdrWorkspaceId);
     } else if (fresh.status === "closed") {
       this.fail(run, `change ${fresh.url} was closed`);
+    } else if (fresh.approved && fresh.checks === "success") {
+      await this.merge(run, change);
     }
+  }
+
+  private async merge(run: AgentRun, change: Change): Promise<void> {
+    if (!this.deps.config.orchestrator.auto_merge) return;
+    if (db.countEvents(this.deps.db, run.id, "ChangeMerged") > 0) return;
+    const failures = db.countEvents(this.deps.db, run.id, "MergeFailed");
+    if (failures >= 3) return;
+    try {
+      await this.codeProvider(run).mergeChange(change.id, run.worktreePath);
+      this.event("ChangeMerged", run, { change: change.url });
+    } catch (err: any) {
+      const error = briefError(err);
+      this.event("MergeFailed", run, { error });
+      this.log(`merge ${run.id}: ${error}`);
+      if (failures === 0) {
+        this.taskProvider(run.taskId)
+          .addComment(run.taskId, `Approved, but merging ${change.url} failed:\n\n\`${error}\``)
+          .catch(() => {});
+      }
+    }
+  }
+
+  private async rework(run: AgentRun, change: Change): Promise<void> {
+    const rounds = db.countEvents(this.deps.db, run.id, "ReviewRejected");
+    const max = this.deps.config.orchestrator.max_review_rounds;
+    if (rounds >= max) {
+      this.event("ReviewRoundsExhausted", run, { rounds });
+      this.fail(run, `still sent back after ${max} review rounds`);
+      return;
+    }
+    const since = [
+      db.lastEventAt(this.deps.db, run.taskId, "ReviewRejected"),
+      db.lastEventAt(this.deps.db, run.taskId, "ChangeCreated"),
+    ]
+      .filter((d): d is Date => d !== undefined)
+      .sort((a, b) => b.getTime() - a.getTime())[0];
+    const provider = this.codeProvider(run);
+    const comments = provider.listComments
+      ? await provider.listComments(change.id, run.worktreePath).catch((err) => {
+          this.log(`comments ${run.id}: ${briefError(err)}`);
+          return [];
+        })
+      : [];
+    this.prompted.set(run.id, { at: Date.now(), sawWorking: false });
+    this.idleTicks.delete(run.id);
+    await this.deps.herdr.prompt(
+      run.herdrAgentId,
+      policy.reviewFeedback(change.url, policy.commentsSince(comments, since)),
+    );
+    this.event("ReviewRejected", run, { round: rounds + 1, comments: comments.length });
+    this.transition(run, "working");
   }
 
   /**
@@ -377,23 +434,33 @@ export class Workflow {
       this.projectConfigById(run.projectId),
     );
     if (!role.prompt.trim()) return false;
-    if (db.hasEvent(this.deps.db, run.id, "ReviewAgentStarted")) return false;
+    if (
+      db.countEvents(this.deps.db, run.id, "ReviewAgentStarted") >
+      db.countEvents(this.deps.db, run.id, "ReviewRejected")
+    ) {
+      return false;
+    }
     const url = changeUrl ?? db.getChangeForRun(this.deps.db, run.id)?.url;
     const task = db.getTask(this.deps.db, run.taskId);
     if (!url || !task) return false;
     try {
-      const tab = await this.deps.herdr.createTab({
-        workspaceId: run.herdrWorkspaceId,
-        cwd: run.worktreePath,
-        label: "review",
-      });
       const name = policy.reviewAgentName(run.herdrAgentId);
-      await this.deps.herdr.spawnAgent({ name, kind: role.kind, paneId: tab.paneId });
+      const live = await this.deps.herdr.listAgents().catch(() => []);
+      let tabId: string | undefined;
+      if (!live.some((a) => a.name === name)) {
+        const tab = await this.deps.herdr.createTab({
+          workspaceId: run.herdrWorkspaceId,
+          cwd: run.worktreePath,
+          label: "review",
+        });
+        tabId = tab.tabId;
+        await this.deps.herdr.spawnAgent({ name, kind: role.kind, paneId: tab.paneId });
+      }
       await this.deps.herdr.prompt(
         name,
         policy.reviewPrompt(role.prompt, task, { changeUrl: url, branch: run.branch }),
       );
-      this.event("ReviewAgentStarted", run, { agent: name, tab: tab.tabId });
+      this.event("ReviewAgentStarted", run, { agent: name, tab: tabId });
       return true;
     } catch (err: any) {
       // review is a bonus step: the pull request already exists, so do not fail the run

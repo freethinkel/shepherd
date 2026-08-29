@@ -3,7 +3,12 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { projectPathFromRemote } from "../src/providers/code/gitlab.ts";
+import { githubApproved, githubChecks } from "../src/providers/code/github.ts";
+import {
+  gitlabApproved,
+  gitlabChecks,
+  projectPathFromRemote,
+} from "../src/providers/code/gitlab.ts";
 import { loadCustomProviders } from "../src/providers/load.ts";
 import { buildIssueFilter, targetState } from "../src/providers/tasks/linear.ts";
 
@@ -60,4 +65,64 @@ test("plugins register under their file name and a broken one is isolated", asyn
   assert.match(custom.errors[0]!, /^broken\.ts:/);
   assert.equal((custom.tasks.jira as any)({ url: "https://jira" }).url, "https://jira");
   assert.ok(custom.code.gitlab);
+});
+
+test("GitHub: the check rollup collapses to one verdict, and no checks means green", () => {
+  assert.equal(githubChecks([]), "success");
+  assert.equal(
+    githubChecks([{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" }]),
+    "success",
+  );
+  assert.equal(
+    githubChecks([{ __typename: "CheckRun", status: "IN_PROGRESS", conclusion: null }]),
+    "pending",
+  );
+  assert.equal(
+    githubChecks([
+      { __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" },
+      { __typename: "StatusContext", state: "FAILURE" },
+    ]),
+    "failure",
+  );
+  assert.equal(
+    githubChecks([{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SKIPPED" }]),
+    "success",
+  );
+});
+
+test("GitHub: without a required-review rule the latest reviews decide", () => {
+  assert.equal(githubApproved({ reviewDecision: "APPROVED", latestReviews: [] }), true);
+  assert.equal(
+    githubApproved({ reviewDecision: "REVIEW_REQUIRED", latestReviews: [{ state: "APPROVED" }] }),
+    false,
+  );
+  assert.equal(
+    githubApproved({ reviewDecision: "", latestReviews: [{ state: "APPROVED" }] }),
+    true,
+  );
+  assert.equal(
+    githubApproved({
+      reviewDecision: "",
+      latestReviews: [{ state: "APPROVED" }, { state: "CHANGES_REQUESTED" }],
+    }),
+    false,
+  );
+  assert.equal(githubApproved({ reviewDecision: null, latestReviews: null }), false);
+});
+
+test("GitLab: pipeline status collapses to one verdict, and no pipeline means green", () => {
+  assert.equal(gitlabChecks(null), "success");
+  assert.equal(gitlabChecks({ status: "success" }), "success");
+  assert.equal(gitlabChecks({ status: "skipped" }), "success");
+  assert.equal(gitlabChecks({ status: "running" }), "pending");
+  assert.equal(gitlabChecks({ status: "created" }), "pending");
+  assert.equal(gitlabChecks({ status: "failed" }), "failure");
+  assert.equal(gitlabChecks({ status: "canceled" }), "failure");
+});
+
+test("GitLab: approved requires a human, not just a satisfied (possibly empty) rule set", () => {
+  assert.equal(gitlabApproved({ approved: true, approved_by: [] }), false);
+  assert.equal(gitlabApproved({ approved: true, approved_by: [{}] }), true);
+  assert.equal(gitlabApproved({}), false);
+  assert.equal(gitlabApproved({ approved: false, approved_by: [{}] }), false);
 });

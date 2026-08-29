@@ -74,6 +74,8 @@ export const ConfigSchema = z.object({
       max_attempts: z.number().int().positive().default(3),
       /** How many times a failed validation is handed back to the agent before giving up. */
       max_validation_rounds: z.number().int().positive().default(3),
+      max_review_rounds: z.number().int().positive().default(3),
+      auto_merge: z.boolean().default(true),
       /**
        * How long an agent may stay idle right after a prompt before that idle counts.
        * Without it the poll can overtake the agent: `agent start` leaves it idle, the
@@ -140,6 +142,8 @@ max_concurrent_runs = 3
 # max_attempts = 3                  # failed runs per task before it needs a human
 # agent_settle_ms = 45000           # grace period after a prompt before idle means "done"
 # max_validation_rounds = 3         # failed validations handed back to the agent
+# max_review_rounds = 3             # review comments handed back to the agent before giving up
+# auto_merge = true                 # merge when a human approved and checks are green
 # run_timeout_ms = 14400000         # 4h deadline for a run that never finishes
 # all intervals are optional, defaults are shown
 # poll_interval_ms = 5000           # how often Herdr is asked about agent state

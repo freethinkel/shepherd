@@ -47,7 +47,7 @@ export const isDirty = async (worktree: string) =>
   (await git(worktree, ["status", "--porcelain"])).length > 0;
 
 export async function pushBranch(worktree: string, branch: string): Promise<void> {
-  await git(worktree, ["push", "--set-upstream", "origin", branch]);
+  await git(worktree, ["push", "--force-with-lease", "--set-upstream", "origin", branch]);
 }
 
 /** Validation: the configured command, run inside the worktree. */

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { Change, CodeProvider, CreateChangeInput } from "../../domain/types.ts";
+import type { Change, ChangeComment, CodeProvider, CreateChangeInput } from "../../domain/types.ts";
 
 const exec = promisify(execFile);
 
@@ -13,6 +13,30 @@ export function projectPathFromRemote(remote: string): string {
     .replace(/^https?:\/\/[^/]+\//, "")
     .replace(/\.git$/, "")
     .replace(/^\/+|\/+$/g, "");
+}
+
+export function gitlabChecks(
+  pipeline: { status?: string } | null | undefined,
+): "pending" | "success" | "failure" {
+  const status = pipeline?.status;
+  if (!status || status === "success" || status === "skipped" || status === "manual") {
+    return "success";
+  }
+  if (
+    ["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled"].includes(
+      status,
+    )
+  ) {
+    return "pending";
+  }
+  return "failure";
+}
+
+export function gitlabApproved(approvals: {
+  approved?: boolean;
+  approved_by?: unknown[];
+}): boolean {
+  return approvals.approved === true && (approvals.approved_by?.length ?? 0) > 0;
 }
 
 /**
@@ -75,11 +99,15 @@ export class GitLabCodeProvider implements CodeProvider {
   }
 
   async getChange(id: string, repoPath: string): Promise<Omit<Change, "runId">> {
-    if (await this.useGlab(repoPath)) {
-      return this.toChange(JSON.parse(await this.glab(repoPath, ["mr", "view", id, "-F", "json"])));
-    }
-    const project = await this.project(repoPath);
-    return this.toChange(await this.api(`/projects/${project}/merge_requests/${id}`));
+    const [mr, approvals] = await Promise.all([
+      this.get(repoPath, `/merge_requests/${id}`),
+      this.get(repoPath, `/merge_requests/${id}/approvals`).catch(() => ({})),
+    ]);
+    return {
+      ...this.toChange(mr),
+      approved: gitlabApproved(approvals),
+      checks: gitlabChecks(mr.head_pipeline),
+    };
   }
 
   async mergeChange(id: string, repoPath: string): Promise<void> {
@@ -98,6 +126,24 @@ export class GitLabCodeProvider implements CodeProvider {
       method: "PUT",
       body: JSON.stringify({ squash: this.settings.squash ?? true }),
     });
+  }
+
+  // ponytail: one page of 100 newest notes; --paginate if an MR ever outgrows it
+  async listComments(id: string, repoPath: string): Promise<ChangeComment[]> {
+    const notes: any[] = await this.get(
+      repoPath,
+      `/merge_requests/${id}/notes?per_page=100&sort=desc`,
+    );
+    return notes
+      .filter((n) => !n.system && n.body?.trim())
+      .map((n) => ({
+        author: n.author?.username ?? "unknown",
+        body: n.body,
+        path: n.position?.new_path ?? undefined,
+        line: n.position?.new_line ?? undefined,
+        createdAt: new Date(n.created_at),
+      }))
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }
 
   /**
@@ -122,6 +168,16 @@ export class GitLabCodeProvider implements CodeProvider {
     const repo = this.settings.project ? ["-R", String(this.settings.project)] : [];
     const { stdout } = await exec("glab", [...args, ...repo], { cwd, maxBuffer: 8 << 20 });
     return stdout.trim();
+  }
+
+  private async get(repoPath: string, path: string): Promise<any> {
+    if (await this.useGlab(repoPath)) {
+      const project = this.settings.project
+        ? encodeURIComponent(String(this.settings.project))
+        : ":id"; // glab resolves :id to the current project from the remote
+      return JSON.parse(await this.glab(repoPath, ["api", `projects/${project}${path}`]));
+    }
+    return this.api(`/projects/${await this.project(repoPath)}${path}`);
   }
 
   private token(): string {
