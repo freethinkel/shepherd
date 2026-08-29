@@ -403,9 +403,26 @@ export class Workflow {
       db.closeWorkspaceRow(this.deps.db, run.herdrWorkspaceId);
     } else if (fresh.status === "closed") {
       this.fail(run, `change ${fresh.url} was closed`);
-    } else if (fresh.approved && fresh.checks === "success") {
+    } else if (fresh.checks === "success" && (fresh.approved || (await this.accepted(run)))) {
       await this.merge(run, change);
     }
+  }
+
+  /**
+   * Done in the tracker accepts the change the way an approval does. GitHub refuses an approval
+   * from the author, so on a solo repository the tracker is the only place a human can say yes.
+   * Read live: the task sync only lists Todo, so a task in Done never comes back through it.
+   */
+  private async accepted(run: AgentRun): Promise<boolean> {
+    const task = await this.taskProvider(run.taskId)
+      .getTask(run.taskId)
+      .catch((err) => {
+        this.log(`task ${run.taskId}: ${briefError(err)}`);
+        return undefined;
+      });
+    if (task?.status !== "done") return false;
+    if (!db.hasEvent(this.deps.db, run.id, "TaskAccepted")) this.event("TaskAccepted", run, {});
+    return true;
   }
 
   private async merge(run: AgentRun, change: Change): Promise<void> {

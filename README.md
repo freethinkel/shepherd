@@ -156,7 +156,9 @@ returns to In Progress, and after validation the same change goes back to In Rev
 review pass. `max_review_rounds` (default 3) caps that loop. A task in Todo whose branch already carries an open
 change — after a restart, a fresh database or `shepherd retry` — is resumed on that change with its
 comments, never redone from scratch. Once a human approves the change and
-checks are green, shepherd merges it; `auto_merge = false` leaves that to a human as well. On GitHub
+checks are green, shepherd merges it; moving the task to Done in the tracker says the same thing,
+which is what you need on a repository where GitHub refuses an approval from the pull request's own
+author. `auto_merge = false` leaves merging to a human as well. On GitHub
 an approving review counts even without a required-review rule; on GitLab an approval by a person is
 required, since `approved` is true by itself when a project has no approval rules.
 
