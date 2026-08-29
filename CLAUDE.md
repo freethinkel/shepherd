@@ -82,6 +82,9 @@ event, and pushes the derived status back to the tracker. Agent state comes verb
 - **The change row follows the live run.** `recordChange` is an upsert on `(provider, id)`: a
   retried run reopens the same change, and a row still pointing at the dead run makes `checkChange`
   find nothing and loop `review ⇄ creating_change` every tick, pushing and commenting each time.
+- **Acceptance is a human's word, from either side.** An approval on the forge or the task moved to
+  Done in the tracker (`TaskAccepted`, read live — the sync only lists Todo) both mean yes; GitHub
+  refuses an approval from the author, so on a solo repository the tracker is the only channel.
 - **Merge is executed, never decided.** `approved && checks === "success"` from `getChange` calls
   `mergeChange`. `approved` means a _person_ approved: on GitHub `reviewDecision` is empty without a
   required-review rule, so `latestReviews` decide; on GitLab `approvals.approved` is `true` with zero

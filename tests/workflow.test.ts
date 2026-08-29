@@ -111,6 +111,7 @@ class FakeHerdr {
 }
 
 class FakeTasks implements TaskProvider {
+  remote: Task["status"] = "todo";
   statuses: string[] = [];
   comments: string[] = [];
   claimed = 0;
@@ -118,7 +119,7 @@ class FakeTasks implements TaskProvider {
     return [];
   }
   async getTask(id: string): Promise<Task> {
-    return { id, providerId: id, projectId: "p", title: id, status: "todo" };
+    return { id, providerId: id, projectId: "p", title: id, status: this.remote };
   }
   async claimTask() {
     this.claimed++;
@@ -613,4 +614,29 @@ test("a merged change on the branch is not resumed", async () => {
   const run = await h.workflow.start(h.project, h.task);
   assert.equal(db.getChangeForRun(h.db, run.id), undefined);
   assert.doesNotMatch(h.herdr.prompts[0]!, /sent back/);
+});
+
+test("Done in the tracker accepts the change the way an approval does", async () => {
+  const h = harness();
+  const run = await parkedInReview(h);
+  h.tasks.remote = "done"; // a human closed the task instead of approving the pull request
+
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.code.merged, 1);
+  assert.equal(db.countEvents(h.db, run.id, "TaskAccepted"), 1);
+
+  await new Promise((r) => setTimeout(r, 350));
+  h.code.state = "merged";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "completed");
+});
+
+test("Done does not merge over failing checks", async () => {
+  const h = harness();
+  const run = await parkedInReview(h);
+  h.tasks.remote = "done";
+  h.code.checks = "failure";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(h.code.merged, 0);
+  assert.equal(reload(h, run.id).status, "review");
 });
