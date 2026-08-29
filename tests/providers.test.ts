@@ -30,7 +30,7 @@ test("Linear: In Progress and In Review are both `started`, so match by name", (
 test("Linear: only Todo, and only what is assigned", () => {
   assert.deepEqual(buildIssueFilter({ assignee: "me", taskProviderProjectId: "Mochi" }), {
     state: { type: { eq: "unstarted" } },
-    project: { name: { eq: "Mochi" } },
+    project: { name: { eqIgnoreCase: "Mochi" } },
     assignee: { isMe: { eq: true } },
   });
   assert.deepEqual(buildIssueFilter({ assignee: "a@b.c" }).assignee, { email: { eq: "a@b.c" } });
