@@ -51,11 +51,13 @@ export function targetState(status: TaskStatus, states: LinearState[]): LinearSt
 
 /**
  * An available task = the Todo column of the given project, assigned to the given person.
- * Backlog is left alone: those tasks are still being written.
+ * Backlog is left alone: those tasks are still being written. The name match ignores case:
+ * `task_project = "fmc"` must find the project called "Fmc".
  */
 export function buildIssueFilter(filter: TaskFilter): Record<string, unknown> {
   const where: Record<string, unknown> = { state: { type: { eq: "unstarted" } } };
-  if (filter.taskProviderProjectId) where.project = { name: { eq: filter.taskProviderProjectId } };
+  if (filter.taskProviderProjectId)
+    where.project = { name: { eqIgnoreCase: filter.taskProviderProjectId } };
   if (filter.assignee === "me") where.assignee = { isMe: { eq: true } };
   else if (filter.assignee && filter.assignee !== "any")
     where.assignee = { email: { eq: filter.assignee } };
