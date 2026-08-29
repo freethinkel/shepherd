@@ -74,9 +74,7 @@ export const ConfigSchema = z.object({
       max_attempts: z.number().int().positive().default(3),
       /** How many times a failed validation is handed back to the agent before giving up. */
       max_validation_rounds: z.number().int().positive().default(3),
-      /** How many times review comments are handed back before the run gives up. */
       max_review_rounds: z.number().int().positive().default(3),
-      /** Merge once a human approved and checks are green. Off means a human merges too. */
       auto_merge: z.boolean().default(true),
       /**
        * How long an agent may stay idle right after a prompt before that idle counts.

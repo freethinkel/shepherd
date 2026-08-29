@@ -64,15 +64,29 @@ event, and pushes the derived status back to the tracker. Agent state comes verb
   application code. Same for one change per run (`changes.run_id UNIQUE`).
 - **Events are state.** `ValidationRejected` is the retry counter for `max_validation_rounds`.
   Adding a "did we already do X" flag means appending an event, not adding a column.
-- **Todo during `review` means rework.** `checkChange` reads the synced task status; `ReviewRejected`
-  is the round counter for `max_review_rounds`, and its timestamp (the newest of `ReviewRejected` or
-  `ChangeCreated`) is the cutoff for which comments are sent. `ensureReviewAgent` keeps the review
-  agent to one pass per round by comparing counts, not timestamps: it skips whenever
-  `ReviewAgentStarted` events for the run outnumber `ReviewRejected` events for the run.
+- **Todo during `review` means rework.** `checkChange` reads the synced task status (our own
+  `fail()` also parks tasks in Todo, but by then the run is `failed`, so that branch cannot fire).
+  `ReviewRejected` is the round counter for `max_review_rounds`, appended only after the prompt
+  reached the agent, and the newest of `ReviewRejected`/`ChangeCreated` is the cutoff for which
+  comments are sent — round two must not re-fix round one. `ensureReviewAgent` allows one pass per
+  round by comparing per-run counts (`ReviewAgentStarted` vs `ReviewRejected`), never timestamps
+  or task-scoped events: a retried run must get its own reviewer.
+- **The orchestrator is the only thing that pushes.** `createChange` pushes before its
+  existing-change short-circuit because a rework round comes back through it with the change already
+  recorded, and the dev agent is told never to push. The push is `--force-with-lease`: rework rounds
+  may rebase or amend, a plain push would reject and fail the run.
+- **The change row follows the live run.** `recordChange` is an upsert on `(provider, id)`: a
+  retried run reopens the same change, and a row still pointing at the dead run makes `checkChange`
+  find nothing and loop `review ⇄ creating_change` every tick, pushing and commenting each time.
 - **Merge is executed, never decided.** `approved && checks === "success"` from `getChange` calls
-  `mergeChange`; a `ChangeMerged` event short-circuits every later attempt, since a forge can still
-  report the change as open for a while after a real merge. `MergeFailed` is capped at three so a
-  conflict does not spam the log every minute, and the run stays in `review` for a human.
+  `mergeChange`. `approved` means a *person* approved: on GitHub `reviewDecision` is empty without a
+  required-review rule, so `latestReviews` decide; on GitLab `approvals.approved` is `true` with zero
+  approval rules (the free-tier default), so `approved_by` must be non-empty. `checks` is `success`
+  when there is no CI at all; SKIPPED/NEUTRAL do not block a GitHub merge either. A `ChangeMerged`
+  event short-circuits later attempts (a forge reports `open` for a while after a merge — queue,
+  API lag — and a second press fails with a false "merge failed" comment). `MergeFailed` is capped at
+  three, the run stays in `review` for a human. A failing `/approvals` read degrades to
+  "not approved" rather than failing the run.
 - **Idle needs two consecutive polls** before a run moves to `validating` — a single idle tick is a
   pause, not completion.
 - **A run in `review` never times out**; every other status is killed after `run_timeout_ms`.
@@ -100,7 +114,8 @@ there; pure rules belong in `policies.test.ts`.
 
 ## Style
 
-`ponytail:` comments mark deliberate simplifications and name the upgrade path (in-memory poll
-timestamps, schema applied on open instead of migrations, polling instead of a herdr event stream).
-Respect them — they are decisions, not oversights. Comments in this codebase explain _why_ a rule
-exists, usually with the failure it prevents; keep that tone rather than restating the code.
+Code comments are rare and one line. `ponytail:` comments mark deliberate simplifications and name
+the upgrade path (in-memory poll timestamps, schema applied on open instead of migrations, polling
+instead of a herdr event stream); respect them — they are decisions, not oversights. The _why_
+behind a rule — the failure it prevents — lives in the invariants list above, not in a doc block
+over the function. If a change needs a paragraph of rationale, add a bullet there.

@@ -8,10 +8,6 @@ const exec = promisify(execFile);
 const gh = async (cwd: string, args: string[]) =>
   (await exec("gh", args, { cwd, maxBuffer: 8 << 20 })).stdout.trim();
 
-/**
- * `statusCheckRollup` mixes CheckRun (status + conclusion) and StatusContext (state).
- * SKIPPED and NEUTRAL do not block a merge on GitHub either, so they count as success.
- */
 export function githubChecks(rollup: unknown[]): "pending" | "success" | "failure" {
   let pending = false;
   for (const item of rollup as any[]) {
@@ -24,10 +20,6 @@ export function githubChecks(rollup: unknown[]): "pending" | "success" | "failur
   return pending ? "pending" : "success";
 }
 
-/**
- * `reviewDecision` is only set when branch protection requires review. Without such a
- * rule a human's Approve still has to count, so the latest review per author decides.
- */
 export function githubApproved(pr: {
   reviewDecision?: string | null;
   latestReviews?: { state: string }[] | null;
@@ -86,7 +78,6 @@ export class GitHubCodeProvider implements CodeProvider {
     await gh(repoPath, ["pr", "merge", id, "--squash"]);
   }
 
-  /** Line comments, review summaries and plain comments are three endpoints on GitHub. */
   async listComments(id: string, repoPath: string): Promise<ChangeComment[]> {
     const api = (path: string) =>
       gh(repoPath, ["api", "--paginate", `repos/{owner}/{repo}/${path}`]).then(
@@ -106,7 +97,6 @@ export class GitHubCodeProvider implements CodeProvider {
     });
     return [
       ...line.map((c) => toComment(c, c.path, c.line ?? c.original_line ?? undefined)),
-      // an unsubmitted review is a draft nobody sent yet: submitted_at is null on it
       ...reviews.filter((r) => r.submitted_at && r.body?.trim()).map((r) => toComment(r)),
       ...plain.map((c) => toComment(c)),
     ].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());

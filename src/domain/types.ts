@@ -67,9 +67,7 @@ export interface Change {
   provider: string;
   url: string;
   status: "open" | "merged" | "closed";
-  /** Read live from the forge, never stored: a human's approval is the merge signal. */
   approved?: boolean | undefined;
-  /** "success" also when the repository runs no checks at all. */
   checks?: "pending" | "success" | "failure" | undefined;
 }
 
@@ -114,6 +112,5 @@ export interface CodeProvider {
   createChange(input: CreateChangeInput): Promise<Omit<Change, "runId">>;
   getChange(id: string, repoPath: string): Promise<Omit<Change, "runId">>;
   mergeChange(id: string, repoPath: string): Promise<void>;
-  /** Optional: a plugin without it still gets rework, the agent is just pointed at the URL. */
   listComments?(id: string, repoPath: string): Promise<ChangeComment[]>;
 }

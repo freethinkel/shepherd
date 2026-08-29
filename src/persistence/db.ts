@@ -243,10 +243,6 @@ export function closeWorkspaceRow(db: Db, id: string): void {
 }
 
 export function recordChange(db: Db, change: Change): void {
-  // A retried run reopens the same change, and the row has to follow the live run: pointing at
-  // the dead one, checkChange finds nothing and loops the run back through creating_change every
-  // tick, pushing and commenting the pull request URL again each time. run_id is UNIQUE, but the
-  // row being updated is the one that holds it, so the upsert never collides.
   db.prepare(
     `INSERT INTO changes (id, run_id, provider, url, status, created_at)
      VALUES (?, ?, ?, ?, ?, ?)

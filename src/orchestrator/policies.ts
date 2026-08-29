@@ -164,16 +164,10 @@ export function noCommitsFeedback(branch: string): string {
   return `Branch ${branch} has no commits. Commit your work, otherwise the task cannot go to review.`;
 }
 
-/** Round two must not re-fix round one, so only what arrived since the last hand-back is sent. */
 export function commentsSince(comments: ChangeComment[], since: Date | undefined): ChangeComment[] {
   return since ? comments.filter((c) => c.createdAt > since) : comments;
 }
 
-/**
- * What the dev agent gets when a human sends the task back. Without a comment list
- * (a plugin forge, or comments left somewhere we cannot read) the agent reads the
- * change itself: it has the forge CLI, the orchestrator does not need to.
- */
 export function reviewFeedback(url: string, comments: ChangeComment[]): string {
   const body =
     comments.length === 0

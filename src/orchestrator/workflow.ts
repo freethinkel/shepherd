@@ -318,8 +318,6 @@ export class Workflow {
   }
 
   private async createChange(run: AgentRun): Promise<void> {
-    // before the short-circuit: a rework round comes back through here with an existing change,
-    // and the agent is told never to push, so this is the only thing that moves origin
     await git.pushBranch(run.worktreePath, run.branch);
     const existing = db.getChangeForRun(this.deps.db, run.id);
     if (existing) {
@@ -344,18 +342,13 @@ export class Workflow {
     await this.ensureReviewAgent(run, change.url);
   }
 
-  /** The run closes once a human merges the change, or goes round again when they send it back. */
   private async checkChange(run: AgentRun): Promise<void> {
     const change = db.getChangeForRun(this.deps.db, run.id);
     if (!change) {
       this.transition(run, "creating_change");
       return;
     }
-    // A task back in Todo while its run waits in review is a human saying "rework".
-    // Our own fail() also parks tasks in Todo, but by then the run is failed, not in review.
-    // ponytail: a tracker whose updateStatus write failed leaves the synced status at todo and
-    // reworks on its own; max_review_rounds is what bounds the burn. Compare the tracker's own
-    // updated-at against the last hand-back if that ever costs a real round.
+    // ponytail: a failed tracker write leaves todo synced and reworks on its own; bounded by the cap
     if (db.getTask(this.deps.db, run.taskId)?.status === "todo") {
       await this.rework(run, change);
       return;
@@ -379,16 +372,8 @@ export class Workflow {
     }
   }
 
-  /**
-   * The human's approval is the decision; shepherd only presses the button. A merge that
-   * keeps failing (conflict, protected branch) is not the run's fault, so the run stays in
-   * review for a human, and the attempts are capped so the log is not spammed every minute.
-   */
   private async merge(run: AgentRun, change: Change): Promise<void> {
     if (!this.deps.config.orchestrator.auto_merge) return;
-    // the forge can report "open" for a while after a successful merge (queue, gated
-    // pipeline, API lag) — pressing the button twice fails and would wrongly tell a
-    // human the merge failed when it actually went through
     if (db.countEvents(this.deps.db, run.id, "ChangeMerged") > 0) return;
     const failures = db.countEvents(this.deps.db, run.id, "MergeFailed");
     if (failures >= 3) return;
@@ -407,10 +392,6 @@ export class Workflow {
     }
   }
 
-  /**
-   * Review comments go back to the same agent, capped like validation: a reviewer and
-   * an agent who never agree would otherwise trade the task forever.
-   */
   private async rework(run: AgentRun, change: Change): Promise<void> {
     const rounds = db.countEvents(this.deps.db, run.id, "ReviewRejected");
     const max = this.deps.config.orchestrator.max_review_rounds;
@@ -419,7 +400,6 @@ export class Workflow {
       this.fail(run, `still sent back after ${max} review rounds`);
       return;
     }
-    // only what arrived since this change was opened or last handed back
     const since = [
       db.lastEventAt(this.deps.db, run.taskId, "ReviewRejected"),
       db.lastEventAt(this.deps.db, run.taskId, "ChangeCreated"),
@@ -439,7 +419,6 @@ export class Workflow {
       run.herdrAgentId,
       policy.reviewFeedback(change.url, policy.commentsSince(comments, since)),
     );
-    // after the prompt: a round is only spent once the agent actually has the feedback
     this.event("ReviewRejected", run, { round: rounds + 1, comments: comments.length });
     this.transition(run, "working");
   }
@@ -455,8 +434,6 @@ export class Workflow {
       this.projectConfigById(run.projectId),
     );
     if (!role.prompt.trim()) return false;
-    // once per round: after a hand-back the agent reviews the new push, not the old one.
-    // Counted per run, so a retried run gets its own review instead of inheriting run 1's.
     if (
       db.countEvents(this.deps.db, run.id, "ReviewAgentStarted") >
       db.countEvents(this.deps.db, run.id, "ReviewRejected")

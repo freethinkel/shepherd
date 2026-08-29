@@ -15,7 +15,6 @@ export function projectPathFromRemote(remote: string): string {
     .replace(/^\/+|\/+$/g, "");
 }
 
-/** `head_pipeline` is null when the project runs no CI; that must not block a merge. */
 export function gitlabChecks(
   pipeline: { status?: string } | null | undefined,
 ): "pending" | "success" | "failure" {
@@ -33,11 +32,6 @@ export function gitlabChecks(
   return "failure";
 }
 
-/**
- * `approvals.approved` means "every REQUIRED approval rule is satisfied" — with the default
- * zero approval rules (rules are a paid-tier feature) that is `true` with `approved_by: []`,
- * which would merge every MR before a human ever looks at it. Require an actual approver.
- */
 export function gitlabApproved(approvals: {
   approved?: boolean;
   approved_by?: unknown[];
@@ -106,10 +100,7 @@ export class GitLabCodeProvider implements CodeProvider {
 
   async getChange(id: string, repoPath: string): Promise<Omit<Change, "runId">> {
     const [mr, approvals] = await Promise.all([
-      // Not `glab mr view`: head_pipeline only rides on the single-MR REST endpoint.
       this.get(repoPath, `/merge_requests/${id}`),
-      // approved is optional by design — a 403 (missing scope), 404 (older instance) or
-      // 5xx here must not fail the whole run and burn an attempt; treat it as "unknown".
       this.get(repoPath, `/merge_requests/${id}/approvals`).catch(() => ({})),
     ]);
     return {
@@ -137,11 +128,8 @@ export class GitLabCodeProvider implements CodeProvider {
     });
   }
 
-  /** MR notes carry both line and general comments; system notes are status noise. */
-  // ponytail: one page of 100 newest notes; --paginate / page loop if an MR ever outgrows it.
+  // ponytail: one page of 100 newest notes; --paginate if an MR ever outgrows it
   async listComments(id: string, repoPath: string): Promise<ChangeComment[]> {
-    // desc so the 100-note page cap keeps the newest notes on a busy MR, not the oldest;
-    // system notes count toward that cap too, so `asc` here could starve `commentsSince`.
     const notes: any[] = await this.get(
       repoPath,
       `/merge_requests/${id}/notes?per_page=100&sort=desc`,
@@ -182,7 +170,6 @@ export class GitLabCodeProvider implements CodeProvider {
     return stdout.trim();
   }
 
-  /** GET through glab when it is logged in, otherwise straight to the REST API. */
   private async get(repoPath: string, path: string): Promise<any> {
     if (await this.useGlab(repoPath)) {
       const project = this.settings.project
