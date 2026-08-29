@@ -71,6 +71,10 @@ event, and pushes the derived status back to the tracker. Agent state comes verb
   comments are sent — round two must not re-fix round one. `ensureReviewAgent` allows one pass per
   round by comparing per-run counts (`ReviewAgentStarted` vs `ReviewRejected`), never timestamps
   or task-scoped events: a retried run must get its own reviewer.
+- **An open change on the branch is resumed, not redone.** `start()` asks the forge for a change on
+  the task's branch (`findChange`); an open one is recorded on the new run (`ChangeResumed`) and
+  its review comments go into the first prompt. That is how a task sent back to Todo is picked up
+  on a fresh database, or after `max_attempts` and `shepherd retry`, without opening a second PR.
 - **The orchestrator is the only thing that pushes.** `createChange` pushes before its
   existing-change short-circuit because a rework round comes back through it with the change already
   recorded, and the dev agent is told never to push. The push is `--force-with-lease`: rework rounds
@@ -79,7 +83,7 @@ event, and pushes the derived status back to the tracker. Agent state comes verb
   retried run reopens the same change, and a row still pointing at the dead run makes `checkChange`
   find nothing and loop `review ⇄ creating_change` every tick, pushing and commenting each time.
 - **Merge is executed, never decided.** `approved && checks === "success"` from `getChange` calls
-  `mergeChange`. `approved` means a *person* approved: on GitHub `reviewDecision` is empty without a
+  `mergeChange`. `approved` means a _person_ approved: on GitHub `reviewDecision` is empty without a
   required-review rule, so `latestReviews` decide; on GitLab `approvals.approved` is `true` with zero
   approval rules (the free-tier default), so `approved_by` must be non-empty. `checks` is `success`
   when there is no CI at all; SKIPPED/NEUTRAL do not block a GitHub merge either. A `ChangeMerged`

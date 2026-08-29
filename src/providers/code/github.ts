@@ -102,6 +102,8 @@ export class GitHubCodeProvider implements CodeProvider {
     ].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   }
 
+  findChange = (branch: string, repoPath: string) => this.findByBranch(repoPath, branch);
+
   private async findByBranch(
     repoPath: string,
     branch: string,

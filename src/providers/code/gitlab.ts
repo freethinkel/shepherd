@@ -213,6 +213,8 @@ export class GitLabCodeProvider implements CodeProvider {
     return res.json();
   }
 
+  findChange = (branch: string, repoPath: string) => this.findByBranch(repoPath, branch);
+
   private async findByBranch(
     repoPath: string,
     branch: string,
