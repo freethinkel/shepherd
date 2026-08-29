@@ -161,6 +161,10 @@ class FakeCode implements CodeProvider {
   async listComments() {
     return this.comments;
   }
+  existing: Omit<Change, "runId"> | undefined;
+  async findChange() {
+    return this.existing;
+  }
 }
 
 function harness(overrides: Record<string, unknown> = {}) {
@@ -573,4 +577,40 @@ test("a retried run takes over the change row of the change it finds again", asy
   await h.workflow.advance(reload(h, run2.id));
   assert.equal(reload(h, run2.id).status, "review");
   assert.equal(h.code.created, 1, "no second change, and no second 'Pull request:' comment");
+});
+
+test("a task with an open change already on its branch resumes there with the review comments", async () => {
+  const h = harness();
+  h.code.existing = { id: "7", provider: "fake", url: "https://fake/mr/7", status: "open" };
+  h.code.comments = [
+    { author: "egor", body: "always true", path: "src/a.ts", line: 237, createdAt: new Date() },
+  ];
+  const run = await h.workflow.start(h.project, h.task);
+  assert.equal(run.status, "working");
+  assert.match(h.herdr.prompts[0]!, /Do the thing/);
+  assert.match(h.herdr.prompts[0]!, /src\/a\.ts:237.*always true/);
+  assert.equal(db.getChangeForRun(h.db, run.id)?.id, "7");
+  assert.equal(db.countEvents(h.db, run.id, "ChangeResumed"), 1);
+
+  // the fixes land on the same change: nothing new is opened
+  const worktree = reload(h, run.id).worktreePath;
+  writeFileSync(join(worktree, "fix.txt"), "fixed\n");
+  git(worktree, "add", "-A");
+  git(worktree, "-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-m", "fix: review");
+  h.herdr.status = "done";
+  await h.workflow.advance(reload(h, run.id));
+  await h.workflow.advance(reload(h, run.id));
+  await h.workflow.advance(reload(h, run.id)); // validating -> creating_change
+  await h.workflow.advance(reload(h, run.id)); // push -> review
+  assert.equal(reload(h, run.id).status, "review");
+  assert.equal(h.code.created, 0);
+  assert.equal(git(h.repo.origin, "rev-parse", run.branch), git(worktree, "rev-parse", "HEAD"));
+});
+
+test("a merged change on the branch is not resumed", async () => {
+  const h = harness();
+  h.code.existing = { id: "7", provider: "fake", url: "https://fake/mr/7", status: "merged" };
+  const run = await h.workflow.start(h.project, h.task);
+  assert.equal(db.getChangeForRun(h.db, run.id), undefined);
+  assert.doesNotMatch(h.herdr.prompts[0]!, /sent back/);
 });

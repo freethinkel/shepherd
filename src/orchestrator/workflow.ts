@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Config, ProjectConfig } from "../config/schema.ts";
 import { taskStatusForRun } from "../domain/status.ts";
-import type { AgentRun, Change, Project, RunStatus, Task } from "../domain/types.ts";
+import type { AgentRun, Change, ChangeComment, Project, RunStatus, Task } from "../domain/types.ts";
 import type { HerdrClient } from "../herdr/client.ts";
 import type { ProviderRegistry } from "../providers/registry.ts";
 import * as db from "../persistence/db.ts";
@@ -135,14 +135,14 @@ export class Workflow {
       await this.spawnAgent(run, dev.kind, ws);
       this.event("AgentStarted", run, { agent: run.herdrAgentId, workspace: ws.workspaceId });
 
+      const feedback = await this.resumeChange(run);
       this.prompted.set(run.id, { at: Date.now(), sawWorking: false });
       await this.deps.herdr.prompt(
         run.herdrAgentId,
-        policy.buildPrompt(task, {
-          branch,
-          validate: cfg.validate,
-          prefix: dev.prompt,
-        }),
+        [
+          policy.buildPrompt(task, { branch, validate: cfg.validate, prefix: dev.prompt }),
+          ...(feedback ? ["", feedback] : []),
+        ].join("\n"),
       );
       this.transition(run, "working");
       return run;
@@ -150,6 +150,37 @@ export class Workflow {
       this.fail(run, briefError(err, 500));
       return run;
     }
+  }
+
+  /** An open change already on the branch is taken over, with its review comments. */
+  private async resumeChange(run: AgentRun): Promise<string | undefined> {
+    const provider = this.codeProvider(run);
+    const existing = await provider.findChange?.(run.branch, run.worktreePath).catch((err) => {
+      this.log(`find change ${run.id}: ${briefError(err)}`);
+      return undefined;
+    });
+    if (!existing || existing.status !== "open") return undefined;
+    db.recordChange(this.deps.db, { ...existing, runId: run.id });
+    this.event("ChangeResumed", run, { change: existing.url });
+    return policy.reviewFeedback(existing.url, await this.newComments(run, existing.id));
+  }
+
+  /** Comments since the change was opened or last handed back; all of them on a fresh database. */
+  private async newComments(run: AgentRun, changeId: string): Promise<ChangeComment[]> {
+    const since = [
+      db.lastEventAt(this.deps.db, run.taskId, "ReviewRejected"),
+      db.lastEventAt(this.deps.db, run.taskId, "ChangeCreated"),
+    ]
+      .filter((d): d is Date => d !== undefined)
+      .sort((a, b) => b.getTime() - a.getTime())[0];
+    const provider = this.codeProvider(run);
+    const comments = provider.listComments
+      ? await provider.listComments(changeId, run.worktreePath).catch((err) => {
+          this.log(`comments ${run.id}: ${briefError(err)}`);
+          return [];
+        })
+      : [];
+    return policy.commentsSince(comments, since);
   }
 
   /**
@@ -400,25 +431,10 @@ export class Workflow {
       this.fail(run, `still sent back after ${max} review rounds`);
       return;
     }
-    const since = [
-      db.lastEventAt(this.deps.db, run.taskId, "ReviewRejected"),
-      db.lastEventAt(this.deps.db, run.taskId, "ChangeCreated"),
-    ]
-      .filter((d): d is Date => d !== undefined)
-      .sort((a, b) => b.getTime() - a.getTime())[0];
-    const provider = this.codeProvider(run);
-    const comments = provider.listComments
-      ? await provider.listComments(change.id, run.worktreePath).catch((err) => {
-          this.log(`comments ${run.id}: ${briefError(err)}`);
-          return [];
-        })
-      : [];
+    const comments = await this.newComments(run, change.id);
     this.prompted.set(run.id, { at: Date.now(), sawWorking: false });
     this.idleTicks.delete(run.id);
-    await this.deps.herdr.prompt(
-      run.herdrAgentId,
-      policy.reviewFeedback(change.url, policy.commentsSince(comments, since)),
-    );
+    await this.deps.herdr.prompt(run.herdrAgentId, policy.reviewFeedback(change.url, comments));
     this.event("ReviewRejected", run, { round: rounds + 1, comments: comments.length });
     this.transition(run, "working");
   }

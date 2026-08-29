@@ -113,4 +113,5 @@ export interface CodeProvider {
   getChange(id: string, repoPath: string): Promise<Omit<Change, "runId">>;
   mergeChange(id: string, repoPath: string): Promise<void>;
   listComments?(id: string, repoPath: string): Promise<ChangeComment[]>;
+  findChange?(branch: string, repoPath: string): Promise<Omit<Change, "runId"> | undefined>;
 }

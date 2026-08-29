@@ -149,7 +149,9 @@ does not fail the run.
 Sending the task back to Todo in the tracker while the change is open means "rework": the
 comments on the change (since it was opened, or since the last round) go to the dev agent, the task
 returns to In Progress, and after validation the same change goes back to In Review with a fresh
-review pass. `max_review_rounds` (default 3) caps that loop. Once a human approves the change and
+review pass. `max_review_rounds` (default 3) caps that loop. A task in Todo whose branch already carries an open
+change — after a restart, a fresh database or `shepherd retry` — is resumed on that change with its
+comments, never redone from scratch. Once a human approves the change and
 checks are green, shepherd merges it; `auto_merge = false` leaves that to a human as well. On GitHub
 an approving review counts even without a required-review rule; on GitLab an approval by a person is
 required, since `approved` is true by itself when a project has no approval rules.
