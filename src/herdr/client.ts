@@ -158,6 +158,7 @@ export class HerdrClient {
     name: string;
     kind: string;
     paneId: string;
+    args?: string[] | undefined;
     timeoutMs?: number | undefined;
   }): Promise<HerdrAgent> {
     const r = await this.call([
@@ -170,6 +171,7 @@ export class HerdrClient {
       input.paneId,
       "--timeout",
       String(input.timeoutMs ?? 60_000),
+      ...(input.args?.length ? ["--", ...input.args] : []),
     ]);
     const a = r.agent ?? r;
     return {

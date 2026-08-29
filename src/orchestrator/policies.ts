@@ -85,7 +85,13 @@ export function codeProviderForRemote(
 export interface AgentRole {
   kind: string;
   prompt: string;
+  args: string[];
 }
+
+/** An agent that stops to ask for permission never finishes a run nobody is watching. */
+const DEFAULT_AGENT_ARGS: Record<string, string[]> = {
+  claude: ["--dangerously-skip-permissions"],
+};
 
 /**
  * Agent role for a project. Priority: [projects.agents.*] → project.agent → [agents.*] → codex.
@@ -99,9 +105,11 @@ export function resolveAgentRole(
   const global = config.agents[role];
   const local = project?.agents?.[role];
   const devKind = project?.agents?.dev?.kind ?? project?.agent ?? config.agents.dev.kind ?? "codex";
+  const kind = local?.kind ?? (role === "dev" ? devKind : (global.kind ?? devKind));
   return {
-    kind: local?.kind ?? (role === "dev" ? devKind : (global.kind ?? devKind)),
+    kind,
     prompt: local?.prompt ?? global.prompt,
+    args: local?.args ?? global.args ?? DEFAULT_AGENT_ARGS[kind] ?? [],
   };
 }
 

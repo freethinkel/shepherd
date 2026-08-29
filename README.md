@@ -136,6 +136,10 @@ agent = "codex"                        # shorthand for the dev agent kind
 prompt = "/code-review --strict"       # kind is inherited from [agents.review]
 ```
 
+`args` are the agent's own command-line flags, passed through to it by Herdr. Unset means the
+kind's defaults, which for `claude` is `--dangerously-skip-permissions`: an agent that stops to ask
+for permission never finishes a run nobody is watching. Set `args = []` to take that off.
+
 Precedence: `[projects.agents.*]`, then `project.agent`, then `[agents.*]`, then `codex`. Fields are
 inherited one by one, not as a whole section. Set only `prompt` in a project and `kind` stays global.
 Review runs with the same agent as development unless you say otherwise.

@@ -92,15 +92,17 @@ test("roles: a project overrides the global section field by field", () => {
     ],
   });
   const [mochi, fmc] = config.projects;
-  assert.deepEqual(resolveAgentRole("dev", config, mochi), { kind: "codex", prompt: "" });
+  assert.deepEqual(resolveAgentRole("dev", config, mochi), { kind: "codex", prompt: "", args: [] });
   assert.deepEqual(resolveAgentRole("review", config, mochi), {
     kind: "claude",
     prompt: "/code-review",
+    args: ["--dangerously-skip-permissions"],
   });
   assert.equal(resolveAgentRole("dev", config, fmc).kind, "claude");
   assert.deepEqual(resolveAgentRole("review", config, fmc), {
     kind: "claude",
     prompt: "/code-review --strict",
+    args: ["--dangerously-skip-permissions"],
   });
 });
 
@@ -169,4 +171,36 @@ test("review feedback names the file and line, and points at the change when the
   const empty = reviewFeedback("https://fake/mr/7", []);
   assert.match(empty, /https:\/\/fake\/mr\/7/);
   assert.match(empty, /read the review/i);
+});
+
+test("claude is started with permission prompts off, and args stay overridable", () => {
+  const cfg = (raw: object) => ConfigSchema.parse(raw);
+  assert.deepEqual(
+    resolveAgentRole("dev", cfg({ agents: { dev: { kind: "claude" } } }), undefined).args,
+    ["--dangerously-skip-permissions"],
+  );
+  // an agent with no known default gets none
+  assert.deepEqual(
+    resolveAgentRole("dev", cfg({ agents: { dev: { kind: "codex" } } }), undefined).args,
+    [],
+  );
+  // and an explicit list wins, including an empty one
+  assert.deepEqual(
+    resolveAgentRole(
+      "dev",
+      cfg({ agents: { dev: { kind: "claude", args: ["--foo"] } } }),
+      undefined,
+    ).args,
+    ["--foo"],
+  );
+  assert.deepEqual(
+    resolveAgentRole("dev", cfg({ agents: { dev: { kind: "claude", args: [] } } }), undefined).args,
+    [],
+  );
+  // a project override beats the global list
+  const project = cfg({
+    agents: { dev: { kind: "claude", args: ["--foo"] } },
+    projects: [{ name: "P", repository: "/repo", agents: { dev: { args: ["--bar"] } } }],
+  });
+  assert.deepEqual(resolveAgentRole("dev", project, project.projects[0]).args, ["--bar"]);
 });

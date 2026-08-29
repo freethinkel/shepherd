@@ -132,7 +132,7 @@ export class Workflow {
       });
       run.herdrWorkspaceId = ws.workspaceId;
 
-      await this.spawnAgent(run, dev.kind, ws);
+      await this.spawnAgent(run, dev, ws);
       this.event("AgentStarted", run, { agent: run.herdrAgentId, workspace: ws.workspaceId });
 
       const feedback = await this.resumeChange(run);
@@ -189,7 +189,7 @@ export class Workflow {
    */
   private async spawnAgent(
     run: AgentRun,
-    kind: string,
+    role: policy.AgentRole,
     ws: { workspaceId: string; paneId: string },
   ): Promise<void> {
     const live = await this.deps.herdr.listAgents().catch(() => []);
@@ -208,7 +208,12 @@ export class Workflow {
           })
         ).paneId
       : ws.paneId;
-    await this.deps.herdr.spawnAgent({ name: run.herdrAgentId, kind, paneId });
+    await this.deps.herdr.spawnAgent({
+      name: run.herdrAgentId,
+      kind: role.kind,
+      paneId,
+      args: role.args,
+    });
   }
 
   /** Advance the run based on the agent state reported by Herdr. */
@@ -470,7 +475,12 @@ export class Workflow {
           label: "review",
         });
         tabId = tab.tabId;
-        await this.deps.herdr.spawnAgent({ name, kind: role.kind, paneId: tab.paneId });
+        await this.deps.herdr.spawnAgent({
+          name,
+          kind: role.kind,
+          paneId: tab.paneId,
+          args: role.args,
+        });
       }
       await this.deps.herdr.prompt(
         name,
