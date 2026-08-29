@@ -11,12 +11,15 @@ const AgentRoleSchema = z.object({
   /** Agent kind for Herdr; defaults to the project's `agent`. */
   kind: z.string().optional(),
   prompt: z.string().default(""),
+  /** Command-line arguments for the agent itself; unset means the kind's defaults. */
+  args: z.array(z.string()).optional(),
 });
 
 /** Per-project role override: an unset field is inherited from the global section. */
 const AgentRoleOverrideSchema = z.object({
   kind: z.string().optional(),
   prompt: z.string().optional(),
+  args: z.array(z.string()).optional(),
 });
 
 const ProjectSchema = z.object({
@@ -152,6 +155,7 @@ max_concurrent_runs = 3
 
 [agents.dev]
 # prompt = "/brainstorm"     # what the dev agent prompt starts with
+# args = []                  # agent's own flags; unset means the kind's defaults
 
 [agents.review]
 kind = "claude"
