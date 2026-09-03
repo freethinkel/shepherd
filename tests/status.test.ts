@@ -5,7 +5,7 @@ import {
   needsAttention,
   normalizeAgentStatus,
   taskStatusForRun,
-} from "../src/domain/status.ts";
+} from "../src/shared/domain/status.ts";
 
 test("normalizes the Herdr vocabulary", () => {
   assert.equal(normalizeAgentStatus("blocked"), "blocked");

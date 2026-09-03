@@ -3,9 +3,9 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AgentRun, Project, Task } from "../src/domain/types.ts";
-import * as db from "../src/persistence/db.ts";
-import * as view from "../src/view.ts";
+import type { AgentRun, Project, Task } from "../src/shared/domain/types.ts";
+import * as db from "../src/core/persistence/db.ts";
+import * as view from "../src/shared/view.ts";
 
 const project: Project = { id: "phocus", name: "Phocus", repositoryId: "/repo" };
 const task: Task = {
@@ -91,7 +91,7 @@ test("the dashboard reads blocked and review differently", () => {
 
 test("a pid file left by a dead process does not block startup", async () => {
   process.env.SHEPHERD_STATE_DIR = mkdtempSync(join(tmpdir(), "shepherd-state-"));
-  const { lockLoop, pidPath, runningPid } = await import("../src/cli/daemon.ts");
+  const { lockLoop, pidPath, runningPid } = await import("../src/modules/cli/daemon.ts");
   writeFileSync(pidPath(), "999999"); // no such process
   assert.equal(runningPid(), undefined);
   assert.equal(existsSync(pidPath()), false);
@@ -108,4 +108,39 @@ test("a reset is a marker in the journal, so earlier runs can be ignored", () =>
   const at = db.lastEventAt(database, "LIN-42", "TaskReset");
   assert.ok(at instanceof Date);
   assert.ok(Date.now() - at.getTime() < 5_000);
+});
+
+test("an event that was never appended is absent, not present", () => {
+  const database = freshDb();
+  db.insertRun(database, run("review"));
+  // the driver answers a miss with null: `!== undefined` would call every event present
+  assert.equal(db.hasEvent(database, "run_1", "ChangeMerged"), false);
+  db.appendEvent(database, "ChangeMerged", { runId: "run_1" });
+  assert.equal(db.hasEvent(database, "run_1", "ChangeMerged"), true);
+  assert.equal(db.hasEvent(database, "run_1", "MergeFailed"), false);
+});
+
+test("the detail view of a run carries its task, change and newest events", () => {
+  const database = freshDb();
+  db.insertRun(database, run("review"));
+  db.recordChange(database, {
+    id: "14",
+    runId: "run_1",
+    provider: "github",
+    url: "https://example.test/pull/14",
+    status: "open",
+  });
+  db.appendEvent(database, "ChangeCreated", { runId: "run_1", taskId: "LIN-42" });
+  db.appendEvent(database, "ReviewRejected", { runId: "run_1", taskId: "LIN-42" });
+
+  const detail = view.runView(database, "run_1");
+  assert.equal(detail?.task?.title, "LUT importer");
+  assert.equal(detail?.project?.name, "Phocus");
+  assert.equal(detail?.change?.url, "https://example.test/pull/14");
+  assert.deepEqual(
+    detail?.events.map((e) => e.type),
+    ["ReviewRejected", "ChangeCreated"],
+    "newest first, the way the pane prints them",
+  );
+  assert.equal(view.runView(database, "nope"), undefined);
 });

@@ -3,14 +3,14 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { githubApproved, githubChecks } from "../src/providers/code/github.ts";
+import { githubApproved, githubChecks } from "../src/modules/providers/code/github.ts";
 import {
   gitlabApproved,
   gitlabChecks,
   projectPathFromRemote,
-} from "../src/providers/code/gitlab.ts";
-import { loadCustomProviders } from "../src/providers/load.ts";
-import { buildIssueFilter, targetState } from "../src/providers/tasks/linear.ts";
+} from "../src/modules/providers/code/gitlab.ts";
+import { loadCustomProviders } from "../src/modules/providers/load.ts";
+import { buildIssueFilter, targetState } from "../src/modules/providers/tasks/linear.ts";
 
 test("Linear: In Progress and In Review are both `started`, so match by name", () => {
   const states = [

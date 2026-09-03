@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ConfigSchema } from "../src/config/schema.ts";
+import { ConfigSchema } from "../src/core/config/schema.ts";
 import type {
   AgentStatus,
   Change,
@@ -13,13 +13,13 @@ import type {
   Project,
   Task,
   TaskProvider,
-} from "../src/domain/types.ts";
-import type { HerdrClient } from "../src/herdr/client.ts";
-import { remoteHost } from "../src/orchestrator/policies.ts";
-import { Workflow } from "../src/orchestrator/workflow.ts";
-import * as db from "../src/persistence/db.ts";
-import { ProviderRegistry } from "../src/providers/registry.ts";
-import type { CustomProviders } from "../src/providers/load.ts";
+} from "../src/shared/domain/types.ts";
+import type { HerdrClient } from "../src/modules/herdr/client.ts";
+import { remoteHost } from "../src/modules/orchestrator/policies.ts";
+import { Workflow } from "../src/modules/orchestrator/workflow.ts";
+import * as db from "../src/core/persistence/db.ts";
+import { ProviderRegistry } from "../src/modules/providers/registry.ts";
+import type { CustomProviders } from "../src/modules/providers/load.ts";
 
 // The whole run lifecycle against fake Herdr and providers, but a real git repository:
 // worktrees, commits and pushes are genuine, nothing touches the network.
@@ -95,8 +95,13 @@ class FakeHerdr {
   async prompt(_agent: string, text: string) {
     this.prompts.push(text);
   }
-  async getAgentStatus() {
+  async getAgentStatus(name?: string) {
+    // herdr knows nothing about a name that was never started
+    if (name && !this.agents.some((a) => a.name === name)) return "unknown" as AgentStatus;
     return this.status;
+  }
+  async clearAgentName(name: string) {
+    this.agents = this.agents.filter((a) => a.name !== name);
   }
   async readAgent() {
     return this.tail;

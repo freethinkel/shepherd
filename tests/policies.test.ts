@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ConfigSchema } from "../src/config/schema.ts";
-import type { AgentRun, ChangeComment, Project, Task } from "../src/domain/types.ts";
+import { ConfigSchema } from "../src/core/config/schema.ts";
+import type { AgentRun, ChangeComment, Project, Task } from "../src/shared/domain/types.ts";
 import {
   agentName,
   buildPrompt,
@@ -17,8 +17,8 @@ import {
   withPrefix,
   workspaceLabel,
   worktreePath,
-} from "../src/orchestrator/policies.ts";
-import { branchName } from "../src/repositories/git.ts";
+} from "../src/modules/orchestrator/policies.ts";
+import { branchName } from "../src/shared/git.ts";
 
 const project: Project = { id: "phocus", name: "Phocus", repositoryId: "/repo" };
 const task: Task = {
@@ -92,16 +92,23 @@ test("roles: a project overrides the global section field by field", () => {
     ],
   });
   const [mochi, fmc] = config.projects;
-  assert.deepEqual(resolveAgentRole("dev", config, mochi), { kind: "codex", prompt: "", args: [] });
+  assert.deepEqual(resolveAgentRole("dev", config, mochi), {
+    kind: "codex",
+    prompt: "",
+    skill: "",
+    args: [],
+  });
   assert.deepEqual(resolveAgentRole("review", config, mochi), {
     kind: "claude",
     prompt: "/code-review",
+    skill: "",
     args: ["--dangerously-skip-permissions"],
   });
   assert.equal(resolveAgentRole("dev", config, fmc).kind, "claude");
   assert.deepEqual(resolveAgentRole("review", config, fmc), {
     kind: "claude",
     prompt: "/code-review --strict",
+    skill: "",
     args: ["--dangerously-skip-permissions"],
   });
 });

@@ -3,30 +3,28 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "start": "nub src/cli/index.ts",
+    "start": "bun --preload @opentui/solid/preload src/modules/cli/index.ts",
     "typecheck": "tsc --noEmit",
-    "install:bin": "nubx -y esbuild src/cli/index.ts --bundle --platform=node --format=esm --outfile=dist/shepherd.mjs --banner:js='#!/usr/bin/env -S node --disable-warning=ExperimentalWarning' && install -m 755 dist/shepherd.mjs \"${SHEPHERD_BIN_DIR:-$HOME/.local/bin}/shepherd\" && echo \"installed: ${SHEPHERD_BIN_DIR:-$HOME/.local/bin}/shepherd\" && { \"${SHEPHERD_BIN_DIR:-$HOME/.local/bin}/shepherd\" daemon restart >/dev/null 2>&1 && echo 'daemon restarted'; true; }",
-    "test": "nub --node --test \"tests/**/*.test.ts\"",
+    "test": "bun test",
     "fmt": "oxfmt .",
-    "lint": "oxlint ."
+    "lint": "oxlint .",
+    "install:bin": "bun build.ts && install -m 755 dist/shepherd \"${SHEPHERD_BIN_DIR:-$HOME/.local/bin}/shepherd\" && echo \"installed: ${SHEPHERD_BIN_DIR:-$HOME/.local/bin}/shepherd\" && { \"${SHEPHERD_BIN_DIR:-$HOME/.local/bin}/shepherd\" daemon restart >/dev/null 2>&1 && echo 'daemon restarted'; true; }"
   },
   "dependencies": {
-    "smol-toml": "^1.8.0",
+    "@opentui/core": "^0.5.10",
+    "@opentui/solid": "^0.5.10",
+    "solid-js": "^1.9.15",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@nubjs/types": ">=0.4.13 <=0.6.0",
+    "@types/bun": "^1.3.0",
     "@types/node": "^26",
     "oxfmt": "^0.65.0",
     "oxlint": "^1.80.0",
     "typescript": "^7"
   },
-  "devEngines": {
-    "packageManager": {
-      "name": "nub",
-      "version": "^0.6.0",
-      "onFail": "warn"
-    }
-  },
-  "packageManager": "nub@0.6.0"
+  "engines": {
+    "bun": ">=1.3.0"
+  }
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { briefError } from "../src/log.ts";
+import { briefError } from "../src/shared/log.ts";
 
 const ESC = "\u001B";
 

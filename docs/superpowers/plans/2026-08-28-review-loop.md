@@ -26,10 +26,12 @@
 ### Task 1: Domain types and config keys
 
 **Files:**
+
 - Modify: `src/domain/types.ts:77-83` (`Change`), `src/domain/types.ts:100-105` (`CodeProvider`)
 - Modify: `src/config/schema.ts:70-97` (orchestrator block) and the `[orchestrator]` block of `EXAMPLE_CONFIG` in the same file
 
 **Interfaces:**
+
 - Produces:
   - `Change.approved?: boolean | undefined` and `Change.checks?: "pending" | "success" | "failure" | undefined`
   - `interface ChangeComment { author: string; body: string; path?: string | undefined; line?: number | undefined; createdAt: Date }`
@@ -111,10 +113,12 @@ git commit -m "Add review-loop types and config keys"
 ### Task 2: Pure rules — comment filtering and the rework prompt
 
 **Files:**
+
 - Modify: `src/orchestrator/policies.ts` (after `validationFeedback`)
 - Test: `tests/policies.test.ts`
 
 **Interfaces:**
+
 - Consumes: `ChangeComment` from Task 1.
 - Produces:
   - `commentsSince(comments: ChangeComment[], since: Date | undefined): ChangeComment[]`
@@ -133,10 +137,7 @@ const comment = (body: string, at: string, extra: Partial<ChangeComment> = {}): 
 });
 
 test("review feedback only carries comments newer than the last round", () => {
-  const all = [
-    comment("old", "2026-01-01T00:00:00Z"),
-    comment("new", "2026-01-02T00:00:00Z"),
-  ];
+  const all = [comment("old", "2026-01-01T00:00:00Z"), comment("new", "2026-01-02T00:00:00Z")];
   assert.deepEqual(
     commentsSince(all, new Date("2026-01-01T12:00:00Z")).map((c) => c.body),
     ["new"],
@@ -217,10 +218,12 @@ git commit -m "Add review feedback rules"
 ### Task 3: Rework — Todo during review hands comments back to the agent
 
 **Files:**
+
 - Modify: `src/orchestrator/workflow.ts:340-361` (`checkChange`), `src/orchestrator/workflow.ts:363-397` (`ensureReviewAgent`)
 - Test: `tests/workflow.test.ts` (`FakeCode` at line 133, new tests at the end)
 
 **Interfaces:**
+
 - Consumes: `commentsSince`, `reviewFeedback` (Task 2); `Change`, `ChangeComment`, `config.orchestrator.max_review_rounds` (Task 1); existing `sendBack`, `db.countEvents`, `db.lastEventAt`, `db.hasEvent`.
 - Produces: events `ReviewRejected { round }` and `ReviewRoundsExhausted`; `ensureReviewAgent` restarts once per round.
 
@@ -427,10 +430,10 @@ Note `sendBack` is not called directly because its counter is `ValidationRejecte
 Replace the line `if (db.hasEvent(this.deps.db, run.id, "ReviewAgentStarted")) return false;` with:
 
 ```ts
-    // once per round: after a hand-back the agent reviews the new push, not the old one
-    const started = db.lastEventAt(this.deps.db, run.taskId, "ReviewAgentStarted");
-    const rejected = db.lastEventAt(this.deps.db, run.taskId, "ReviewRejected");
-    if (started && (!rejected || started > rejected)) return false;
+// once per round: after a hand-back the agent reviews the new push, not the old one
+const started = db.lastEventAt(this.deps.db, run.taskId, "ReviewAgentStarted");
+const rejected = db.lastEventAt(this.deps.db, run.taskId, "ReviewRejected");
+if (started && (!rejected || started > rejected)) return false;
 ```
 
 And replace the `try` body so a live review agent is prompted instead of spawned twice:
@@ -481,10 +484,12 @@ git commit -m "Send review comments back to the agent when a task returns to Tod
 ### Task 4: Merge after human approval
 
 **Files:**
+
 - Modify: `src/orchestrator/workflow.ts` (`checkChange`, the poll section)
 - Test: `tests/workflow.test.ts`
 
 **Interfaces:**
+
 - Consumes: `Change.approved` / `Change.checks` (Task 1), `config.orchestrator.auto_merge` (Task 1), `CodeProvider.mergeChange`.
 - Produces: events `ChangeMerged` and `MergeFailed { error }`.
 
@@ -609,10 +614,12 @@ git commit -m "Merge a change once a human approved it and checks are green"
 ### Task 5: GitHub — approval, checks and comments
 
 **Files:**
+
 - Modify: `src/providers/code/github.ts`
 - Test: `tests/providers.test.ts`
 
 **Interfaces:**
+
 - Consumes: `Change.approved`/`checks`, `ChangeComment`, `CodeProvider.listComments` (Task 1).
 - Produces: exported pure helper `githubChecks(rollup: unknown[]): "pending" | "success" | "failure"`; `GitHubCodeProvider.getChange` fills `approved`/`checks`; `GitHubCodeProvider.listComments`.
 
@@ -745,10 +752,12 @@ git commit -m "GitHub: read approval, checks and review comments"
 ### Task 6: GitLab — approval, pipeline and notes
 
 **Files:**
+
 - Modify: `src/providers/code/gitlab.ts`
 - Test: `tests/providers.test.ts`
 
 **Interfaces:**
+
 - Consumes: same as Task 5.
 - Produces: exported pure helper `gitlabChecks(pipeline: { status?: string } | null | undefined)`; `GitLabCodeProvider.getChange` fills `approved`/`checks`; `GitLabCodeProvider.listComments`.
 
@@ -786,7 +795,11 @@ export function gitlabChecks(
   if (!status || status === "success" || status === "skipped" || status === "manual") {
     return "success";
   }
-  if (["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled"].includes(status)) {
+  if (
+    ["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled"].includes(
+      status,
+    )
+  ) {
     return "pending";
   }
   return "failure";
@@ -868,6 +881,7 @@ git commit -m "GitLab: read approval, pipeline and notes"
 ### Task 7: Documentation
 
 **Files:**
+
 - Modify: `README.md:140-146` (review paragraph), `README.md:187` (lifecycle line), `README.md:211` ("Not there yet")
 - Modify: `CLAUDE.md` (invariants list)
 

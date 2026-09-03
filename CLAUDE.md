@@ -7,23 +7,24 @@ this file only covers what the README does not.
 
 ## Commands
 
-Package manager and runner is **nub** (not npm/pnpm). It executes `.ts` directly — there is no build
-step for development.
+Package manager and runner is **bun** (not npm/pnpm). It executes `.ts` directly — there is no build
+step for development. `@opentui/core` is native and needs Bun >= 1.3: that is what pins the runtime.
 
 ```sh
-nub install
-nub run typecheck                        # tsc --noEmit
-nub run test                             # node:test over tests/**/*.test.ts
-nub --node --test tests/policies.test.ts # one file
-nub --node --test --test-name-pattern "review falls back" tests/policies.test.ts
-nub run fmt                              # oxfmt
-nub run lint                             # oxlint
-nub start -- status                      # run the CLI from source
-nub run install:bin                      # bundle to ~/.local/bin/shepherd + restart the daemon
+bun install
+bun run typecheck                        # tsc --noEmit
+bun test                                 # node:test over tests/**/*.test.ts, run by bun
+bun test tests/policies.test.ts          # one file
+bun test -t "review falls back"          # one test
+bun run fmt                              # oxfmt
+bun run lint                             # oxlint
+bun run start -- status                  # run the CLI from source
+bun run start -- ui                      # the TUI from source
+bun run install:bin                      # compile to ~/.local/bin/shepherd + restart the daemon
 ```
 
 `install:bin` is the only way to ship a change to a running daemon: the daemon holds config and code
-in memory, so editing `config.toml` or `src/` does nothing until it is rebuilt and kicked.
+in memory, so editing `config.yaml` or `src/` does nothing until it is rebuilt and kicked.
 
 ## Imports and types
 
@@ -33,18 +34,29 @@ declared `foo?: T | undefined` — dropping the explicit `| undefined` breaks th
 
 ## Architecture
 
-Layering rule: `domain/` and `view.ts` know nothing about Linear, GitHub, GitLab or Herdr. Vendor
-knowledge lives only in `providers/` and `herdr/`. Keep it that way when adding a tracker or forge.
+Layering rule: `shared/` and `core/` know nothing about Linear, GitHub, GitLab or Herdr. Vendor
+knowledge lives only in `modules/providers/` and `modules/herdr/`. Keep it that way when adding a
+tracker or forge.
+
+`core/` is the wiring and the state everything stands on, `modules/` are the parts that could be
+swapped out, `shared/` is what more than one module needs. A module owns its own `ui/`, `helpers/`,
+`constants/` and `types/` when it grows them — `modules/theme` and `modules/tui` do.
 
 ```
-config/schema.ts   zod + TOML, also the source of EXAMPLE_CONFIG shown by `shepherd init`
-app.ts             wires config → db → registry → workflow → scheduler; every entry point uses it
-domain/            types + status derivation (pure, no I/O)
-orchestrator/      scheduler (when) · workflow (how, one method per run transition) · policies (pure rules)
-providers/         registry (which provider) · load (plugin files) · tasks/* · code/*
-herdr/client.ts    execFile over the `herdr` CLI, JSON in/out
-repositories/git.ts  branch names, commit counting, push, validation command
-persistence/db.ts  node:sqlite, the source of truth for orchestration
+core/app.ts              wires config → db → registry → workflow → scheduler; every entry point uses it
+core/config/schema.ts    zod + YAML, also the source of EXAMPLE_CONFIG shown by `shepherd init`
+core/persistence/db.ts   bun:sqlite, the source of truth for orchestration
+modules/orchestrator/    scheduler (when) · workflow (how, one method per run transition) · policies (pure rules)
+modules/providers/       registry (which provider) · load (plugin files) · tasks/* · code/*
+modules/herdr/client.ts  execFile over the `herdr` CLI, JSON in/out
+modules/theme/           terminal palette → colour roles; the UI never names a hex
+modules/tui/             the dashboard: solid components over shared/view + shared/actions
+modules/cli/             commands, daemon, plain-text rendering
+shared/domain/           types + status derivation (pure, no I/O)
+shared/view.ts           one state view for the CLI and the TUI
+shared/actions.ts        retry/stop/open/review/reset — what a human asks for, CLI and TUI share it
+shared/components/       Text · List · Scroll, all painted from the palette
+shared/git.ts            branch names, commit counting, push, validation command
 ```
 
 ### The two loops
@@ -99,11 +111,35 @@ event, and pushes the derived status back to the tracker. Agent state comes verb
 - **A run in `review` never times out**; every other status is killed after `run_timeout_ms`.
 - **Failure is not terminal for a task.** `fail()` puts the task back in the tracker's Todo column
   and comments why; `isTaskAvailable` re-queues it until `max_attempts` runs have failed.
+- **A miss in SQLite is `null`, not `undefined`.** `bun:sqlite` answers an empty `.get()` with
+  `null`, so `hasEvent` compares against `null`; the `!== undefined` it used to use reported every
+  event as already present, which silently disables every "did we already do X" guard above.
 - Provider dispatch: a task remembers which tracker it came from (`tasks.provider`) so updates go
   back to the same one; a code provider is picked from the repository's git remote, never configured
   per project.
 - Errors from CLI tools go through `briefError()` before reaching the log — `gh`/`glab`/`jira` answer
   failures with pages of help text and this loop runs every few seconds.
+
+### The TUI
+
+Solid + JSX over `@opentui/solid`, the same shape as the `glui` project. The JSX transform is
+registered by `@opentui/solid/preload`: `bun run start` passes it with `--preload`, and `build.ts`
+registers the same plugin for the compiled binary. A `bunfig.toml` would do it too, but the
+compiled binary reads the one in the current directory and dies on a preload it does not contain.
+
+Colour is never a hex. `modules/theme` asks the terminal for its real palette (`getPalette`) and
+maps it to roles — `fg`, `muted`, `border`, `selectionBg`, `accent`, `danger`, `success`,
+`warning` — pushing every role that carries text to a legible contrast ratio. Without an answer it
+falls back to ANSI indices, which the terminal resolves itself. opentui's own default is white,
+which is invisible on a light background: that is the bug this exists to prevent.
+
+Two rules the dashboard was rewritten to obey:
+
+- **A frame never waits on I/O.** `refresh()` reads SQLite and nothing else; the agent log arrives
+  through its own effect. Drawing behind `herdr read` showed empty panes and swallowed ctrl-c.
+- **Quitting hands stdin back first.** `renderer.destroy()` blocks forever while stdin is in raw
+  mode, so `helpers/quit.ts` clears raw mode, then destroys, then exits — a `herdr read` still in
+  flight would otherwise keep the terminal hostage.
 
 ### Adding a provider
 
@@ -114,7 +150,7 @@ optional `check()` is a preflight so an agent does not work for an hour and then
 
 ## Tests
 
-`node:test` + `node:assert`, no framework. `tests/workflow.test.ts` runs the full lifecycle against
+`node:test` + `node:assert`, run by `bun test`, no framework. `tests/workflow.test.ts` runs the full lifecycle against
 fake Herdr and fake providers but a **real** git repo (bare origin + clone in a tmpdir) — worktrees,
 commits and pushes are genuine, nothing touches the network. New orchestration behaviour belongs
 there; pure rules belong in `policies.test.ts`.
