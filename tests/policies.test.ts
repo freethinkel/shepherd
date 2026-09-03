@@ -9,14 +9,18 @@ import {
   agentName,
   buildPlanPrompt,
   buildPrompt,
+  render,
   retry,
+  validationFeedback,
   codeProviderForRemote,
   commentsSince,
   isTaskAvailable,
+  noCommitsFeedback,
   providerSettings,
   resolveAgentRole,
   reviewAgentName,
   reviewFeedback,
+  reviewPrompt,
   withPrefix,
   workspaceLabel,
   worktreePath,
@@ -314,4 +318,42 @@ test("a read that never works throws the last error, after a bounded number of t
     /attempt 3/,
   );
   assert.equal(calls, 3, "three attempts, not an unbounded loop");
+});
+
+test("a template fills its holes, and a hole with no value is a mistake, not a blank", () => {
+  assert.equal(
+    render("Task {{id}}: {{title}}", { id: "T-1", title: "Ship it" }),
+    "Task T-1: Ship it",
+  );
+  // the same hole twice is filled twice
+  assert.equal(render("{{a}}/{{a}}", { a: "x" }), "x/x");
+  // a typo in a .md would otherwise reach the agent verbatim
+  assert.throws(() => render("Branch {{brnach}}", { branch: "b" }), /brnach/);
+});
+
+test("a line that is only an empty placeholder disappears with its blank line", () => {
+  const tpl = "Task T-1\n\n{{description}}\n\nDo the work.\n{{validate}}\nDo not push.";
+  assert.equal(
+    render(tpl, { description: "why it matters", validate: "Run `pnpm test`." }),
+    "Task T-1\n\nwhy it matters\n\nDo the work.\nRun `pnpm test`.\nDo not push.",
+  );
+  assert.equal(
+    render(tpl, { description: "", validate: "" }),
+    "Task T-1\n\nDo the work.\nDo not push.",
+  );
+});
+
+test("every prompt template gets every hole it declares filled", () => {
+  const task: Task = { ...planTask, description: "why it matters" };
+  const built = [
+    buildPrompt(task, { branch: "b", validate: "pnpm test", prefix: "/x", skill: "s" }),
+    buildPrompt({ ...task, description: undefined }, { branch: "b" }),
+    buildPlanPrompt(task, { branch: "b", skill: "s" }),
+    reviewPrompt("/code-review", task, { changeUrl: "https://fake/mr/7", branch: "b" }),
+    reviewFeedback("https://fake/mr/7", []),
+    validationFeedback("pnpm test", "boom"),
+    noCommitsFeedback("b"),
+  ];
+  // a hole left behind means the template asked for something the builder never passes
+  for (const text of built) assert.doesNotMatch(text, /\{\{/, text.slice(0, 60));
 });

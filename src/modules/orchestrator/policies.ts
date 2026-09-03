@@ -1,3 +1,9 @@
+import DEV_PROMPT from "./prompts/DEV.md" with { type: "text" };
+import NO_COMMITS_PROMPT from "./prompts/NO-COMMITS.md" with { type: "text" };
+import PLAN_PROMPT from "./prompts/PLAN.md" with { type: "text" };
+import REVIEW_FEEDBACK_PROMPT from "./prompts/REVIEW-FEEDBACK.md" with { type: "text" };
+import REVIEW_PROMPT from "./prompts/REVIEW.md" with { type: "text" };
+import VALIDATION_FAILED_PROMPT from "./prompts/VALIDATION-FAILED.md" with { type: "text" };
 import { join } from "node:path";
 import { expandPath } from "../../core/config/schema.ts";
 import type { Config, ProjectConfig } from "../../core/config/schema.ts";
@@ -179,6 +185,29 @@ export function resolveAgentRole(
 }
 
 /** A command or text before the task: "/code-review" plus the body in one prompt. */
+/**
+ * Prompt templates live next to this file as markdown. A line that holds nothing but an empty
+ * placeholder drops out with its blank line, which is how an optional paragraph disappears
+ * without leaving a hole in the middle of the prompt.
+ */
+export function render(template: string, vars: Record<string, string>): string {
+  const HOLE = /\{\{(\w+)\}\}/g;
+  const fill = (line: string) =>
+    line.replace(HOLE, (_, key: string) => {
+      if (!(key in vars)) throw new Error(`prompt template: no value for {{${key}}}`);
+      return vars[key] ?? "";
+    });
+  const lines: string[] = [];
+  for (const line of template.split("\n")) {
+    const filled = fill(line);
+    // an optional block that was not filled in takes its own line with it
+    if (/^\s*\{\{\w+\}\}\s*$/.test(line) && !filled.trim()) continue;
+    if (!filled.trim() && !lines.at(-1)?.trim() && lines.length) continue;
+    lines.push(filled);
+  }
+  return lines.join("\n").trim();
+}
+
 export function withPrefix(prefix: string, body: string): string {
   return prefix.trim() ? `${prefix.trim()} ${body}` : body;
 }
@@ -194,12 +223,12 @@ export function reviewPrompt(
 ): string {
   return withPrefix(
     prefix,
-    [
-      ctx.changeUrl,
-      "",
-      `Task ${task.id}: ${task.title}`,
-      `Branch ${ctx.branch}. Leave findings as pull request comments.`,
-    ].join("\n"),
+    render(REVIEW_PROMPT, {
+      url: ctx.changeUrl,
+      id: task.id,
+      title: task.title,
+      branch: ctx.branch,
+    }),
   );
 }
 
@@ -216,17 +245,13 @@ export function buildPrompt(
     ctx.skill ?? "",
     withPrefix(
       ctx.prefix ?? "",
-      [
-        `Task ${task.id}: ${task.title}`,
-        task.description ? `\n${task.description}` : "",
-        `\nYou are working in a dedicated git worktree on branch ${ctx.branch}.`,
-        `Implement the task and commit your changes to that branch.`,
-        ctx.validate ? `Before finishing, make sure \`${ctx.validate}\` passes.` : "",
-        `Do not push the branch or open a pull request — the orchestrator does that.`,
-        `If the requirements are ambiguous, stop and ask instead of guessing.`,
-      ]
-        .filter(Boolean)
-        .join("\n"),
+      render(DEV_PROMPT, {
+        id: task.id,
+        title: task.title,
+        description: task.description ?? "",
+        branch: ctx.branch,
+        validate: ctx.validate ? `Before finishing, make sure \`${ctx.validate}\` passes.` : "",
+      }),
     ),
   );
 }
@@ -243,21 +268,12 @@ export function buildPlanPrompt(
     ctx.skill ?? "",
     withPrefix(
       ctx.prefix ?? "",
-      [
-        `Task ${task.id}: ${task.title}`,
-        task.description ? `\n${task.description}` : "",
-        `\nYou are in a git worktree on branch ${ctx.branch}, planning this task.`,
-        `Read the code you would touch, then write a plan someone could execute:`,
-        `the files and functions you would change, the steps in order, what the acceptance`,
-        `criterion is, and any open questions that would change the approach.`,
-        `Name what you are NOT doing, so the scope is visible.`,
-        `If the change is too small to be worth planning, say exactly that in one line`,
-        `instead of padding it out — the work starts either way.`,
-        `Publish it with \`shepherd task comment ${task.id} "<plan>"\` and stop there.`,
-        `This pass is planning only — do not write any code and do not commit.`,
-      ]
-        .filter(Boolean)
-        .join("\n"),
+      render(PLAN_PROMPT, {
+        id: task.id,
+        title: task.title,
+        description: task.description ?? "",
+        branch: ctx.branch,
+      }),
     ),
   );
 }
@@ -268,17 +284,11 @@ export function withSkill(skill: string, body: string): string {
 }
 
 export function validationFeedback(command: string, output: string): string {
-  return [
-    `Validation failed: \`${command}\``,
-    "```",
-    output.slice(-4000),
-    "```",
-    "Fix it and commit the fix to the same branch.",
-  ].join("\n");
+  return render(VALIDATION_FAILED_PROMPT, { command, output: output.slice(-4000) });
 }
 
 export function noCommitsFeedback(branch: string): string {
-  return `Branch ${branch} has no commits. Commit your work, otherwise the task cannot go to review.`;
+  return render(NO_COMMITS_PROMPT, { branch });
 }
 
 export function commentsSince(comments: ChangeComment[], since: Date | undefined): ChangeComment[] {
@@ -295,13 +305,7 @@ export function reviewFeedback(url: string, comments: ChangeComment[]): string {
             return `- ${c.author}${where}: ${c.body.trim()}`;
           })
           .join("\n");
-  return [
-    `The change ${url} was sent back for rework:`,
-    "",
-    body,
-    "",
-    "Address every point and commit the fixes to the same branch.",
-  ].join("\n");
+  return render(REVIEW_FEEDBACK_PROMPT, { url, comments: body });
 }
 
 export function changeBody(task: Task, run: AgentRun): string {

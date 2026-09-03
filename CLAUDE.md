@@ -47,6 +47,7 @@ core/app.ts              wires config → db → registry → workflow → sched
 core/config/schema.ts    zod + YAML, also the source of EXAMPLE_CONFIG shown by `shepherd init`
 core/persistence/db.ts   bun:sqlite, the source of truth for orchestration
 modules/orchestrator/    scheduler (when) · workflow (how, one method per run transition) · policies (pure rules)
+modules/orchestrator/prompts/  every prompt as a markdown template, `{{holes}}` filled by `render`
 modules/providers/       registry (which provider) · load (plugin files) · tasks/* · code/*
 modules/herdr/client.ts  execFile over the `herdr` CLI, JSON in/out
 modules/theme/           terminal palette → colour roles; the UI never names a hex
