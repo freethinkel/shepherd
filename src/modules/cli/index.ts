@@ -81,11 +81,11 @@ async function main() {
   switch (command) {
     case "projects": {
       await app.scheduler.syncProjects();
-      return out(projectsTree(view.overview(app.db)));
+      return out(projectsTree(view.overview(app.db, app.projectConfigs.keys())));
     }
     case "status": {
       await app.scheduler.syncProjects();
-      const views = view.overview(app.db);
+      const views = view.overview(app.db, app.projectConfigs.keys());
       const pid = daemon.runningPid();
       out(
         pid

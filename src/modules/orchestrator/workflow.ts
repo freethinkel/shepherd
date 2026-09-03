@@ -23,6 +23,8 @@ export interface WorkflowDeps {
   config: Config;
   projectConfigs: Map<string, ProjectConfig>;
   log?: (msg: string) => void;
+  /** Only the checks override it, so a retried read does not make them wait out the backoff. */
+  sleep?: ((ms: number) => Promise<void>) | undefined;
 }
 
 /** One workflow step = one run state transition, recorded in SQLite. */
@@ -460,7 +462,17 @@ export class Workflow {
     if (since < this.deps.config.orchestrator.change_poll_interval_ms) return;
     this.lastChangeCheck.set(run.id, Date.now());
 
-    const fresh = await this.codeProvider(run).getChange(change.id, run.worktreePath);
+    // a forge that blinks is not a failed run: ride out a couple of errors, then wait for the
+    // next poll rather than killing work that is finished and only needs someone to look at it
+    const fresh = await policy
+      .retry(() => this.codeProvider(run).getChange(change.id, run.worktreePath), {
+        sleep: this.deps.sleep,
+      })
+      .catch((err) => {
+        this.log(`change ${change.id}: ${briefError(err)}`);
+        return undefined;
+      });
+    if (!fresh) return;
     if (fresh.status === "merged") {
       this.transition(run, "completed", { finishedAt: new Date() });
       this.event("RunCompleted", run, { change: fresh.url });

@@ -79,10 +79,16 @@ class FakeHerdr {
     return { tabId: `w1:t${this.tabs + 1}`, paneId: `w1:p${this.tabs + 1}` };
   }
   agents: { name: string; paneId: string }[] = [];
+  /** Names herdr holds but `agent list` does not report — exactly what the failures showed. */
+  unlisted = new Set<string>();
+  cleared: string[] = [];
+  startErrors: string[] = [];
   async listAgents() {
     return this.agents;
   }
   async spawnAgent(input: { name: string; kind: string; paneId: string }) {
+    const err = this.startErrors.shift();
+    if (err) throw new Error(err);
     this.agents.push({ name: input.name, paneId: input.paneId });
     return {
       name: input.name,
@@ -96,11 +102,14 @@ class FakeHerdr {
     this.prompts.push(text);
   }
   async getAgentStatus(name?: string) {
+    if (name && this.unlisted.has(name)) return "idle" as AgentStatus;
     // herdr knows nothing about a name that was never started
     if (name && !this.agents.some((a) => a.name === name)) return "unknown" as AgentStatus;
     return this.status;
   }
   async clearAgentName(name: string) {
+    this.cleared.push(name);
+    this.unlisted.delete(name);
     this.agents = this.agents.filter((a) => a.name !== name);
   }
   async readAgent() {
@@ -150,8 +159,13 @@ class FakeCode implements CodeProvider {
     this.created++;
     return { id: "7", provider: "fake", url: "https://fake/mr/7", status: "open" };
   }
+  getChangeErrors = 0;
   async getChange(): Promise<Omit<Change, "runId">> {
     this.polled++;
+    if (this.getChangeErrors > 0) {
+      this.getChangeErrors--;
+      throw new Error("Command failed: gh pr view 7 --json number,url,state");
+    }
     return {
       id: "7",
       provider: "fake",
@@ -210,6 +224,7 @@ function harness(overrides: Record<string, unknown> = {}) {
     config,
     projectConfigs,
     log: () => {},
+    sleep: async () => {}, // the retry backoff is real time; the checks skip it
   });
 
   const project: Project = { id: "demo", name: "Demo", repositoryId: repo.work };
@@ -644,4 +659,87 @@ test("Done does not merge over failing checks", async () => {
   await h.workflow.advance(reload(h, run.id));
   assert.equal(h.code.merged, 0);
   assert.equal(reload(h, run.id).status, "review");
+});
+
+test("a planning pass runs before the work, in the same agent", async () => {
+  const h = harness({ agents: { plan: { prompt: "/plan", skill: "superpowers:writing-plans" } } });
+  const run = await h.workflow.start(h.project, h.task);
+  assert.equal(run.status, "planning");
+  assert.match(h.herdr.prompts[0]!, /Use the superpowers:writing-plans skill\./);
+  assert.match(h.herdr.prompts[0]!, /shepherd task comment T-1/);
+
+  // planning survives the agent being busy; it is not the work phase yet
+  h.herdr.status = "working";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "planning");
+
+  // and one idle poll is a pause here too
+  h.herdr.status = "done";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "planning");
+
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "working");
+  // the same agent is handed the work prompt, no second agent is started
+  assert.equal(h.herdr.prompts.length, 2);
+  assert.match(h.herdr.prompts[1]!, /Implement the task/);
+  assert.equal(h.herdr.agents.length, 1);
+});
+
+test("without a plan role the dev agent starts straight away", async () => {
+  const h = harness();
+  const run = await h.workflow.start(h.project, h.task);
+  assert.equal(run.status, "working");
+  assert.match(h.herdr.prompts[0]!, /Implement the task/);
+});
+
+test("an agent herdr knows by name is reused even when the list does not report it", async () => {
+  // "agent name X is already used; candidates: ... status=Idle" — it was alive all along
+  const h = harness();
+  h.herdr.unlisted.add("demo-t-1");
+  const run = await h.workflow.start(h.project, h.task);
+  assert.equal(h.herdr.agents.length, 0, "no second agent under a name herdr already holds");
+  assert.equal(db.hasEvent(h.db, run.id, "AgentReused"), true);
+  assert.equal(h.herdr.tabs, 0, "and no tab is opened for an agent we already have");
+});
+
+test("a name left behind by a dead agent is cleared, and the start retried once", async () => {
+  const h = harness();
+  h.herdr.startErrors = ["named agent demo-t-1 no longer owns the target terminal"];
+  const run = await h.workflow.start(h.project, h.task);
+  assert.deepEqual(h.herdr.cleared, ["demo-t-1"]);
+  assert.equal(h.herdr.agents.length, 1);
+  assert.equal(run.status, "working");
+});
+
+test("a start that fails for its own reason still fails the run", async () => {
+  const h = harness();
+  h.herdr.startErrors = [
+    "timed out waiting for agent startup",
+    "timed out waiting for agent startup",
+  ];
+  const run = await h.workflow.start(h.project, h.task);
+  assert.equal(run.status, "failed");
+  assert.deepEqual(h.herdr.cleared, [], "a timeout is not a stale name");
+});
+
+test("a forge read that blinks is retried; one that stays down skips the tick", async () => {
+  const h = harness();
+  const run = await parkedInReview(h);
+
+  // two failures in a row are ridden out inside one tick
+  await new Promise((r) => setTimeout(r, 350));
+  h.code.getChangeErrors = 2;
+  h.code.state = "merged";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "completed");
+
+  // and a read that never comes back leaves the run where it was instead of failing it
+  const down = harness();
+  const stuck = await parkedInReview(down);
+  // the backoff is real time; the checks do not need to sit through it
+  await new Promise((r) => setTimeout(r, 350));
+  down.code.getChangeErrors = 99;
+  await down.workflow.advance(reload(down, stuck.id));
+  assert.equal(reload(down, stuck.id).status, "review", "a dead forge is not a failed run");
 });

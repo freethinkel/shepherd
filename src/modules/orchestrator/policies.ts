@@ -85,6 +85,29 @@ export function pickTaskProvider(
   return name;
 }
 
+/**
+ * Reads that fail for a moment: `gh pr view` and `glab` answer with a network error often enough
+ * to have failed runs on their own. Writes never come here — a repeated merge or push is a second
+ * press, not a second read.
+ */
+export async function retry<T>(
+  work: () => Promise<T>,
+  opts: { sleep?: ((ms: number) => Promise<void>) | undefined } = {},
+): Promise<T> {
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await work();
+    } catch (err) {
+      if (attempt >= RETRY_ATTEMPTS) throw err;
+      await sleep(attempt * 1000);
+    }
+  }
+}
+
+// ponytail: a constant, not a config key. Nobody has ever wanted to tune this.
+const RETRY_ATTEMPTS = 3;
+
 export function remoteHost(remote: string): string {
   return (
     remote
@@ -224,7 +247,12 @@ export function buildPlanPrompt(
         `Task ${task.id}: ${task.title}`,
         task.description ? `\n${task.description}` : "",
         `\nYou are in a git worktree on branch ${ctx.branch}, planning this task.`,
-        `Read the code you would touch, then write an implementation plan.`,
+        `Read the code you would touch, then write a plan someone could execute:`,
+        `the files and functions you would change, the steps in order, what the acceptance`,
+        `criterion is, and any open questions that would change the approach.`,
+        `Name what you are NOT doing, so the scope is visible.`,
+        `If the change is too small to be worth planning, say exactly that in one line`,
+        `instead of padding it out — the work starts either way.`,
         `Publish it with \`shepherd task comment ${task.id} "<plan>"\` and stop there.`,
         `This pass is planning only — do not write any code and do not commit.`,
       ]

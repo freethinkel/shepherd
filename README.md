@@ -126,9 +126,16 @@ o    open the workspace in Herdr      v  review    x  reset
 S    sync the trackers (the only key that goes to the network)      q  quit
 ```
 
+Under 100 columns — a phone over ssh — the panes cannot sit side by side, so the screen becomes a
+single column: the task list, then `enter` for the run on a screen of its own and `esc` back.
+`j`/`k` scroll the agent log there, and the project picker is dropped when there is only one
+project, because a phone has no rows to spare.
+
 It reads SQLite every 1.5 s, so it costs the trackers nothing to leave open, and it decides nothing
 on its own: every key calls what the matching `shepherd` command calls. One action runs at a time —
-a push or a workspace teardown takes seconds — and the footer says how it ended.
+a push or a workspace teardown takes seconds — and the footer says how it ended. It lists the
+projects your config names; a project you removed keeps its rows for `shepherd runs` and
+`shepherd events`, but stops cluttering the live picture.
 
 Tasks can also be written, not only read. `shepherd task` talks to the tracker directly — the
 orchestrator never creates or edits tasks itself.

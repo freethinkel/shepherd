@@ -25,8 +25,18 @@ export interface ProjectView {
   attention: boolean;
 }
 
-export function overview(database: db.Db): ProjectView[] {
-  return db.listProjects(database).map((project) => projectView(database, project));
+/**
+ * The live picture, which is the configured projects and nothing else. A project dropped from
+ * the config keeps its rows — the runs and events of past work are history, not clutter — but a
+ * dashboard listing projects nobody orchestrates any more is just wrong. `shepherd runs` and
+ * `shepherd events` still see everything.
+ */
+export function overview(database: db.Db, configured?: Iterable<string>): ProjectView[] {
+  const allowed = configured ? new Set(configured) : undefined;
+  return db
+    .listProjects(database)
+    .filter((project) => !allowed || allowed.has(project.id))
+    .map((project) => projectView(database, project));
 }
 
 export function projectView(database: db.Db, project: Project): ProjectView {

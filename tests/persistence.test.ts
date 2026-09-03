@@ -144,3 +144,20 @@ test("the detail view of a run carries its task, change and newest events", () =
   );
   assert.equal(view.runView(database, "nope"), undefined);
 });
+
+test("the overview lists the configured projects, not everything ever synced", () => {
+  const database = freshDb();
+  db.upsertProject(database, { id: "gone", name: "Gone", repositoryId: "/repo" });
+  assert.deepEqual(
+    view.overview(database).map((v) => v.project.id),
+    ["gone", "phocus"],
+    "without a filter the view still shows the whole table",
+  );
+  assert.deepEqual(
+    view.overview(database, ["phocus"]).map((v) => v.project.id),
+    ["phocus"],
+    "a project dropped from the config disappears from the live picture",
+  );
+  // its rows are still there for the history commands
+  assert.equal(db.listProjects(database).length, 2);
+});

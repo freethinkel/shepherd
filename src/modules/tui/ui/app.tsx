@@ -1,4 +1,4 @@
-import { useKeyboard, useRenderer } from "@opentui/solid";
+import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
 import {
   createEffect,
   createMemo,
@@ -10,6 +10,8 @@ import {
   type Accessor,
   type JSX,
 } from "solid-js";
+
+import type { ScrollBoxRenderable } from "@opentui/core";
 
 import type { App } from "../../../core/app.ts";
 import * as actions from "../../../shared/actions.ts";
@@ -30,12 +32,21 @@ import { quit } from "../helpers/quit.ts";
 
 const TICK_MS = 1500;
 const LOG_LINES = 200;
+/** Below this the two columns stop fitting: a phone over ssh gets one column and a detail screen. */
+const WIDE_COLS = 100;
 const KEYS =
   "j/k move · tab pane · r retry · s stop · o open · v review · x reset · S sync · q quit";
+const KEYS_NARROW = "j/k · enter open · r retry · s stop · o open · q quit";
+const KEYS_DETAIL = "j/k scroll · esc back · r retry · s stop · o open · q quit";
 
 export const Dashboard = (props: { app: App }) => {
   const renderer = useRenderer();
+  const dimensions = useTerminalDimensions();
+  const wide = () => dimensions().width >= WIDE_COLS;
   const [projects, setProjects] = createSignal<view.ProjectView[]>([]);
+  /** Only ever "detail" on a narrow terminal, where the panes cannot sit side by side. */
+  const [screen, setScreen] = createSignal<"list" | "detail">("list");
+  let logScroll: ScrollBoxRenderable | undefined;
   const [projectIndex, setProjectIndex] = createSignal(0);
   const [taskIndex, setTaskIndex] = createSignal(0);
   const [pane, setPane] = createSignal<"projects" | "tasks">("tasks");
@@ -48,7 +59,7 @@ export const Dashboard = (props: { app: App }) => {
   const run = () => task()?.run;
 
   /** SQLite only: a frame never waits on herdr, the tracker or the forge. */
-  const refresh = () => setProjects(view.overview(props.app.db));
+  const refresh = () => setProjects(view.overview(props.app.db, props.app.projectConfigs.keys()));
 
   onMount(() => {
     refresh();
@@ -91,7 +102,14 @@ export const Dashboard = (props: { app: App }) => {
   };
 
   useKeyboard((key) => {
-    switch (key.name?.toLowerCase()) {
+    const name = key.name?.toLowerCase();
+    if (!wide() && screen() === "detail") {
+      if (name === "escape") return setScreen("list");
+      if (name === "j" || name === "down") return scrollLog(3);
+      if (name === "k" || name === "up") return scrollLog(-3);
+    }
+    if (name === "return" && !wide() && screen() === "list") return setScreen("detail");
+    switch (name) {
       case "q":
         return quit(renderer, busy(), setStatus);
       case "c":
@@ -120,6 +138,10 @@ export const Dashboard = (props: { app: App }) => {
     }
   });
 
+  const scrollLog = (lines: number) => {
+    if (logScroll) logScroll.scrollTop = Math.max(0, logScroll.scrollTop + lines);
+  };
+
   const projectItems = (): ListItem<number>[] =>
     projects().map((p, i) => ({
       mark: ICONS[p.status === "idle" ? "queued" : "working"],
@@ -139,57 +161,101 @@ export const Dashboard = (props: { app: App }) => {
       value: i,
     }));
 
+  const ProjectsPane = (props: { height?: number }) => (
+    <Panel title="Projects" height={props.height}>
+      <List
+        items={projectItems()}
+        index={projectIndex()}
+        onIndex={(i) => {
+          setProjectIndex(i);
+          setTaskIndex(0);
+        }}
+        focused={pane() === "projects" && screen() === "list"}
+      />
+    </Panel>
+  );
+
+  const TasksPane = () => (
+    <Panel title="Tasks" grow>
+      <List
+        items={taskItems()}
+        index={taskIndex()}
+        onIndex={setTaskIndex}
+        focused={pane() === "tasks" && screen() === "list"}
+      />
+    </Panel>
+  );
+
+  const AgentLog = () => (
+    <Panel title="Agent log" grow>
+      <Scroll
+        ref={(el: ScrollBoxRenderable) => (logScroll = el)}
+        flexGrow={1}
+        scrollY
+        stickyScroll
+        stickyStart="bottom"
+      >
+        <Text wrapMode="none" color="muted">
+          {log() || "no agent output"}
+        </Text>
+      </Scroll>
+    </Panel>
+  );
+
   return (
     <box flexDirection="column" flexGrow={1}>
       <box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1}>
         <Text flexGrow={1} wrapMode="none" color="accent">
           shepherd
         </Text>
-        <Text flexShrink={0} wrapMode="none" color="muted">
-          {`${projects().length} projects`}
-        </Text>
+        <Show when={wide()}>
+          <Text flexShrink={0} wrapMode="none" color="muted">
+            {`${projects().length} projects`}
+          </Text>
+        </Show>
       </box>
 
-      <box flexDirection="row" flexGrow={1}>
-        <box flexDirection="column" width={36}>
-          <Panel title="Projects" height={10}>
-            <List
-              items={projectItems()}
-              index={projectIndex()}
-              onIndex={(i) => {
-                setProjectIndex(i);
-                setTaskIndex(0);
-              }}
-              focused={pane() === "projects"}
-            />
-          </Panel>
-          <Panel title="Tasks" grow>
-            <List
-              items={taskItems()}
-              index={taskIndex()}
-              onIndex={setTaskIndex}
-              focused={pane() === "tasks"}
-            />
-          </Panel>
+      <Show
+        when={wide()}
+        fallback={
+          <Show
+            when={screen() === "list"}
+            fallback={
+              <box flexDirection="column" flexGrow={1}>
+                <Panel title="Run" grow>
+                  <RunDetail detail={detail()} task={task()} events={3} />
+                </Panel>
+                <AgentLog />
+              </box>
+            }
+          >
+            <box flexDirection="column" flexGrow={1}>
+              {/* one project needs no picker, and a phone has no rows to spare */}
+              <Show when={projects().length > 1}>
+                <ProjectsPane height={6} />
+              </Show>
+              <TasksPane />
+            </box>
+          </Show>
+        }
+      >
+        <box flexDirection="row" flexGrow={1}>
+          <box flexDirection="column" width={36}>
+            <ProjectsPane height={10} />
+            <TasksPane />
+          </box>
+          <box flexDirection="column" flexGrow={1}>
+            <Panel title="Run" height={16}>
+              <RunDetail detail={detail()} task={task()} events={6} />
+            </Panel>
+            <AgentLog />
+          </box>
         </box>
-
-        <box flexDirection="column" flexGrow={1}>
-          <Panel title="Run" height={16}>
-            <RunDetail detail={detail()} task={task()} />
-          </Panel>
-          <Panel title="Agent log" grow>
-            <Scroll flexGrow={1} scrollY stickyScroll stickyStart="bottom">
-              <Text wrapMode="none" color="muted">
-                {log() || "no agent output"}
-              </Text>
-            </Scroll>
-          </Panel>
-        </box>
-      </box>
+      </Show>
 
       <box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1}>
         <Text flexGrow={1} wrapMode="none" color={busy() ? "warning" : "muted"}>
-          {status() || KEYS}
+          {status() || (wide() ? KEYS : screen() === "detail" ? KEYS_DETAIL : KEYS_NARROW)}
         </Text>
       </box>
     </box>
@@ -198,7 +264,7 @@ export const Dashboard = (props: { app: App }) => {
 
 const Panel = (props: {
   title: string;
-  height?: number;
+  height?: number | undefined;
   grow?: boolean;
   children: JSX.Element;
 }) => {
@@ -221,6 +287,8 @@ const Panel = (props: {
 const RunDetail = (props: {
   detail: view.RunDetail | undefined;
   task: view.TaskView | undefined;
+  /** A narrow screen has no rows to spare for the whole journal. */
+  events: number;
 }) => (
   <Show
     when={props.detail}
@@ -231,7 +299,7 @@ const RunDetail = (props: {
     }
   >
     {(d: Accessor<view.RunDetail>) => (
-      <box flexDirection="column" paddingLeft={1} paddingRight={1}>
+      <box flexDirection="column" paddingLeft={1} paddingRight={1} overflow="hidden">
         <Field label="task">{`${d().task?.id ?? ""}  ${d().task?.title ?? ""}`}</Field>
         <Field label="run" color={STATUS_COLOR[d().run.status]}>
           {`${ICONS[d().run.status]} ${d().run.status}   attempt on ${d().run.branch}`}
@@ -263,7 +331,7 @@ const RunDetail = (props: {
             </Field>
           )}
         </Show>
-        <For each={d().events.slice(0, 6)}>
+        <For each={d().events.slice(0, props.events)}>
           {(event) => (
             <Field label="">{`${event.at.slice(11, 19)}  ${event.type}  ${event.data ?? ""}`}</Field>
           )}

@@ -133,6 +133,13 @@ maps it to roles — `fg`, `muted`, `border`, `selectionBg`, `accent`, `danger`,
 falls back to ANSI indices, which the terminal resolves itself. opentui's own default is white,
 which is invisible on a light background: that is the bug this exists to prevent.
 
+The layout is adaptive: under `WIDE_COLS` (100) the two columns become one, and the run detail
+moves to a screen of its own behind `enter`. `useTerminalDimensions` drives it, so resizing the
+window switches layout without a restart.
+
+`overview()` takes the configured project ids: a project dropped from the config keeps its rows —
+`runs` and `events` are history — but disappears from the dashboard and from `status`.
+
 Two rules the dashboard was rewritten to obey:
 
 - **A frame never waits on I/O.** `refresh()` reads SQLite and nothing else; the agent log arrives

@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ConfigSchema } from "../src/core/config/schema.ts";
+import { ConfigSchema, EXAMPLE_CONFIG } from "../src/core/config/schema.ts";
 import type { AgentRun, ChangeComment, Project, Task } from "../src/shared/domain/types.ts";
+import { parse as parseYaml } from "yaml";
 import {
   agentName,
+  buildPlanPrompt,
   buildPrompt,
+  retry,
   codeProviderForRemote,
   commentsSince,
   isTaskAvailable,
@@ -210,4 +213,105 @@ test("claude is started with permission prompts off, and args stay overridable",
     projects: [{ name: "P", repository: "/repo", agents: { dev: { args: ["--bar"] } } }],
   });
   assert.deepEqual(resolveAgentRole("dev", project, project.projects[0]).args, ["--bar"]);
+});
+
+test("the example config `shepherd init` writes is valid", () => {
+  const config = ConfigSchema.parse(parseYaml(EXAMPLE_CONFIG));
+  assert.equal(config.projects[0]?.name, "Phocus");
+  assert.equal(config.agents.review.prompt, "/code-review");
+});
+
+test("a skill is configured per role and overridden per project", () => {
+  const cfg = (raw: object) => ConfigSchema.parse(raw);
+  const global = cfg({ agents: { plan: { skill: "superpowers:writing-plans" } } });
+  assert.equal(resolveAgentRole("plan", global, undefined).skill, "superpowers:writing-plans");
+
+  const overridden = cfg({
+    agents: { dev: { skill: "superpowers:test-driven-development" } },
+    projects: [{ name: "P", repository: "/repo", agents: { dev: { skill: "flutter-architect" } } }],
+  });
+  assert.equal(
+    resolveAgentRole("dev", overridden, overridden.projects[0]).skill,
+    "flutter-architect",
+  );
+  // an empty override takes the skill off for that project alone
+  const off = cfg({
+    agents: { review: { skill: "dunk-review" } },
+    projects: [{ name: "P", repository: "/repo", agents: { review: { skill: "" } } }],
+  });
+  assert.equal(resolveAgentRole("review", off, off.projects[0]).skill, "");
+  assert.equal(resolveAgentRole("review", off, undefined).skill, "dunk-review");
+});
+
+const planTask: Task = {
+  id: "MOC-1",
+  providerId: "moc-1",
+  title: "Add a share sheet",
+  status: "todo",
+  projectId: "mochi",
+  provider: "linear",
+};
+
+test("a role's skill leads its prompt, in front of the configured prefix", () => {
+  const prompt = buildPrompt(planTask, {
+    branch: "moc-1-add-a-share-sheet",
+    prefix: "/brainstorm",
+    skill: "flutter-architect",
+  });
+  assert.match(prompt, /^Use the flutter-architect skill\. \/brainstorm Task MOC-1/);
+  // no skill configured leaves the prompt exactly as it was
+  assert.match(buildPrompt(planTask, { branch: "b", prefix: "/brainstorm" }), /^\/brainstorm Task/);
+});
+
+test("the plan prompt asks for a plan on the task and nothing else", () => {
+  const prompt = buildPlanPrompt(planTask, {
+    branch: "moc-1",
+    skill: "superpowers:writing-plans",
+  });
+  assert.match(prompt, /^Use the superpowers:writing-plans skill\./);
+  assert.match(prompt, /shepherd task comment MOC-1/);
+  assert.match(prompt, /do not write any code/i);
+  // a plan that cannot be executed is worse than no plan
+  assert.match(prompt, /acceptance/i);
+  assert.match(prompt, /open questions/i);
+  // and a change too small to plan says so instead of padding the comment
+  assert.match(prompt, /too small to be worth planning/i);
+});
+
+test("a flaky read is retried, a working one is not", async () => {
+  const slept: number[] = [];
+  const sleep = async (ms: number) => void slept.push(ms);
+
+  let calls = 0;
+  const flaky = await retry(
+    async () => {
+      calls++;
+      if (calls < 3) throw new Error("Command failed: gh pr view 7");
+      return "ok";
+    },
+    { sleep },
+  );
+  assert.equal(flaky, "ok");
+  assert.equal(calls, 3);
+  assert.deepEqual(slept, [1000, 2000], "backoff grows, and only between attempts");
+
+  calls = 0;
+  slept.length = 0;
+  assert.equal(await retry(async () => ++calls, { sleep }), 1);
+  assert.deepEqual(slept, [], "a call that works the first time never sleeps");
+});
+
+test("a read that never works throws the last error, after a bounded number of tries", async () => {
+  let calls = 0;
+  await assert.rejects(
+    retry(
+      async () => {
+        calls++;
+        throw new Error(`attempt ${calls}`);
+      },
+      { sleep: async () => {} },
+    ),
+    /attempt 3/,
+  );
+  assert.equal(calls, 3, "three attempts, not an unbounded loop");
 });
