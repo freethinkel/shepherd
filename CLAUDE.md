@@ -107,6 +107,13 @@ event, and pushes the derived status back to the tracker. Agent state comes verb
   API lag — and a second press fails with a false "merge failed" comment). `MergeFailed` is capped at
   three, the run stays in `review` for a human. A failing `/approvals` read degrades to
   "not approved" rather than failing the run.
+- **`review` means a human can look at it.** A new change parks in `checking` until the forge
+  reports green: the task stays `in_progress` in the tracker and no review agent starts, because a
+  review round spent on code that fails CI is a wasted round and `in_review` on a red branch lies to
+  whoever reads the board. A forge with no CI answers `success`, so those projects pass straight
+  through. A red pipeline goes back to the agent that wrote it (`ChecksRejected`, capped by
+  `max_checks_rounds`); past the cap the run moves to `review` with a comment rather than failing —
+  the pull request is real work, and what to do with a pipeline we cannot fix is a human's call.
 - **Idle needs two consecutive polls** before a run moves to `validating` — a single idle tick is a
   pause, not completion.
 - **A run in `review` never times out**; every other status is killed after `run_timeout_ms`.

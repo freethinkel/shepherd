@@ -283,7 +283,8 @@ test("the happy path: queued to merged", async () => {
   await h.workflow.advance(reload(h, run.id));
   assert.equal(reload(h, run.id).status, "validating");
   await h.workflow.advance(reload(h, run.id)); // validating -> creating_change
-  await h.workflow.advance(reload(h, run.id)); // push + create -> review
+  await h.workflow.advance(reload(h, run.id)); // push + create -> checking
+  await h.workflow.advance(reload(h, run.id)); // green checks -> review
   const inReview = reload(h, run.id);
   assert.equal(inReview.status, "review");
   assert.equal(inReview.changeId, "7");
@@ -299,7 +300,7 @@ test("the happy path: queued to merged", async () => {
   assert.equal(h.code.created, 1);
   // the open pull request is polled on its own slower interval, not every tick
   await h.workflow.advance(reload(h, run.id));
-  assert.equal(h.code.polled, polledOnce + 1);
+  assert.equal(h.code.polled, polledOnce, "two ticks inside the interval read the forge once");
 
   await new Promise((r) => setTimeout(r, 350)); // past the poll interval
   h.code.state = "merged";
@@ -424,6 +425,19 @@ test("a review agent lands in a sibling tab, exactly once", async () => {
 });
 
 /** A run parked in review with its change recorded, the state a human sees a pull request in. */
+/** A run whose agent has finished and committed: the next advance creates the change. */
+async function workedThrough(h: ReturnType<typeof harness>) {
+  const run = await h.workflow.start(h.project, h.task);
+  const worktree = reload(h, run.id).worktreePath;
+  writeFileSync(join(worktree, "feature.txt"), "done\n");
+  git(worktree, "add", "-A");
+  git(worktree, "-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-m", "feat: the thing");
+  h.herdr.status = "done";
+  await h.workflow.advance(reload(h, run.id));
+  await h.workflow.advance(reload(h, run.id)); // idle twice -> validating
+  return run;
+}
+
 async function parkedInReview(h: ReturnType<typeof harness>) {
   const run = await h.workflow.start(h.project, h.task);
   db.updateRun(h.db, run.id, { status: "review", changeId: "7" });
@@ -474,7 +488,9 @@ test("a task sent back to Todo during review returns the comments to the agent",
   git(worktree, "add", "-A");
   git(worktree, "-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-m", "fix: review");
   await h.workflow.advance(reload(h, run.id)); // validating -> creating_change
-  await h.workflow.advance(reload(h, run.id)); // existing change -> review
+  await h.workflow.advance(reload(h, run.id)); // existing change -> checking
+  await new Promise((r) => setTimeout(r, 350));
+  await h.workflow.advance(reload(h, run.id)); // green checks -> review
   const back = reload(h, run.id);
   assert.equal(back.status, "review");
   assert.equal(h.code.created, 0);
@@ -590,9 +606,9 @@ test("a retried run takes over the change row of the change it finds again", asy
   await h.workflow.advance(reload(h, run2.id));
 
   // the forge hands back the same open change, so the row has to follow the live run:
-  // left on the dead one, checkChange finds nothing and bounces back here every tick
+  // left on the dead one, the checks step finds nothing and bounces back here every tick
   assert.equal(db.getChangeForRun(h.db, run2.id)?.id, "7");
-  assert.equal(reload(h, run2.id).status, "review");
+  assert.equal(reload(h, run2.id).status, "checking");
   assert.equal(h.code.created, 1);
 
   await h.workflow.advance(reload(h, run2.id));
@@ -622,7 +638,9 @@ test("a task with an open change already on its branch resumes there with the re
   await h.workflow.advance(reload(h, run.id));
   await h.workflow.advance(reload(h, run.id));
   await h.workflow.advance(reload(h, run.id)); // validating -> creating_change
-  await h.workflow.advance(reload(h, run.id)); // push -> review
+  await h.workflow.advance(reload(h, run.id)); // push -> checking
+  await new Promise((r) => setTimeout(r, 350));
+  await h.workflow.advance(reload(h, run.id)); // green checks -> review
   assert.equal(reload(h, run.id).status, "review");
   assert.equal(h.code.created, 0);
   assert.equal(git(h.repo.origin, "rev-parse", run.branch), git(worktree, "rev-parse", "HEAD"));
@@ -742,4 +760,66 @@ test("a forge read that blinks is retried; one that stays down skips the tick", 
   down.code.getChangeErrors = 99;
   await down.workflow.advance(reload(down, stuck.id));
   assert.equal(reload(down, stuck.id).status, "review", "a dead forge is not a failed run");
+});
+
+test("a new change waits for its checks before anyone is asked to review", async () => {
+  const h = harness({ agents: { review: { kind: "claude", prompt: "/code-review" } } });
+  const run = await workedThrough(h);
+  await h.workflow.advance(reload(h, run.id)); // validating -> creating_change
+  await h.workflow.advance(reload(h, run.id)); // push + create
+
+  const created = reload(h, run.id);
+  assert.equal(created.status, "checking", "the pull request exists, the pipeline has not run");
+  assert.equal(h.tasks.statuses.at(-1), "in_progress", "nobody is told it is ready for review yet");
+  assert.equal(
+    h.herdr.agents.length,
+    1,
+    "and the reviewer is not started over a red-or-unknown CI",
+  );
+
+  h.code.checks = "pending";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "checking");
+
+  await new Promise((r) => setTimeout(r, 350));
+  h.code.checks = "success";
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "review");
+  assert.equal(h.tasks.statuses.at(-1), "in_review");
+  assert.equal(h.herdr.agents.length, 2, "the reviewer starts once the pipeline is green");
+});
+
+test("a red pipeline goes back to the agent, and gives up after the cap", async () => {
+  const h = harness({ orchestrator: { max_checks_rounds: 2 } });
+  const run = await workedThrough(h);
+  await h.workflow.advance(reload(h, run.id));
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "checking");
+
+  h.code.checks = "failure";
+  await h.workflow.advance(reload(h, run.id));
+  const back = reload(h, run.id);
+  assert.equal(back.status, "working", "the agent that wrote it fixes it");
+  assert.match(h.herdr.prompts.at(-1)!, /https:\/\/fake\/mr\/7/);
+  assert.match(h.herdr.prompts.at(-1)!, /checks|pipeline/i);
+  assert.equal(db.countEvents(h.db, run.id, "ChecksRejected"), 1);
+
+  // second round, then the cap: a human takes over instead of the run failing
+  for (let i = 0; i < 2; i++) {
+    db.updateRun(h.db, run.id, { status: "checking" });
+    await new Promise((r) => setTimeout(r, 350));
+    await h.workflow.advance(reload(h, run.id));
+  }
+  assert.equal(db.countEvents(h.db, run.id, "ChecksRejected"), 2, "capped at max_checks_rounds");
+  assert.equal(reload(h, run.id).status, "review", "a change nobody can make green is left for us");
+});
+
+test("a repository with no CI at all is not held up", async () => {
+  const h = harness();
+  const run = await workedThrough(h);
+  await h.workflow.advance(reload(h, run.id));
+  await h.workflow.advance(reload(h, run.id));
+  // the forge reports success when there is nothing to run
+  await h.workflow.advance(reload(h, run.id));
+  assert.equal(reload(h, run.id).status, "review");
 });

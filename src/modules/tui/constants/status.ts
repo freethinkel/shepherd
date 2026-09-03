@@ -12,6 +12,7 @@ export const STATUS_COLOR: Record<RunStatus, keyof Palette> = {
   blocked: "warning",
   validating: "fg",
   creating_change: "fg",
+  checking: "fg",
   review: "accent",
   completed: "success",
   failed: "danger",

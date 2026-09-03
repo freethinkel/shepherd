@@ -1,3 +1,4 @@
+import CHECKS_FAILED_PROMPT from "./prompts/CHECKS-FAILED.md" with { type: "text" };
 import DEV_PROMPT from "./prompts/DEV.md" with { type: "text" };
 import NO_COMMITS_PROMPT from "./prompts/NO-COMMITS.md" with { type: "text" };
 import PLAN_PROMPT from "./prompts/PLAN.md" with { type: "text" };
@@ -285,6 +286,10 @@ export function withSkill(skill: string, body: string): string {
 
 export function validationFeedback(command: string, output: string): string {
   return render(VALIDATION_FAILED_PROMPT, { command, output: output.slice(-4000) });
+}
+
+export function checksFeedback(url: string, branch: string): string {
+  return render(CHECKS_FAILED_PROMPT, { url, branch });
 }
 
 export function noCommitsFeedback(branch: string): string {

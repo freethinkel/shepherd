@@ -21,6 +21,7 @@ const RUN_ACTIVE: RunStatus[] = [
   "blocked",
   "validating",
   "creating_change",
+  "checking",
   "review",
 ];
 
@@ -73,6 +74,7 @@ function runToProjectStatus(status: RunStatus): ProjectStatus | undefined {
       return "working";
     case "validating":
     case "creating_change":
+    case "checking":
       return "validating";
     case "review":
       return "review";

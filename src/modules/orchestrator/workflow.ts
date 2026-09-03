@@ -277,6 +277,9 @@ export class Workflow {
         case "creating_change":
           await this.createChange(run);
           break;
+        case "checking":
+          await this.checkPipelines(run);
+          break;
         case "review":
           await this.checkChange(run);
           break;
@@ -406,6 +409,25 @@ export class Workflow {
    * A failed validation goes back to the same agent, but not forever: a check that
    * can never pass would keep the pair looping and the slot occupied.
    */
+  /**
+   * One read of the change, on its own slower interval. A forge that blinks is not a failed run:
+   * ride out a couple of errors, then wait for the next poll rather than killing work that is
+   * finished and only needs someone to look at it.
+   */
+  private async pollChange(run: AgentRun, changeId: string) {
+    const since = Date.now() - (this.lastChangeCheck.get(run.id) ?? 0);
+    if (since < this.deps.config.orchestrator.change_poll_interval_ms) return undefined;
+    this.lastChangeCheck.set(run.id, Date.now());
+    return await policy
+      .retry(() => this.codeProvider(run).getChange(changeId, run.worktreePath), {
+        sleep: this.deps.sleep,
+      })
+      .catch((err) => {
+        this.log(`change ${changeId}: ${briefError(err)}`);
+        return undefined;
+      });
+  }
+
   private async sendBack(run: AgentRun, message: string): Promise<void> {
     const rounds = db.countEvents(this.deps.db, run.id, "ValidationRejected");
     const max = this.deps.config.orchestrator.max_validation_rounds;
@@ -414,6 +436,11 @@ export class Workflow {
       return;
     }
     this.event("ValidationRejected", run, { round: rounds + 1 });
+    await this.promptAgain(run, message);
+  }
+
+  /** Hand the work back to the agent that did it: a fresh prompt and the run back in `working`. */
+  private async promptAgain(run: AgentRun, message: string): Promise<void> {
     this.prompted.set(run.id, { at: Date.now(), sawWorking: false });
     this.idleTicks.delete(run.id);
     await this.deps.herdr.prompt(run.herdrAgentId, message);
@@ -424,7 +451,7 @@ export class Workflow {
     await git.pushBranch(run.worktreePath, run.branch);
     const existing = db.getChangeForRun(this.deps.db, run.id);
     if (existing) {
-      this.transition(run, "review", { changeId: existing.id });
+      this.transition(run, "checking", { changeId: existing.id });
       return;
     }
     const task = db.getTask(this.deps.db, run.taskId);
@@ -441,8 +468,52 @@ export class Workflow {
     this.taskProvider(run.taskId)
       .addComment(run.taskId, `Pull request: ${change.url}`)
       .catch(() => {});
-    this.transition(run, "review", { changeId: change.id });
-    await this.ensureReviewAgent(run, change.url);
+    this.transition(run, "checking", { changeId: change.id });
+  }
+
+  /**
+   * The change exists, the pipeline has not spoken yet. Nobody is told the work is ready for
+   * review and no reviewer is started until the checks are green — a review round spent on code
+   * that fails CI is a wasted round, and `in_review` on a red branch is a lie to whoever reads it.
+   *
+   * A forge with no CI at all answers `success`, so those projects pass straight through.
+   */
+  private async checkPipelines(run: AgentRun): Promise<void> {
+    const change = db.getChangeForRun(this.deps.db, run.id);
+    if (!change) {
+      this.transition(run, "creating_change");
+      return;
+    }
+    const fresh = await this.pollChange(run, change.id);
+    if (!fresh) return;
+    if (fresh.status === "merged") {
+      this.transition(run, "review", { changeId: change.id });
+      return;
+    }
+    if (fresh.status === "closed") {
+      this.fail(run, `change ${fresh.url} was closed`);
+      return;
+    }
+    if (fresh.checks === "failure") {
+      const rounds = db.countEvents(this.deps.db, run.id, "ChecksRejected");
+      const max = this.deps.config.orchestrator.max_checks_rounds;
+      if (rounds >= max) {
+        // the pull request is real work; a human decides what to do with a pipeline we cannot fix
+        this.event("ChecksGaveUp", run, { round: rounds });
+        this.transition(run, "review", { changeId: change.id });
+        this.taskProvider(run.taskId)
+          .addComment(run.taskId, `Checks on ${fresh.url} still fail after ${max} attempts.`)
+          .catch(() => {});
+        return;
+      }
+      this.event("ChecksRejected", run, { round: rounds + 1 });
+      await this.promptAgain(run, policy.checksFeedback(fresh.url, run.branch));
+      return;
+    }
+    if (fresh.checks === "success") {
+      this.transition(run, "review", { changeId: change.id });
+      await this.ensureReviewAgent(run, fresh.url);
+    }
   }
 
   private async checkChange(run: AgentRun): Promise<void> {
@@ -458,20 +529,7 @@ export class Workflow {
     }
     await this.ensureReviewAgent(run, change.url);
 
-    const since = Date.now() - (this.lastChangeCheck.get(run.id) ?? 0);
-    if (since < this.deps.config.orchestrator.change_poll_interval_ms) return;
-    this.lastChangeCheck.set(run.id, Date.now());
-
-    // a forge that blinks is not a failed run: ride out a couple of errors, then wait for the
-    // next poll rather than killing work that is finished and only needs someone to look at it
-    const fresh = await policy
-      .retry(() => this.codeProvider(run).getChange(change.id, run.worktreePath), {
-        sleep: this.deps.sleep,
-      })
-      .catch((err) => {
-        this.log(`change ${change.id}: ${briefError(err)}`);
-        return undefined;
-      });
+    const fresh = await this.pollChange(run, change.id);
     if (!fresh) return;
     if (fresh.status === "merged") {
       this.transition(run, "completed", { finishedAt: new Date() });

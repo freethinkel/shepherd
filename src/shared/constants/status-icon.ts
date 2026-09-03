@@ -8,6 +8,7 @@ export const ICONS: Record<RunStatus, string> = {
   blocked: "◉",
   validating: "◍",
   creating_change: "◍",
+  checking: "◍",
   review: "◍",
   completed: "✓",
   failed: "✗",

@@ -87,6 +87,8 @@ export const ConfigSchema = z.object({
       /** How many times a failed validation is handed back to the agent before giving up. */
       max_validation_rounds: z.number().int().positive().default(3),
       max_review_rounds: z.number().int().positive().default(3),
+      /** How many red pipelines are handed back to the agent before a human is needed. */
+      max_checks_rounds: z.number().int().positive().default(3),
       auto_merge: z.boolean().default(true),
       /**
        * How long an agent may stay idle right after a prompt before that idle counts.
@@ -155,6 +157,7 @@ orchestrator:
   # agent_settle_ms: 45000           # grace period after a prompt before idle means "done"
   # max_validation_rounds: 3         # failed validations handed back to the agent
   # max_review_rounds: 3             # review comments handed back to the agent before giving up
+  # max_checks_rounds: 3             # red pipelines handed back to the agent before giving up
   # auto_merge: true                 # merge when a human approved and checks are green
   # run_timeout_ms: 14400000         # 4h deadline for a run that never finishes
   # all intervals are optional, defaults are shown

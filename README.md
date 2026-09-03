@@ -44,6 +44,7 @@ orchestrator:
   task_sync_interval_ms: 60000 # how often trackers are polled
   change_poll_interval_ms: 60000 # how often an open MR/PR is re-checked
   # max_review_rounds: 3         # rework rounds before the run gives up
+  # max_checks_rounds: 3         # red pipelines handed back to the agent before giving up
   # auto_merge: true             # merge approved changes with green checks
 
 projects:

@@ -10,6 +10,7 @@ export type RunStatus =
   | "blocked"
   | "validating"
   | "creating_change"
+  | "checking"
   | "review"
   | "completed"
   | "failed";
