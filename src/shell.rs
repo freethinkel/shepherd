@@ -2,6 +2,7 @@
 //! refreshed on every herdr event.
 use crate::herdr::{Client, EVENT_TYPES};
 use crate::model::{AgentStatus, PaneFrame, Snapshot, attachable};
+use crate::theme::Theme;
 use gpui::{
     Bounds, Context, Hsla, IntoElement, ParentElement, Render, SharedString, Styled, Window, WindowAppearance,
     WindowOptions, div, prelude::*, px, relative, rgb, size,
@@ -28,7 +29,13 @@ impl Shell {
             window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::centered(None, size(px(1100.), px(720.)), cx))),
             ..Default::default()
         };
-        cx.open_window(options, |_, cx| {
+        cx.open_window(options, |window, cx| {
+            window
+                .observe_window_appearance(|window, cx| {
+                    cx.set_global(Theme::for_appearance(window.appearance()));
+                    cx.refresh_windows();
+                })
+                .detach();
             cx.new(|cx| {
                 let shell = Shell {
                     snapshot: None,
