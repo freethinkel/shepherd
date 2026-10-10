@@ -1,4 +1,4 @@
-use shepherd::model::{AgentStatus, Frac, Snapshot, attachable};
+use shepherd::model::{AgentStatus, Frac, Snapshot, attachable, split_path};
 
 fn fixture() -> Snapshot {
     let value: serde_json::Value = serde_json::from_str(include_str!("fixtures/snapshot.json")).unwrap();
@@ -97,4 +97,28 @@ fn pick_tab_falls_back_to_the_first_tab_without_focus() {
     let mut s = fixture();
     s.focused_tab_id = None;
     assert_eq!(s.pick_tab(None).map(|t| t.tab_id.as_str()), Some("w1:t1"));
+}
+
+#[test]
+fn split_ids_decode_to_tree_paths() {
+    assert_eq!(split_path("split_0_root"), Some(vec![]));
+    assert_eq!(split_path("split_0_01"), Some(vec![false, true]));
+    assert_eq!(split_path("s0"), None);
+}
+
+#[test]
+fn split_frames_are_fractions_of_the_tab_area() {
+    let splits = fixture().split_frames("w1:t1");
+    assert_eq!(splits.len(), 1);
+    assert_eq!(splits[0].path, Vec::<bool>::new());
+    assert!(splits[0].vertical);
+    assert_eq!(splits[0].ratio, 0.5);
+    assert_eq!(splits[0].frame, Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+}
+
+#[test]
+fn zoomed_tabs_have_no_dividers() {
+    let mut s = fixture();
+    s.layouts[0].zoomed = true;
+    assert!(s.split_frames("w1:t1").is_empty());
 }

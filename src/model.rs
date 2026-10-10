@@ -62,6 +62,45 @@ pub struct Layout {
     pub focused_pane_id: String,
     pub area: Rect,
     pub panes: Vec<LayoutPane>,
+    #[serde(default)]
+    pub splits: Vec<LayoutSplit>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LayoutSplit {
+    /// `split_<n>_root` or `split_<n>_<0|1…>`: the path from the tab's root (0 = first, 1 = second).
+    pub id: String,
+    /// `right` (side by side) or `down` (stacked).
+    pub direction: String,
+    pub ratio: f32,
+    pub rect: Rect,
+}
+
+/// A divider of the shown tab, as a fraction of the tab area.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitFrame {
+    /// The tree path `layout.set_split_ratio` takes (false = first child, true = second).
+    pub path: Vec<bool>,
+    /// The divider line is vertical: herdr's direction `right`.
+    pub vertical: bool,
+    pub ratio: f32,
+    pub frame: Frac,
+}
+
+/// herdr's split id → its tree path (`src/app/api/panes.rs::split_path_id`).
+pub fn split_path(id: &str) -> Option<Vec<bool>> {
+    let rest = id.strip_prefix("split_")?;
+    let (_, path) = rest.split_once('_')?;
+    if path == "root" {
+        return Some(Vec::new());
+    }
+    path.chars()
+        .map(|c| match c {
+            '0' => Some(false),
+            '1' => Some(true),
+            _ => None,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +151,25 @@ impl Snapshot {
         wanted.and_then(find).or_else(|| self.focused_tab_id.as_deref().and_then(find)).or(self.tabs.first())
     }
 
+    pub fn split_frames(&self, tab_id: &str) -> Vec<SplitFrame> {
+        let Some(layout) = self.layouts.iter().find(|l| l.tab_id == tab_id) else { return Vec::new() };
+        if layout.zoomed {
+            return Vec::new();
+        }
+        layout
+            .splits
+            .iter()
+            .filter_map(|split| {
+                Some(SplitFrame {
+                    path: split_path(&split.id)?,
+                    vertical: split.direction == "right",
+                    ratio: split.ratio,
+                    frame: frac(&layout.area, &split.rect)?,
+                })
+            })
+            .collect()
+    }
+
     // ponytail: fractions of herdr's cell rects; plan 2 builds a real split tree (dividers, set_split_ratio paths).
     pub fn pane_frames(&self, tab_id: &str) -> Vec<PaneFrame> {
         let Some(layout) = self.layouts.iter().find(|l| l.tab_id == tab_id) else { return Vec::new() };
@@ -119,26 +177,26 @@ impl Snapshot {
             let full = Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
             return vec![PaneFrame { pane_id: layout.focused_pane_id.clone(), frame: full, focused: true }];
         }
-        let (aw, ah) = (f32::from(layout.area.width), f32::from(layout.area.height));
-        if aw == 0.0 || ah == 0.0 {
-            return Vec::new();
-        }
         layout
             .panes
             .iter()
-            .filter(|p| p.rect.width > 0 && p.rect.height > 0)
-            .map(|p| PaneFrame {
-                pane_id: p.pane_id.clone(),
-                frame: Frac {
-                    x: f32::from(p.rect.x.saturating_sub(layout.area.x)) / aw,
-                    y: f32::from(p.rect.y.saturating_sub(layout.area.y)) / ah,
-                    w: f32::from(p.rect.width) / aw,
-                    h: f32::from(p.rect.height) / ah,
-                },
-                focused: p.focused,
-            })
+            .filter_map(|p| Some(PaneFrame { pane_id: p.pane_id.clone(), frame: frac(&layout.area, &p.rect)?, focused: p.focused }))
             .collect()
     }
+}
+
+/// `rect` as a fraction of `area`; `None` for an empty rect or area.
+fn frac(area: &Rect, rect: &Rect) -> Option<Frac> {
+    let (aw, ah) = (f32::from(area.width), f32::from(area.height));
+    if aw == 0.0 || ah == 0.0 || rect.width == 0 || rect.height == 0 {
+        return None;
+    }
+    Some(Frac {
+        x: f32::from(rect.x.saturating_sub(area.x)) / aw,
+        y: f32::from(rect.y.saturating_sub(area.y)) / ah,
+        w: f32::from(rect.width) / aw,
+        h: f32::from(rect.height) / ah,
+    })
 }
 
 /// A Shepherd started inside a herdr pane must not mirror that pane into itself.

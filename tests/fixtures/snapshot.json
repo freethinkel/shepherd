@@ -27,7 +27,7 @@
          {"pane_id": "w1:p1", "focused": false, "rect": {"x": 0, "y": 0, "width": 50, "height": 40}},
          {"pane_id": "w1:p2", "focused": true, "rect": {"x": 50, "y": 0, "width": 50, "height": 40}}
        ],
-       "splits": [{"id": "s0", "direction": "right", "ratio": 0.5, "rect": {"x": 0, "y": 0, "width": 100, "height": 40}}]},
+       "splits": [{"id": "split_0_root", "direction": "right", "ratio": 0.5, "rect": {"x": 0, "y": 0, "width": 100, "height": 40}}]},
       {"workspace_id": "w1", "tab_id": "w1:t2", "zoomed": false, "focused_pane_id": "w1:p3",
        "area": {"x": 0, "y": 0, "width": 100, "height": 40},
        "panes": [
