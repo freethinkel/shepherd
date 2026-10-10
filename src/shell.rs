@@ -46,6 +46,8 @@ pub struct Shell {
     flash: Option<String>,
     /// The tab or workspace label being edited in place.
     renaming: Option<Rename>,
+    // ponytail: in memory only; persist in settings if folds should survive a restart
+    folded: std::collections::HashSet<String>,
     /// The workspace shown last, so closing its tab stays in it.
     shown_workspace: Option<String>,
     /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
@@ -119,6 +121,7 @@ impl Shell {
                     settling: None,
                     flash: None,
                     renaming: None,
+                    folded: Default::default(),
                     shown_workspace: None,
                     focus: cx.focus_handle(),
                 };
@@ -518,9 +521,14 @@ impl Render for Shell {
         }
         let shown_ws = tab.as_ref().map(|t| t.workspace_id.clone());
         let shown_tab = tab.as_ref().map(|t| t.tab_id.clone());
-        let workspaces: Vec<(crate::model::Workspace, Option<bool>)> = snapshot
+        let workspaces: Vec<(crate::model::Workspace, Option<bool>, Option<bool>)> = snapshot
             .as_ref()
-            .map(|s| s.workspace_tree().into_iter().map(|(w, nest)| (w.clone(), nest)).collect())
+            .map(|s| {
+                crate::model::fold(s.workspace_tree(), &self.folded, shown_ws.as_deref())
+                    .into_iter()
+                    .map(|r| (r.workspace.clone(), r.nest, r.group))
+                    .collect()
+            })
             .unwrap_or_default();
         let agents: Vec<(crate::model::Pane, String)> = snapshot
             .as_ref()
@@ -567,7 +575,7 @@ impl Render for Shell {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .children(workspaces.into_iter().map(|(w, nest)| {
+                    .children(workspaces.into_iter().map(|(w, nest, fold)| {
                         let selected = shown_ws.as_deref() == Some(w.workspace_id.as_str());
                         let first_tab =
                             snapshot.as_ref().and_then(|s| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
@@ -578,14 +586,27 @@ impl Render for Shell {
                         let group = SharedString::from(format!("ws-row-{}", w.workspace_id));
                         row(&theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
                             .group(group.clone())
-                            .when_some(nest, |el, last| {
-                                el.pl(px(4.)).child(
-                                    div()
-                                        .w(px(12.))
-                                        .flex_none()
-                                        .text_color(theme.text_faint)
-                                        .child(if last { "└" } else { "├" }),
-                                )
+                            .map(|el| {
+                                let slot = div().w(px(12.)).flex_none().text_color(theme.text_faint);
+                                match (nest, fold) {
+                                    (Some(last), _) => el.pl(px(20.)).child(slot.child(if last { "└" } else { "├" })),
+                                    (None, Some(folded)) => el.child(
+                                        slot.id(SharedString::from(format!("ws-fold-{}", w.workspace_id)))
+                                            .cursor_pointer()
+                                            .child(if folded { "▸" } else { "▾" })
+                                            .on_click(cx.listener({
+                                                let id = w.workspace_id.clone();
+                                                move |this, _: &ClickEvent, _, cx| {
+                                                    cx.stop_propagation();
+                                                    if !this.folded.remove(&id) {
+                                                        this.folded.insert(id.clone());
+                                                    }
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    ),
+                                    (None, None) => el.child(slot),
+                                }
                             })
                             .child(status_dot(w.agent_status, &theme))
                             .map(|el| match editing {
