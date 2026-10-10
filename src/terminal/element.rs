@@ -4,10 +4,6 @@
 //! Terminal paint + input encoding.
 //!
 //! - theme-owned background/ANSI16 plus the xterm 256-color cube/grayscale;
-//! - keystroke → PTY byte encoding (printables, control keys, arrows/nav
-//!   escape sequences, Ctrl- combos, Alt prefixing);
-//! - the 12 ms input coalescer and the 80 ms resize debounce constants (the
-//!   panel drives the timers; the buffer logic here is pure);
 //! - [`TerminalElement`] — a custom gpui element that measures cell metrics
 //!   from the real mono font (the "font probe"), reports the resulting
 //!   cols×rows back to the panel, and paints the grid: background quads for
@@ -193,7 +189,7 @@ pub fn cell_at(x: f32, y: f32, cell_w: f32, line_h: f32, cols: usize, rows: usiz
 /// Paints the active tab's grid. Cell metrics come from the resolved mono font
 /// each frame (font probe): `em_advance` for the cell width, the fixed line
 /// height for rows. The measured cols×rows feed back into the panel, which
-/// resizes the emulator immediately and debounces the `ResizeTerminal` RPC.
+/// resizes the emulator and herdr's view of the pane.
 pub struct TerminalElement {
     panel: Entity<PaneTerminal>,
     focused: bool,

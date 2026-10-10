@@ -17,10 +17,14 @@ pub fn keystroke_bytes(
         return None;
     }
     if mods.alt {
-        // ESC-prefix the same keystroke without alt.
+        // macOS composes Option chords (Option+B → "∫"); send what was composed, as Ghostty does by default.
+        if let Some(text) = key_char.filter(|c| !c.is_empty() && *c != key) {
+            return Some(text.as_bytes().to_vec());
+        }
+        // Nothing composed (arrows, or a layout where Option adds nothing): Meta, ESC-prefixed.
         let inner = keystroke_bytes(
             key,
-            key_char,
+            None,
             &Modifiers {
                 alt: false,
                 ..*mods
@@ -293,6 +297,21 @@ mod tests {
             paste_bytes("a\x1b[201~rm -rf", true),
             b"\x1b[200~arm -rf\x1b[201~".to_vec()
         );
+    }
+
+    #[test]
+    fn option_sends_the_character_macos_composed() {
+        // GPUI hands Option chords their composed key_char (Option+B → "∫" on a US layout); like Ghostty's
+        // default (macos-option-as-alt = false), that character is what the user typed.
+        let alt = Modifiers { alt: true, ..mods() };
+        assert_eq!(keystroke_bytes("b", Some("∫"), &alt, false), Some("∫".as_bytes().to_vec()));
+        assert_eq!(keystroke_bytes("l", Some("@"), &alt, false), Some(b"@".to_vec()));
+    }
+
+    #[test]
+    fn option_without_a_character_is_meta() {
+        let alt = Modifiers { alt: true, ..mods() };
+        assert_eq!(keystroke_bytes("left", None, &alt, false), Some(b"\x1b\x1b[D".to_vec()));
     }
 
     #[test]

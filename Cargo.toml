@@ -19,6 +19,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
+gpui = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["test-support"] }
 tempfile = "3"
 
 # gpui is slow unoptimized (Zeron and Collie do the same).

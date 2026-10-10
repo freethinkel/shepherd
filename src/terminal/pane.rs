@@ -1,5 +1,7 @@
 //! One herdr pane as a GPUI terminal: a `herdr terminal session control` stream fed into Zeron's emulator and
 //! painted by its grid element. Keys, wheel and mouse go back to herdr as session commands.
+//! `GridGeometry` and the selection gestures are adapted from Zeron's crates/ui/src/terminal/panel.rs (MIT, see
+//! assets/NOTICE).
 use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement, cell_at};
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, Side};
 use super::keys::{keystroke_bytes, paste_bytes};
@@ -12,8 +14,8 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollDelta,
     ScrollWheelEvent, Styled, Task, WeakEntity, Window, div, prelude::*,
 };
-use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Duration;
+use futures::StreamExt;
+use futures::channel::mpsc::UnboundedReceiver;
 
 /// Where the grid landed this frame, in window coordinates (from Zeron's panel.rs).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,7 +55,7 @@ pub struct PaneTerminal {
 
 impl PaneTerminal {
     pub fn new(pane_id: String, cx: &mut Context<Self>) -> Self {
-        let mut this = PaneTerminal {
+        PaneTerminal {
             pane_id,
             emulator: Emulator::new(80, 24),
             session: None,
@@ -63,9 +65,9 @@ impl PaneTerminal {
             wheel_acc: 0.0,
             drag: None,
             _pump: None,
-        };
-        this.attach(cx);
-        this
+        }
+        // Attaching waits for the first measured grid (`on_grid_metrics`): herdr resizes the real PTY to
+        // whatever size the attach names.
     }
 
     pub fn pane_id(&self) -> &str {
@@ -76,9 +78,9 @@ impl PaneTerminal {
         self.ended.as_deref()
     }
 
-    fn attach(&mut self, cx: &mut Context<Self>) {
+    fn attach(&mut self, takeover: bool, cx: &mut Context<Self>) {
         let (cols, rows) = (self.emulator.cols() as u16, self.emulator.rows() as u16);
-        match Session::spawn(&self.pane_id, cols, rows) {
+        match Session::spawn(&self.pane_id, cols, rows, takeover) {
             Ok((session, rx)) => {
                 self.session = Some(session);
                 self.ended = None;
@@ -88,21 +90,25 @@ impl PaneTerminal {
         }
     }
 
-    pub fn reattach(&mut self, cx: &mut Context<Self>) {
+    /// `takeover` replaces another client that controls the pane.
+    pub fn reattach(&mut self, takeover: bool, cx: &mut Context<Self>) {
         self.session = None;
-        self.attach(cx);
+        self.attach(takeover, cx);
         cx.notify();
     }
 
     /// Element hook: this frame's grid placement. A size change resizes the emulator and herdr's view.
-    pub fn on_grid_metrics(&mut self, geometry: GridGeometry, _cx: &mut Context<Self>) {
+    pub fn on_grid_metrics(&mut self, geometry: GridGeometry, cx: &mut Context<Self>) {
+        let first = self.geometry.is_none();
         self.geometry = Some(geometry);
         let (cols, rows) = (geometry.cols, geometry.rows);
-        if self.emulator.cols() == cols as usize && self.emulator.rows() == rows as usize {
-            return;
+        let resized = self.emulator.cols() != cols as usize || self.emulator.rows() != rows as usize;
+        if resized {
+            self.emulator.resize(cols, rows);
         }
-        self.emulator.resize(cols, rows);
-        if let Some(session) = &self.session {
+        if first && self.session.is_none() && self.ended.is_none() {
+            self.attach(false, cx);
+        } else if let (Some(session), true) = (&self.session, resized) {
             session.resize(cols, rows);
         }
     }
@@ -221,6 +227,11 @@ impl PaneTerminal {
     }
 }
 
+/// herdr allows one controller per terminal; its refusal names the flag that replaces the other one.
+pub fn needs_takeover(reason: &str) -> bool {
+    reason.contains("already has an attached client")
+}
+
 /// herdr's mouse modifier bits: Shift = 1, Ctrl = 2, Alt = 4.
 fn mouse_mods(m: &Modifiers) -> u8 {
     u8::from(m.shift) | (u8::from(m.control) << 1) | (u8::from(m.alt) << 2)
@@ -238,44 +249,34 @@ pub fn wheel_lines(acc: &mut f32, delta_px: f32, line_h: f32) -> i32 {
     n as i32
 }
 
-/// Moves frames from the session's reader thread into the emulator.
-// ponytail: polls every 8 ms when idle; an async channel if input latency ever shows.
-async fn pump(this: WeakEntity<PaneTerminal>, rx: Receiver<SessionEvent>, cx: &mut AsyncApp) {
-    loop {
-        let mut frames = Vec::new();
-        let mut ended = None;
-        loop {
-            match rx.try_recv() {
-                Ok(SessionEvent::Frame(bytes)) => frames.push(bytes),
-                Ok(SessionEvent::Ended(why)) => {
-                    ended = Some(why);
-                    break;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    ended = Some("the session closed".into());
-                    break;
-                }
-            }
+/// Moves frames from the session's reader thread into the emulator. Wakes only when herdr sends something;
+/// a burst of frames is applied in one update and one repaint.
+async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionEvent>, cx: &mut AsyncApp) {
+    while let Some(first) = rx.next().await {
+        let mut events = vec![first];
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
         }
-        if !frames.is_empty() || ended.is_some() {
-            let alive = this.update(cx, |pane, cx| {
-                for frame in &frames {
+        let mut ended = false;
+        let alive = this.update(cx, |pane, cx| {
+            for event in events {
+                match event {
                     // Replies (DSR, DA…) are dropped: frames are herdr's re-render, and herdr already
                     // answered the app's own queries.
-                    let _ = pane.emulator.feed(frame);
+                    SessionEvent::Frame(bytes) => drop(pane.emulator.feed(&bytes)),
+                    SessionEvent::Ended(why) => {
+                        pane.ended = Some(why);
+                        pane.session = None;
+                        ended = true;
+                        break;
+                    }
                 }
-                if let Some(why) = ended.clone() {
-                    pane.ended = Some(why);
-                    pane.session = None;
-                }
-                cx.notify();
-            });
-            if alive.is_err() || ended.is_some() {
-                return;
             }
+            cx.notify();
+        });
+        if alive.is_err() || ended {
+            return;
         }
-        cx.background_executor().timer(Duration::from_millis(8)).await;
     }
 }
 
@@ -289,6 +290,7 @@ impl Render for PaneTerminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         if let Some(why) = self.ended.clone() {
+            let takeover = needs_takeover(&why);
             return div()
                 .size_full()
                 .flex()
@@ -309,8 +311,8 @@ impl Render for PaneTerminal {
                         .bg(theme.hover)
                         .text_color(theme.text)
                         .cursor_pointer()
-                        .child("Reattach")
-                        .on_click(cx.listener(|pane, _, _, cx| pane.reattach(cx))),
+                        .child(if takeover { "Take over" } else { "Reattach" })
+                        .on_click(cx.listener(move |pane, _, _, cx| pane.reattach(takeover, cx))),
                 )
                 .into_any_element();
         }
@@ -335,6 +337,39 @@ impl Render for PaneTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn geometry(cols: u16, rows: u16) -> GridGeometry {
+        GridGeometry {
+            bounds: gpui::Bounds::default(),
+            origin: gpui::Point::default(),
+            cell_w: 8.0,
+            line_h: 17.0,
+            cols,
+            rows,
+        }
+    }
+
+    #[gpui::test]
+    fn waits_for_its_size_before_attaching(cx: &mut gpui::TestAppContext) {
+        // Attaching resizes herdr's real PTY: a placeholder 80×24 first would SIGWINCH every agent twice.
+        unsafe { std::env::set_var("SHEPHERD_HERDR", "/nonexistent/herdr") };
+        let pane = cx.new(|cx| PaneTerminal::new("w1:p1".into(), cx));
+        pane.read_with(cx, |p, _| {
+            assert!(p.session.is_none() && p.ended.is_none(), "attached before its size: {:?}", p.ended);
+        });
+        pane.update(cx, |p, cx| p.on_grid_metrics(geometry(120, 40), cx));
+        pane.read_with(cx, |p, _| {
+            assert_eq!((p.emulator.cols(), p.emulator.rows()), (120, 40));
+            // The attach ran (at 120×40) and failed on the missing binary.
+            assert!(p.ended.as_deref().is_some_and(|e| e.contains("/nonexistent/herdr")), "{:?}", p.ended);
+        });
+    }
+
+    #[test]
+    fn a_refused_attach_offers_takeover() {
+        assert!(needs_takeover("herdr: terminal w1:p1 already has an attached client; retry with --takeover"));
+        assert!(!needs_takeover("pane closed"));
+    }
 
     #[test]
     fn wheel_lines_accumulate_fractions() {

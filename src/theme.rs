@@ -84,7 +84,8 @@ impl Theme {
             selected: hsla(0., 0., 0.92, 0.11),
             border: hsla(0., 0., 1., 0.10),
             border_strong: hsla(0., 0., 1., 0.18),
-            cursor: text,
+            // Zeron: translucent so the glyph under the block stays legible.
+            cursor: text.opacity(0.40),
             font_ui: "Geist".into(),
             font_terminal: "Geist Mono".into(),
             terminal_font_size: 13.0,
@@ -115,7 +116,7 @@ impl Theme {
             selected: hsla(0., 0., 0.10, 0.06),
             border: hsla(0., 0., 0., 0.12),
             border_strong: hsla(0., 0., 0., 0.22),
-            cursor: text,
+            cursor: text.opacity(0.55),
             font_ui: "Geist".into(),
             font_terminal: "Geist Mono".into(),
             terminal_font_size: 13.0,
@@ -172,6 +173,13 @@ mod tests {
         assert_eq!(t.terminal.background, hex(0x090909));
         assert_eq!(t.terminal.ansi[1], hex(0xf87171));
         assert_eq!(t.terminal.ansi[15], hex(0xfafafa));
+    }
+
+    #[test]
+    fn block_cursor_lets_the_glyph_under_it_show() {
+        // Painted over the glyphs: opaque would hide the character in vim's normal mode.
+        assert_eq!(Theme::for_appearance(gpui::WindowAppearance::Dark).cursor.a, 0.40);
+        assert_eq!(Theme::for_appearance(gpui::WindowAppearance::Light).cursor.a, 0.55);
     }
 
     #[test]

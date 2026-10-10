@@ -5,8 +5,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use std::sync::Mutex;
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 pub enum SessionEvent {
@@ -17,22 +17,24 @@ pub enum SessionEvent {
 }
 
 pub struct Session {
-    child: Child,
+    child: Option<Child>,
     stdin: Mutex<Option<ChildStdin>>,
 }
 
 impl Session {
-    pub fn spawn(pane: &str, cols: u16, rows: u16) -> anyhow::Result<(Session, Receiver<SessionEvent>)> {
+    /// `takeover` replaces another client's control of the pane (herdr allows one controller).
+    pub fn spawn(pane: &str, cols: u16, rows: u16, takeover: bool) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
         let herdr = std::env::var("SHEPHERD_HERDR").unwrap_or_else(|_| "herdr".into());
         let mut child = Command::new(&herdr)
             .args(["terminal", "session", "control", pane])
             .args(["--cols", &cols.to_string(), "--rows", &rows.to_string()])
+            .args(takeover.then_some("--takeover"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| anyhow::anyhow!("cannot run {herdr}: {e}"))?;
-        let (tx, rx) = channel();
+        let (tx, rx) = unbounded();
         let stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
         let errors = std::thread::spawn(move || {
@@ -42,7 +44,7 @@ impl Session {
         });
         std::thread::spawn(move || read_frames(stdout, errors, tx));
         let stdin = Mutex::new(child.stdin.take());
-        Ok((Session { child, stdin }, rx))
+        Ok((Session { child: Some(child), stdin }, rx))
     }
 
     pub fn input(&self, bytes: &[u8]) {
@@ -70,21 +72,21 @@ impl Session {
     }
 }
 
-fn read_frames(stdout: impl Read, errors: std::thread::JoinHandle<String>, tx: Sender<SessionEvent>) {
+fn read_frames(stdout: impl Read, errors: std::thread::JoinHandle<String>, tx: UnboundedSender<SessionEvent>) {
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         let Ok(record) = serde_json::from_str::<Value>(&line) else { continue };
         match record["type"].as_str() {
             Some("terminal.frame") => {
                 if let Ok(bytes) = B64.decode(record["bytes"].as_str().unwrap_or("")) {
-                    if tx.send(SessionEvent::Frame(bytes)).is_err() {
+                    if tx.unbounded_send(SessionEvent::Frame(bytes)).is_err() {
                         return; // the pane view is gone
                     }
                 }
             }
             Some("terminal.closed") => {
                 let why = record["reason"].as_str().unwrap_or("the terminal closed").to_string();
-                let _ = tx.send(SessionEvent::Ended(why));
+                let _ = tx.unbounded_send(SessionEvent::Ended(why));
                 return;
             }
             _ => {}
@@ -92,7 +94,7 @@ fn read_frames(stdout: impl Read, errors: std::thread::JoinHandle<String>, tx: S
     }
     let stderr = errors.join().unwrap_or_default();
     let why = stderr.trim();
-    let _ = tx.send(SessionEvent::Ended(if why.is_empty() { "herdr exited".into() } else { tail(why, 2000) }));
+    let _ = tx.unbounded_send(SessionEvent::Ended(if why.is_empty() { "herdr exited".into() } else { tail(why, 2000) }));
 }
 
 fn tail(s: &str, max: usize) -> String {
@@ -103,16 +105,20 @@ fn tail(s: &str, max: usize) -> String {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Closing stdin ends the session cleanly; a child that ignores it is killed after a short grace.
+        // Closing stdin ends the session cleanly. Waiting for herdr happens off this thread: drops run on
+        // GPUI's main thread, several at once on a tab switch. A child that ignores the close is killed.
         self.stdin.lock().unwrap().take();
-        let deadline = Instant::now() + Duration::from_millis(200);
-        while Instant::now() < deadline {
-            if let Ok(Some(_)) = self.child.try_wait() {
-                return;
+        let Some(mut child) = self.child.take() else { return };
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline {
+                if let Ok(Some(_)) = child.try_wait() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+            let _ = child.kill();
+            let _ = child.wait();
+        });
     }
 }
