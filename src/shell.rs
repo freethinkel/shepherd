@@ -1,35 +1,53 @@
-//! The window: workspaces sidebar, the tab bar, and one Ghostty surface per pane of the shown tab,
-//! refreshed on every herdr event.
+//! The window: workspaces sidebar, the tab bar, and a GPUI terminal per pane of the shown tab, refreshed on
+//! every herdr event. Look and titlebar handling follow Collie (Zeron style).
 use crate::herdr::{Client, EVENT_TYPES};
 use crate::model::{AgentStatus, PaneFrame, Snapshot, attachable};
+use crate::terminal::PaneTerminal;
 use crate::theme::Theme;
 use gpui::{
-    Bounds, Context, Hsla, IntoElement, ParentElement, Render, SharedString, Styled, Window, WindowAppearance,
-    WindowOptions, div, prelude::*, px, relative, rgb, size,
+    Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseMoveEvent,
+    ParentElement, Render, SharedString, Stateful, Styled, TitlebarOptions, Window, WindowBackgroundAppearance,
+    WindowControlArea, WindowOptions, div, point, prelude::*, px, relative, size,
 };
 use serde_json::json;
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
+
+const TITLEBAR_HEIGHT: f32 = 38.0;
+const SIDEBAR_WIDTH: f32 = 256.0;
 
 pub struct Shell {
     snapshot: Option<Snapshot>,
     error: Option<String>,
-    // ponytail: unit placeholder until Task 7 holds pane terminals here.
-    surfaces: HashMap<String, ()>,
+    panes: HashMap<String, Entity<PaneTerminal>>,
     own_pane: Option<String>,
-    /// herdr's focused pane we last moved AppKit focus to; refocusing on every paint would undo clicks.
+    /// herdr's focused pane we last moved keyboard focus to; refocusing on every render would undo clicks.
     focused: Option<String>,
     /// The tab Shepherd shows. Local on purpose: herdr's focus is shared with its TUI clients.
     selected_tab: Option<String>,
+    /// Titlebar drag: armed by a press in the strip, consumed by the first move (Collie's `drag_strip`).
+    should_move: Rc<Cell<bool>>,
 }
 
 impl Shell {
     pub fn open(rt: tokio::runtime::Handle, cx: &mut gpui::App) {
         let options = WindowOptions {
-            window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::centered(None, size(px(1100.), px(720.)), cx))),
+            window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::centered(None, size(px(1180.), px(760.)), cx))),
+            window_min_size: Some(size(px(820.), px(560.))),
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(14.), px(14.))),
+            }),
+            app_owns_titlebar_drag: true,
+            window_background: WindowBackgroundAppearance::Blurred,
+            app_id: Some("dev.freethinkel.shepherd".into()),
             ..Default::default()
         };
         cx.open_window(options, |window, cx| {
+            cx.set_global(Theme::for_appearance(window.appearance()));
             window
                 .observe_window_appearance(|window, cx| {
                     cx.set_global(Theme::for_appearance(window.appearance()));
@@ -40,10 +58,11 @@ impl Shell {
                 let shell = Shell {
                     snapshot: None,
                     error: None,
-                    surfaces: HashMap::new(),
+                    panes: HashMap::new(),
                     own_pane: std::env::var("HERDR_PANE_ID").ok(),
                     focused: None,
                     selected_tab: std::env::var("SHEPHERD_TAB").ok(),
+                    should_move: Rc::new(Cell::new(false)),
                 };
                 cx.spawn(async move |this, cx| sync_loop(this, rt, cx).await).detach();
                 shell
@@ -51,11 +70,37 @@ impl Shell {
         })
         .expect("open window");
     }
+
+    /// The strip under the transparent titlebar drags the window; a double click zooms it.
+    fn drag_strip(&self) -> Stateful<Div> {
+        let (down, up, out, moved) =
+            (self.should_move.clone(), self.should_move.clone(), self.should_move.clone(), self.should_move.clone());
+        div()
+            .id("titlebar-drag")
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .h(px(TITLEBAR_HEIGHT))
+            .window_control_area(WindowControlArea::Drag)
+            .on_mouse_down_out(move |_, _, _| out.set(false))
+            .on_mouse_up(MouseButton::Left, move |_, _, _| up.set(false))
+            .on_mouse_down(MouseButton::Left, move |_, _, _| down.set(true))
+            .on_mouse_move(move |e: &MouseMoveEvent, window, _| {
+                if moved.get() && e.pressed_button == Some(MouseButton::Left) {
+                    moved.set(false);
+                    window.start_window_move();
+                }
+            })
+            .on_click(|e: &ClickEvent, window, _| {
+                if e.click_count() == 2 {
+                    window.titlebar_double_click();
+                }
+            })
+    }
 }
 
-/// Keep surfaces of shown panes whose shim still runs; a dropped one is recreated (reattached) on the next
-/// paint. Focus is forgotten with its surface so the recreated one gets AppKit focus again.
-// ponytail: while herdr is down this reattaches once per refresh (about 1/s); add a backoff if that shows up.
+/// Keep views of shown panes; focus is forgotten with its view so a recreated one gets keyboard focus again.
 fn prune<S>(surfaces: &mut HashMap<String, S>, focused: &mut Option<String>, shown: &[PaneFrame], exited: impl Fn(&S) -> bool) {
     surfaces.retain(|id, s| shown.iter().any(|f| &f.pane_id == id) && !exited(s));
     if focused.as_ref().is_some_and(|id| !surfaces.contains_key(id)) {
@@ -112,69 +157,65 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cx
     }
 }
 
-struct Palette {
-    bg: Hsla,
-    sidebar: Hsla,
-    border: Hsla,
-    hover: Hsla,
-    selected: Hsla,
-    text: Hsla,
-    muted: Hsla,
-}
-
-// ponytail: two fixed palettes; plan 2 brings Zeron's theme as in Collie.
-fn palette(appearance: WindowAppearance) -> Palette {
-    match appearance {
-        WindowAppearance::Dark | WindowAppearance::VibrantDark => Palette {
-            bg: rgb(0x1c1c1e).into(),
-            sidebar: rgb(0x232326).into(),
-            border: rgb(0x38383c).into(),
-            hover: rgb(0x2e2e32).into(),
-            selected: rgb(0x3a3a40).into(),
-            text: rgb(0xe6e6e8).into(),
-            muted: rgb(0x8e8e93).into(),
-        },
-        _ => Palette {
-            bg: rgb(0xffffff).into(),
-            sidebar: rgb(0xf4f4f5).into(),
-            border: rgb(0xe0e0e3).into(),
-            hover: rgb(0xe9e9ec).into(),
-            selected: rgb(0xdcdce1).into(),
-            text: rgb(0x1d1d1f).into(),
-            muted: rgb(0x6e6e73).into(),
-        },
-    }
-}
-
-fn status_color(status: AgentStatus) -> Option<Hsla> {
+fn status_color(status: AgentStatus, theme: &Theme) -> Option<Hsla> {
     match status {
-        AgentStatus::Working => Some(rgb(0x0a84ff).into()),
-        AgentStatus::Blocked => Some(rgb(0xff9f0a).into()),
-        AgentStatus::Done => Some(rgb(0x30d158).into()),
+        AgentStatus::Working => Some(theme.accent),
+        AgentStatus::Blocked => Some(theme.warning),
+        AgentStatus::Done => Some(theme.success.opacity(0.9)),
         AgentStatus::Idle | AgentStatus::Unknown => None,
     }
 }
 
-fn status_dot(status: AgentStatus, muted: Hsla) -> impl IntoElement {
-    let color = status_color(status);
+/// Collie's status dot: 6 px, filled for an agent state, a faint ring when idle.
+fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
+    let dot = div().size(px(6.)).rounded_full().flex_none();
+    match status_color(status, theme) {
+        Some(c) => dot.bg(c),
+        None => dot.border_1().border_color(theme.text_faint.opacity(0.6)),
+    }
+}
+
+/// Collie's sidebar row: 32 px, 8 px radius, a wash under the selected one.
+fn row(theme: &Theme, selected: bool, id: impl Into<gpui::ElementId>) -> Stateful<Div> {
+    let hover = theme.hover;
     div()
-        .size(px(7.))
-        .flex_none()
-        .rounded_full()
-        .when_some(color, |d, c| d.bg(c))
-        .when(color.is_none(), |d| d.border_1().border_color(muted))
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.))
+        .h(px(32.))
+        .px(px(8.))
+        .rounded(px(8.))
+        .flex_shrink_0()
+        .cursor_pointer()
+        .when(selected, |el| el.bg(theme.selected))
+        .when(!selected, |el| el.hover(move |s| s.bg(hover)))
 }
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(window.appearance());
+        let theme = Theme::of(cx).clone();
         let snapshot = self.snapshot.clone();
         let tab = snapshot.as_ref().and_then(|s| s.pick_tab(self.selected_tab.as_deref())).cloned();
         let frames = match (&snapshot, &tab) {
             (Some(s), Some(t)) => s.pane_frames(&t.tab_id),
             _ => Vec::new(),
         };
-        prune(&mut self.surfaces, &mut self.focused, &frames, |_| false);
+        let own = self.own_pane.clone();
+        let shown: Vec<PaneFrame> = frames.iter().filter(|f| attachable(&f.pane_id, own.as_deref())).cloned().collect();
+        prune(&mut self.panes, &mut self.focused, &shown, |_| false);
+        for f in &shown {
+            if !self.panes.contains_key(&f.pane_id) {
+                let id = f.pane_id.clone();
+                self.panes.insert(id.clone(), cx.new(|cx| PaneTerminal::new(id, cx)));
+            }
+            if f.focused && self.focused.as_deref() != Some(f.pane_id.as_str()) {
+                let handle = self.panes[&f.pane_id].read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+                self.focused = Some(f.pane_id.clone());
+            }
+        }
 
         let shown_ws = tab.as_ref().map(|t| t.workspace_id.clone());
         let shown_tab = tab.as_ref().map(|t| t.tab_id.clone());
@@ -182,41 +223,49 @@ impl Render for Shell {
         workspaces.sort_by_key(|w| w.number);
 
         let sidebar = div()
-            .w(px(220.))
+            .w(px(SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(2.))
-            .p_2()
-            .bg(p.sidebar)
+            .pt(px(TITLEBAR_HEIGHT))
+            .bg(theme.wash(0.05))
             .border_r_1()
-            .border_color(p.border)
-            .child(div().px_2().pb_1().text_xs().text_color(p.muted).child("WORKSPACES"))
-            .children(workspaces.into_iter().map(|w| {
-                let selected = shown_ws.as_deref() == Some(w.workspace_id.as_str());
-                let first_tab = snapshot.as_ref().and_then(|s| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
-                let target = w.active_tab_id.clone().or(first_tab);
+            .border_color(theme.border)
+            .child(
                 div()
-                    .id(SharedString::from(format!("ws-{}", w.workspace_id)))
+                    .px(px(16.))
+                    .pt(px(8.))
+                    .pb(px(6.))
+                    .text_size(px(11.))
+                    .text_color(theme.text_faint)
+                    .child("Workspaces"),
+            )
+            .child(
+                div()
+                    .id("workspaces")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(8.))
                     .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(p.selected))
-                    .when(!selected, |d| d.hover(|d| d.bg(p.hover)))
-                    .child(status_dot(w.agent_status, p.muted))
-                    .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().child(w.label.clone()))
-                    .child(div().text_xs().text_color(p.muted).child(w.number.to_string()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_tab = target.clone();
-                        cx.notify();
-                    }))
-            }));
+                    .flex_col()
+                    .gap(px(2.))
+                    .children(workspaces.into_iter().map(|w| {
+                        let selected = shown_ws.as_deref() == Some(w.workspace_id.as_str());
+                        let first_tab =
+                            snapshot.as_ref().and_then(|s| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
+                        let target = w.active_tab_id.clone().or(first_tab);
+                        row(&theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
+                            .child(status_dot(w.agent_status, &theme))
+                            .child(div().flex_1().min_w_0().truncate().child(w.label.clone()))
+                            .child(div().text_size(px(11.)).text_color(theme.text_faint).child(w.number.to_string()))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.selected_tab = target.clone();
+                                cx.notify();
+                            }))
+                    })),
+            );
 
         let tabs = match (&snapshot, &shown_ws) {
             (Some(s), Some(ws)) => s.tabs_of(ws).into_iter().cloned().collect(),
@@ -224,50 +273,41 @@ impl Render for Shell {
         };
         let tabbar = div()
             .id("tabbar")
-            .overflow_x_scroll()
-            .h(px(34.))
+            .h(px(TITLEBAR_HEIGHT))
             .flex_none()
             .flex()
             .items_center()
-            .gap_1()
-            .px_2()
-            .border_b_1()
-            .border_color(p.border)
+            .gap(px(2.))
+            .px(px(8.))
+            .overflow_x_scroll()
             .children(tabs.into_iter().map(|t| {
                 let selected = shown_tab.as_deref() == Some(t.tab_id.as_str());
                 let id = t.tab_id.clone();
-                div()
-                    .id(SharedString::from(format!("tab-{}", t.tab_id)))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(p.selected))
-                    .when(!selected, |d| d.text_color(p.muted).hover(|d| d.bg(p.hover)))
-                    .flex_none()
-                    .max_w(px(220.))
-                    .child(status_dot(t.agent_status, p.muted))
-                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(t.label.clone()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                row(&theme, selected, SharedString::from(format!("tab-{}", t.tab_id)))
+                    .h(px(28.))
+                    .max_w(px(240.))
+                    .when(!selected, |el| el.text_color(theme.text_muted))
+                    .child(status_dot(t.agent_status, &theme))
+                    .child(div().min_w_0().truncate().child(t.label.clone()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.selected_tab = Some(id.clone());
                         cx.notify();
                     }))
             }));
 
-        let own = self.own_pane.clone();
-        let border = p.border;
-        let panes = div()
+        let border = theme.border;
+        let ring = theme.accent.opacity(0.5);
+        let grid = div()
             .flex_1()
+            .min_h_0()
             .relative()
             .overflow_hidden()
-            .when_some(self.error.clone(), |el, err| el.child(div().p_4().child(err)))
-            .when(snapshot.is_none() && self.error.is_none(), |el| el.child(div().p_4().text_color(p.muted).child("Connecting to herdr…")))
-            .children(frames.into_iter().map(move |f| {
-                // 1-px gutter in the border color stands in for split dividers until plan 2.
+            .bg(theme.terminal.background)
+            .when_some(self.error.clone(), |el, err| el.child(div().p_4().text_color(theme.text_muted).child(err)))
+            .when(snapshot.is_none() && self.error.is_none(), |el| {
+                el.child(div().p_4().text_color(theme.text_muted).child("Connecting to herdr…"))
+            })
+            .children(frames.into_iter().map(|f| {
                 let cell = div()
                     .absolute()
                     .left(relative(f.frame.x))
@@ -276,19 +316,37 @@ impl Render for Shell {
                     .h(relative(f.frame.h))
                     .p(px(0.5))
                     .bg(border);
-                if !attachable(&f.pane_id, own.as_deref()) {
-                    return cell.child(div().size_full().p_4().child(format!("{} is this Shepherd's own pane", f.pane_id)));
+                match self.panes.get(&f.pane_id) {
+                    Some(pane) => {
+                        let focused = pane.read(cx).focus_handle(cx).is_focused(window);
+                        cell.child(
+                            div().size_full().when(focused, |el| el.border_1().border_color(ring)).child(pane.clone()),
+                        )
+                    }
+                    None => cell.child(
+                        div()
+                            .size_full()
+                            .p_4()
+                            .bg(theme.terminal.background)
+                            .text_color(theme.text_muted)
+                            .child(format!("{} is this Shepherd's own pane", f.pane_id)),
+                    ),
                 }
-                cell.child(div().size_full().bg(p.bg).p_2().text_color(p.muted).child(f.pane_id.clone()))
             }));
 
         div()
+            .id("root")
+            .relative()
             .size_full()
             .flex()
-            .bg(p.bg)
-            .text_color(p.text)
+            .flex_row()
+            .bg(theme.glass())
+            .text_color(theme.text)
+            .font_family(theme.font_ui.clone())
+            .text_size(px(13.))
+            .child(self.drag_strip())
             .child(sidebar)
-            .child(div().flex_1().h_full().flex().flex_col().child(tabbar).child(panes))
+            .child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).child(grid))
     }
 }
 

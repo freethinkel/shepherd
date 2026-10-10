@@ -128,6 +128,14 @@ impl Theme {
         }
     }
 
+    /// A tint that lifts a block off the page: light on dark, dark on light (Collie's `wash`).
+    pub fn wash(&self, a: f32) -> Hsla {
+        match self.appearance {
+            Appearance::Dark => hsla(0., 0., 0.92, a),
+            Appearance::Light => hsla(0., 0., 0.10, a),
+        }
+    }
+
     /// The window's own fill, translucent over the blurred desktop (Collie's `glass`).
     pub fn glass(&self) -> Hsla {
         self.surface.opacity(0.80)

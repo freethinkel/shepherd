@@ -30,6 +30,8 @@ pub const TERM_LINE_HEIGHT: f32 = 18.0;
 /// Line height as a multiple of the font size, so a user-chosen size keeps the
 /// default's row rhythm.
 const TERM_LINE_HEIGHT_RATIO: f32 = TERM_LINE_HEIGHT / TERM_FONT_SIZE;
+// ponytail: a fixed list of common Nerd Font families; a setting when someone uses another.
+const NERD_FALLBACKS: [&str; 3] = ["Symbols Nerd Font Mono", "IoskeleyMonoNL Nerd Font Mono", "FiraCode Nerd Font Mono"];
 /// Inner padding of the grid area.
 pub const TERM_PADDING: f32 = 12.0;
 
@@ -277,6 +279,8 @@ impl gpui::Element for TerminalElement {
             ("calt".into(), 0),
             ("dlig".into(), 0),
         ]));
+        // Nerd Font icons (eza, prompts) are missing from Geist Mono; borrow them from installed Nerd Fonts.
+        mono.fallbacks = Some(gpui::FontFallbacks::from_fonts(NERD_FALLBACKS.iter().map(|f| f.to_string()).collect()));
         // Font probe: measure the actual advance of the resolved mono font so
         // cols/rows track real glyph metrics, not a guessed aspect ratio.
         let font_size = px(theme.terminal_font_size);

@@ -65,3 +65,20 @@ SHEPHERD_TAB=<tab_id> make run              # or pin a tab (e.g. a scratch one) 
 
 Launch it from a terminal outside herdr, or from inside herdr with another tab pinned: a Shepherd started in a
 herdr pane shows that pane as a placeholder instead of mirroring itself.
+
+# GPUI terminal (plan 2a)
+
+Date: 2026-10-10. Each pane is a `PaneTerminal`: `herdr terminal session control` → Zeron's `alacritty_terminal`
+emulator (no local scrollback) → Zeron's grid element, in Geist Mono with Zeron's palette.
+
+**Verified** (screenshots of the running app on a scratch tab, plus the test suite):
+- Two panes of one tab render side by side; ANSI 16 colors, bold, underline and backgrounds show; `eza` icons
+  render once installed Nerd Fonts are set as fallbacks (Geist Mono has none).
+- The pane resizes herdr's view to the measured grid: the first frame at 80×24 is redrawn at the window's size.
+- Sessions: frames in, input / resize / scroll / mouse lines out, end reasons, and child cleanup (tests against a
+  fake `herdr`, one live echo through a real herdr).
+- Wheel deltas accumulate across trackpad ticks (unit test).
+
+**Pending a person at the keyboard:** typing (Cyrillic, ctrl, alt, arrows), wheel scrolling through herdr's
+history, vim arrows in normal and insert mode (does herdr re-encode cursor keys for the pane's mode?), drag
+selection with Cmd+C and Cmd+V, and whether pasted text shows stray `ESC[200~` in apps without bracketed paste.
