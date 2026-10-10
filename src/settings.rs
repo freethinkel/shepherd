@@ -65,6 +65,12 @@ impl Settings {
         Ok(())
     }
 
+    /// Binds `chord` to `action`; another action the user had put on that chord goes back to its default.
+    pub fn record_chord(&mut self, action: &str, chord: &str) {
+        self.keys.retain(|a, k| a == action || k != chord);
+        self.keys.insert(action.to_string(), chord.to_string());
+    }
+
     pub fn font(&self) -> FontSettings {
         FontSettings { family: self.font_family.clone(), size: self.font_size }
     }
@@ -72,6 +78,11 @@ impl Settings {
     pub fn theme(&self, system: WindowAppearance) -> Theme {
         Theme::resolve(&self.theme_family, self.appearance, system, &self.font())
     }
+}
+
+/// The terminal font size one step up or down, within 9…32.
+pub fn step_font_size(size: f32, delta: f32) -> f32 {
+    (size + delta).clamp(9.0, 32.0)
 }
 
 /// The loaded settings, the load error (shown in Settings) and where they live.
@@ -138,6 +149,22 @@ mod tests {
         assert_eq!(s, Settings::default());
         assert!(err.unwrap().contains(&path.display().to_string()));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
+    }
+
+    #[test]
+    fn recording_a_chord_takes_it_from_other_user_bindings() {
+        let mut s = Settings::default();
+        s.keys.insert("NewTab".into(), "cmd-n".into());
+        s.record_chord("SplitRight", "cmd-n");
+        assert_eq!(s.keys.get("SplitRight").map(String::as_str), Some("cmd-n"));
+        assert_eq!(s.keys.get("NewTab"), None, "NewTab falls back to its default");
+    }
+
+    #[test]
+    fn font_size_steps_within_bounds() {
+        assert_eq!(step_font_size(13.0, 1.0), 14.0);
+        assert_eq!(step_font_size(9.0, -1.0), 9.0);
+        assert_eq!(step_font_size(32.0, 1.0), 32.0);
     }
 
     #[test]

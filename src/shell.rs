@@ -4,7 +4,7 @@ use crate::bindings::*;
 use crate::commands::{Command, Direction};
 use crate::herdr::{Client, EVENT_TYPES};
 use crate::ui::divider::{Throttle, drag_ratio};
-use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
+use gpui_base::input::{Input, InputEvent, InputState};
 use crate::model::{AgentStatus, PaneFrame, Snapshot, SplitFrame, attachable};
 use crate::terminal::PaneTerminal;
 use crate::settings::SettingsGlobal;
@@ -196,14 +196,7 @@ impl Shell {
         let input = cx.new(|cx| InputState::new(window, cx).default_value(label));
         input.update(cx, |input, cx| {
             // gpui-base inputs are unstyled: colors from the theme, as Collie does.
-            input.set_editor_style(InputEditorStyle {
-                foreground: theme.text,
-                muted_foreground: theme.text_faint,
-                border: theme.border,
-                selection: theme.accent.opacity(0.3),
-                caret: theme.text,
-                ..Default::default()
-            });
+            input.set_editor_style(crate::ui::input_style(&theme));
             input.focus(window, cx);
         });
         let events = cx.subscribe_in(&input, window, |shell, _, event: &InputEvent, _, cx| match event {
@@ -439,7 +432,7 @@ fn close_button(theme: &Theme, group: &SharedString, id: SharedString) -> Statef
 }
 
 /// Collie's sidebar row: 32 px, 8 px radius, a wash under the selected one.
-fn row(theme: &Theme, selected: bool, id: impl Into<gpui::ElementId>) -> Stateful<Div> {
+pub(crate) fn row(theme: &Theme, selected: bool, id: impl Into<gpui::ElementId>) -> Stateful<Div> {
     let hover = theme.hover;
     div()
         .id(id)

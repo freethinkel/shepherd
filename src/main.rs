@@ -11,12 +11,17 @@ fn main() {
         shepherd::bindings::rebind(cx, &settings.keys);
         cx.set_global(shepherd::settings::SettingsGlobal { settings, error, path });
         cx.on_action(|_: &shepherd::bindings::Quit, cx| cx.quit());
+        cx.on_action(|_: &shepherd::bindings::OpenSettings, cx| shepherd::ui::settings::open(cx));
+        cx.set_global(shepherd::ui::settings::Tokio(handle.clone()));
         cx.set_menus(vec![gpui::Menu::new("Shepherd").items([
             gpui::MenuItem::action("Settings…", shepherd::bindings::OpenSettings),
             gpui::MenuItem::separator(),
             gpui::MenuItem::action("Quit Shepherd", shepherd::bindings::Quit),
         ])]);
         shepherd::shell::Shell::open(handle.clone(), cx);
+        if std::env::var_os("SHEPHERD_SETTINGS").is_some() {
+            shepherd::ui::settings::open(cx);
+        }
         cx.activate(true);
     });
     drop(rt);
