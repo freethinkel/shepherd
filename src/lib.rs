@@ -1,5 +1,3 @@
-pub mod attach;
-pub mod ghostty;
 pub mod herdr;
 pub mod model;
 pub mod shell;

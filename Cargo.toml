@@ -8,22 +8,15 @@ publish = false
 [workspace]
 
 [dependencies]
+alacritty_terminal = "0.26"
 anyhow = "1"
 base64 = "0.22"
 futures = "0.3"
 gpui = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda" }
 gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["font-kit", "runtime_shaders"] }
-libc = "0.2"
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3.2", features = ["NSEvent", "NSGraphics", "NSResponder", "NSView", "NSPasteboard", "NSWindow"] }
-objc2-foundation = "0.3.2"
-raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-
-[build-dependencies]
-bindgen = "0.72"
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,21 +1,20 @@
 //! The window: workspaces sidebar, the tab bar, and one Ghostty surface per pane of the shown tab,
 //! refreshed on every herdr event.
-use crate::ghostty::{self, Surface};
 use crate::herdr::{Client, EVENT_TYPES};
 use crate::model::{AgentStatus, PaneFrame, Snapshot, attachable};
 use gpui::{
-    Bounds, Context, Hsla, IntoElement, ParentElement, Pixels, Render, SharedString, Styled, Window, WindowAppearance,
-    WindowOptions, canvas, div, prelude::*, px, relative, rgb, size,
+    Bounds, Context, Hsla, IntoElement, ParentElement, Render, SharedString, Styled, Window, WindowAppearance,
+    WindowOptions, div, prelude::*, px, relative, rgb, size,
 };
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
 
 pub struct Shell {
-    app: ghostty::App,
     snapshot: Option<Snapshot>,
     error: Option<String>,
-    surfaces: HashMap<String, Surface>,
+    // ponytail: unit placeholder until Task 7 holds pane terminals here.
+    surfaces: HashMap<String, ()>,
     own_pane: Option<String>,
     /// herdr's focused pane we last moved AppKit focus to; refocusing on every paint would undo clicks.
     focused: Option<String>,
@@ -24,7 +23,7 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn open(app: ghostty::App, rt: tokio::runtime::Handle, cx: &mut gpui::App) {
+    pub fn open(rt: tokio::runtime::Handle, cx: &mut gpui::App) {
         let options = WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::centered(None, size(px(1100.), px(720.)), cx))),
             ..Default::default()
@@ -32,7 +31,6 @@ impl Shell {
         cx.open_window(options, |_, cx| {
             cx.new(|cx| {
                 let shell = Shell {
-                    app,
                     snapshot: None,
                     error: None,
                     surfaces: HashMap::new(),
@@ -45,26 +43,6 @@ impl Shell {
             })
         })
         .expect("open window");
-    }
-
-    fn place(&mut self, pane_id: &str, focused: bool, bounds: Bounds<Pixels>, window: &mut Window) {
-        if !self.surfaces.contains_key(pane_id) {
-            match Surface::new(self.app, window, pane_id) {
-                Ok(surface) => {
-                    self.surfaces.insert(pane_id.to_string(), surface);
-                }
-                Err(err) => {
-                    self.error = Some(format!("{err:#}"));
-                    return;
-                }
-            }
-        }
-        let surface = &self.surfaces[pane_id];
-        surface.set_bounds(bounds, window);
-        if focused && self.focused.as_deref() != Some(pane_id) {
-            surface.focus();
-            self.focused = Some(pane_id.to_string());
-        }
     }
 }
 
@@ -189,7 +167,7 @@ impl Render for Shell {
             (Some(s), Some(t)) => s.pane_frames(&t.tab_id),
             _ => Vec::new(),
         };
-        prune(&mut self.surfaces, &mut self.focused, &frames, Surface::exited);
+        prune(&mut self.surfaces, &mut self.focused, &frames, |_| false);
 
         let shown_ws = tab.as_ref().map(|t| t.workspace_id.clone());
         let shown_tab = tab.as_ref().map(|t| t.tab_id.clone());
@@ -273,7 +251,6 @@ impl Render for Shell {
                     }))
             }));
 
-        let view = cx.entity();
         let own = self.own_pane.clone();
         let border = p.border;
         let panes = div()
@@ -283,7 +260,6 @@ impl Render for Shell {
             .when_some(self.error.clone(), |el, err| el.child(div().p_4().child(err)))
             .when(snapshot.is_none() && self.error.is_none(), |el| el.child(div().p_4().text_color(p.muted).child("Connecting to herdr…")))
             .children(frames.into_iter().map(move |f| {
-                let view = view.clone();
                 // 1-px gutter in the border color stands in for split dividers until plan 2.
                 let cell = div()
                     .absolute()
@@ -296,12 +272,7 @@ impl Render for Shell {
                 if !attachable(&f.pane_id, own.as_deref()) {
                     return cell.child(div().size_full().p_4().child(format!("{} is this Shepherd's own pane", f.pane_id)));
                 }
-                cell.child(
-                    canvas(|_, _, _| (), move |bounds, _, window, cx| {
-                        view.update(cx, |shell, _| shell.place(&f.pane_id, f.focused, bounds, window));
-                    })
-                    .size_full(),
-                )
+                cell.child(div().size_full().bg(p.bg).p_2().text_color(p.muted).child(f.pane_id.clone()))
             }));
 
         div()
