@@ -4,7 +4,8 @@ Geist and Geist Mono (assets/fonts/*.ttf)
   SIL Open Font License 1.1; the full license is in assets/fonts/Geist-OFL.txt.
 
 Zeron
-  The theme tokens in src/theme.rs (via Collie) and the terminal code in src/terminal/ are adapted from Zeron
+  The theme families (the zeron-theme crate), the theme tokens in src/theme.rs (via Collie) and the terminal code
+  in src/terminal/ are from or adapted from Zeron
   (https://github.com/zeronsh/zeron), MIT License, Copyright (c) 2026 Wing:
 
   MIT License

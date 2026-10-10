@@ -1,11 +1,35 @@
-//! Window and terminal colors. Chrome tokens from Collie's theme (adapted from Zeron, MIT); the terminal palette
-//! from Zeron's built-in `zeron_dark` / `zeron_light` (crates/theme/src/builtins.rs). See assets/NOTICE.
+//! Window and terminal colors from Zeron's built-in theme families (the `zeron-theme` crate, MIT, see
+//! assets/NOTICE), laid out as Collie's tokens, with the terminal font from settings.
 use gpui::{App, Global, Hsla, SharedString, WindowAppearance, hsla, rgb};
+use serde::{Deserialize, Serialize};
+use zeron_theme::{Color, ThemeRegistry, ThemeVariant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Appearance {
     Dark,
     Light,
+}
+
+/// Light, dark, or whatever the system shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppearanceMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontSettings {
+    pub family: String,
+    pub size: f32,
+}
+
+impl Default for FontSettings {
+    fn default() -> Self {
+        FontSettings { family: "Geist Mono".into(), size: 13.0 }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,92 +65,86 @@ pub struct Theme {
 
 impl Global for Theme {}
 
+#[allow(dead_code)]
 pub(crate) fn hex(c: u32) -> Hsla {
     rgb(c).into()
 }
 
-const ANSI_DARK: [u32; 16] = [
-    0x242424, 0xf87171, 0x4ade80, 0xfacc15, 0x60a5fa, 0xc084fc, 0x22d3ee, 0xd4d4d8,
-    0x52525b, 0xfca5a5, 0x86efac, 0xfde047, 0x93c5fd, 0xd8b4fe, 0x67e8f9, 0xfafafa,
-];
-const ANSI_LIGHT: [u32; 16] = [
-    0x1f1f1f, 0xdc2626, 0x16a34a, 0xb45309, 0x2563eb, 0x9333ea, 0x0e7490, 0x3f3f46,
-    0x71717a, 0xb91c1c, 0x15803d, 0x92400e, 0x1d4ed8, 0x7e22ce, 0x155e75, 0x18181b,
-];
+fn color(c: Color) -> Hsla {
+    let channel = |v: u8| f32::from(v) / 255.0;
+    gpui::Rgba { r: channel(c.r), g: channel(c.g), b: channel(c.b), a: channel(c.a) }.into()
+}
+
+/// Built-in theme families as (id, name), in Zeron's order.
+pub fn families() -> Vec<(String, String)> {
+    ThemeRegistry::builtin().families.iter().map(|f| (f.id.clone(), f.name.clone())).collect()
+}
 
 impl Theme {
+    /// Zeron's own theme for this appearance, with the default font.
     pub fn for_appearance(appearance: WindowAppearance) -> Theme {
-        match appearance {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Theme::dark(),
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Theme::light(),
+        Theme::resolve("zeron", AppearanceMode::System, appearance, &FontSettings::default())
+    }
+
+    /// The variant of `family_id` for the mode (or the system's appearance); a family without that appearance
+    /// uses its other variant, and an unknown family is Zeron's.
+    pub fn resolve(family_id: &str, mode: AppearanceMode, system: WindowAppearance, font: &FontSettings) -> Theme {
+        let dark = match mode {
+            AppearanceMode::Dark => true,
+            AppearanceMode::Light => false,
+            AppearanceMode::System => matches!(system, WindowAppearance::Dark | WindowAppearance::VibrantDark),
+        };
+        let registry = ThemeRegistry::builtin();
+        let family = registry
+            .families
+            .iter()
+            .find(|f| f.id == family_id)
+            .or_else(|| registry.families.iter().find(|f| f.id == "zeron"))
+            .expect("Zeron's built-in family");
+        let variant = family
+            .variants
+            .iter()
+            .find(|v| v.appearance.is_dark() == dark)
+            .or(family.variants.first())
+            .expect("a family has variants");
+        Theme::from_zeron(variant, font)
+    }
+
+    pub fn from_zeron(v: &ThemeVariant, font: &FontSettings) -> Theme {
+        let c = &v.colors;
+        let appearance = if v.appearance.is_dark() { Appearance::Dark } else { Appearance::Light };
+        let text = color(c.text);
+        Theme {
+            appearance,
+            surface: color(c.shell),
+            card: color(c.card),
+            text,
+            text_muted: color(c.text_muted),
+            text_faint: color(c.text_faint),
+            accent: color(v.accent.primary),
+            warning: color(c.warning),
+            success: color(c.success),
+            danger: color(c.danger),
+            hover: color(c.hover),
+            selected: color(c.active),
+            border: color(c.border),
+            border_strong: color(c.border_strong),
+            // Zeron: translucent so the glyph under the block stays legible.
+            cursor: text.opacity(if appearance == Appearance::Dark { 0.40 } else { 0.55 }),
+            font_ui: "Geist".into(),
+            font_terminal: font.family.clone().into(),
+            terminal_font_size: font.size,
+            terminal: TerminalPalette {
+                background: color(v.terminal.background),
+                foreground: color(v.terminal.foreground),
+                selection: color(v.terminal.selection),
+                ansi: v.terminal.ansi.map(color),
+            },
         }
     }
 
     pub fn of(cx: &App) -> &Theme {
         cx.global::<Theme>()
-    }
-
-    fn dark() -> Theme {
-        let text = hex(0xe8e8ea);
-        let accent = hex(0x8b7cf6);
-        Theme {
-            appearance: Appearance::Dark,
-            surface: hex(0x0d0d0d),
-            card: hex(0x0e0e0e),
-            text,
-            text_muted: hex(0xa9a9ae),
-            text_faint: hex(0x85858a),
-            accent,
-            warning: hex(0xfacc15),
-            success: hex(0x34d399),
-            danger: hex(0xf87171),
-            hover: hsla(0., 0., 1., 0.07),
-            selected: hsla(0., 0., 0.92, 0.11),
-            border: hsla(0., 0., 1., 0.10),
-            border_strong: hsla(0., 0., 1., 0.18),
-            // Zeron: translucent so the glyph under the block stays legible.
-            cursor: text.opacity(0.40),
-            font_ui: "Geist".into(),
-            font_terminal: "Geist Mono".into(),
-            terminal_font_size: 13.0,
-            terminal: TerminalPalette {
-                background: hex(0x090909),
-                foreground: text,
-                selection: accent.opacity(0.30),
-                ansi: ANSI_DARK.map(hex),
-            },
-        }
-    }
-
-    fn light() -> Theme {
-        let text = hex(0x303035);
-        let accent = hex(0x5b43e8);
-        Theme {
-            appearance: Appearance::Light,
-            surface: hex(0xf3f3f5),
-            card: hex(0xffffff),
-            text,
-            text_muted: hex(0x62626a),
-            text_faint: hex(0x797981),
-            accent,
-            warning: hex(0xa16207),
-            success: hex(0x15803d),
-            danger: hex(0xdc2626),
-            hover: hsla(0., 0., 0., 0.04),
-            selected: hsla(0., 0., 0.10, 0.06),
-            border: hsla(0., 0., 0., 0.12),
-            border_strong: hsla(0., 0., 0., 0.22),
-            cursor: text.opacity(0.55),
-            font_ui: "Geist".into(),
-            font_terminal: "Geist Mono".into(),
-            terminal_font_size: 13.0,
-            terminal: TerminalPalette {
-                background: hex(0xfafafa),
-                foreground: text,
-                selection: accent.opacity(0.22),
-                ansi: ANSI_LIGHT.map(hex),
-            },
-        }
     }
 
     /// A tint that lifts a block off the page: light on dark, dark on light (Collie's `wash`).
@@ -166,6 +184,50 @@ pub fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn font() -> FontSettings {
+        FontSettings { family: "Geist Mono".into(), size: 13.0 }
+    }
+
+    #[test]
+    fn zeron_family_resolves_to_zeron_colors() {
+        let t = Theme::resolve("zeron", AppearanceMode::System, gpui::WindowAppearance::Dark, &font());
+        assert_eq!(t.terminal.background, hex(0x090909));
+        assert_eq!(t.terminal.ansi[1], hex(0xf87171));
+        assert_eq!(t.surface, hex(0x0d0d0d));
+        assert_eq!(t.appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn every_builtin_family_resolves_in_both_appearances() {
+        for (id, _) in families() {
+            for system in [gpui::WindowAppearance::Dark, gpui::WindowAppearance::Light] {
+                let t = Theme::resolve(&id, AppearanceMode::System, system, &font());
+                assert_ne!(t.terminal.background, t.terminal.foreground, "{id}");
+            }
+        }
+        assert!(families().len() >= 10);
+    }
+
+    #[test]
+    fn an_explicit_mode_beats_the_system() {
+        let t = Theme::resolve("zeron", AppearanceMode::Light, gpui::WindowAppearance::Dark, &font());
+        assert_eq!(t.appearance, Appearance::Light);
+        assert_eq!(t.terminal.background, hex(0xfafafa));
+    }
+
+    #[test]
+    fn unknown_family_falls_back_to_zeron() {
+        let t = Theme::resolve("no-such-theme", AppearanceMode::Dark, gpui::WindowAppearance::Dark, &font());
+        assert_eq!(t.terminal.background, hex(0x090909));
+    }
+
+    #[test]
+    fn font_settings_reach_the_terminal() {
+        let t = Theme::resolve("zeron", AppearanceMode::Dark, gpui::WindowAppearance::Dark, &FontSettings { family: "Menlo".into(), size: 16.0 });
+        assert_eq!(t.font_terminal.as_ref(), "Menlo");
+        assert_eq!(t.terminal_font_size, 16.0);
+    }
 
     #[test]
     fn dark_terminal_matches_zeron_dark() {
