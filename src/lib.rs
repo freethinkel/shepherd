@@ -5,3 +5,4 @@ pub mod model;
 pub mod shell;
 pub mod terminal;
 pub mod theme;
+pub mod ui;

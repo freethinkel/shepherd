@@ -1,19 +1,21 @@
 //! The window: workspaces sidebar, the tab bar, and a GPUI terminal per pane of the shown tab, refreshed on
 //! every herdr event. Look and titlebar handling follow Collie (Zeron style).
+use crate::commands::Command;
 use crate::herdr::{Client, EVENT_TYPES};
-use crate::model::{AgentStatus, PaneFrame, Snapshot, attachable};
+use crate::ui::divider::{Throttle, drag_ratio};
+use crate::model::{AgentStatus, PaneFrame, Snapshot, SplitFrame, attachable};
 use crate::terminal::PaneTerminal;
 use crate::theme::Theme;
 use gpui::{
-    Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseMoveEvent,
+    Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     ParentElement, Render, SharedString, Stateful, Styled, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowControlArea, WindowOptions, div, point, prelude::*, px, relative, size,
+    WindowControlArea, WindowOptions, canvas, div, point, prelude::*, px, relative, size,
 };
 use serde_json::json;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const TITLEBAR_HEIGHT: f32 = 38.0;
 const SIDEBAR_WIDTH: f32 = 256.0;
@@ -29,6 +31,23 @@ pub struct Shell {
     selected_tab: Option<String>,
     /// Titlebar drag: armed by a press in the strip, consumed by the first move (Collie's `drag_strip`).
     should_move: Rc<Cell<bool>>,
+    client: Client,
+    rt: tokio::runtime::Handle,
+    /// The pane grid's bounds from the last paint, to turn a divider drag into a ratio.
+    grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    divider: Option<DividerDrag>,
+    /// A herdr error from the last command, shown over the grid for a few seconds.
+    flash: Option<String>,
+}
+
+struct DividerDrag {
+    tab_id: String,
+    path: Vec<bool>,
+    vertical: bool,
+    start_px: f32,
+    len_px: f32,
+    ratio: f32,
+    throttle: Throttle,
 }
 
 impl Shell {
@@ -63,12 +82,90 @@ impl Shell {
                     focused: None,
                     selected_tab: std::env::var("SHEPHERD_TAB").ok(),
                     should_move: Rc::new(Cell::new(false)),
+                    client: Client::local(),
+                    rt: rt.clone(),
+                    grid_bounds: Rc::new(Cell::new(None)),
+                    divider: None,
+                    flash: None,
                 };
-                cx.spawn(async move |this, cx| sync_loop(this, rt, cx).await).detach();
+                let client = shell.client.clone();
+                cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await).detach();
                 shell
             })
         })
         .expect("open window");
+    }
+
+    /// Send a command to herdr; `then` gets the result. Errors show over the grid for 4 s.
+    fn send(
+        &mut self,
+        command: Command,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Shell, &serde_json::Value, &mut Context<Shell>) + 'static,
+    ) {
+        let (method, params) = command.request();
+        let client = self.client.clone();
+        let call = self.rt.spawn(async move { client.call(method, params).await });
+        cx.spawn(async move |this, cx| {
+            let result = call.await.map_err(anyhow::Error::from).and_then(|r| r);
+            let _ = this.update(cx, |shell, cx| match result {
+                Ok(value) => then(shell, &value, cx),
+                Err(err) => shell.show_error(format!("{err:#}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    fn show_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.flash = Some(message.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(4)).await;
+            let _ = this.update(cx, |shell, cx| {
+                if shell.flash.as_deref() == Some(message.as_str()) {
+                    shell.flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn start_divider(&mut self, tab_id: String, split: &SplitFrame, cx: &mut Context<Self>) {
+        let Some(grid) = self.grid_bounds.get() else { return };
+        let (origin, size) = if split.vertical {
+            (f32::from(grid.origin.x) + f32::from(grid.size.width) * split.frame.x, f32::from(grid.size.width) * split.frame.w)
+        } else {
+            (f32::from(grid.origin.y) + f32::from(grid.size.height) * split.frame.y, f32::from(grid.size.height) * split.frame.h)
+        };
+        self.divider = Some(DividerDrag {
+            tab_id,
+            path: split.path.clone(),
+            vertical: split.vertical,
+            start_px: origin,
+            len_px: size,
+            ratio: split.ratio,
+            throttle: Throttle::default(),
+        });
+        cx.notify();
+    }
+
+    fn drag_divider(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(drag) = &mut self.divider else { return };
+        let pointer = f32::from(if drag.vertical { position.x } else { position.y });
+        drag.ratio = drag_ratio(drag.start_px, drag.len_px, pointer);
+        if drag.throttle.ready(Instant::now()) {
+            let command = Command::SetSplitRatio { tab_id: drag.tab_id.clone(), path: drag.path.clone(), ratio: drag.ratio };
+            self.send(command, cx, |_, _, _| {});
+        }
+        cx.notify();
+    }
+
+    fn end_divider(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.divider.take() else { return };
+        // The last position, unthrottled, so herdr ends where the pointer let go.
+        self.send(Command::SetSplitRatio { tab_id: drag.tab_id, path: drag.path, ratio: drag.ratio }, cx, |_, _, _| {});
+        cx.notify();
     }
 
     /// The strip under the transparent titlebar drags the window; a double click zooms it.
@@ -109,8 +206,7 @@ fn prune<S>(surfaces: &mut HashMap<String, S>, focused: &mut Option<String>, sho
 }
 
 /// Subscribe, then snapshot; every event (coalesced) triggers another snapshot. Reconnects forever.
-async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cx: &mut gpui::AsyncApp) {
-    let client = Client::local();
+async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, client: Client, cx: &mut gpui::AsyncApp) {
     loop {
         let sub = {
             let c = client.clone();
@@ -295,6 +391,12 @@ impl Render for Shell {
                     }))
             }));
 
+        let splits = match (&snapshot, &tab) {
+            (Some(s), Some(t)) => s.split_frames(&t.tab_id),
+            _ => Vec::new(),
+        };
+        let shown_tab_id = shown_tab.clone().unwrap_or_default();
+        let grid_bounds = self.grid_bounds.clone();
         let border = theme.border;
         let ring = theme.accent.opacity(0.5);
         let grid = div()
@@ -303,6 +405,11 @@ impl Render for Shell {
             .relative()
             .overflow_hidden()
             .bg(theme.terminal.background)
+            .child(
+                canvas(move |bounds, _, _| grid_bounds.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
             .when_some(self.error.clone(), |el, err| el.child(div().p_4().text_color(theme.text_muted).child(err)))
             .when(snapshot.is_none() && self.error.is_none(), |el| {
                 el.child(div().p_4().text_color(theme.text_muted).child("Connecting to herdr…"))
@@ -333,6 +440,61 @@ impl Render for Shell {
                     ),
                 }
             }));
+        let hover = theme.border_strong;
+        let active = theme.accent;
+        let grid = grid
+            .children(splits.into_iter().map(|split| {
+                let dragging = self.divider.as_ref().is_some_and(|d| d.path == split.path);
+                let ratio = self.divider.as_ref().filter(|d| d.path == split.path).map_or(split.ratio, |d| d.ratio);
+                let id = SharedString::from(format!("split-{}", split.path.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>()));
+                let strip = if split.vertical {
+                    div()
+                        .left(relative(split.frame.x + split.frame.w * ratio))
+                        .ml(px(-3.))
+                        .top(relative(split.frame.y))
+                        .h(relative(split.frame.h))
+                        .w(px(6.))
+                        .cursor_col_resize()
+                } else {
+                    div()
+                        .top(relative(split.frame.y + split.frame.h * ratio))
+                        .mt(px(-3.))
+                        .left(relative(split.frame.x))
+                        .w(relative(split.frame.w))
+                        .h(px(6.))
+                        .cursor_row_resize()
+                };
+                let tab_id = shown_tab_id.clone();
+                strip
+                    .id(id)
+                    .absolute()
+                    .when(dragging, |el| el.bg(active.opacity(0.6)))
+                    .when(!dragging, |el| el.hover(move |s| s.bg(hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.start_divider(tab_id.clone(), &split, cx);
+                        }),
+                    )
+            }))
+            .when_some(self.flash.clone(), |el, message| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(8.))
+                        .left(px(8.))
+                        .right(px(8.))
+                        .px_3()
+                        .py_2()
+                        .rounded(px(8.))
+                        .bg(theme.card)
+                        .border_1()
+                        .border_color(theme.danger.opacity(0.5))
+                        .text_color(theme.danger)
+                        .child(message),
+                )
+            });
 
         div()
             .id("root")
@@ -344,6 +506,9 @@ impl Render for Shell {
             .text_color(theme.text)
             .font_family(theme.font_ui.clone())
             .text_size(px(13.))
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.drag_divider(e.position, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_divider(cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_divider(cx)))
             .child(self.drag_strip())
             .child(sidebar)
             .child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).child(grid))
