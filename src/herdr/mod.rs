@@ -1,4 +1,4 @@
 mod client;
 mod session;
 pub use client::{Client, EVENT_TYPES};
-pub use session::{Session, SessionEvent};
+pub use session::{Session, SessionEvent, set_binary};

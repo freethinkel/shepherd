@@ -1,0 +1,153 @@
+//! Shepherd's settings: a JSON file every field of which has a default, so old, partial or future files load.
+use crate::theme::{AppearanceMode, FontSettings, Theme};
+use gpui::{App, Global, WindowAppearance};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub font_family: String,
+    pub font_size: f32,
+    pub theme_family: String,
+    pub appearance: AppearanceMode,
+    /// The herdr binary; `None` is `herdr` on PATH.
+    pub herdr_bin: Option<String>,
+    /// herdr's API socket; `None` is herdr's own default.
+    pub herdr_socket: Option<String>,
+    /// Action name → keystroke (`cmd-shift-d`); an empty string unbinds the action.
+    pub keys: BTreeMap<String, String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        let font = FontSettings::default();
+        Settings {
+            font_family: font.family,
+            font_size: font.size,
+            theme_family: "zeron".into(),
+            appearance: AppearanceMode::System,
+            herdr_bin: None,
+            herdr_socket: None,
+            keys: BTreeMap::new(),
+        }
+    }
+}
+
+impl Settings {
+    pub fn path() -> PathBuf {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Application Support/Shepherd/settings.json")
+    }
+
+    /// Defaults when the file is missing; defaults and an error naming the file when it cannot be read. The file
+    /// is never rewritten here, so a broken one survives until the user saves.
+    pub fn load(path: &Path) -> (Settings, Option<String>) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), None),
+            Err(e) => return (Settings::default(), Some(format!("cannot read {}: {e}", path.display()))),
+        };
+        match serde_json::from_str(&text) {
+            Ok(settings) => (settings, None),
+            Err(e) => (Settings::default(), Some(format!("{} is not valid settings: {e}", path.display()))),
+        }
+    }
+
+    /// Writes a temporary file next to `path`, then renames it over: a crash never leaves half a file.
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    pub fn font(&self) -> FontSettings {
+        FontSettings { family: self.font_family.clone(), size: self.font_size }
+    }
+
+    pub fn theme(&self, system: WindowAppearance) -> Theme {
+        Theme::resolve(&self.theme_family, self.appearance, system, &self.font())
+    }
+}
+
+/// The loaded settings, the load error (shown in Settings) and where they live.
+pub struct SettingsGlobal {
+    pub settings: Settings,
+    pub error: Option<String>,
+    pub path: PathBuf,
+}
+
+impl Global for SettingsGlobal {}
+
+impl SettingsGlobal {
+    pub fn of(cx: &App) -> &SettingsGlobal {
+        cx.global::<SettingsGlobal>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        (dir, path)
+    }
+
+    #[test]
+    fn missing_file_gives_defaults_without_error() {
+        let (_d, path) = tmp();
+        let (s, err) = Settings::load(&path);
+        assert_eq!(s, Settings::default());
+        assert!(err.is_none());
+        assert_eq!(s.font_family, "Geist Mono");
+        assert_eq!(s.font_size, 13.0);
+        assert_eq!(s.theme_family, "zeron");
+    }
+
+    #[test]
+    fn empty_object_and_unknown_fields_give_defaults() {
+        let (_d, path) = tmp();
+        std::fs::write(&path, r#"{"from_the_future": 1}"#).unwrap();
+        let (s, err) = Settings::load(&path);
+        assert_eq!(s, Settings::default());
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn a_partial_file_keeps_what_it_sets() {
+        let (_d, path) = tmp();
+        std::fs::write(&path, r#"{"font_size": 15, "appearance": "dark", "keys": {"NewTab": "cmd-n"}}"#).unwrap();
+        let (s, _) = Settings::load(&path);
+        assert_eq!(s.font_size, 15.0);
+        assert_eq!(s.appearance, crate::theme::AppearanceMode::Dark);
+        assert_eq!(s.keys.get("NewTab").map(String::as_str), Some("cmd-n"));
+        assert_eq!(s.font_family, "Geist Mono");
+    }
+
+    #[test]
+    fn a_broken_file_gives_defaults_an_error_and_stays_untouched() {
+        let (_d, path) = tmp();
+        std::fs::write(&path, "{not json").unwrap();
+        let (s, err) = Settings::load(&path);
+        assert_eq!(s, Settings::default());
+        assert!(err.unwrap().contains(&path.display().to_string()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let (_d, path) = tmp();
+        let mut s = Settings::default();
+        s.font_family = "IoskeleyMonoNL Nerd Font Mono".into();
+        s.herdr_bin = Some("/opt/homebrew/bin/herdr".into());
+        s.keys.insert("SplitRight".into(), "cmd-shift-right".into());
+        s.save(&path).unwrap();
+        assert_eq!(Settings::load(&path), (s, None));
+    }
+}

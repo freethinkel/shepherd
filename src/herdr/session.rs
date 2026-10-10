@@ -9,6 +9,20 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+static BINARY: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// The herdr binary sessions run (from settings); `None` is `herdr` on PATH. `SHEPHERD_HERDR` overrides it.
+pub fn set_binary(path: Option<String>) {
+    *BINARY.write().unwrap() = path.filter(|p| !p.trim().is_empty());
+}
+
+fn binary() -> String {
+    std::env::var("SHEPHERD_HERDR")
+        .ok()
+        .or_else(|| BINARY.read().unwrap().clone())
+        .unwrap_or_else(|| "herdr".into())
+}
+
 pub enum SessionEvent {
     /// Terminal bytes to feed the emulator.
     Frame(Vec<u8>),
@@ -24,7 +38,7 @@ pub struct Session {
 impl Session {
     /// `takeover` replaces another client's control of the pane (herdr allows one controller).
     pub fn spawn(pane: &str, cols: u16, rows: u16, takeover: bool) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
-        let herdr = std::env::var("SHEPHERD_HERDR").unwrap_or_else(|_| "herdr".into());
+        let herdr = binary();
         let mut child = Command::new(&herdr)
             .args(["terminal", "session", "control", pane])
             .args(["--cols", &cols.to_string(), "--rows", &rows.to_string()])

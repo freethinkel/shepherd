@@ -174,3 +174,24 @@ fn takeover_is_passed_to_herdr() {
     drop(session);
     assert_eq!(args.trim(), "terminal session control w1:p1 --cols 100 --rows 30 --takeover");
 }
+
+#[test]
+fn the_configured_binary_is_used_without_the_env_override() {
+    let _l = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    fake(dir.path(), "cat > /dev/null");
+    unsafe {
+        std::env::remove_var("SHEPHERD_HERDR");
+        std::env::set_var("REC", dir.path());
+    }
+    shepherd::herdr::set_binary(Some(dir.path().join("herdr").display().to_string()));
+    let (session, _rx) = Session::spawn("w1:p1", 100, 30, false).unwrap();
+    let args_path = dir.path().join("args");
+    let ran = (0..50).any(|_| {
+        std::thread::sleep(Duration::from_millis(20));
+        args_path.exists()
+    });
+    drop(session);
+    shepherd::herdr::set_binary(None);
+    assert!(ran, "the configured herdr binary did not run");
+}

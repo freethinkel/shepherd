@@ -6,6 +6,7 @@ use crate::ui::divider::{Throttle, drag_ratio};
 use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use crate::model::{AgentStatus, PaneFrame, Snapshot, SplitFrame, attachable};
 use crate::terminal::PaneTerminal;
+use crate::settings::SettingsGlobal;
 use crate::theme::Theme;
 use gpui::{
     Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
@@ -81,10 +82,10 @@ impl Shell {
             ..Default::default()
         };
         cx.open_window(options, |window, cx| {
-            cx.set_global(Theme::for_appearance(window.appearance()));
+            cx.set_global(SettingsGlobal::of(cx).settings.theme(window.appearance()));
             window
                 .observe_window_appearance(|window, cx| {
-                    cx.set_global(Theme::for_appearance(window.appearance()));
+                    cx.set_global(SettingsGlobal::of(cx).settings.theme(window.appearance()));
                     cx.refresh_windows();
                 })
                 .detach();
@@ -97,7 +98,12 @@ impl Shell {
                     focused: None,
                     selected_tab: std::env::var("SHEPHERD_TAB").ok(),
                     should_move: Rc::new(Cell::new(false)),
-                    client: Client::local(),
+                    client: SettingsGlobal::of(cx)
+                        .settings
+                        .herdr_socket
+                        .clone()
+                        .filter(|p| !p.trim().is_empty())
+                        .map_or_else(Client::local, |p| Client::at(p.into())),
                     rt: rt.clone(),
                     grid_bounds: Rc::new(Cell::new(None)),
                     divider: None,
