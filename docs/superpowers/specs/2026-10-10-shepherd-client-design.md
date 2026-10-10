@@ -55,7 +55,8 @@ same revs as Collie: `gpui`, `gpui_platform` (`font-kit`, `runtime_shaders`), `g
 
 ```
 shepherd/
-  Makefile            build libghostty (zig 0.15.2, pinned ghostty commit) → vendor/ghostty/{libghostty.a,ghostty.h}
+  Makefile            build libghostty (zig 0.15.2, pinned ghostty commit) → vendor/ghostty/{libghostty.dylib,ghostty.h};
+                      GHOSTTY_PREBUILT=<dir> reuses a prior build (Zig 0.15.2 cannot link on macOS 27, see docs/spike-results.md)
   build.rs            link libghostty and its macOS frameworks
   src/
     main.rs           app entry; `shepherd attach …` subcommand dispatch
