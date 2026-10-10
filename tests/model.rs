@@ -71,3 +71,30 @@ fn parses_live_snapshot() {
         let _ = s.pane_frames(&tab.tab_id);
     }
 }
+
+#[test]
+fn tabs_of_a_workspace_in_order() {
+    let s = fixture();
+    let labels: Vec<_> = s.tabs_of("w1").iter().map(|t| t.label.as_str()).collect();
+    assert_eq!(labels, ["main", "logs"]);
+    assert!(s.tabs_of("w7").is_empty());
+}
+
+#[test]
+fn pick_tab_keeps_a_live_choice() {
+    assert_eq!(fixture().pick_tab(Some("w1:t2")).map(|t| t.tab_id.as_str()), Some("w1:t2"));
+}
+
+#[test]
+fn pick_tab_falls_back_to_herdr_focus_when_the_choice_is_gone() {
+    // The chosen tab was closed in herdr: show herdr's focused tab instead of nothing.
+    assert_eq!(fixture().pick_tab(Some("w1:t9")).map(|t| t.tab_id.as_str()), Some("w1:t1"));
+    assert_eq!(fixture().pick_tab(None).map(|t| t.tab_id.as_str()), Some("w1:t1"));
+}
+
+#[test]
+fn pick_tab_falls_back_to_the_first_tab_without_focus() {
+    let mut s = fixture();
+    s.focused_tab_id = None;
+    assert_eq!(s.pick_tab(None).map(|t| t.tab_id.as_str()), Some("w1:t1"));
+}

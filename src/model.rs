@@ -100,6 +100,18 @@ impl Snapshot {
         Ok(Self::deserialize(&result["snapshot"])?)
     }
 
+    pub fn tabs_of(&self, workspace_id: &str) -> Vec<&Tab> {
+        let mut tabs: Vec<_> = self.tabs.iter().filter(|t| t.workspace_id == workspace_id).collect();
+        tabs.sort_by_key(|t| t.number);
+        tabs
+    }
+
+    /// The tab Shepherd shows: its own choice while that tab lives, else herdr's focused one, else the first.
+    pub fn pick_tab(&self, wanted: Option<&str>) -> Option<&Tab> {
+        let find = |id: &str| self.tabs.iter().find(|t| t.tab_id == id);
+        wanted.and_then(find).or_else(|| self.focused_tab_id.as_deref().and_then(find)).or(self.tabs.first())
+    }
+
     // ponytail: fractions of herdr's cell rects; plan 2 builds a real split tree (dividers, set_split_ratio paths).
     pub fn pane_frames(&self, tab_id: &str) -> Vec<PaneFrame> {
         let Some(layout) = self.layouts.iter().find(|l| l.tab_id == tab_id) else { return Vec::new() };
