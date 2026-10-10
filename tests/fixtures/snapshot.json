@@ -1,0 +1,41 @@
+{
+  "type": "session_snapshot",
+  "snapshot": {
+    "version": "0.9.3",
+    "protocol": 22,
+    "focused_workspace_id": "w1",
+    "focused_tab_id": "w1:t1",
+    "focused_pane_id": "w1:p2",
+    "workspaces": [
+      {"workspace_id": "w1", "label": "demo", "number": 1, "active_tab_id": "w1:t1",
+       "agent_status": "working", "focused": true, "pane_count": 3, "tab_count": 2}
+    ],
+    "tabs": [
+      {"tab_id": "w1:t1", "workspace_id": "w1", "label": "main", "number": 1, "agent_status": "working", "focused": true, "pane_count": 2},
+      {"tab_id": "w1:t2", "workspace_id": "w1", "label": "logs", "number": 2, "agent_status": "unknown", "focused": false, "pane_count": 1}
+    ],
+    "panes": [
+      {"pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1", "terminal_id": "term_a", "agent_status": "unknown", "focused": false, "cwd": "/tmp/demo", "revision": 1},
+      {"pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "terminal_id": "term_b", "agent_status": "working", "focused": true, "cwd": "/tmp/demo", "revision": 7,
+       "agent": "claude", "terminal_title_stripped": "fixing tests"},
+      {"pane_id": "w1:p3", "tab_id": "w1:t2", "workspace_id": "w1", "terminal_id": "term_c", "agent_status": "unknown", "focused": false, "cwd": "/tmp/demo", "revision": 0}
+    ],
+    "layouts": [
+      {"workspace_id": "w1", "tab_id": "w1:t1", "zoomed": false, "focused_pane_id": "w1:p2",
+       "area": {"x": 0, "y": 0, "width": 100, "height": 40},
+       "panes": [
+         {"pane_id": "w1:p1", "focused": false, "rect": {"x": 0, "y": 0, "width": 50, "height": 40}},
+         {"pane_id": "w1:p2", "focused": true, "rect": {"x": 50, "y": 0, "width": 50, "height": 40}}
+       ],
+       "splits": [{"id": "s0", "direction": "right", "ratio": 0.5, "rect": {"x": 0, "y": 0, "width": 100, "height": 40}}]},
+      {"workspace_id": "w1", "tab_id": "w1:t2", "zoomed": false, "focused_pane_id": "w1:p3",
+       "area": {"x": 0, "y": 0, "width": 100, "height": 40},
+       "panes": [
+         {"pane_id": "w1:p3", "focused": true, "rect": {"x": 0, "y": 0, "width": 100, "height": 40}},
+         {"pane_id": "w1:p9", "focused": false, "rect": {"x": 100, "y": 0, "width": 0, "height": 40}}
+       ],
+       "splits": []}
+    ],
+    "agents": []
+  }
+}

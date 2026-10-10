@@ -1,0 +1,73 @@
+use shepherd::model::{AgentStatus, Frac, Snapshot, attachable};
+
+fn fixture() -> Snapshot {
+    let value: serde_json::Value = serde_json::from_str(include_str!("fixtures/snapshot.json")).unwrap();
+    Snapshot::from_result(&value).unwrap()
+}
+
+#[test]
+fn parses_snapshot() {
+    let s = fixture();
+    assert_eq!(s.focused_tab_id.as_deref(), Some("w1:t1"));
+    assert_eq!(s.workspaces[0].label, "demo");
+    assert_eq!(s.tabs.len(), 2);
+    let p2 = s.panes.iter().find(|p| p.pane_id == "w1:p2").unwrap();
+    assert_eq!(p2.agent_status, AgentStatus::Working);
+    assert_eq!(p2.terminal_title_stripped.as_deref(), Some("fixing tests"));
+}
+
+#[test]
+fn pane_frames_are_fractions_of_the_tab_area() {
+    let frames = fixture().pane_frames("w1:t1");
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].pane_id, "w1:p1");
+    assert_eq!(frames[0].frame, Frac { x: 0.0, y: 0.0, w: 0.5, h: 1.0 });
+    assert_eq!(frames[1].frame, Frac { x: 0.5, y: 0.0, w: 0.5, h: 1.0 });
+    assert!(frames[1].focused);
+}
+
+#[test]
+fn zoomed_tab_shows_only_the_focused_pane_full_size() {
+    let mut s = fixture();
+    s.layouts[0].zoomed = true;
+    let frames = s.pane_frames("w1:t1");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].pane_id, "w1:p2");
+    assert_eq!(frames[0].frame, Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+}
+
+#[test]
+fn zero_area_panes_are_skipped() {
+    let frames = fixture().pane_frames("w1:t2");
+    assert_eq!(frames.iter().map(|f| f.pane_id.as_str()).collect::<Vec<_>>(), ["w1:p3"]);
+}
+
+#[test]
+fn unknown_tab_has_no_frames() {
+    assert!(fixture().pane_frames("w7:t7").is_empty());
+}
+
+#[test]
+fn own_pane_is_not_attachable() {
+    assert!(!attachable("w1:p2", Some("w1:p2")));
+    assert!(attachable("w1:p1", Some("w1:p2")));
+    assert!(attachable("w1:p1", None));
+}
+
+#[test]
+fn unknown_agent_status_parses_as_unknown() {
+    let s: AgentStatus = serde_json::from_str("\"sleeping\"").unwrap();
+    assert_eq!(s, AgentStatus::Unknown);
+}
+
+/// `herdr api snapshot | jq .result > /tmp/live.json && SHEPHERD_LIVE_SNAPSHOT=/tmp/live.json cargo test --test model -- --ignored`
+#[test]
+#[ignore]
+fn parses_live_snapshot() {
+    let path = std::env::var("SHEPHERD_LIVE_SNAPSHOT").expect("SHEPHERD_LIVE_SNAPSHOT");
+    let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let s = Snapshot::from_result(&value).unwrap();
+    for tab in &s.tabs {
+        let _ = s.pane_frames(&tab.tab_id);
+    }
+}
