@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod bindings;
 pub mod commands;
 pub mod herdr;
 pub mod model;

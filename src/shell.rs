@@ -1,6 +1,7 @@
 //! The window: workspaces sidebar, the tab bar, and a GPUI terminal per pane of the shown tab, refreshed on
 //! every herdr event. Look and titlebar handling follow Collie (Zeron style).
-use crate::commands::Command;
+use crate::bindings::*;
+use crate::commands::{Command, Direction};
 use crate::herdr::{Client, EVENT_TYPES};
 use crate::ui::divider::{Throttle, drag_ratio};
 use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
@@ -9,7 +10,7 @@ use crate::terminal::PaneTerminal;
 use crate::settings::SettingsGlobal;
 use crate::theme::Theme;
 use gpui::{
-    Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    App, Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     ParentElement, Render, SharedString, Stateful, Styled, TitlebarOptions, Window, WindowBackgroundAppearance,
     Subscription, WindowControlArea, WindowOptions, canvas, div, point, prelude::*, px, relative, size,
 };
@@ -136,6 +137,44 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    fn shown_tab(&self) -> Option<crate::model::Tab> {
+        self.snapshot.as_ref()?.pick_tab(self.selected_tab.as_deref()).cloned()
+    }
+
+    /// The pane keyboard actions apply to: the one with keyboard focus, else herdr's focused pane of the shown tab.
+    fn active_pane(&self, window: &Window, cx: &App) -> Option<String> {
+        if let Some((id, _)) = self.panes.iter().find(|(_, pane)| pane.read(cx).focus_handle(cx).is_focused(window)) {
+            return Some(id.clone());
+        }
+        let (snapshot, tab) = (self.snapshot.as_ref()?, self.shown_tab()?);
+        snapshot.pane_frames(&tab.tab_id).into_iter().find(|f| f.focused).map(|f| f.pane_id)
+    }
+
+    fn pane_command(&mut self, window: &Window, cx: &mut Context<Self>, make: impl FnOnce(String) -> Command) {
+        if let Some(pane_id) = self.active_pane(window, cx) {
+            self.send(make(pane_id), cx, |_, _, _| {});
+        }
+    }
+
+    fn go_to_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let (Some(snapshot), Some(tab)) = (self.snapshot.as_ref(), self.shown_tab()) else { return };
+        if let Some(target) = snapshot.tabs_of(&tab.workspace_id).get(index) {
+            self.selected_tab = Some(target.tab_id.clone());
+            cx.notify();
+        }
+    }
+
+    fn step_workspace(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let (Some(snapshot), Some(tab)) = (self.snapshot.as_ref(), self.shown_tab()) else { return };
+        let mut workspaces = snapshot.workspaces.clone();
+        workspaces.sort_by_key(|w| w.number);
+        let Some(i) = workspaces.iter().position(|w| w.workspace_id == tab.workspace_id) else { return };
+        let n = workspaces.len();
+        let next = &workspaces[if forward { (i + 1) % n } else { (i + n - 1) % n }];
+        self.selected_tab = next.active_tab_id.clone().or_else(|| snapshot.tabs_of(&next.workspace_id).first().map(|t| t.tab_id.clone()));
+        cx.notify();
     }
 
     fn new_tab(&mut self, workspace_id: String, cx: &mut Context<Self>) {
@@ -691,6 +730,36 @@ impl Render for Shell {
             .text_color(theme.text)
             .font_family(theme.font_ui.clone())
             .text_size(px(13.))
+            .on_action(cx.listener(|this, _: &NewTab, _, cx| {
+                if let Some(tab) = this.shown_tab() {
+                    this.new_tab(tab.workspace_id, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
+                if let Some(tab) = this.shown_tab() {
+                    this.send(Command::CloseTab { tab_id: tab.tab_id }, cx, |_, _, _| {});
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
+            .on_action(cx.listener(|this, _: &SplitRight, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: false })))
+            .on_action(cx.listener(|this, _: &SplitDown, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: true })))
+            .on_action(cx.listener(|this, _: &ClosePane, w, cx| this.pane_command(w, cx, |pane_id| Command::ClosePane { pane_id })))
+            .on_action(cx.listener(|this, _: &ToggleZoom, w, cx| this.pane_command(w, cx, |pane_id| Command::Zoom { pane_id })))
+            .on_action(cx.listener(|this, _: &FocusLeft, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Left })))
+            .on_action(cx.listener(|this, _: &FocusRight, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Right })))
+            .on_action(cx.listener(|this, _: &FocusUp, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Up })))
+            .on_action(cx.listener(|this, _: &FocusDown, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Down })))
+            .on_action(cx.listener(|this, _: &Tab1, _, cx| this.go_to_tab(0, cx)))
+            .on_action(cx.listener(|this, _: &Tab2, _, cx| this.go_to_tab(1, cx)))
+            .on_action(cx.listener(|this, _: &Tab3, _, cx| this.go_to_tab(2, cx)))
+            .on_action(cx.listener(|this, _: &Tab4, _, cx| this.go_to_tab(3, cx)))
+            .on_action(cx.listener(|this, _: &Tab5, _, cx| this.go_to_tab(4, cx)))
+            .on_action(cx.listener(|this, _: &Tab6, _, cx| this.go_to_tab(5, cx)))
+            .on_action(cx.listener(|this, _: &Tab7, _, cx| this.go_to_tab(6, cx)))
+            .on_action(cx.listener(|this, _: &Tab8, _, cx| this.go_to_tab(7, cx)))
+            .on_action(cx.listener(|this, _: &Tab9, _, cx| this.go_to_tab(8, cx)))
+            .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.step_workspace(false, cx)))
+            .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.drag_divider(e.position, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_divider(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_divider(cx)))
