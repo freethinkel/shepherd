@@ -1,17 +1,17 @@
 # Shepherd: a native macOS client for herdr
 
-Date: 2026-10-10. Status: draft for review.
+Date: 2026-10-10, revised the same day after the libghostty spike (see "Revision" at the end).
 
 ## Goal
 
 A desktop client for [herdr](https://github.com/herdrdev/herdr) (Apache-2.0, protocol 22, v0.9.3) that the
 author fully controls, built on the same stack as Collie's app (GPUI from `zeronsh/zui`, `gpui-base`, Zeron's
-palette), with terminals rendered by Ghostty itself through libghostty. It replaces daily use of the herdr TUI and
+palette and widgets, Geist fonts), with terminals emulated and painted in GPUI. It replaces daily use of the herdr TUI and
 of the third-party Herdr GPUI app, and is the base for features those lack: first of all an ACP chat view for
 agent panes (a separate spec, after this one).
 
 Success: the author runs their herdr sessions, local and on saved SSH machines, from Shepherd every day: terminals
-look and type exactly like their Ghostty, and everything the herdr TUI does for workspaces, tabs, panes,
+type, scroll and select like a normal terminal, the window looks like Zeron, and everything the herdr TUI does for workspaces, tabs, panes,
 worktrees and agents is reachable from the window.
 
 ## Scope
@@ -20,29 +20,40 @@ In:
 - macOS only (14+, Apple Silicon first).
 - Local herdr server and saved SSH machines (`herdr machine list`), each with its own connection.
 - Sidebar: machines → workspaces (with worktree grouping) → agents and their status; tab bar; herdr's split layout.
-- Terminals: one libghostty surface per visible pane, using the user's Ghostty config.
+- Terminals: one GPUI terminal view per visible pane (`alacritty_terminal` emulation, Zeron's terminal painter).
 - Management: create / close / rename workspaces, tabs and panes; split; focus; resize splits by dragging;
   zoom; drag-and-drop of tabs and panes; create / open / remove worktrees; start agents.
 - Chrome theme: Zeron light / dark following the system, as in Collie.
 
 Out (later specs):
 - ACP chat view for agent panes.
-- Linux and Windows (a libghostty-vt + GPUI painter variant goes there).
+- Linux and Windows builds (the terminal path is pure Rust + GPUI, so this is packaging, not a redesign).
 - Named-session switching beyond what a saved machine profile targets (local uses the default session).
 - Browser tabs, annotations, notifications UI beyond agent status, plugins UI, in-app settings.
 
 ## Approach
 
-Terminals are native libghostty surfaces (Metal, `NSView`), one per visible pane, laid over the GPUI window at
-rects GPUI computes. A surface's process is Shepherd's own shim, `shepherd attach <machine> <pane>`, which
-bridges the surface's PTY to `herdr terminal session control <pane>` (JSON lines: `terminal.frame` with base64
-ANSI out; `terminal.input`, `terminal.resize`, `terminal.scroll`, `terminal.mouse` in). The herdr server keeps
-the authoritative terminal state (its own ghostty-vt); Ghostty re-parses the ANSI it emits, like a terminal
-under tmux.
+Each visible pane is a GPUI view that Shepherd paints itself. The app spawns `herdr terminal session control
+<pane> --cols C --rows R` per pane (JSON lines: `terminal.frame` with base64 ANSI out; `terminal.input`,
+`terminal.resize`, `terminal.scroll`, `terminal.mouse` in), feeds the frames into an `alacritty_terminal`
+emulator and paints its grid with the terminal element ported from Zeron (`crates/ui/src/terminal`, MIT).
 
+- **herdr owns the terminal state.** Frames are herdr's re-render of the pane's screen, so the local emulator keeps
+  no scrollback (history 0). The wheel and Shift+PageUp/PageDown send `terminal.scroll`; herdr scrolls its own
+  viewport and the next frames show it.
+- **Input** goes through GPUI key events: Zeron's `keystroke_bytes` turns a keystroke into bytes sent as
+  `terminal.input`. herdr's frames do not carry application modes (cursor keys, bracketed paste, mouse
+  reporting), so Shepherd sends plain xterm encodings and relies on herdr re-encoding input for the pane's
+  mode, as its own TUI client does (checked live in the plan).
+- **Mouse**: a drag selects locally on the visible grid (Cmd+C copies); clicks and drags are also sent as
+  `terminal.mouse`, which herdr drops unless the app asked for mouse reporting.
+- **Colors and font**: Zeron's terminal palette (16 ANSI colors per appearance) and Geist Mono; the user's
+  Ghostty config is not read.
+
+Why not libghostty (the first spike, `docs/spike-results.md`): its surfaces own scrolling, selection and input in
+a native `NSView` beside GPUI, so herdr-side scrollback could not be wired without hacks, every AppKit input path
+had to be re-implemented by hand, and Zig 0.15.2 cannot build it on macOS 27.
 Why not `herdr terminal attach`: it reserves `ctrl+b` as a detach prefix and is not forwarded to saved machines.
-Why not a GPUI-painted terminal (libghostty-vt + own renderer): that is writing a terminal renderer, which is
-the main thing this project wants from Ghostty; it stays the plan for Linux and Windows.
 
 herdr is the single source of truth for layout. Shepherd never changes its own layout model locally: every
 action is an API call, and the window updates from the event that follows.
@@ -55,30 +66,28 @@ same revs as Collie: `gpui`, `gpui_platform` (`font-kit`, `runtime_shaders`), `g
 
 ```
 shepherd/
-  Makefile            build libghostty (zig 0.15.2, pinned ghostty commit) → vendor/ghostty/{libghostty.dylib,ghostty.h};
-                      GHOSTTY_PREBUILT=<dir> reuses a prior build (Zig 0.15.2 cannot link on macOS 27, see docs/spike-results.md)
-  build.rs            link libghostty and its macOS frameworks
+  assets/             Geist + Geist Mono fonts, icons (licenses in assets/NOTICE)
   src/
-    main.rs           app entry; `shepherd attach …` subcommand dispatch
+    main.rs           app entry, window, menus
     herdr/
       transport.rs    a duplex byte stream: unix socket (local) | `ssh <target> herdr remote-api-bridge` stdio
       client.rs       JSON API requests/responses, `events.subscribe`, reconnect with backoff
       machines.rs     `herdr machine list --json`; the Local machine is implicit
+      session.rs      one `herdr terminal session control` child per pane: frames in, commands out
     model.rs          Machine → Workspace → Tab → split tree → Pane (+ agent status); parsed from
                       `session.snapshot`, refetched on events; pure, no GPUI
-    ghostty/
-      ffi.rs          bindgen output for ghostty.h (ABI-exact; hand-written structs fail silently)
-      app.rs          ghostty app + config (`ghostty_config_load_default_files`), runtime callbacks
-      surface.rs      surface lifecycle; `NSView` placement inside the GPUI window
-      actions.rs      ghostty actions → herdr commands
-    attach.rs         the shim: PTY ⇄ `herdr terminal session control` (local) or the same over ssh
+    terminal/
+      emulator.rs     alacritty_terminal Term + parser (from Zeron)
+      keys.rs         keystroke → bytes, paste encoding (from Zeron)
+      element.rs      the grid painter (from Zeron)
+      pane.rs         a pane's view: emulator + session + input, scroll and selection handling
+    theme.rs          Zeron tokens (light/dark) and terminal palette, as in Collie
     ui/
       window.rs       root view: sidebar | tab bar + pane grid
       sidebar.rs      machines, workspaces, worktree groups, agents with status
       tabs.rs         tab bar, drag-and-drop reorder / move
       panes.rs        split layout → rects, dividers (drag to resize), pane drag-and-drop, zoom
       dialogs.rs      rename, new worktree, start agent, confirm close/remove
-      theme.rs        Zeron palette (light/dark), copied from Collie
 ```
 
 ### Units
@@ -93,18 +102,19 @@ shepherd/
   `layout.updated`, …) are invalidation signals: a burst of them triggers one fresh snapshot, as herdr's docs
   require (events and snapshots share no sequence, so events are never replayed onto a snapshot).
   Unit-testable with recorded JSON.
-- **ghostty** — owns the single `ghostty_app_t`, creates a surface per visible pane with `command` set to the
-  shim, places its `NSView` at the pane rect, forwards focus, and routes actions.
-- **attach (shim)** — runs as the surface's child process. Puts its stdin in raw mode, spawns
-  `herdr terminal session control <pane> --cols C --rows R` (local) or `ssh -t <target> herdr --session <s>
-  terminal session control …` (remote), writes decoded `terminal.frame` bytes to stdout, wraps stdin bytes as
-  `terminal.input`, turns SIGWINCH into `terminal.resize`, exits on `terminal.closed`.
+- **session** — spawns `herdr terminal session control <pane> --cols C --rows R` (local) or
+  `ssh <target> herdr --session <s> terminal session control …` (remote), decodes `terminal.frame` lines into
+  bytes on a reader thread, and writes `terminal.input` / `resize` / `scroll` / `mouse` lines. Ends on
+  `terminal.closed` or EOF.
+- **terminal** — Zeron's emulator, key encoding and grid painter, plus a pane view that owns one session: frames
+  feed the emulator, the element's size drives `resize`, keys / wheel / mouse become session commands.
 - **ui** — GPUI views over the model; every user action becomes a `client.call`.
 
 ## UI
 
 - **Window**: left sidebar, right the selected workspace: a tab bar and the pane grid of the selected tab.
-  Window title follows the focused pane (`GHOSTTY_ACTION_SET_TITLE` and herdr's pane title).
+  Window title follows the focused pane (herdr's pane title). Zeron look: Collie's tokens, Geist, a transparent
+  titlebar over the sidebar.
 - **Sidebar**: machines as collapsible sections (Local first), each with its workspaces; worktree workspaces
   grouped under their repository's workspace; under each workspace its agents with a status dot (working,
   waiting / needs you, done, idle) from herdr's agent state. A disconnected machine is dimmed with a status
@@ -118,22 +128,16 @@ shepherd/
 - **Dialogs**: rename (inline text field), new worktree (branch name, base), start agent (kind from
   `server.agent_manifests`, optional prompt), confirm closing a pane with a running process and removing a
   worktree.
-- **Keys**: inside a terminal, Ghostty handles keys with the user's Ghostty keybinds. Ghostty actions map to
-  herdr: `new_split` → `pane.split` (direction kept), `goto_split` → `pane.focus_direction`, `resize_split` →
-  `pane.resize`, `equalize_splits` → `layout.apply` of an equalized tree, `toggle_split_zoom` → `pane.zoom`,
-  `close_surface` → `pane.close`, `new_tab` → `tab.create`, `goto_tab` → `tab.focus`, `close_tab` → `tab.close`,
-  `new_window` → `workspace.create`. App-menu shortcuts cover what Ghostty has no action for: new workspace
-  (Cmd+Shift+N), new worktree (Cmd+Shift+W), start agent (Cmd+Shift+A), previous / next machine-workspace
-  (Cmd+Up / Cmd+Down), rename tab (Cmd+Shift+R).
+- **Keys**: app shortcuts, Ghostty-like defaults: Cmd+D / Cmd+Shift+D split right / down (`pane.split`),
+  Cmd+Option+arrows focus a neighbor (`pane.focus_direction`), Cmd+Shift+Enter zoom (`pane.zoom`), Cmd+W close
+  pane (`pane.close`), Cmd+T new tab (`tab.create`), Cmd+1…9 go to tab, Cmd+Shift+N new workspace, Cmd+Shift+W
+  new worktree, Cmd+Shift+A start agent, Cmd+Up / Cmd+Down previous / next workspace, Cmd+C / Cmd+V copy /
+  paste. Every other key goes to the focused pane.
 
-### Surfaces and GPUI
+### Pane views
 
-GPUI lays out an empty placeholder element per pane and reports its bounds after layout. Shepherd keeps a
-surface per pane id and moves its `NSView` to those bounds; views of panes no longer visible (other tab,
-another workspace) are hidden, not destroyed, for a bounded set (the current tab plus the last 8 used tabs);
-older ones are freed and recreated on return, which costs one reattach and a redraw from the server.
-Popovers, menus and dialogs render above native views through the zui fork's deferred compositing over
-native macOS views; anything that cannot is shown as a sheet or a separate window.
+Each pane view is a GPUI entity keyed by pane id. Views of panes no longer visible (other tab, another
+workspace) are dropped; returning re-spawns the session, and herdr's first frame is a full screen.
 
 ## Errors
 
@@ -144,8 +148,7 @@ native macOS views; anything that cannot is shown as a sheet or a separate windo
   (`herdr machine reconnect <id>`, `herdr --remote <target>`). Shepherd never installs or restarts a remote
   server.
 - **API call fails**: a toast with herdr's error message; the model is untouched (it only changes on events).
-- **Shim fails or its stream closes**: the surface shows Ghostty's process-exited state; the pane gets a
-  "Reattach" overlay. A pane herdr reports closed is removed by the next event anyway.
+- **Session fails or its stream closes**: the pane shows why (herdr's stderr) with a "Reattach" button. A pane herdr reports closed is removed by the next event anyway.
 - **Controller conflict** (another client controls the terminal): attach without `--takeover`; on refusal show
   "Controlled elsewhere — Take over" on the pane, which reattaches with `--takeover`.
 
@@ -155,23 +158,25 @@ native macOS views; anything that cannot is shown as a sheet or a separate windo
   asserting the tree and pane frames; this is where most logic lives.
 - **client**: tests against a fake JSON API server on a unix socket in a temp dir (request/response, event
   stream, reconnect).
-- **attach**: a test that runs the shim against a fake `herdr` script on `PATH` that emits `terminal.frame`
-  lines and records `terminal.input` / `terminal.resize`.
+- **session**: a test that runs a session against a fake `herdr` script that emits `terminal.frame` lines and
+  records the command lines it gets.
+- **terminal**: Zeron's emulator and key-encoding tests, ported with the code.
 - **ui**: screenshots of the window against a fake herdr (Collie's `shot.sh` pattern) for sidebar, tabs,
   splits, disconnected machine, dialogs.
 - **manual**: a checklist run against a real local herdr and one saved SSH machine.
 
-## Risks and first spike
+## Risks
 
-The plan starts with a throwaway spike that answers these before anything else is built:
+1. Input encoding without the pane's modes (cursor keys, bracketed paste): relies on herdr re-encoding input;
+   checked live with vim and Claude Code. Fallback: herdr's binary client protocol (`ControlTerminal` in
+   `src/protocol/wire.rs`), whose semantic key events herdr encodes for the pane.
+2. Sizing when the herdr TUI or another client shows the same tab (herdr's shared-tab sizing rules).
+3. Paint cost of large grids at 60 fps in GPUI (Zeron's element shapes one line per row; measure on a
+   full-screen pane).
 
-1. A libghostty surface `NSView` inside a GPUI (zui) window: placement at GPUI rects, resize, keyboard focus
-   moving between GPUI views and the surface, IME, z-order of GPUI popovers above it.
-2. `herdr terminal session control` driven by the shim: latency of typing, full-screen apps (vim, Claude Code),
-   mouse, scrollback (herdr-side `terminal.scroll` vs Ghostty's own scrollback), resize, local and over ssh.
-3. Sizing when the herdr TUI or another client shows the same tab (herdr's shared-tab sizing rules).
-4. Building libghostty with zig at a pinned commit and linking it into a cargo build (Collie's and
-   `flutter_ghostty`'s experience apply).
+## Revision
 
-If (1) fails, terminals move to separate child windows or the GPUI-painted variant; if (2) is too slow or lossy,
-the shim switches to herdr's binary client protocol (`ControlTerminal` in `src/protocol/wire.rs`).
+The first plan embedded libghostty surfaces (`NSView`) under the GPUI overlay with a PTY shim in between. It
+rendered correctly, but scrolling showed Ghostty's local scrollback of herdr's re-rendered frames instead of
+herdr's history, and input, focus, IME and mouse all needed hand-written AppKit translation. The terminal moved
+into GPUI (this spec); `docs/spike-results.md` keeps the findings.
