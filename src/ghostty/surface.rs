@@ -63,6 +63,11 @@ impl Surface {
         }
     }
 
+    /// The shim ended (pane closed, herdr gone, attach refused); Ghostty shows "process exited".
+    pub fn exited(&self) -> bool {
+        unsafe { ffi::ghostty_surface_process_exited(self.raw) }
+    }
+
     pub fn focus(&self) {
         if let Some(window) = self.view.window() {
             window.makeFirstResponder(Some(&self.view));

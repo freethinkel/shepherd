@@ -3,7 +3,7 @@ use super::ffi;
 use objc2::DefinedClass;
 use objc2::rc::Retained;
 use objc2::{MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSView};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSView};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
 use std::cell::Cell;
 use std::ffi::CString;
@@ -101,10 +101,7 @@ impl SurfaceView {
     }
 
     fn key(&self, event: &NSEvent, action: ffi::ghostty_input_action_e, text: Option<CString>) {
-        let unshifted = event
-            .charactersIgnoringModifiers()
-            .and_then(|s| s.to_string().chars().next())
-            .map_or(0, u32::from);
+        let unshifted = unshifted_codepoint(event);
         let key = ffi::ghostty_input_key_s {
             action,
             mods: mods_of(event),
@@ -133,6 +130,14 @@ impl SurfaceView {
     }
 }
 
+fn unshifted_codepoint(event: &NSEvent) -> u32 {
+    // AppKit raises on the characters of anything but key events (flagsChanged lands here too).
+    if !matches!(event.r#type(), NSEventType::KeyDown | NSEventType::KeyUp) {
+        return 0;
+    }
+    event.charactersIgnoringModifiers().and_then(|s| s.to_string().chars().next()).map_or(0, u32::from)
+}
+
 // ponytail: no NSTextInputClient yet, so no IME composition (CJK, dead keys); plan 2 adds it.
 fn text_of(event: &NSEvent) -> Option<CString> {
     let s = event.characters()?.to_string();
@@ -153,4 +158,29 @@ fn mods_of(event: &NSEvent) -> ffi::ghostty_input_mods_e {
     if f.contains(NSEventModifierFlags::Command) { m |= ffi::GHOSTTY_MODS_SUPER; }
     if f.contains(NSEventModifierFlags::CapsLock) { m |= ffi::GHOSTTY_MODS_CAPS; }
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2_foundation::NSString;
+
+    fn event(kind: NSEventType, chars: &str, keycode: u16) -> objc2::rc::Retained<NSEvent> {
+        NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            kind, NSPoint::ZERO, NSEventModifierFlags::Shift, 0.0, 0, None,
+            &NSString::from_str(chars), &NSString::from_str(chars), false, keycode,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn modifier_events_have_no_codepoint() {
+        // AppKit raises for charactersIgnoringModifiers on FlagsChanged (Shift = keycode 0x38).
+        assert_eq!(unshifted_codepoint(&event(NSEventType::FlagsChanged, "", 0x38)), 0);
+    }
+
+    #[test]
+    fn key_events_keep_their_codepoint() {
+        assert_eq!(unshifted_codepoint(&event(NSEventType::KeyDown, "a", 0)), u32::from('a'));
+    }
 }

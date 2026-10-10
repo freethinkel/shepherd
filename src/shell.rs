@@ -1,7 +1,7 @@
 //! Plan 1's window: herdr's focused tab, one Ghostty surface per pane, refreshed on every herdr event.
 use crate::ghostty::{self, Surface};
 use crate::herdr::{Client, EVENT_TYPES};
-use crate::model::{Snapshot, attachable};
+use crate::model::{PaneFrame, Snapshot, attachable};
 use gpui::{
     Bounds, Context, IntoElement, ParentElement, Pixels, Render, Styled, Window, WindowOptions, canvas, div,
     prelude::*, px, relative, rgb, size,
@@ -64,6 +64,16 @@ impl Shell {
     }
 }
 
+/// Keep surfaces of shown panes whose shim still runs; a dropped one is recreated (reattached) on the next
+/// paint. Focus is forgotten with its surface so the recreated one gets AppKit focus again.
+// ponytail: while herdr is down this reattaches once per refresh (about 1/s); add a backoff if that shows up.
+fn prune<S>(surfaces: &mut HashMap<String, S>, focused: &mut Option<String>, shown: &[PaneFrame], exited: impl Fn(&S) -> bool) {
+    surfaces.retain(|id, s| shown.iter().any(|f| &f.pane_id == id) && !exited(s));
+    if focused.as_ref().is_some_and(|id| !surfaces.contains_key(id)) {
+        *focused = None;
+    }
+}
+
 /// Subscribe, then snapshot; every event (coalesced) triggers another snapshot. Reconnects forever.
 async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cx: &mut gpui::AsyncApp) {
     let client = Client::local();
@@ -121,7 +131,7 @@ impl Render for Shell {
             // SHEPHERD_TAB pins a tab for spikes without moving herdr's own focus.
             .and_then(|s| std::env::var("SHEPHERD_TAB").ok().or(s.focused_tab_id.clone()).map(|t| s.pane_frames(&t)))
             .unwrap_or_default();
-        self.surfaces.retain(|id, _| frames.iter().any(|f| &f.pane_id == id));
+        prune(&mut self.surfaces, &mut self.focused, &frames, Surface::exited);
         let view = cx.entity();
         let own = self.own_pane.clone();
         div()
@@ -148,5 +158,49 @@ impl Render for Shell {
                     .size_full(),
                 )
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prune;
+    use crate::model::{Frac, PaneFrame};
+    use std::collections::HashMap;
+
+    fn shown(ids: &[&str]) -> Vec<PaneFrame> {
+        let frame = Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+        ids.iter().map(|id| PaneFrame { pane_id: id.to_string(), frame, focused: false }).collect()
+    }
+
+    /// Surfaces stand in as "has its process exited?".
+    fn surfaces(entries: &[(&str, bool)]) -> HashMap<String, bool> {
+        entries.iter().map(|(id, exited)| (id.to_string(), *exited)).collect()
+    }
+
+    #[test]
+    fn hidden_panes_lose_their_surface_and_focus() {
+        let mut s = surfaces(&[("w1:p1", false), ("w1:p2", false)]);
+        let mut focused = Some("w1:p2".to_string());
+        prune(&mut s, &mut focused, &shown(&["w1:p1"]), |exited| *exited);
+        assert_eq!(s.keys().collect::<Vec<_>>(), ["w1:p1"]);
+        assert_eq!(focused, None, "a recreated surface for w1:p2 must get focus again");
+    }
+
+    #[test]
+    fn exited_surfaces_are_dropped_to_be_recreated() {
+        let mut s = surfaces(&[("w1:p1", true)]);
+        let mut focused = Some("w1:p1".to_string());
+        prune(&mut s, &mut focused, &shown(&["w1:p1"]), |exited| *exited);
+        assert!(s.is_empty());
+        assert_eq!(focused, None);
+    }
+
+    #[test]
+    fn live_shown_surfaces_keep_focus() {
+        let mut s = surfaces(&[("w1:p1", false)]);
+        let mut focused = Some("w1:p1".to_string());
+        prune(&mut s, &mut focused, &shown(&["w1:p1"]), |exited| *exited);
+        assert_eq!(s.len(), 1);
+        assert_eq!(focused.as_deref(), Some("w1:p1"));
     }
 }

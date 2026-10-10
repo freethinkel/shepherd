@@ -22,6 +22,8 @@ fn quote(s: &str) -> String {
 
 pub fn run(pane: &str) -> anyhow::Result<()> {
     let herdr = std::env::var("SHEPHERD_HERDR").unwrap_or_else(|_| "herdr".into());
+    // Listen before reading the size: Ghostty resizes the PTY right after spawning us.
+    unsafe { libc::signal(libc::SIGWINCH, on_winch as extern "C" fn(libc::c_int) as libc::sighandler_t) };
     let size = winsize().unwrap_or(Size { cols: 80, rows: 24, cell_w: 0, cell_h: 0 });
     let mut child = Command::new(herdr)
         .args(["terminal", "session", "control", pane])
@@ -42,6 +44,7 @@ pub fn run(pane: &str) -> anyhow::Result<()> {
         input.lock().unwrap().take(); // EOF: close herdr's stdin so it ends the session
     });
 
+    WINCH.store(true, Ordering::Relaxed); // send the current size once, in case it changed before the spawn
     watch_resize(sink.clone());
 
     let mut stdout = std::io::stdout().lock();
@@ -75,7 +78,6 @@ extern "C" fn on_winch(_: libc::c_int) {
 
 // ponytail: a flag polled every 50 ms; a self-pipe if resize latency ever matters.
 fn watch_resize(sink: Sink) {
-    unsafe { libc::signal(libc::SIGWINCH, on_winch as extern "C" fn(libc::c_int) as libc::sighandler_t) };
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(50));
         if WINCH.swap(false, Ordering::Relaxed) {
