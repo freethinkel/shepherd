@@ -31,6 +31,14 @@ pub struct Workspace {
     pub number: u32,
     pub active_tab_id: Option<String>,
     pub agent_status: AgentStatus,
+    #[serde(default)]
+    pub worktree: Option<Worktree>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Worktree {
+    pub repo_key: String,
+    pub is_linked_worktree: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +151,30 @@ impl Snapshot {
         let mut tabs: Vec<_> = self.tabs.iter().filter(|t| t.workspace_id == workspace_id).collect();
         tabs.sort_by_key(|t| t.number);
         tabs
+    }
+
+    /// Workspaces in sidebar order: linked worktrees right under their repo's checkout workspace, with
+    /// `Some(is_last_child)`; roots (and worktrees whose checkout has no workspace) get `None`.
+    pub fn workspace_tree(&self) -> Vec<(&Workspace, Option<bool>)> {
+        let mut all: Vec<_> = self.workspaces.iter().collect();
+        all.sort_by_key(|w| w.number);
+        let repo = |w: &Workspace| w.worktree.as_ref().map(|t| (t.repo_key.clone(), t.is_linked_worktree));
+        let is_checkout = |key: &str| all.iter().any(|w| repo(w) == Some((key.to_string(), false)));
+        let mut tree = Vec::new();
+        for w in &all {
+            match repo(w) {
+                Some((key, true)) if is_checkout(&key) => continue,
+                Some((key, false)) => {
+                    tree.push((*w, None));
+                    let kids: Vec<_> = all.iter().filter(|c| repo(c) == Some((key.clone(), true))).collect();
+                    for (i, c) in kids.iter().enumerate() {
+                        tree.push((**c, Some(i + 1 == kids.len())));
+                    }
+                }
+                _ => tree.push((*w, None)),
+            }
+        }
+        tree
     }
 
     /// Panes running a detected agent, the ones that need you first (herdr's "priority" sort).

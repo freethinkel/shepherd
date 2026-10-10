@@ -179,8 +179,8 @@ impl Shell {
 
     fn step_workspace(&mut self, forward: bool, cx: &mut Context<Self>) {
         let (Some(snapshot), Some(tab)) = (self.snapshot.as_ref(), self.shown_tab()) else { return };
-        let mut workspaces = snapshot.workspaces.clone();
-        workspaces.sort_by_key(|w| w.number);
+        // sidebar order, so Cmd+Up/Down walk the tree as shown
+        let workspaces: Vec<_> = snapshot.workspace_tree().into_iter().map(|(w, _)| w).collect();
         let Some(i) = workspaces.iter().position(|w| w.workspace_id == tab.workspace_id) else { return };
         let n = workspaces.len();
         let next = &workspaces[if forward { (i + 1) % n } else { (i + n - 1) % n }];
@@ -518,8 +518,10 @@ impl Render for Shell {
         }
         let shown_ws = tab.as_ref().map(|t| t.workspace_id.clone());
         let shown_tab = tab.as_ref().map(|t| t.tab_id.clone());
-        let mut workspaces = snapshot.as_ref().map(|s| s.workspaces.clone()).unwrap_or_default();
-        workspaces.sort_by_key(|w| w.number);
+        let workspaces: Vec<(crate::model::Workspace, Option<bool>)> = snapshot
+            .as_ref()
+            .map(|s| s.workspace_tree().into_iter().map(|(w, nest)| (w.clone(), nest)).collect())
+            .unwrap_or_default();
         let agents: Vec<(crate::model::Pane, String)> = snapshot
             .as_ref()
             .map(|s| {
@@ -565,7 +567,7 @@ impl Render for Shell {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .children(workspaces.into_iter().map(|w| {
+                    .children(workspaces.into_iter().map(|(w, nest)| {
                         let selected = shown_ws.as_deref() == Some(w.workspace_id.as_str());
                         let first_tab =
                             snapshot.as_ref().and_then(|s| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
@@ -576,6 +578,15 @@ impl Render for Shell {
                         let group = SharedString::from(format!("ws-row-{}", w.workspace_id));
                         row(&theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
                             .group(group.clone())
+                            .when_some(nest, |el, last| {
+                                el.pl(px(4.)).child(
+                                    div()
+                                        .w(px(12.))
+                                        .flex_none()
+                                        .text_color(theme.text_faint)
+                                        .child(if last { "└" } else { "├" }),
+                                )
+                            })
                             .child(status_dot(w.agent_status, &theme))
                             .map(|el| match editing {
                                 Some(field) => el.child(field),
@@ -606,6 +617,24 @@ impl Render for Shell {
                                 cx.notify();
                             }))
                     })),
+            )
+            .child(
+                div()
+                    .id("new-workspace")
+                    .flex_none()
+                    .m(px(8.))
+                    .h(px(32.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .child(div().text_size(px(15.)).child("+"))
+                    .child("New workspace")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
             )
             .when(!agents.is_empty(), |el| {
                 el.child(
@@ -669,25 +698,7 @@ impl Render for Shell {
                                 }))
                         })),
                 )
-            })
-            .child(
-                div()
-                    .id("new-workspace")
-                    .flex_none()
-                    .m(px(8.))
-                    .h(px(32.))
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .rounded(px(8.))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg))
-                    .child(div().text_size(px(15.)).child("+"))
-                    .child("New workspace")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
-            );
+            });
 
         let tabs = match (&snapshot, &shown_ws) {
             (Some(s), Some(ws)) => s.tabs_of(ws).into_iter().cloned().collect(),

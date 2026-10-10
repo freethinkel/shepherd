@@ -205,3 +205,35 @@ fn agents_are_panes_with_an_agent_most_urgent_first() {
     let order: Vec<_> = s.agents().iter().map(|p| p.pane_id.as_str()).collect();
     assert_eq!(order, ["w1:p2", "w1:p3"]);
 }
+
+fn ws(id: &str, number: u32, repo: Option<(&str, bool)>) -> shepherd::model::Workspace {
+    serde_json::from_value(serde_json::json!({
+        "workspace_id": id, "label": id, "number": number, "agent_status": "idle",
+        "worktree": repo.map(|(key, linked)| serde_json::json!({"repo_key": key, "is_linked_worktree": linked})),
+    }))
+    .unwrap()
+}
+
+#[test]
+fn linked_worktrees_nest_under_their_repo_checkout() {
+    let mut s = fixture();
+    s.workspaces = vec![
+        ws("mochi", 1, Some(("m", false))),
+        ws("plain", 2, None),
+        ws("mono-wt", 3, Some(("x", true))),
+        ws("mochi-a", 4, Some(("m", true))),
+        ws("mochi-b", 5, Some(("m", true))),
+    ];
+    let tree: Vec<_> = s.workspace_tree().into_iter().map(|(w, nest)| (w.workspace_id.as_str(), nest)).collect();
+    assert_eq!(
+        tree,
+        [
+            ("mochi", None),
+            ("mochi-a", Some(false)),
+            ("mochi-b", Some(true)),
+            ("plain", None),
+            // its checkout has no workspace: shown at the top level
+            ("mono-wt", None),
+        ]
+    );
+}
