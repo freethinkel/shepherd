@@ -3,13 +3,14 @@
 use crate::commands::Command;
 use crate::herdr::{Client, EVENT_TYPES};
 use crate::ui::divider::{Throttle, drag_ratio};
+use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use crate::model::{AgentStatus, PaneFrame, Snapshot, SplitFrame, attachable};
 use crate::terminal::PaneTerminal;
 use crate::theme::Theme;
 use gpui::{
     Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     ParentElement, Render, SharedString, Stateful, Styled, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowControlArea, WindowOptions, canvas, div, point, prelude::*, px, relative, size,
+    Subscription, WindowControlArea, WindowOptions, canvas, div, point, prelude::*, px, relative, size,
 };
 use serde_json::json;
 use std::cell::Cell;
@@ -38,6 +39,20 @@ pub struct Shell {
     divider: Option<DividerDrag>,
     /// A herdr error from the last command, shown over the grid for a few seconds.
     flash: Option<String>,
+    /// The tab or workspace label being edited in place.
+    renaming: Option<Rename>,
+}
+
+#[derive(Clone, PartialEq)]
+enum RenameTarget {
+    Tab(String),
+    Workspace(String),
+}
+
+struct Rename {
+    target: RenameTarget,
+    input: Entity<InputState>,
+    _events: Subscription,
 }
 
 struct DividerDrag {
@@ -87,6 +102,7 @@ impl Shell {
                     grid_bounds: Rc::new(Cell::new(None)),
                     divider: None,
                     flash: None,
+                    renaming: None,
                 };
                 let client = shell.client.clone();
                 cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await).detach();
@@ -114,6 +130,75 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    fn new_tab(&mut self, workspace_id: String, cx: &mut Context<Self>) {
+        self.send(Command::NewTab { workspace_id }, cx, |shell, result, cx| {
+            shell.selected_tab = crate::commands::created_tab_id(result);
+            cx.notify();
+        });
+    }
+
+    fn new_workspace(&mut self, cx: &mut Context<Self>) {
+        self.send(Command::NewWorkspace { cwd: None }, cx, |shell, result, cx| {
+            shell.selected_tab = crate::commands::created_tab_id(result);
+            cx.notify();
+        });
+    }
+
+    fn start_rename(&mut self, target: RenameTarget, label: String, window: &mut Window, cx: &mut Context<Self>) {
+        let theme = Theme::of(cx).clone();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(label));
+        input.update(cx, |input, cx| {
+            // gpui-base inputs are unstyled: colors from the theme, as Collie does.
+            input.set_editor_style(InputEditorStyle {
+                foreground: theme.text,
+                muted_foreground: theme.text_faint,
+                border: theme.border,
+                selection: theme.accent.opacity(0.3),
+                caret: theme.text,
+                ..Default::default()
+            });
+            input.focus(window, cx);
+        });
+        let events = cx.subscribe_in(&input, window, |shell, _, event: &InputEvent, _, cx| match event {
+            InputEvent::PressEnter { .. } => shell.finish_rename(true, cx),
+            InputEvent::Blur => shell.finish_rename(false, cx),
+            _ => {}
+        });
+        self.renaming = Some(Rename { target, input, _events: events });
+        cx.notify();
+    }
+
+    /// Enter renames in herdr; Escape and clicking away keep the old label.
+    fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let Some(rename) = self.renaming.take() else { return };
+        let label = rename.input.read(cx).value().trim().to_string();
+        if commit && !label.is_empty() {
+            let command = match rename.target {
+                RenameTarget::Tab(tab_id) => Command::RenameTab { tab_id, label },
+                RenameTarget::Workspace(workspace_id) => Command::RenameWorkspace { workspace_id, label },
+            };
+            self.send(command, cx, |_, _, _| {});
+        }
+        cx.notify();
+    }
+
+    /// The inline editor when `target` is being renamed.
+    fn rename_field(&self, target: &RenameTarget, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let rename = self.renaming.as_ref().filter(|r| &r.target == target)?;
+        Some(
+            div()
+                .flex_1()
+                .min_w(px(80.))
+                .capture_key_down(cx.listener(|shell, e: &gpui::KeyDownEvent, _, cx| {
+                    if e.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        shell.finish_rename(false, cx);
+                    }
+                }))
+                .child(Input::new(&rename.input)),
+        )
     }
 
     fn show_error(&mut self, message: String, cx: &mut Context<Self>) {
@@ -271,6 +356,43 @@ fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
     }
 }
 
+/// A small square text button (`+`).
+fn icon_button(theme: &Theme, id: &'static str, glyph: &'static str) -> Stateful<Div> {
+    let hover = theme.hover;
+    div()
+        .id(id)
+        .size(px(22.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .text_size(px(15.))
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .child(glyph)
+}
+
+/// `×` that shows while the pointer is over its row (`group`).
+fn close_button(theme: &Theme, group: &SharedString, id: SharedString) -> Stateful<Div> {
+    let hover = theme.hover;
+    div()
+        .id(id)
+        .size(px(16.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .text_size(px(13.))
+        .text_color(theme.text_faint)
+        .invisible()
+        .group_hover(group.clone(), |s| s.visible())
+        .hover(move |s| s.bg(hover))
+        .child("×")
+}
+
 /// Collie's sidebar row: 32 px, 8 px radius, a wash under the selected one.
 fn row(theme: &Theme, selected: bool, id: impl Into<gpui::ElementId>) -> Stateful<Div> {
     let hover = theme.hover;
@@ -333,9 +455,15 @@ impl Render for Shell {
                     .px(px(16.))
                     .pt(px(8.))
                     .pb(px(6.))
+                    .flex()
+                    .items_center()
                     .text_size(px(11.))
                     .text_color(theme.text_faint)
-                    .child("Workspaces"),
+                    .child(div().flex_1().child("Workspaces"))
+                    .child(
+                        icon_button(&theme, "new-workspace", "+")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
+                    ),
             )
             .child(
                 div()
@@ -352,11 +480,38 @@ impl Render for Shell {
                         let first_tab =
                             snapshot.as_ref().and_then(|s| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
                         let target = w.active_tab_id.clone().or(first_tab);
+                        let rename_target = RenameTarget::Workspace(w.workspace_id.clone());
+                        let editing = self.rename_field(&rename_target, cx);
+                        let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
+                        let group = SharedString::from(format!("ws-row-{}", w.workspace_id));
                         row(&theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
+                            .group(group.clone())
                             .child(status_dot(w.agent_status, &theme))
-                            .child(div().flex_1().min_w_0().truncate().child(w.label.clone()))
-                            .child(div().text_size(px(11.)).text_color(theme.text_faint).child(w.number.to_string()))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            .map(|el| match editing {
+                                Some(field) => el.child(field),
+                                None => el.child(div().flex_1().min_w_0().truncate().child(w.label.clone())),
+                            })
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.text_faint)
+                                    .group_hover(group.clone(), |s| s.invisible())
+                                    .child(w.number.to_string()),
+                            )
+                            .child(close_button(&theme, &group, SharedString::from(format!("ws-x-{}", w.workspace_id))).on_click(
+                                cx.listener({
+                                    let ws_id = ws_id.clone();
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.send(Command::CloseWorkspace { workspace_id: ws_id.clone() }, cx, |_, _, _| {});
+                                    }
+                                }),
+                            ))
+                            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                                if e.click_count() == 2 {
+                                    this.start_rename(RenameTarget::Workspace(ws_id.clone()), label.clone(), window, cx);
+                                    return;
+                                }
                                 this.selected_tab = target.clone();
                                 cx.notify();
                             }))
@@ -379,17 +534,41 @@ impl Render for Shell {
             .children(tabs.into_iter().map(|t| {
                 let selected = shown_tab.as_deref() == Some(t.tab_id.as_str());
                 let id = t.tab_id.clone();
+                let editing = self.rename_field(&RenameTarget::Tab(t.tab_id.clone()), cx);
+                let label = t.label.clone();
+                let group = SharedString::from(format!("tab-row-{}", t.tab_id));
+                let close_id = t.tab_id.clone();
                 row(&theme, selected, SharedString::from(format!("tab-{}", t.tab_id)))
+                    .group(group.clone())
                     .h(px(28.))
                     .max_w(px(240.))
                     .when(!selected, |el| el.text_color(theme.text_muted))
                     .child(status_dot(t.agent_status, &theme))
-                    .child(div().min_w_0().truncate().child(t.label.clone()))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    .map(|el| match editing {
+                        Some(field) => el.child(field),
+                        None => el.child(div().min_w_0().truncate().child(t.label.clone())),
+                    })
+                    .child(close_button(&theme, &group, SharedString::from(format!("tab-x-{}", t.tab_id))).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.send(Command::CloseTab { tab_id: close_id.clone() }, cx, |_, _, _| {});
+                        }),
+                    ))
+                    .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                        if e.click_count() == 2 {
+                            this.start_rename(RenameTarget::Tab(id.clone()), label.clone(), window, cx);
+                            return;
+                        }
                         this.selected_tab = Some(id.clone());
                         cx.notify();
                     }))
-            }));
+            }))
+            .when_some(shown_ws.clone(), |el, ws| {
+                el.child(
+                    icon_button(&theme, "new-tab", "+")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.new_tab(ws.clone(), cx))),
+                )
+            });
 
         let splits = match (&snapshot, &tab) {
             (Some(s), Some(t)) => s.split_frames(&t.tab_id),
