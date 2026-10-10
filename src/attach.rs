@@ -75,7 +75,7 @@ extern "C" fn on_winch(_: libc::c_int) {
 
 // ponytail: a flag polled every 50 ms; a self-pipe if resize latency ever matters.
 fn watch_resize(sink: Sink) {
-    unsafe { libc::signal(libc::SIGWINCH, on_winch as libc::sighandler_t) };
+    unsafe { libc::signal(libc::SIGWINCH, on_winch as extern "C" fn(libc::c_int) as libc::sighandler_t) };
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(50));
         if WINCH.swap(false, Ordering::Relaxed) {
