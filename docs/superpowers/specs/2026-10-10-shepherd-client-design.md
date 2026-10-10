@@ -63,10 +63,10 @@ shepherd/
       transport.rs    a duplex byte stream: unix socket (local) | `ssh <target> herdr remote-api-bridge` stdio
       client.rs       JSON API requests/responses, `events.subscribe`, reconnect with backoff
       machines.rs     `herdr machine list --json`; the Local machine is implicit
-    model.rs          Machine → Workspace → Tab → split tree → Pane (+ agent status); built from
-                      `session.snapshot`, updated by events; pure, no GPUI
+    model.rs          Machine → Workspace → Tab → split tree → Pane (+ agent status); parsed from
+                      `session.snapshot`, refetched on events; pure, no GPUI
     ghostty/
-      ffi.rs          hand-written bindings for the subset of ghostty.h used
+      ffi.rs          bindgen output for ghostty.h (ABI-exact; hand-written structs fail silently)
       app.rs          ghostty app + config (`ghostty_config_load_default_files`), runtime callbacks
       surface.rs      surface lifecycle; `NSView` placement inside the GPUI window
       actions.rs      ghostty actions → herdr commands
@@ -88,8 +88,10 @@ shepherd/
 - **client** — speaks herdr's JSON API over a transport: request ids, responses, one `events.subscribe` stream.
   Exposes `call(method, params)` and a stream of events. On disconnect: exponential backoff up to 2 minutes,
   then `session.snapshot` again on reconnect.
-- **model** — applies a snapshot and events (`workspace.*`, `tab.*`, `pane.*`, `layout.updated`,
-  `pane.agent_status_changed`, …) to an immutable tree per machine. Unit-testable with recorded JSON.
+- **model** — the parsed `session.snapshot` per machine. Events (`workspace.*`, `tab.*`, `pane.*`,
+  `layout.updated`, …) are invalidation signals: a burst of them triggers one fresh snapshot, as herdr's docs
+  require (events and snapshots share no sequence, so events are never replayed onto a snapshot).
+  Unit-testable with recorded JSON.
 - **ghostty** — owns the single `ghostty_app_t`, creates a surface per visible pane with `command` set to the
   shim, places its `NSView` at the pane rect, forwards focus, and routes actions.
 - **attach (shim)** — runs as the surface's child process. Puts its stdin in raw mode, spawns
@@ -148,8 +150,8 @@ native macOS views; anything that cannot is shown as a sheet or a separate windo
 
 ## Testing
 
-- **model**: unit tests applying recorded `session.snapshot` and event JSON (captured from a real herdr 0.9.3)
-  and asserting the tree; this is where most logic lives.
+- **model**: unit tests parsing a `session.snapshot` fixture (shape from herdr 0.9.3, made-up data) and
+  asserting the tree and pane frames; this is where most logic lives.
 - **client**: tests against a fake JSON API server on a unix socket in a temp dir (request/response, event
   stream, reconnect).
 - **attach**: a test that runs the shim against a fake `herdr` script on `PATH` that emits `terminal.frame`
