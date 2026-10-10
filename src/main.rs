@@ -1,7 +1,7 @@
 fn main() {
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     let handle = rt.handle().clone();
-    gpui_platform::application().run(move |cx| {
+    gpui_platform::application().with_assets(shepherd::assets::Assets).run(move |cx| {
         gpui_base::init(cx);
         shepherd::assets::register_fonts(cx);
         let path = shepherd::settings::Settings::path();

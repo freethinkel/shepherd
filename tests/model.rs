@@ -239,7 +239,7 @@ fn linked_worktrees_nest_under_their_repo_checkout() {
 }
 
 #[test]
-fn a_folded_group_hides_its_worktrees_but_not_the_shown_one() {
+fn worktrees_group_under_their_repo() {
     let mut s = fixture();
     s.workspaces = vec![
         ws("mochi", 1, Some(("m", false))),
@@ -247,19 +247,9 @@ fn a_folded_group_hides_its_worktrees_but_not_the_shown_one() {
         ws("mochi-b", 3, Some(("m", true))),
         ws("plain", 4, None),
     ];
-    let folded = std::collections::HashSet::from(["mochi".to_string()]);
-    let rows = |shown: Option<&str>| -> Vec<(String, Option<bool>)> {
-        shepherd::model::fold(s.workspace_tree(), &folded, shown)
-            .into_iter()
-            .map(|r| (r.workspace.workspace_id.clone(), r.group))
-            .collect()
-    };
-    assert_eq!(rows(None), [("mochi".into(), Some(true)), ("plain".into(), None)]);
-    assert_eq!(
-        rows(Some("mochi-b")),
-        [("mochi".into(), Some(true)), ("mochi-b".into(), None), ("plain".into(), None)]
-    );
-    let open = shepherd::model::fold(s.workspace_tree(), &Default::default(), None);
-    assert_eq!(open.len(), 4);
-    assert_eq!(open[0].group, Some(false));
+    let groups: Vec<(&str, Vec<&str>)> = shepherd::model::groups(s.workspace_tree())
+        .into_iter()
+        .map(|(w, kids)| (w.workspace_id.as_str(), kids.iter().map(|k| k.workspace_id.as_str()).collect()))
+        .collect();
+    assert_eq!(groups, [("mochi", vec!["mochi-a", "mochi-b"]), ("plain", vec![])]);
 }

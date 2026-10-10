@@ -15,3 +15,24 @@ pub fn register_fonts(cx: &App) {
         eprintln!("shepherd: cannot load the bundled fonts: {e:#}");
     }
 }
+
+/// Zeron's sidebar icons, served at `icons/<name>.svg`.
+pub struct Assets;
+
+impl gpui::AssetSource for Assets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        Ok(match path {
+            "icons/alt-arrow-right.svg" => Some(Cow::Borrowed(include_bytes!("../assets/icons/alt-arrow-right.svg"))),
+            "icons/folder.svg" => Some(Cow::Borrowed(include_bytes!("../assets/icons/folder.svg"))),
+            "icons/git-branch.svg" => Some(Cow::Borrowed(include_bytes!("../assets/icons/git-branch.svg"))),
+            "icons/sidebar-minimalistic-left.svg" => {
+                Some(Cow::Borrowed(include_bytes!("../assets/icons/sidebar-minimalistic-left.svg")))
+            }
+            _ => None,
+        })
+    }
+
+    fn list(&self, _path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
+        Ok(Vec::new())
+    }
+}

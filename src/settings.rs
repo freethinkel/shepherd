@@ -18,7 +18,14 @@ pub struct Settings {
     pub herdr_socket: Option<String>,
     /// Action name → keystroke (`cmd-shift-d`); an empty string unbinds the action.
     pub keys: BTreeMap<String, String>,
+    /// The workspaces sidebar's width; dragging its edge sets it.
+    pub sidebar_width: f32,
 }
+
+/// Zeron's sidebar: 256 px by default, its edge drags it between 224 and 400.
+pub const SIDEBAR_WIDTH: f32 = 256.0;
+pub const SIDEBAR_MIN: f32 = 224.0;
+pub const SIDEBAR_MAX: f32 = 400.0;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -31,6 +38,7 @@ impl Default for Settings {
             herdr_bin: None,
             herdr_socket: None,
             keys: BTreeMap::new(),
+            sidebar_width: SIDEBAR_WIDTH,
         }
     }
 }
@@ -52,6 +60,7 @@ impl Settings {
             Ok(mut settings) => {
                 // A hand-edited size of 0 would make zero-height rows and a 500×500 PTY in herdr.
                 settings.font_size = settings.font_size.clamp(9.0, 32.0);
+                settings.sidebar_width = settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
                 (settings, None)
             }
             Err(e) => (Settings::default(), Some(format!("{} is not valid settings: {e}", path.display()))),
@@ -213,6 +222,13 @@ mod tests {
         assert_eq!(Settings::load(&path).0.font_size, 9.0);
         std::fs::write(&path, r#"{"font_size": 400}"#).unwrap();
         assert_eq!(Settings::load(&path).0.font_size, 32.0);
+    }
+
+    #[test]
+    fn a_hand_edited_sidebar_width_is_clamped() {
+        let (_d, path) = tmp();
+        std::fs::write(&path, r#"{"sidebar_width": 10}"#).unwrap();
+        assert_eq!(Settings::load(&path).0.sidebar_width, SIDEBAR_MIN);
     }
 
     #[test]

@@ -5,14 +5,14 @@
 use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement, cell_at};
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, Side};
 use super::keys::{keystroke_bytes, paste_bytes};
-use crate::herdr::{Session, SessionEvent};
+use crate::herdr::{Client, Session, SessionEvent};
 use crate::theme::Theme;
 use alacritty_terminal::index::Point as GridPoint;
 use alacritty_terminal::selection::SelectionType;
 use gpui::{
     App, AsyncApp, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, Styled, Task, WeakEntity, Window, div, prelude::*,
+    ScrollWheelEvent, Styled, Task, WeakEntity, Window, DispatchPhase, canvas, div, prelude::*, px,
 };
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
@@ -40,6 +40,64 @@ pub struct GridHold(pub bool);
 
 impl gpui::Global for GridHold {}
 
+/// herdr's socket for per-pane queries (scroll position); absent in tests.
+pub struct PaneQueries(pub Client, pub tokio::runtime::Handle);
+
+impl gpui::Global for PaneQueries {}
+
+/// herdr's scrollback position; frames do not carry it, `pane.get` does.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Deserialize)]
+pub struct ScrollState {
+    pub offset_from_bottom: u32,
+    pub max_offset_from_bottom: u32,
+    pub viewport_rows: u32,
+}
+
+/// The scrollbar thumb's (top, height) in a track `track` px tall; `None` without history.
+pub fn thumb(s: ScrollState, track: f32) -> Option<(f32, f32)> {
+    if s.max_offset_from_bottom == 0 || track <= 0.0 {
+        return None;
+    }
+    let total = (s.max_offset_from_bottom + s.viewport_rows) as f32;
+    let h = (track * s.viewport_rows as f32 / total).clamp(SCROLLBAR_MIN_THUMB.min(track), track);
+    let above = s.max_offset_from_bottom.saturating_sub(s.offset_from_bottom) as f32;
+    Some(((track - h) * above / s.max_offset_from_bottom as f32, h))
+}
+
+const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+
+/// Lines per line-height of wheel/trackpad travel.
+const WHEEL_SPEED: f32 = 1.5;
+
+/// After our own scroll, herdr's reported offset lags behind it: the thumb keeps ours this long, then re-syncs.
+const SCROLL_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// herdr's offset for a thumb grabbed at `start` and moved `dy` px down a track whose thumb can travel `travel` px.
+pub fn dragged_offset(start: u32, max: u32, dy: f32, travel: f32) -> u32 {
+    if travel <= 0.0 {
+        return start;
+    }
+    (start as f32 - dy * max as f32 / travel).round().clamp(0.0, max as f32) as u32
+}
+
+/// herdr's offset that centers a `thumb_h` px thumb on `y` px down a `track` px track.
+pub fn offset_at(y: f32, max: u32, track: f32, thumb_h: f32) -> u32 {
+    let travel = track - thumb_h;
+    if travel <= 0.0 {
+        return 0;
+    }
+    let top = (y - thumb_h / 2.0).clamp(0.0, travel);
+    (max as f32 * (1.0 - top / travel)).round() as u32
+}
+
+/// A grabbed scrollbar thumb: where the press started and the offset herdr was last asked for.
+#[derive(Debug, Clone, Copy)]
+struct ThumbDrag {
+    start_y: Pixels,
+    start_offset: u32,
+    sent: u32,
+}
+
 /// A left-button press: armed once the pointer travels past the drag threshold.
 #[derive(Debug, Clone, Copy)]
 struct Drag {
@@ -56,6 +114,14 @@ pub struct PaneTerminal {
     focus: FocusHandle,
     wheel_acc: f32,
     drag: Option<Drag>,
+    scroll: ScrollState,
+    /// A `pane.get` is out; `scroll_stale` asks for one more when it lands.
+    scroll_fetching: bool,
+    scroll_stale: bool,
+    thumb_drag: Option<ThumbDrag>,
+    /// Until then `scroll.offset_from_bottom` is our own prediction, not herdr's (stale) report.
+    scroll_local_until: Option<std::time::Instant>,
+    _scroll_settle: Option<Task<()>>,
     _pump: Option<Task<()>>,
 }
 
@@ -70,6 +136,12 @@ impl PaneTerminal {
             focus: cx.focus_handle(),
             wheel_acc: 0.0,
             drag: None,
+            scroll: ScrollState::default(),
+            scroll_fetching: false,
+            scroll_stale: false,
+            thumb_drag: None,
+            scroll_local_until: None,
+            _scroll_settle: None,
             _pump: None,
         }
         // Attaching waits for the first measured grid (`on_grid_metrics`): herdr resizes the real PTY to
@@ -122,6 +194,55 @@ impl PaneTerminal {
         }
     }
 
+    /// Ask herdr where its view sits in the scrollback. One request at a time; a burst of frames costs one more.
+    fn refresh_scroll(&mut self, cx: &mut Context<Self>) {
+        let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>() else { return };
+        if self.scroll_fetching {
+            self.scroll_stale = true;
+            return;
+        }
+        self.scroll_fetching = true;
+        let client = client.clone();
+        let pane_id = self.pane_id.clone();
+        let call = rt.spawn(async move { client.call("pane.get", serde_json::json!({"pane_id": pane_id})).await });
+        cx.spawn(async move |this, cx| {
+            let scroll: Option<ScrollState> = call.await.ok().and_then(Result::ok).and_then(|r| serde_json::from_value(r["pane"]["scroll"].clone()).ok());
+            let _ = this.update(cx, |pane, cx| {
+                pane.scroll_fetching = false;
+                if let Some(mut scroll) = scroll {
+                    if pane.scroll_local_until.is_some_and(|t| std::time::Instant::now() < t) {
+                        scroll.offset_from_bottom = pane.scroll.offset_from_bottom.min(scroll.max_offset_from_bottom);
+                    }
+                    if scroll != pane.scroll {
+                        pane.scroll = scroll;
+                        cx.notify();
+                    }
+                }
+                if std::mem::take(&mut pane.scroll_stale) {
+                    pane.refresh_scroll(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Scroll herdr by `delta` lines (positive = up, into history) and move the thumb now, not a round trip later.
+    fn scroll_by(&mut self, delta: i64, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else { return };
+        if delta == 0 {
+            return;
+        }
+        session.scroll(delta > 0, delta.unsigned_abs().min(u16::MAX as u64) as u16);
+        let max = self.scroll.max_offset_from_bottom as i64;
+        self.scroll.offset_from_bottom = (self.scroll.offset_from_bottom as i64 + delta).clamp(0, max) as u32;
+        self.scroll_local_until = Some(std::time::Instant::now() + SCROLL_SETTLE);
+        self._scroll_settle = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SCROLL_SETTLE + std::time::Duration::from_millis(20)).await;
+            let _ = this.update(cx, |pane, cx| pane.refresh_scroll(cx));
+        }));
+        cx.notify();
+    }
+
     pub fn active_grid_snapshot(&self, _cx: &App) -> Option<GridSnapshot> {
         Some(GridSnapshot { lines: self.emulator.lines(), cursor: self.emulator.cursor() })
     }
@@ -156,16 +277,46 @@ impl PaneTerminal {
         }
     }
 
-    fn on_scroll_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_scroll_wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let line_h = self.geometry.map_or(TERM_LINE_HEIGHT, |g| g.line_h);
         let px = match event.delta {
             ScrollDelta::Pixels(d) => f32::from(d.y),
             ScrollDelta::Lines(d) => d.y * line_h,
         };
-        let n = wheel_lines(&mut self.wheel_acc, px, line_h);
-        if let (Some(session), true) = (&self.session, n != 0) {
-            session.scroll(n > 0, n.unsigned_abs().min(u16::MAX as u32) as u16);
-        }
+        let n = wheel_lines(&mut self.wheel_acc, px * WHEEL_SPEED, line_h);
+        self.scroll_by(n as i64, cx);
+    }
+
+    fn on_thumb_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        let offset = self.scroll.offset_from_bottom;
+        self.thumb_drag = Some(ThumbDrag { start_y: event.position.y, start_offset: offset, sent: offset });
+        cx.stop_propagation(); // not a selection, not a click for herdr
+        cx.notify();
+    }
+
+    /// A press on the track jumps the thumb under the pointer, then drags it from there.
+    fn on_track_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        cx.stop_propagation();
+        let Some(bounds) = self.geometry.map(|g| g.bounds) else { return };
+        let track = f32::from(bounds.size.height);
+        let Some((_, h)) = thumb(self.scroll, track) else { return };
+        let target = offset_at(f32::from(event.position.y - bounds.top()), self.scroll.max_offset_from_bottom, track, h);
+        self.scroll_by(target as i64 - self.scroll.offset_from_bottom as i64, cx);
+        self.thumb_drag = Some(ThumbDrag { start_y: event.position.y, start_offset: target, sent: target });
+        cx.notify();
+    }
+
+    /// Scrolls herdr by the difference between the thumb's new offset and the one asked for last.
+    fn on_thumb_move(&mut self, y: Pixels, cx: &mut Context<Self>) {
+        let Some(drag) = self.thumb_drag.as_mut() else { return };
+        let track = self.geometry.map_or(0.0, |g| f32::from(g.bounds.size.height));
+        let Some((_, h)) = thumb(self.scroll, track) else { return };
+        let target = dragged_offset(drag.start_offset, self.scroll.max_offset_from_bottom, f32::from(y - drag.start_y), track - h);
+        let delta = target as i64 - drag.sent as i64;
+        drag.sent = target;
+        self.scroll_by(delta, cx);
     }
 
     /// Window position → (viewport row, col) and the grid point/side for selections.
@@ -281,6 +432,9 @@ async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionE
                     }
                 }
             }
+            if !ended {
+                pane.refresh_scroll(cx);
+            }
             cx.notify();
         });
         if alive.is_err() || ended {
@@ -326,8 +480,58 @@ impl Render for PaneTerminal {
                 .into_any_element();
         }
         let focused = self.focus.is_focused(window);
+        let track = self.geometry.map_or(0.0, |g| f32::from(g.bounds.size.height));
+        let dragging = self.thumb_drag.is_some();
+        // The hit zone is wider than the 6 px bar; the thumb's own press stops before the track's.
+        let scrollbar = thumb(self.scroll, track).map(|(top, h)| {
+            div()
+                .id("scroll-track")
+                .absolute()
+                .top_0()
+                .right_0()
+                .w(px(12.))
+                .h_full()
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_track_down))
+                .child(
+                    div()
+                        .id("scroll-thumb")
+                        .absolute()
+                        .top(px(top))
+                        .right_0()
+                        .w_full()
+                        .h(px(h))
+                        .flex()
+                        .justify_end()
+                        .pr(px(2.))
+                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_thumb_down))
+                        .child(div().w(px(6.)).h_full().rounded_full().bg(theme.text_muted.opacity(if dragging { 0.6 } else { 0.35 }))),
+                )
+        });
+        // While grabbed, the thumb follows the pointer anywhere in the window, not only over this pane.
+        let thumb_tracking = dragging.then(|| {
+            let this = cx.entity();
+            canvas(|_, _, _| {}, move |_, _, window, _| {
+                let moved = this.clone();
+                window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        moved.update(cx, |pane, cx| pane.on_thumb_move(e.position.y, cx));
+                    }
+                });
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        this.update(cx, |pane, cx| {
+                            pane.thumb_drag = None;
+                            cx.notify();
+                        });
+                    }
+                });
+            })
+            .absolute()
+            .size_0()
+        });
         div()
             .id("terminal")
+            .relative()
             .size_full()
             .bg(theme.terminal.background)
             .key_context("Terminal")
@@ -339,6 +543,8 @@ impl Render for PaneTerminal {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(TerminalElement::new(cx.entity(), focused))
+            .children(scrollbar)
+            .children(thumb_tracking)
             .into_any_element()
     }
 }
@@ -392,6 +598,31 @@ mod tests {
     fn a_refused_attach_offers_takeover() {
         assert!(needs_takeover("herdr: terminal w1:p1 already has an attached client; retry with --takeover"));
         assert!(!needs_takeover("pane closed"));
+    }
+
+    #[test]
+    fn the_thumb_tracks_herdrs_offset() {
+        let s = |offset, max| ScrollState { offset_from_bottom: offset, max_offset_from_bottom: max, viewport_rows: 100 };
+        assert_eq!(thumb(s(0, 0), 400.0), None); // no history, no bar
+        assert_eq!(thumb(s(0, 300), 400.0), Some((300.0, 100.0))); // live: at the bottom, a quarter tall
+        assert_eq!(thumb(s(300, 300), 400.0), Some((0.0, 100.0))); // oldest line: at the top
+        assert_eq!(thumb(s(0, 100_000), 400.0), Some((376.0, 24.0))); // long history keeps a grabbable thumb
+    }
+
+    #[test]
+    fn dragging_the_thumb_moves_through_history() {
+        assert_eq!(dragged_offset(0, 300, -150.0, 300.0), 150); // half the travel up: half the history
+        assert_eq!(dragged_offset(150, 300, 150.0, 300.0), 0); // back down to live
+        assert_eq!(dragged_offset(0, 300, -1000.0, 300.0), 300); // clamped at the oldest line
+        assert_eq!(dragged_offset(10, 300, 5.0, 0.0), 10); // a thumb as tall as the track cannot move
+    }
+
+    #[test]
+    fn a_track_click_centers_the_thumb_on_it() {
+        // 400 px track, 100 px thumb: 300 px of travel over 300 lines of history.
+        assert_eq!(offset_at(50.0, 300, 400.0, 100.0), 300); // near the top: oldest line
+        assert_eq!(offset_at(200.0, 300, 400.0, 100.0), 150); // middle
+        assert_eq!(offset_at(390.0, 300, 400.0, 100.0), 0); // near the bottom: live
     }
 
     #[test]

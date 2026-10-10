@@ -3,15 +3,15 @@
 use crate::bindings::*;
 use crate::commands::{Command, Direction};
 use crate::herdr::{Client, EVENT_TYPES};
-use crate::terminal::pane::GridHold;
+use crate::terminal::pane::{GridHold, PaneQueries};
 use crate::ui::divider::{Throttle, drag_ratio};
 use gpui_base::input::{Input, InputEvent, InputState};
 use crate::model::{AgentStatus, PaneFrame, Snapshot, SplitFrame, attachable};
 use crate::terminal::PaneTerminal;
-use crate::settings::SettingsGlobal;
+use crate::settings::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_WIDTH, SettingsGlobal};
 use crate::theme::Theme;
 use gpui::{
-    App, Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    AnimationExt, App, Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     ParentElement, Render, SharedString, Stateful, Styled, TitlebarOptions, Window, WindowBackgroundAppearance,
     Subscription, WindowControlArea, WindowOptions, canvas, div, point, prelude::*, px, relative, size,
 };
@@ -22,7 +22,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const TITLEBAR_HEIGHT: f32 = 38.0;
-const SIDEBAR_WIDTH: f32 = 256.0;
+/// The titlebar's left cluster: traffic lights, then the sidebar toggle.
+const TOGGLE_LEFT: f32 = 78.0;
+/// Centre line of the traffic lights (placed at y 14), measured on a 2x screen; the toggle centres on it, not on the titlebar.
+const TRAFFIC_LIGHTS_CENTER: f32 = 21.25;
+const TITLEBAR_CLUSTER: f32 = TOGGLE_LEFT + 24.0 + 8.0;
 
 pub struct Shell {
     snapshot: Option<Snapshot>,
@@ -48,8 +52,22 @@ pub struct Shell {
     renaming: Option<Rename>,
     // ponytail: in memory only; persist in settings if folds should survive a restart
     folded: std::collections::HashSet<String>,
+    /// A workspace's right-click menu and where it opened.
+    ws_menu: Option<(String, gpui::Point<Pixels>)>,
+    /// Groups mid fold or unfold, by workspace id.
+    fold_motion: HashMap<String, FoldMotion>,
     /// The workspace shown last, so closing its tab stays in it.
     shown_workspace: Option<String>,
+    /// Saved in the settings when a drag ends.
+    sidebar_width: f32,
+    // ponytail: open/closed in memory only; persist in settings if it should survive a restart
+    sidebar_open: bool,
+    /// The sidebar's width tween while it shows or hides.
+    sidebar_motion: Option<FoldMotion>,
+    /// The sidebar's edge is being dragged.
+    sidebar_drag: bool,
+    /// The drag hit a width limit (-1 min, +1 max) at this instant: the edge nudges past it and springs back.
+    sidebar_edge: Option<(f32, Instant)>,
     /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
     /// actions still dispatch.
     focus: gpui::FocusHandle,
@@ -122,10 +140,18 @@ impl Shell {
                     flash: None,
                     renaming: None,
                     folded: Default::default(),
+                    fold_motion: Default::default(),
+                    ws_menu: None,
                     shown_workspace: None,
+                    sidebar_width: SettingsGlobal::of(cx).settings.sidebar_width,
+                    sidebar_open: true,
+                    sidebar_motion: None,
+                    sidebar_drag: false,
+                    sidebar_edge: None,
                     focus: cx.focus_handle(),
                 };
                 let client = shell.client.clone();
+                cx.set_global(PaneQueries(client.clone(), rt.clone()));
                 cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await).detach();
                 shell
             })
@@ -462,6 +488,188 @@ fn close_button(theme: &Theme, group: &SharedString, id: SharedString) -> Statef
         .child("×")
 }
 
+/// Zeron's sidebar disclosure (`motion::COLLAPSE`): 180 ms CSS ease-out.
+const FOLD_DURATION: Duration = Duration::from_millis(180);
+
+/// CSS `ease-out`, cubic-bezier(0, 0, 0.58, 1), solved for x by bisection.
+fn ease_out(x: f32) -> f32 {
+    if x <= 0. || x >= 1. {
+        return x.clamp(0., 1.);
+    }
+    let bezier = |p2: f32, t: f32| 3. * p2 * t * t * (1. - t) + t * t * t;
+    let (mut lo, mut hi) = (0f32, 1f32);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.;
+        if bezier(0.58, mid) < x { lo = mid } else { hi = mid }
+    }
+    bezier(1., (lo + hi) / 2.).clamp(0., 1.)
+}
+
+/// Zeron's resize-edge spring (`motion::resize_bounce_offset`): 5 px out over the first 32 % of 220 ms, then
+/// home over the rest, smoothstep both ways.
+const EDGE_SPRING: Duration = Duration::from_millis(220);
+
+fn edge_nudge(t: f32) -> f32 {
+    let smooth = |t: f32| {
+        let t = t.clamp(0., 1.);
+        t * t * (3. - 2. * t)
+    };
+    let out = 0.32;
+    5. * if t < out { smooth(t / out) } else { 1. - smooth((t - out) / (1. - out)) }
+}
+
+fn fold_animation() -> gpui::Animation {
+    gpui::Animation::new(FOLD_DURATION).with_easing(ease_out)
+}
+
+/// A group body's height tween; `epoch` restarts the animation on every toggle.
+#[derive(Clone, Copy)]
+struct FoldMotion {
+    epoch: u64,
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+
+impl FoldMotion {
+    fn current(self) -> f32 {
+        let t = (self.started.elapsed().as_secs_f32() / FOLD_DURATION.as_secs_f32()).min(1.);
+        self.from + (self.to - self.from) * ease_out(t)
+    }
+
+    /// A little past the end, so the last frame lands before the static height takes over.
+    fn animating(self) -> bool {
+        self.started.elapsed() < FOLD_DURATION + Duration::from_millis(120)
+    }
+}
+
+impl Shell {
+    /// Folds or unfolds a worktree group, tweening from wherever its body is now.
+    fn toggle_fold(&mut self, id: &str, full: f32) {
+        let open = !self.folded.contains(id);
+        let prev = self.fold_motion.get(id).copied();
+        let from = prev.filter(|m| m.animating()).map(FoldMotion::current).unwrap_or(if open { full } else { 0. });
+        let epoch = prev.map_or(1, |m| m.epoch + 1);
+        self.fold_motion.insert(id.to_string(), FoldMotion { epoch, from, to: if open { 0. } else { full }, started: Instant::now() });
+        if open {
+            self.folded.insert(id.to_string());
+        } else {
+            self.folded.remove(id);
+        }
+    }
+
+    /// The sidebar's width this frame: mid tween, or where it rests.
+    fn sidebar_now(&self) -> f32 {
+        match self.sidebar_motion.filter(|m| m.animating()) {
+            Some(m) => m.current(),
+            None if self.sidebar_open => self.sidebar_width + self.sidebar_nudge().unwrap_or(0.),
+            None => 0.,
+        }
+    }
+
+    /// The edge spring's offset while it plays.
+    fn sidebar_nudge(&self) -> Option<f32> {
+        let (sign, started) = self.sidebar_edge?;
+        let t = started.elapsed().as_secs_f32() / EDGE_SPRING.as_secs_f32();
+        (t < 1.).then(|| sign * edge_nudge(t))
+    }
+
+    /// Hides or shows the sidebar with the fold tween; panes keep their grids until it lands.
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        let from = self.sidebar_now();
+        self.sidebar_edge = None;
+        self.sidebar_open = !self.sidebar_open;
+        let to = if self.sidebar_open { self.sidebar_width } else { 0. };
+        let motion = FoldMotion { epoch: 0, from, to, started: Instant::now() };
+        self.sidebar_motion = Some(motion);
+        cx.set_global(GridHold(true));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FOLD_DURATION + Duration::from_millis(120)).await;
+            let _ = this.update(cx, |shell, cx| {
+                // a later toggle or a drag owns the hold now
+                if shell.sidebar_motion.is_some_and(|m| m.started == motion.started) && !shell.sidebar_drag && shell.divider.is_none() {
+                    shell.sidebar_motion = None;
+                    cx.set_global(GridHold(false));
+                    cx.refresh_windows();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn drag_sidebar(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        if !self.sidebar_drag {
+            return;
+        }
+        let x = f32::from(x);
+        let edge = if x <= SIDEBAR_MIN { -1. } else if x >= SIDEBAR_MAX { 1. } else { 0. };
+        // one spring per arrival at a limit, not one per mouse move while held there
+        if edge == 0. {
+            self.sidebar_edge = None;
+        } else if self.sidebar_edge.map(|(s, _)| s) != Some(edge) {
+            self.sidebar_edge = Some((edge, Instant::now()));
+        }
+        self.sidebar_width = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        cx.notify();
+    }
+
+    fn end_sidebar_drag(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.sidebar_drag) {
+            cx.set_global(GridHold(false));
+            self.save_sidebar_width(cx);
+            cx.refresh_windows();
+        }
+    }
+
+    fn save_sidebar_width(&self, cx: &mut Context<Self>) {
+        // A settings file that failed to load is the user's to fix: a drag must not overwrite it with defaults.
+        if SettingsGlobal::of(cx).error.is_none() {
+            let width = self.sidebar_width;
+            crate::ui::settings::update(cx, |s| s.sidebar_width = width);
+        }
+    }
+}
+
+/// Zeron's titlebar button: 24 px, a 16 px muted icon, a wash on hover. It occludes the drag strip under it.
+fn titlebar_button(theme: &Theme, id: &'static str, icon: &'static str) -> Stateful<Div> {
+    let hover = theme.hover;
+    div()
+        .id(id)
+        .size(px(24.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .child(gpui::svg().path(icon).size(px(16.)).text_color(theme.text_muted))
+}
+
+/// Zeron's disclosure chevron: points right when folded, turns a quarter down as the group opens.
+fn fold_chevron(theme: &Theme, id: &str, open: bool, full: f32, tween: Option<FoldMotion>) -> Stateful<Div> {
+    let chevron = gpui::svg().path("icons/alt-arrow-right.svg").size(px(12.)).text_color(theme.text_muted.opacity(0.5));
+    let turn = |reveal: f32| gpui::Transformation::rotate(gpui::percentage(reveal * 0.25));
+    div()
+        .id(SharedString::from(format!("ws-fold-{id}")))
+        .size(px(16.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .map(|el| match tween {
+            Some(m) => el.child(chevron.with_animation(
+                SharedString::from(format!("fold-chevron-{id}-{}", m.epoch)),
+                fold_animation(),
+                move |el, t| el.with_transformation(turn((m.from + (m.to - m.from) * t) / full)),
+            )),
+            None => el.child(chevron.with_transformation(turn(if open { 1. } else { 0. }))),
+        })
+}
+
 /// Collie's sidebar row: 32 px, 8 px radius, a wash under the selected one.
 pub(crate) fn row(theme: &Theme, selected: bool, id: impl Into<gpui::ElementId>) -> Stateful<Div> {
     let hover = theme.hover;
@@ -521,12 +729,12 @@ impl Render for Shell {
         }
         let shown_ws = tab.as_ref().map(|t| t.workspace_id.clone());
         let shown_tab = tab.as_ref().map(|t| t.tab_id.clone());
-        let workspaces: Vec<(crate::model::Workspace, Option<bool>, Option<bool>)> = snapshot
+        let groups: Vec<(crate::model::Workspace, Vec<crate::model::Workspace>)> = snapshot
             .as_ref()
             .map(|s| {
-                crate::model::fold(s.workspace_tree(), &self.folded, shown_ws.as_deref())
+                crate::model::groups(s.workspace_tree())
                     .into_iter()
-                    .map(|r| (r.workspace.clone(), r.nest, r.group))
+                    .map(|(w, kids)| (w.clone(), kids.into_iter().cloned().collect()))
                     .collect()
             })
             .unwrap_or_default();
@@ -543,17 +751,20 @@ impl Render for Shell {
             })
             .unwrap_or_default();
         let hover_bg = theme.hover;
+        let sidebar_w = self.sidebar_now();
+        let sliding = self.sidebar_motion.is_some_and(|m| m.animating());
+        if sliding || self.sidebar_nudge().is_some() {
+            window.request_animation_frame();
+        }
 
+        // Laid out at full width and clipped by its tweened box, so rows never reflow mid slide.
         let sidebar = div()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(self.sidebar_width - 1.))
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
             .pt(px(TITLEBAR_HEIGHT))
-            .bg(theme.wash(0.05))
-            .border_r_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .px(px(16.))
@@ -575,69 +786,90 @@ impl Render for Shell {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .children(workspaces.into_iter().map(|(w, nest, fold)| {
-                        let selected = shown_ws.as_deref() == Some(w.workspace_id.as_str());
-                        let first_tab =
-                            snapshot.as_ref().and_then(|s| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
-                        let target = w.active_tab_id.clone().or(first_tab);
-                        let rename_target = RenameTarget::Workspace(w.workspace_id.clone());
-                        let editing = self.rename_field(&rename_target, cx);
-                        let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
-                        let group = SharedString::from(format!("ws-row-{}", w.workspace_id));
-                        row(&theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
-                            .group(group.clone())
-                            .map(|el| {
-                                let slot = div().w(px(12.)).flex_none().text_color(theme.text_faint);
-                                match (nest, fold) {
-                                    (Some(last), _) => el.pl(px(20.)).child(slot.child(if last { "└" } else { "├" })),
-                                    (None, Some(folded)) => el.child(
-                                        slot.id(SharedString::from(format!("ws-fold-{}", w.workspace_id)))
-                                            .cursor_pointer()
-                                            .child(if folded { "▸" } else { "▾" })
-                                            .on_click(cx.listener({
-                                                let id = w.workspace_id.clone();
-                                                move |this, _: &ClickEvent, _, cx| {
-                                                    cx.stop_propagation();
-                                                    if !this.folded.remove(&id) {
-                                                        this.folded.insert(id.clone());
-                                                    }
-                                                    cx.notify();
-                                                }
-                                            })),
-                                    ),
-                                    (None, None) => el.child(slot),
-                                }
-                            })
-                            .child(status_dot(w.agent_status, &theme))
-                            .map(|el| match editing {
-                                Some(field) => el.child(field),
-                                None => el.child(div().flex_1().min_w_0().truncate().child(w.label.clone())),
-                            })
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(theme.text_faint)
-                                    .group_hover(group.clone(), |s| s.invisible())
-                                    .child(w.number.to_string()),
-                            )
-                            .child(close_button(&theme, &group, SharedString::from(format!("ws-x-{}", w.workspace_id))).on_click(
-                                cx.listener({
-                                    let ws_id = ws_id.clone();
-                                    move |this, _: &ClickEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        this.send(Command::CloseWorkspace { workspace_id: ws_id.clone() }, cx, |_, _, _| {});
+                    .children({
+                        let ws_row = |w: &crate::model::Workspace, nested: bool, chevron: Option<gpui::AnyElement>, cx: &mut Context<Self>| {
+                            let selected = shown_ws.as_deref() == Some(w.workspace_id.as_str());
+                            let first_tab =
+                                snapshot.as_ref().and_then(|s| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
+                            let target = w.active_tab_id.clone().or(first_tab);
+                            let rename_target = RenameTarget::Workspace(w.workspace_id.clone());
+                            let editing = self.rename_field(&rename_target, cx);
+                            let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
+                            row(&theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
+                                .when(nested, |el| el.pl(px(30.)))
+                                .child(
+                                    gpui::svg()
+                                        .path(if nested { "icons/git-branch.svg" } else { "icons/folder.svg" })
+                                        .size(px(14.))
+                                        .flex_none()
+                                        .text_color(if nested { theme.text_faint } else { theme.text_muted }),
+                                )
+                                .map(|el| match editing {
+                                    Some(field) => el.child(field),
+                                    None => el.child(div().flex_1().min_w_0().truncate().child(w.label.clone())),
+                                })
+                                .child(status_dot(w.agent_status, &theme))
+                                .child(div().text_size(px(11.)).text_color(theme.text_faint).child(w.number.to_string()))
+                                .children(chevron)
+                                .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                                    if e.click_count() == 2 {
+                                        this.start_rename(RenameTarget::Workspace(ws_id.clone()), label.clone(), window, cx);
+                                        return;
                                     }
-                                }),
-                            ))
-                            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                                if e.click_count() == 2 {
-                                    this.start_rename(RenameTarget::Workspace(ws_id.clone()), label.clone(), window, cx);
-                                    return;
+                                    this.selected_tab = target.clone();
+                                    cx.notify();
+                                }))
+                                .on_mouse_down(MouseButton::Right, cx.listener({
+                                    let id = w.workspace_id.clone();
+                                    move |this, e: &MouseDownEvent, _, cx| {
+                                        this.ws_menu = Some((id.clone(), e.position));
+                                        cx.notify();
+                                    }
+                                }))
+                        };
+                        groups.into_iter().map(|(w, kids)| {
+                            if kids.is_empty() {
+                                return ws_row(&w, false, None, cx).into_any_element();
+                            }
+                            let open = !self.folded.contains(&w.workspace_id);
+                            let full = kids.len() as f32 * 34.;
+                            let tween = self.fold_motion.get(&w.workspace_id).copied().filter(|m| m.animating());
+                            let chevron = fold_chevron(&theme, &w.workspace_id, open, full, tween).on_click(cx.listener({
+                                let id = w.workspace_id.clone();
+                                move |this, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_fold(&id, full);
+                                    cx.notify();
                                 }
-                                this.selected_tab = target.clone();
-                                cx.notify();
-                            }))
-                    })),
+                            }));
+                            let header = ws_row(&w, false, Some(chevron.into_any_element()), cx);
+                            let body = div()
+                                .w_full()
+                                .flex_none()
+                                .overflow_hidden()
+                                .flex()
+                                .flex_col()
+                                .pt(px(2.))
+                                .gap(px(2.))
+                                .children(kids.iter().map(|k| ws_row(k, true, None, cx)).collect::<Vec<_>>());
+                            let body = match tween {
+                                None => body.h(px(if open { full } else { 0. })).into_any_element(),
+                                // Zeron's disclosure: the height tweens, the rows fade up from 35 % and slide 3 px.
+                                Some(m) => body
+                                    .with_animation(
+                                        SharedString::from(format!("fold-{}-{}", w.workspace_id, m.epoch)),
+                                        fold_animation(),
+                                        move |el, t| {
+                                            let h = m.from + (m.to - m.from) * t;
+                                            let reveal = (h / full).clamp(0., 1.);
+                                            el.h(px(h)).opacity(0.35 + 0.65 * reveal).relative().top(px(-3. * (1. - reveal)))
+                                        },
+                                    )
+                                    .into_any_element(),
+                            };
+                            div().flex().flex_col().flex_none().child(header).child(body).into_any_element()
+                        }).collect::<Vec<_>>()
+                    }),
             )
             .child(
                 div()
@@ -732,7 +964,9 @@ impl Render for Shell {
             .flex()
             .items_center()
             .gap(px(2.))
-            .px(px(8.))
+            .pr(px(8.))
+            // clear the traffic lights and the sidebar toggle once the sidebar no longer sits under them
+            .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
             .overflow_x_scroll()
             .children(tabs.into_iter().map(|t| {
                 let selected = shown_tab.as_deref() == Some(t.tab_id.as_str());
@@ -918,12 +1152,108 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &Tab9, _, cx| this.go_to_tab(8, cx)))
             .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.step_workspace(false, cx)))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
-            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.drag_divider(e.position, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_divider(cx)))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_divider(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                this.drag_divider(e.position, cx);
+                this.drag_sidebar(e.position.x, cx);
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.end_divider(cx);
+                this.end_sidebar_drag(cx);
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.end_divider(cx);
+                this.end_sidebar_drag(cx);
+            }))
             .child(self.drag_strip())
-            .child(sidebar)
+            .when(sidebar_w > 0., |el| {
+                el.child(
+                    div()
+                        .w(px(sidebar_w))
+                        .h_full()
+                        .flex_none()
+                        .overflow_hidden()
+                        .bg(theme.wash(0.05))
+                        .border_r_1()
+                        .border_color(theme.border)
+                        .child(sidebar),
+                )
+            })
             .child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).child(grid))
+            // The sidebar's edge: drag to resize, double-click for the default width.
+            .when(self.sidebar_open && !sliding, |el| {
+                let (hover, active) = (theme.border_strong, theme.accent);
+                el.child(
+                    div()
+                        .id("sidebar-resize")
+                        .absolute()
+                        .top(px(TITLEBAR_HEIGHT))
+                        .bottom_0()
+                        .left(px(sidebar_w - 3.))
+                        .w(px(6.))
+                        .cursor_col_resize()
+                        .when(self.sidebar_drag, |el| el.bg(active.opacity(0.6)))
+                        .when(!self.sidebar_drag, |el| el.hover(move |s| s.bg(hover)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.sidebar_drag = true;
+                                cx.set_global(GridHold(true));
+                                cx.notify();
+                            }),
+                        )
+                        .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
+                            if e.click_count() == 2 {
+                                this.sidebar_width = SIDEBAR_WIDTH;
+                                this.save_sidebar_width(cx);
+                                cx.notify();
+                            }
+                        })),
+                )
+            })
+            .child(
+                titlebar_button(&theme, "toggle-sidebar", "icons/sidebar-minimalistic-left.svg")
+                    .absolute()
+                    .top(px(TRAFFIC_LIGHTS_CENTER - 12.))
+                    .left(px(TOGGLE_LEFT))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_sidebar(cx);
+                    })),
+            )
+            .children(self.ws_menu.clone().map(|(id, at)| {
+                gpui::deferred(
+                    gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(
+                        div()
+                            .id("ws-menu")
+                            .occlude()
+                            .min_w(px(180.))
+                            .p(px(4.))
+                            .rounded(px(10.))
+                            .bg(theme.card)
+                            .border_1()
+                            .border_color(theme.border)
+                            .shadow_lg()
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.ws_menu = None;
+                                cx.notify();
+                            }))
+                            .child(
+                                row(&theme, false, "ws-menu-close")
+                                    .h(px(28.))
+                                    .rounded(px(6.))
+                                    .text_color(theme.danger)
+                                    .child("Close workspace")
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.ws_menu = None;
+                                        this.send(Command::CloseWorkspace { workspace_id: id.clone() }, cx, |_, _, _| {});
+                                    })),
+                            ),
+                    ),
+                )
+                .with_priority(1)
+            }))
     }
 }
 
@@ -969,4 +1299,19 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(focused.as_deref(), Some("w1:p1"));
     }
+}
+
+#[test]
+fn edge_nudge_springs_out_and_home() {
+    assert_eq!(edge_nudge(0.), 0.);
+    assert_eq!(edge_nudge(0.32), 5.);
+    assert_eq!(edge_nudge(1.), 0.);
+}
+
+#[test]
+fn ease_out_matches_css() {
+    assert_eq!(ease_out(0.), 0.);
+    assert_eq!(ease_out(1.), 1.);
+    // CSS ease-out at x = 0.5 is ≈ 0.684
+    assert!((ease_out(0.5) - 0.684).abs() < 0.01);
 }

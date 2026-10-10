@@ -1,7 +1,6 @@
 //! herdr's `session.snapshot`, parsed. Events only invalidate it: the app refetches
 //! (herdr's docs: events have no shared sequence with snapshots, so never replay them onto one).
 use serde::Deserialize;
-use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -304,32 +303,19 @@ fn frac(area: &Rect, rect: &Rect) -> Option<Frac> {
     })
 }
 
-/// A Shepherd started inside a herdr pane must not mirror that pane into itself.
-/// A sidebar workspace row after folding.
-pub struct TreeRow<'a> {
-    pub workspace: &'a Workspace,
-    /// For a worktree under its repo: `Some(is_last_child)`.
-    pub nest: Option<bool>,
-    /// For a repo with worktrees: `Some(folded)`.
-    pub group: Option<bool>,
-}
-
-/// Drops the worktrees of `folded` groups, except `shown` so the open workspace stays visible.
-pub fn fold<'a>(tree: Vec<(&'a Workspace, Option<bool>)>, folded: &HashSet<String>, shown: Option<&str>) -> Vec<TreeRow<'a>> {
-    let mut rows = Vec::new();
-    let mut hiding = false;
-    for (i, &(workspace, nest)) in tree.iter().enumerate() {
-        if nest.is_none() {
-            let has_kids = tree.get(i + 1).is_some_and(|(_, n)| n.is_some());
-            hiding = has_kids && folded.contains(&workspace.workspace_id);
-            rows.push(TreeRow { workspace, nest, group: has_kids.then_some(hiding) });
-        } else if !hiding || shown == Some(workspace.workspace_id.as_str()) {
-            rows.push(TreeRow { workspace, nest, group: None });
+/// The tree as sidebar groups: each top-level workspace with the worktrees nested under it.
+pub fn groups<'a>(tree: Vec<(&'a Workspace, Option<bool>)>) -> Vec<(&'a Workspace, Vec<&'a Workspace>)> {
+    let mut out: Vec<(&Workspace, Vec<&Workspace>)> = Vec::new();
+    for (w, nest) in tree {
+        match (nest, out.last_mut()) {
+            (Some(_), Some((_, kids))) => kids.push(w),
+            _ => out.push((w, Vec::new())),
         }
     }
-    rows
+    out
 }
 
+/// A Shepherd started inside a herdr pane must not mirror that pane into itself.
 pub fn attachable(pane_id: &str, own_pane: Option<&str>) -> bool {
     own_pane != Some(pane_id)
 }

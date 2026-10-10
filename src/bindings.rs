@@ -41,6 +41,7 @@ app_actions! {
     Tab9: "Go to tab 9",
     PreviousWorkspace: "Previous workspace",
     NextWorkspace: "Next workspace",
+    ToggleSidebar: "Toggle sidebar",
     OpenSettings: "Settings",
     Quit: "Quit",
 }
@@ -68,6 +69,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("Tab9", "cmd-9"),
     ("PreviousWorkspace", "cmd-up"),
     ("NextWorkspace", "cmd-down"),
+    ("ToggleSidebar", "cmd-b"),
     ("OpenSettings", "cmd-,"),
     ("Quit", "cmd-q"),
 ];
