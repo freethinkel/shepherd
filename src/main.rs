@@ -9,4 +9,12 @@ fn main() {
             return;
         }
     }
+    let rt = tokio::runtime::Runtime::new().expect("tokio");
+    let handle = rt.handle().clone();
+    gpui_platform::application().run(move |cx| {
+        let app = shepherd::ghostty::App::init(cx);
+        shepherd::shell::Shell::open(app, handle.clone(), cx);
+        cx.activate(true);
+    });
+    drop(rt);
 }
