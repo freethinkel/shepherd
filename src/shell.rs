@@ -3,6 +3,7 @@
 use crate::bindings::*;
 use crate::commands::{Command, Direction};
 use crate::herdr::{Client, EVENT_TYPES};
+use crate::terminal::pane::GridHold;
 use crate::ui::divider::{Throttle, drag_ratio};
 use gpui_base::input::{Input, InputEvent, InputState};
 use crate::model::{AgentStatus, PaneFrame, Snapshot, SplitFrame, attachable};
@@ -39,6 +40,8 @@ pub struct Shell {
     /// The pane grid's bounds from the last paint, to turn a divider drag into a ratio.
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     divider: Option<DividerDrag>,
+    /// A released divider's ratio, shown until herdr's snapshot catches up (no jump back to the old layout).
+    settling: Option<(Vec<bool>, f32)>,
     /// A herdr error from the last command, shown over the grid for a few seconds.
     flash: Option<String>,
     /// The tab or workspace label being edited in place.
@@ -113,6 +116,7 @@ impl Shell {
                     rt: rt.clone(),
                     grid_bounds: Rc::new(Cell::new(None)),
                     divider: None,
+                    settling: None,
                     flash: None,
                     renaming: None,
                     shown_workspace: None,
@@ -272,6 +276,7 @@ impl Shell {
         } else {
             (f32::from(grid.origin.y) + f32::from(grid.size.height) * split.frame.y, f32::from(grid.size.height) * split.frame.h)
         };
+        cx.set_global(GridHold(true));
         self.divider = Some(DividerDrag {
             tab_id,
             path: split.path.clone(),
@@ -297,9 +302,21 @@ impl Shell {
 
     fn end_divider(&mut self, cx: &mut Context<Self>) {
         let Some(drag) = self.divider.take() else { return };
+        self.settling = Some((drag.path.clone(), drag.ratio));
         // The last position, unthrottled, so herdr ends where the pointer let go.
         self.send(Command::SetSplitRatio { tab_id: drag.tab_id, path: drag.path, ratio: drag.ratio }, cx, |_, _, _| {});
-        cx.notify();
+        // Panes held their grids during the drag: re-measure every one now (refresh bypasses view caching).
+        cx.set_global(GridHold(false));
+        cx.refresh_windows();
+        // herdr normally answers within a few frames; never hold a stale preview longer than a second.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let _ = this.update(cx, |shell, cx| {
+                shell.settling = None;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The strip under the transparent titlebar drags the window; a double click zooms it.
@@ -466,10 +483,21 @@ impl Render for Shell {
         let snapshot = self.snapshot.clone();
         let tab = self.shown_tab();
         self.shown_workspace = tab.as_ref().map(|t| t.workspace_id.clone());
-        let frames = match (&snapshot, &tab) {
-            (Some(s), Some(t)) => s.pane_frames(&t.tab_id),
-            _ => Vec::new(),
+        let (mut frames, mut splits) = match (&snapshot, &tab) {
+            (Some(s), Some(t)) => (s.pane_frames(&t.tab_id), s.split_frames(&t.tab_id)),
+            _ => (Vec::new(), Vec::new()),
         };
+        // herdr caught up with a released divider: its snapshot is the layout again.
+        if let Some((path, ratio)) = &self.settling {
+            if splits.iter().any(|s| &s.path == path && (s.ratio - ratio).abs() < 0.02) {
+                self.settling = None;
+            }
+        }
+        // While a divider moves (or settles), lay the panes out at its ratio, not herdr's last one.
+        let live = self.divider.as_ref().map(|d| (d.path.clone(), d.ratio)).or(self.settling.clone());
+        if let Some((path, ratio)) = live {
+            (frames, splits) = crate::model::preview(&frames, &splits, &path, ratio);
+        }
         let own = self.own_pane.clone();
         let shown: Vec<PaneFrame> = frames.iter().filter(|f| attachable(&f.pane_id, own.as_deref())).cloned().collect();
         prune(&mut self.panes, &mut self.focused, &shown, |_| false);
@@ -623,10 +651,6 @@ impl Render for Shell {
                 )
             });
 
-        let splits = match (&snapshot, &tab) {
-            (Some(s), Some(t)) => s.split_frames(&t.tab_id),
-            _ => Vec::new(),
-        };
         let shown_tab_id = shown_tab.clone().unwrap_or_default();
         let grid_bounds = self.grid_bounds.clone();
         let border = theme.border;
@@ -677,7 +701,7 @@ impl Render for Shell {
         let grid = grid
             .children(splits.into_iter().map(|split| {
                 let dragging = self.divider.as_ref().is_some_and(|d| d.path == split.path);
-                let ratio = self.divider.as_ref().filter(|d| d.path == split.path).map_or(split.ratio, |d| d.ratio);
+                let ratio = split.ratio; // already the live ratio while dragging (preview)
                 let id = SharedString::from(format!("split-{}", split.path.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>()));
                 let strip = if split.vertical {
                     div()

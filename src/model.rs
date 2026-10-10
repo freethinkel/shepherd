@@ -198,6 +198,51 @@ impl Snapshot {
     }
 }
 
+/// The tab's panes and dividers while the divider at `path` is dragged to `ratio`, before herdr re-lays out:
+/// inside that split's area, positions along its axis are remapped from the old ratio to the new one, so both
+/// sides (and dividers nested in them) resize with the pointer. Frames outside the split are unchanged.
+pub fn preview(panes: &[PaneFrame], splits: &[SplitFrame], path: &[bool], ratio: f32) -> (Vec<PaneFrame>, Vec<SplitFrame>) {
+    let Some(dragged) = splits.iter().find(|s| s.path == path) else { return (panes.to_vec(), splits.to_vec()) };
+    let node = dragged.frame;
+    let (start, len) = if dragged.vertical { (node.x, node.w) } else { (node.y, node.h) };
+    let (old, new) = (start + len * dragged.ratio, start + len * ratio);
+    let end = start + len;
+    // A position on the split's axis: the first side scales into [start, new], the second into [new, end].
+    let remap = |v: f32| {
+        if v <= old {
+            if old - start <= f32::EPSILON { start } else { start + (v - start) * (new - start) / (old - start) }
+        } else if end - old <= f32::EPSILON {
+            end
+        } else {
+            new + (v - old) * (end - new) / (end - old)
+        }
+    };
+    let moved = |f: Frac| {
+        if !inside(f, node) {
+            return f;
+        }
+        if dragged.vertical {
+            let (x, right) = (remap(f.x), remap(f.x + f.w));
+            Frac { x, w: right - x, ..f }
+        } else {
+            let (y, bottom) = (remap(f.y), remap(f.y + f.h));
+            Frac { y, h: bottom - y, ..f }
+        }
+    };
+    let panes = panes.iter().map(|p| PaneFrame { frame: moved(p.frame), ..p.clone() }).collect();
+    let splits = splits
+        .iter()
+        .map(|s| if s.path == path { SplitFrame { ratio, ..s.clone() } } else { SplitFrame { frame: moved(s.frame), ..s.clone() } })
+        .collect();
+    (panes, splits)
+}
+
+/// `f` lies within `node` (allowing float noise).
+fn inside(f: Frac, node: Frac) -> bool {
+    const EPS: f32 = 1e-4;
+    f.x >= node.x - EPS && f.y >= node.y - EPS && f.x + f.w <= node.x + node.w + EPS && f.y + f.h <= node.y + node.h + EPS
+}
+
 /// `rect` as a fraction of `area`; `None` for an empty rect or area.
 fn frac(area: &Rect, rect: &Rect) -> Option<Frac> {
     let (aw, ah) = (f32::from(area.width), f32::from(area.height));

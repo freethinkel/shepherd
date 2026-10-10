@@ -34,6 +34,12 @@ pub struct GridSnapshot {
     pub cursor: Option<CursorSnapshot>,
 }
 
+/// While true, panes keep their grid size when their bounds change (a divider is being dragged): the box resizes
+/// live, the terminal and herdr's PTY resize once when the drag ends.
+pub struct GridHold(pub bool);
+
+impl gpui::Global for GridHold {}
+
 /// A left-button press: armed once the pointer travels past the drag threshold.
 #[derive(Debug, Clone, Copy)]
 struct Drag {
@@ -100,6 +106,9 @@ impl PaneTerminal {
     /// Element hook: this frame's grid placement. A size change resizes the emulator and herdr's view.
     pub fn on_grid_metrics(&mut self, geometry: GridGeometry, cx: &mut Context<Self>) {
         let first = self.geometry.is_none();
+        if !first && cx.try_global::<GridHold>().is_some_and(|hold| hold.0) {
+            return; // a divider is moving: re-measured when it is let go
+        }
         self.geometry = Some(geometry);
         let (cols, rows) = (geometry.cols, geometry.rows);
         let resized = self.emulator.cols() != cols as usize || self.emulator.rows() != rows as usize;
@@ -363,6 +372,20 @@ mod tests {
             // The attach ran (at 120×40) and failed on the missing binary.
             assert!(p.ended.as_deref().is_some_and(|e| e.contains("/nonexistent/herdr")), "{:?}", p.ended);
         });
+    }
+
+    #[gpui::test]
+    fn the_grid_holds_its_size_while_a_divider_moves(cx: &mut gpui::TestAppContext) {
+        // Panes resize live under a divider drag; herdr's PTYs resize once, when the drag ends.
+        unsafe { std::env::set_var("SHEPHERD_HERDR", "/nonexistent/herdr") };
+        let pane = cx.new(|cx| PaneTerminal::new("w1:p1".into(), cx));
+        pane.update(cx, |p, cx| p.on_grid_metrics(geometry(120, 40), cx));
+        cx.update(|cx| cx.set_global(GridHold(true)));
+        pane.update(cx, |p, cx| p.on_grid_metrics(geometry(90, 40), cx));
+        pane.read_with(cx, |p, _| assert_eq!(p.emulator.cols(), 120, "resized during the drag"));
+        cx.update(|cx| cx.set_global(GridHold(false)));
+        pane.update(cx, |p, cx| p.on_grid_metrics(geometry(90, 40), cx));
+        pane.read_with(cx, |p, _| assert_eq!(p.emulator.cols(), 90));
     }
 
     #[test]

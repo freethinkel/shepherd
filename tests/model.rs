@@ -138,3 +138,56 @@ fn pick_tab_stays_in_the_shown_workspace_when_its_tab_closes() {
     let picked = s.pick_tab_in(Some("w1:t9"), Some("w1")).map(|t| t.tab_id.clone());
     assert_eq!(picked.as_deref(), Some("w1:t1"), "the workspace's active tab, not herdr's focus elsewhere");
 }
+
+fn pane(id: &str, x: f32, y: f32, w: f32, h: f32) -> shepherd::model::PaneFrame {
+    shepherd::model::PaneFrame { pane_id: id.into(), frame: Frac { x, y, w, h }, focused: false }
+}
+
+fn split(path: Vec<bool>, vertical: bool, ratio: f32, frame: Frac) -> shepherd::model::SplitFrame {
+    shepherd::model::SplitFrame { path, vertical, ratio, frame }
+}
+
+fn close(a: Frac, b: Frac) -> bool {
+    [(a.x, b.x), (a.y, b.y), (a.w, b.w), (a.h, b.h)].iter().all(|(p, q)| (p - q).abs() < 1e-5)
+}
+
+#[test]
+fn dragging_the_root_divider_resizes_both_sides() {
+    let s = fixture();
+    let (panes, _) = shepherd::model::preview(&s.pane_frames("w1:t1"), &s.split_frames("w1:t1"), &[], 0.3);
+    assert!(close(panes[0].frame, Frac { x: 0.0, y: 0.0, w: 0.3, h: 1.0 }), "{:?}", panes[0].frame);
+    assert!(close(panes[1].frame, Frac { x: 0.3, y: 0.0, w: 0.7, h: 1.0 }), "{:?}", panes[1].frame);
+}
+
+#[test]
+fn dragging_a_nested_divider_leaves_the_other_side_alone() {
+    // left | (top / bottom): drag the right column's horizontal divider from 0.5 to 0.8.
+    let panes = [pane("l", 0.0, 0.0, 0.5, 1.0), pane("t", 0.5, 0.0, 0.5, 0.5), pane("b", 0.5, 0.5, 0.5, 0.5)];
+    let full = Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+    let right = Frac { x: 0.5, y: 0.0, w: 0.5, h: 1.0 };
+    let splits = [split(vec![], true, 0.5, full), split(vec![true], false, 0.5, right)];
+    let (out, _) = shepherd::model::preview(&panes, &splits, &[true], 0.8);
+    assert!(close(out[0].frame, panes[0].frame));
+    assert!(close(out[1].frame, Frac { x: 0.5, y: 0.0, w: 0.5, h: 0.8 }), "{:?}", out[1].frame);
+    assert!(close(out[2].frame, Frac { x: 0.5, y: 0.8, w: 0.5, h: 0.2 }), "{:?}", out[2].frame);
+}
+
+#[test]
+fn nested_dividers_move_with_the_root() {
+    let panes = [pane("l", 0.0, 0.0, 0.5, 1.0), pane("t", 0.5, 0.0, 0.5, 0.5), pane("b", 0.5, 0.5, 0.5, 0.5)];
+    let full = Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+    let right = Frac { x: 0.5, y: 0.0, w: 0.5, h: 1.0 };
+    let splits = [split(vec![], true, 0.5, full), split(vec![true], false, 0.5, right)];
+    let (out_panes, out_splits) = shepherd::model::preview(&panes, &splits, &[], 0.25);
+    assert!(close(out_panes[1].frame, Frac { x: 0.25, y: 0.0, w: 0.75, h: 0.5 }), "{:?}", out_panes[1].frame);
+    assert_eq!(out_splits[0].ratio, 0.25);
+    assert!(close(out_splits[1].frame, Frac { x: 0.25, y: 0.0, w: 0.75, h: 1.0 }), "{:?}", out_splits[1].frame);
+    assert_eq!(out_splits[1].ratio, 0.5);
+}
+
+#[test]
+fn an_unknown_path_changes_nothing() {
+    let s = fixture();
+    let (panes, _) = shepherd::model::preview(&s.pane_frames("w1:t1"), &s.split_frames("w1:t1"), &[true, true], 0.3);
+    assert_eq!(panes, s.pane_frames("w1:t1"));
+}
