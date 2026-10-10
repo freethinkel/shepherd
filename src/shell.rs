@@ -520,6 +520,19 @@ impl Render for Shell {
         let shown_tab = tab.as_ref().map(|t| t.tab_id.clone());
         let mut workspaces = snapshot.as_ref().map(|s| s.workspaces.clone()).unwrap_or_default();
         workspaces.sort_by_key(|w| w.number);
+        let agents: Vec<(crate::model::Pane, String)> = snapshot
+            .as_ref()
+            .map(|s| {
+                s.agents()
+                    .into_iter()
+                    .map(|p| {
+                        let ws = s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id);
+                        (p.clone(), ws.map(|w| w.label.clone()).unwrap_or_default())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let hover_bg = theme.hover;
 
         let sidebar = div()
             .w(px(SIDEBAR_WIDTH))
@@ -540,11 +553,7 @@ impl Render for Shell {
                     .items_center()
                     .text_size(px(11.))
                     .text_color(theme.text_faint)
-                    .child(div().flex_1().child("Workspaces"))
-                    .child(
-                        icon_button(&theme, "new-workspace", "+")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
-                    ),
+                    .child("Workspaces"),
             )
             .child(
                 div()
@@ -597,6 +606,87 @@ impl Render for Shell {
                                 cx.notify();
                             }))
                     })),
+            )
+            .when(!agents.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px(px(16.))
+                        .pt(px(12.))
+                        .pb(px(6.))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_size(px(11.))
+                        .text_color(theme.text_faint)
+                        .child("Agents"),
+                )
+                .child(
+                    div()
+                        .id("agents")
+                        .flex_none()
+                        .max_h(relative(0.4))
+                        .overflow_y_scroll()
+                        .px(px(8.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .children(agents.into_iter().map(|(pane, workspace)| {
+                            let selected = shown_tab.as_deref() == Some(pane.tab_id.as_str());
+                            let tab_id = pane.tab_id.clone();
+                            let title = pane.terminal_title_stripped.clone().unwrap_or_default();
+                            row(&theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
+                                .h(px(44.))
+                                .child(status_dot(pane.agent_status, &theme))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap(px(6.))
+                                                .child(pane.agent.clone().unwrap_or_default())
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_color(theme.text_faint)
+                                                        .child(workspace),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(11.))
+                                                .text_color(theme.text_muted)
+                                                .child(title),
+                                        ),
+                                )
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.selected_tab = Some(tab_id.clone());
+                                    cx.notify();
+                                }))
+                        })),
+                )
+            })
+            .child(
+                div()
+                    .id("new-workspace")
+                    .flex_none()
+                    .m(px(8.))
+                    .h(px(32.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    .text_color(theme.text_muted)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .child(div().text_size(px(15.)).child("+"))
+                    .child("New workspace")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
             );
 
         let tabs = match (&snapshot, &shown_ws) {
@@ -683,7 +773,10 @@ impl Render for Shell {
                     Some(pane) => {
                         let focused = pane.read(cx).focus_handle(cx).is_focused(window);
                         cell.child(
-                            div().size_full().when(focused, |el| el.border_1().border_color(ring)).child(pane.clone()),
+                            div().size_full().relative().child(pane.clone()).when(focused, |el| {
+                                // ponytail: overlay, not a border on the container, which shrank the grid by 1px
+                                el.child(div().absolute().inset_0().border_1().border_color(ring))
+                            }),
                         )
                     }
                     None => cell.child(

@@ -145,6 +145,20 @@ impl Snapshot {
         tabs
     }
 
+    /// Panes running a detected agent, the ones that need you first (herdr's "priority" sort).
+    pub fn agents(&self) -> Vec<&Pane> {
+        let rank = |s: AgentStatus| match s {
+            AgentStatus::Blocked => 0,
+            AgentStatus::Working => 1,
+            AgentStatus::Done => 2,
+            AgentStatus::Idle => 3,
+            AgentStatus::Unknown => 4,
+        };
+        let mut agents: Vec<_> = self.panes.iter().filter(|p| p.agent.is_some()).collect();
+        agents.sort_by_key(|p| rank(p.agent_status));
+        agents
+    }
+
     /// Like `pick_tab`, but a gone choice falls back within `workspace` (its active tab, then its first) before
     /// herdr's focus, which may be in a workspace the TUI shows.
     pub fn pick_tab_in(&self, wanted: Option<&str>, workspace: Option<&str>) -> Option<&Tab> {

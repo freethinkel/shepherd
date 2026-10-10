@@ -191,3 +191,17 @@ fn an_unknown_path_changes_nothing() {
     let (panes, _) = shepherd::model::preview(&s.pane_frames("w1:t1"), &s.split_frames("w1:t1"), &[true, true], 0.3);
     assert_eq!(panes, s.pane_frames("w1:t1"));
 }
+
+#[test]
+fn agents_are_panes_with_an_agent_most_urgent_first() {
+    let mut s = fixture();
+    s.panes[0].agent = Some("codex".into());
+    s.panes[0].agent_status = AgentStatus::Blocked;
+    s.panes[2].agent = Some("pi".into());
+    s.panes[2].agent_status = AgentStatus::Idle;
+    let order: Vec<_> = s.agents().iter().map(|p| p.pane_id.as_str()).collect();
+    assert_eq!(order, ["w1:p1", "w1:p2", "w1:p3"]);
+    s.panes[0].agent = None;
+    let order: Vec<_> = s.agents().iter().map(|p| p.pane_id.as_str()).collect();
+    assert_eq!(order, ["w1:p2", "w1:p3"]);
+}
