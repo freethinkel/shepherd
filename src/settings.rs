@@ -48,8 +48,12 @@ impl Settings {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), None),
             Err(e) => return (Settings::default(), Some(format!("cannot read {}: {e}", path.display()))),
         };
-        match serde_json::from_str(&text) {
-            Ok(settings) => (settings, None),
+        match serde_json::from_str::<Settings>(&text) {
+            Ok(mut settings) => {
+                // A hand-edited size of 0 would make zero-height rows and a 500×500 PTY in herdr.
+                settings.font_size = settings.font_size.clamp(9.0, 32.0);
+                (settings, None)
+            }
             Err(e) => (Settings::default(), Some(format!("{} is not valid settings: {e}", path.display()))),
         }
     }
@@ -65,10 +69,20 @@ impl Settings {
         Ok(())
     }
 
+    /// The settings after `change`, or `None` when it changes nothing (so nothing is saved).
+    pub fn changed_by(&self, change: impl FnOnce(&mut Settings)) -> Option<Settings> {
+        let mut next = self.clone();
+        change(&mut next);
+        (next != *self).then_some(next)
+    }
+
     /// Binds `chord` to `action`; another action the user had put on that chord goes back to its default.
     pub fn record_chord(&mut self, action: &str, chord: &str) {
-        self.keys.retain(|a, k| a == action || k != chord);
-        self.keys.insert(action.to_string(), chord.to_string());
+        let chord = crate::bindings::normalize(chord).unwrap_or_default();
+        if !chord.is_empty() {
+            self.keys.retain(|a, k| a == action || crate::bindings::normalize(k).as_deref() != Some(chord.as_str()));
+        }
+        self.keys.insert(action.to_string(), chord);
     }
 
     pub fn font(&self) -> FontSettings {
@@ -165,6 +179,40 @@ mod tests {
         assert_eq!(step_font_size(13.0, 1.0), 14.0);
         assert_eq!(step_font_size(9.0, -1.0), 9.0);
         assert_eq!(step_font_size(32.0, 1.0), 32.0);
+    }
+
+    #[test]
+    fn an_unchanged_value_is_no_change() {
+        // Leaving a field without editing must not save (a broken file would be overwritten with defaults).
+        let s = Settings::default();
+        assert_eq!(s.changed_by(|s| s.font_family = "Geist Mono".into()), None);
+        assert_eq!(s.changed_by(|s| s.font_family = "Menlo".into()).map(|n| n.font_family), Some("Menlo".into()));
+    }
+
+    #[test]
+    fn unbinding_one_action_keeps_the_others_unbound() {
+        let mut s = Settings::default();
+        s.record_chord("ClosePane", "");
+        s.record_chord("Quit", "");
+        assert_eq!(s.keys.get("ClosePane").map(String::as_str), Some(""));
+        assert_eq!(s.keys.get("Quit").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn recorded_chords_are_stored_normalized() {
+        let mut s = Settings::default();
+        s.keys.insert("NewTab".into(), "cmd-alt-left".into());
+        s.record_chord("ToggleZoom", "alt-cmd-left");
+        assert_eq!(s.keys.get("NewTab"), None, "same chord written another way");
+    }
+
+    #[test]
+    fn a_hand_edited_font_size_is_clamped() {
+        let (_d, path) = tmp();
+        std::fs::write(&path, r#"{"font_size": 0}"#).unwrap();
+        assert_eq!(Settings::load(&path).0.font_size, 9.0);
+        std::fs::write(&path, r#"{"font_size": 400}"#).unwrap();
+        assert_eq!(Settings::load(&path).0.font_size, 32.0);
     }
 
     #[test]

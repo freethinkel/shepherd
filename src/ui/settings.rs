@@ -1,6 +1,6 @@
 //! The Settings window: terminal font, appearance and theme family, herdr's binary and socket, key bindings.
 //! Every change is saved at once and applied to all windows.
-use crate::bindings::{ACTIONS, effective, rebind, valid_chord};
+use crate::bindings::{ACTIONS, effective, rebind, recordable};
 use crate::herdr::{Client, set_binary};
 use crate::settings::{Settings, SettingsGlobal, step_font_size};
 use crate::theme::{AppearanceMode, Theme, families};
@@ -71,16 +71,21 @@ pub fn open(cx: &mut App) {
 
 /// Changes the settings, saves them and applies them everywhere.
 pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
-    let (settings, path) = {
+    // Nothing changed, nothing saved: leaving a field must not overwrite a file that failed to load.
+    let Some(settings) = SettingsGlobal::of(cx).settings.changed_by(change) else { return };
+    let keys_changed = settings.keys != SettingsGlobal::of(cx).settings.keys;
+    let path = {
         let global = cx.global_mut::<SettingsGlobal>();
-        change(&mut global.settings);
-        (global.settings.clone(), global.path.clone())
+        global.settings = settings.clone();
+        global.path.clone()
     };
     let saved = settings.save(&path);
     cx.global_mut::<SettingsGlobal>().error = saved.err().map(|e| format!("cannot save {}: {e:#}", path.display()));
     set_binary(settings.herdr_bin.clone());
     cx.set_global(settings.theme(cx.window_appearance()));
-    rebind(cx, &settings.keys);
+    if keys_changed {
+        rebind(cx, &settings.keys);
+    }
     cx.refresh_windows();
 }
 
@@ -114,21 +119,26 @@ impl SettingsView {
         }
         // While recording, the next keystroke is the chord: intercepted before any binding (Cmd+Q included) runs.
         let view = cx.entity().downgrade();
-        subscriptions.push(cx.intercept_keystrokes(move |event: &KeystrokeEvent, _, cx| {
+        let settings_window = window.window_handle();
+        subscriptions.push(cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
+            // Only keys pressed in this window: typing in a terminal while Record is armed stays typing.
+            if window.window_handle() != settings_window {
+                return;
+            }
             let Some(view) = view.upgrade() else { return };
             let Some(action) = view.read(cx).recording else { return };
-            cx.stop_propagation();
             let keystroke = &event.keystroke;
+            let bare = keystroke.modifiers == Default::default();
             match keystroke.key.as_str() {
-                "escape" if keystroke.modifiers == Default::default() => {}
-                "backspace" if keystroke.modifiers == Default::default() => update(cx, |s| s.record_chord(action, "")),
-                _ => {
+                "escape" if bare => {}
+                "backspace" if bare => update(cx, |s| s.record_chord(action, "")),
+                _ if recordable(keystroke) => {
                     let chord = keystroke.unparse();
-                    if valid_chord(&chord) {
-                        update(cx, |s| s.record_chord(action, &chord));
-                    }
+                    update(cx, |s| s.record_chord(action, &chord));
                 }
+                _ => return, // a bare key: keep waiting for a chord
             }
+            cx.stop_propagation();
             view.update(cx, |v, cx| {
                 v.recording = None;
                 cx.notify();

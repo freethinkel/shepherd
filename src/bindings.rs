@@ -76,6 +76,19 @@ fn known(action: &str) -> bool {
     ACTIONS.iter().any(|(name, _)| *name == action)
 }
 
+/// The chord in GPUI's own spelling (`alt-cmd-left`), so the same keys written two ways compare equal.
+pub fn normalize(chord: &str) -> Option<String> {
+    let keys: Option<Vec<String>> = chord.split_whitespace().map(|k| Keystroke::parse(k).ok().map(|k| k.unparse())).collect();
+    keys.filter(|k| !k.is_empty()).map(|k| k.join(" "))
+}
+
+/// A keystroke worth binding: with cmd, ctrl, alt or fn, or a function key. A bare letter would be taken from
+/// every terminal.
+pub fn recordable(keystroke: &Keystroke) -> bool {
+    let m = &keystroke.modifiers;
+    m.platform || m.control || m.alt || m.function || (keystroke.key.starts_with('f') && keystroke.key[1..].parse::<u8>().is_ok())
+}
+
 /// A chord GPUI can bind: space-separated keystrokes that all parse.
 pub fn valid_chord(chord: &str) -> bool {
     !chord.trim().is_empty() && chord.split_whitespace().all(|k| Keystroke::parse(k).is_ok())
@@ -86,14 +99,15 @@ pub fn valid_chord(chord: &str) -> bool {
 pub fn effective(user: &BTreeMap<String, String>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for (action, chord) in user {
-        if known(action) && valid_chord(chord) {
-            out.retain(|(_, k)| k != chord);
-            out.push((action.clone(), chord.clone()));
+        if let (true, Some(chord)) = (known(action), normalize(chord)) {
+            out.retain(|(_, k)| *k != chord);
+            out.push((action.clone(), chord));
         }
     }
     for (action, chord) in DEFAULTS {
-        if !user.contains_key(*action) && !out.iter().any(|(_, k)| k == chord) {
-            out.push((action.to_string(), chord.to_string()));
+        let chord = normalize(chord).expect("defaults parse");
+        if !user.contains_key(*action) && !out.iter().any(|(_, k)| *k == chord) {
+            out.push((action.to_string(), chord));
         }
     }
     out
@@ -110,6 +124,12 @@ pub fn rebind(cx: &mut App, user: &BTreeMap<String, String>) {
     let next = effective(user);
     apply(cx, &previous, &next);
     cx.set_global(ActiveBindings(next));
+    // macOS copies menu shortcuts when the menu is set: set it again so it shows (and only fires) the new ones.
+    cx.set_menus(vec![gpui::Menu::new("Shepherd").items([
+        gpui::MenuItem::action("Settings…", OpenSettings),
+        gpui::MenuItem::separator(),
+        gpui::MenuItem::action("Quit Shepherd", Quit),
+    ])]);
 }
 
 /// Binds `next`; chords of `previous` that `next` no longer uses are bound to `NoAction` (a later binding
@@ -168,6 +188,30 @@ mod tests {
     fn unknown_actions_are_ignored() {
         let eff = effective(&user(&[("Teleport", "cmd-j")]));
         assert_eq!(chord(&eff, "Teleport"), None);
+    }
+
+    #[test]
+    fn chords_written_differently_collide() {
+        // GPUI's unparse writes alt before cmd; the defaults say cmd-alt-left.
+        let eff = effective(&user(&[("NewTab", "alt-cmd-left")]));
+        assert_eq!(chord(&eff, "FocusLeft"), None, "two actions on one chord");
+        assert!(chord(&eff, "NewTab").is_some());
+    }
+
+    #[test]
+    fn normalize_orders_modifiers_one_way() {
+        assert_eq!(normalize("shift-cmd-d"), normalize("cmd-shift-d"));
+        assert_eq!(normalize(""), None);
+    }
+
+    #[test]
+    fn only_modified_or_function_keys_are_recordable() {
+        let k = |s: &str| gpui::Keystroke::parse(s).unwrap();
+        assert!(recordable(&k("cmd-d")));
+        assert!(recordable(&k("ctrl-a")));
+        assert!(recordable(&k("f5")));
+        assert!(!recordable(&k("l")), "a bare letter would steal typing in every pane");
+        assert!(!recordable(&k("shift-l")));
     }
 
     #[test]

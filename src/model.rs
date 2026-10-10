@@ -145,6 +145,19 @@ impl Snapshot {
         tabs
     }
 
+    /// Like `pick_tab`, but a gone choice falls back within `workspace` (its active tab, then its first) before
+    /// herdr's focus, which may be in a workspace the TUI shows.
+    pub fn pick_tab_in(&self, wanted: Option<&str>, workspace: Option<&str>) -> Option<&Tab> {
+        let find = |id: &str| self.tabs.iter().find(|t| t.tab_id == id);
+        wanted
+            .and_then(find)
+            .or_else(|| {
+                let ws = self.workspaces.iter().find(|w| Some(w.workspace_id.as_str()) == workspace)?;
+                ws.active_tab_id.as_deref().and_then(find).or_else(|| self.tabs_of(&ws.workspace_id).into_iter().next())
+            })
+            .or_else(|| self.pick_tab(None))
+    }
+
     /// The tab Shepherd shows: its own choice while that tab lives, else herdr's focused one, else the first.
     pub fn pick_tab(&self, wanted: Option<&str>) -> Option<&Tab> {
         let find = |id: &str| self.tabs.iter().find(|t| t.tab_id == id);

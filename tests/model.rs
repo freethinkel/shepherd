@@ -122,3 +122,19 @@ fn zoomed_tabs_have_no_dividers() {
     s.layouts[0].zoomed = true;
     assert!(s.split_frames("w1:t1").is_empty());
 }
+
+#[test]
+fn pick_tab_stays_in_the_shown_workspace_when_its_tab_closes() {
+    // Shepherd's selection is local; herdr's focus may be in another workspace (the TUI's).
+    let mut s = fixture();
+    s.focused_tab_id = Some("w2:t1".into());
+    s.tabs.push(shepherd::model::Tab {
+        tab_id: "w2:t1".into(),
+        workspace_id: "w2".into(),
+        label: "other".into(),
+        number: 1,
+        agent_status: AgentStatus::Unknown,
+    });
+    let picked = s.pick_tab_in(Some("w1:t9"), Some("w1")).map(|t| t.tab_id.clone());
+    assert_eq!(picked.as_deref(), Some("w1:t1"), "the workspace's active tab, not herdr's focus elsewhere");
+}

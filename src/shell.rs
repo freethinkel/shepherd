@@ -43,6 +43,11 @@ pub struct Shell {
     flash: Option<String>,
     /// The tab or workspace label being edited in place.
     renaming: Option<Rename>,
+    /// The workspace shown last, so closing its tab stays in it.
+    shown_workspace: Option<String>,
+    /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
+    /// actions still dispatch.
+    focus: gpui::FocusHandle,
 }
 
 #[derive(Clone, PartialEq)]
@@ -110,6 +115,8 @@ impl Shell {
                     divider: None,
                     flash: None,
                     renaming: None,
+                    shown_workspace: None,
+                    focus: cx.focus_handle(),
                 };
                 let client = shell.client.clone();
                 cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await).detach();
@@ -140,7 +147,7 @@ impl Shell {
     }
 
     fn shown_tab(&self) -> Option<crate::model::Tab> {
-        self.snapshot.as_ref()?.pick_tab(self.selected_tab.as_deref()).cloned()
+        self.snapshot.as_ref()?.pick_tab_in(self.selected_tab.as_deref(), self.shown_workspace.as_deref()).cloned()
     }
 
     /// The pane keyboard actions apply to: the one with keyboard focus, else herdr's focused pane of the shown tab.
@@ -211,6 +218,8 @@ impl Shell {
     /// Enter renames in herdr; Escape and clicking away keep the old label.
     fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
         let Some(rename) = self.renaming.take() else { return };
+        // The input held focus: give it back to herdr's focused pane on the next render.
+        self.focused = None;
         let label = rename.input.read(cx).value().trim().to_string();
         if commit && !label.is_empty() {
             let command = match rename.target {
@@ -235,6 +244,8 @@ impl Shell {
                         shell.finish_rename(false, cx);
                     }
                 }))
+                // Clicks in the field (a double-click selecting a word) must not reach the row and restart the rename.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(Input::new(&rename.input)),
         )
     }
@@ -453,7 +464,8 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let snapshot = self.snapshot.clone();
-        let tab = snapshot.as_ref().and_then(|s| s.pick_tab(self.selected_tab.as_deref())).cloned();
+        let tab = self.shown_tab();
+        self.shown_workspace = tab.as_ref().map(|t| t.workspace_id.clone());
         let frames = match (&snapshot, &tab) {
             (Some(s), Some(t)) => s.pane_frames(&t.tab_id),
             _ => Vec::new(),
@@ -473,6 +485,9 @@ impl Render for Shell {
             }
         }
 
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus, cx);
+        }
         let shown_ws = tab.as_ref().map(|t| t.workspace_id.clone());
         let shown_tab = tab.as_ref().map(|t| t.tab_id.clone());
         let mut workspaces = snapshot.as_ref().map(|s| s.workspaces.clone()).unwrap_or_default();
@@ -715,6 +730,7 @@ impl Render for Shell {
 
         div()
             .id("root")
+            .track_focus(&self.focus)
             .relative()
             .size_full()
             .flex()
