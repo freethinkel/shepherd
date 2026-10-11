@@ -21,6 +21,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+mod pane_drag;
+
 const TITLEBAR_HEIGHT: f32 = 38.0;
 /// The titlebar's left cluster: traffic lights, then the sidebar toggle at Zeron's `titlebar_cluster_start` (88).
 const TOGGLE_LEFT: f32 = 88.0;
@@ -99,6 +101,8 @@ pub struct Shell {
     focus: gpui::FocusHandle,
     /// The Settings page, shown in place of the sidebar and the panes while open.
     settings: Option<(Entity<crate::ui::settings::SettingsView>, Subscription)>,
+    /// A pane being dragged by its grip.
+    pane_drop: Option<pane_drag::PaneDrop>,
 }
 
 /// A tab being dragged along the tab bar, drawn under the pointer as a pill with its label.
@@ -230,6 +234,7 @@ impl Shell {
                     tabs_scroll: gpui::ScrollHandle::new(),
                     focus: cx.focus_handle(),
                     settings: None,
+                    pane_drop: None,
                 };
                 let client = shell.client.clone();
                 cx.set_global(PaneQueries(client.clone(), rt.clone()));
@@ -1185,6 +1190,7 @@ impl Render for Shell {
                             let editing = self.rename_field(&rename_target, cx);
                             let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
                             row(&theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
+                                .map(|el| pane_drag::accept_pane_in_workspace(el, &w.workspace_id, theme.accent.opacity(0.15), cx))
                                 .when(nested, |el| el.pl(px(30.)))
                                 .child(
                                     gpui::svg()
@@ -1482,6 +1488,7 @@ impl Render for Shell {
                         }
                     }))
                     .when_some(dragged, |el, dragged| el.on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone())))
+                    .map(|el| pane_drag::accept_pane(el, &t.tab_id, drop_bg, cx))
                     .drag_over::<DraggedTab>(move |s, d, _, _| if d.index == index { s } else { s.bg(drop_bg) })
                     // Dropped on a tab, the dragged one takes its place: herdr's slot is after it when moving right.
                     .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| {
@@ -1544,6 +1551,7 @@ impl Render for Shell {
         let border = theme.border;
         let ring = theme.accent.opacity(0.5);
         let split = frames.len() > 1;
+        let pane_drop = self.pane_drop_overlay(&frames, &shown_tab_id, &theme, window, cx);
         let grid = div()
             .flex_1()
             .min_h_0()
@@ -1573,7 +1581,9 @@ impl Render for Shell {
                         // a lone pane needs no marker of which pane has focus
                         let focused = split && pane.read(cx).focus_handle(cx).is_focused(window);
                         let pane_id = f.pane_id.clone();
-                        cell.on_mouse_down(
+                        let group = SharedString::from(format!("pane-{}", f.pane_id));
+                        let grip = self.pane_grip(&f.pane_id, &shown_tab_id, &group, &theme, cx);
+                        cell.group(group).on_mouse_down(
                             MouseButton::Right,
                             cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                                 this.pane_menu = Some(crate::ui::Popup::new((pane_id.clone(), e.position)));
@@ -1586,6 +1596,7 @@ impl Render for Shell {
                                 el.child(div().absolute().inset_0().border_1().border_color(ring))
                             }),
                         )
+                        .child(grip)
                     }
                     None => cell.child(
                         div()
@@ -1635,6 +1646,7 @@ impl Render for Shell {
                         }),
                     )
             }))
+            .children(pane_drop)
             .when_some(self.flash.clone(), |el, message| {
                 el.child(
                     div()

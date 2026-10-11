@@ -37,6 +37,7 @@ impl gpui::AssetSource for Assets {
             "alt-arrow-right",
             "bot",
             "check",
+            "drag-handle",
             "checklist",
             "folder",
             "git-branch",
