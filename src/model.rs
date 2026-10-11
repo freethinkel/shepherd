@@ -80,6 +80,14 @@ pub struct Pane {
     /// The directory of the pane's foreground process (a shell's `cd` moves it).
     #[serde(default)]
     pub foreground_cwd: Option<String>,
+    /// The agent's own session, as its herdr integration reports it (Claude's is its transcript's file name).
+    #[serde(default)]
+    pub agent_session: Option<AgentSession>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentSession {
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

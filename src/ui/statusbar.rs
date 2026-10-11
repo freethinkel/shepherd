@@ -12,6 +12,8 @@ pub const HEIGHT: f32 = 24.0;
 const GIT_TTL: Duration = Duration::from_secs(5);
 /// Claude's usage endpoint is polled as often as the dotfiles' statusbar does.
 const USAGE_TTL: Duration = Duration::from_secs(300);
+/// How often the shown agent's transcript is summed again.
+const SPENT_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Git {
@@ -175,6 +177,43 @@ fn read_usage(_: &str) -> Option<Usage> {
     parse_usage(&response.body_mut().read_to_string().ok()?)
 }
 
+/// Tokens a Claude Code transcript spent: input, output and cache writes and reads of every answer. Each answer
+/// is written once per content block with the same usage, so it counts once by its message id.
+pub fn parse_spent(jsonl: &str) -> u64 {
+    let mut seen = std::collections::HashSet::new();
+    jsonl
+        .lines()
+        .filter(|l| l.contains("\"usage\""))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| seen.insert(v["message"]["id"].as_str().unwrap_or_default().to_string()))
+        .map(|v| {
+            let u = &v["message"]["usage"];
+            ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
+                .iter()
+                .filter_map(|k| u[k].as_u64())
+                .sum::<u64>()
+        })
+        .sum()
+}
+
+/// `1234` as `1.2k`, `5600000` as `5.6M`.
+pub fn short_count(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
+}
+
+// ponytail: rereads the whole transcript each SPENT_TTL; read on from the last offset if transcripts get huge.
+// Subagents' own transcripts (`<session>/subagents/`) aren't counted.
+/// The tokens Claude session `id` spent, from its transcript in any of Claude Code's project folders.
+fn read_spent(id: &str) -> Option<u64> {
+    let projects = Path::new(&std::env::var_os("HOME")?).join(".claude/projects");
+    let file = std::fs::read_dir(projects).ok()?.flatten().map(|d| d.path().join(format!("{id}.jsonl"))).find(|f| f.is_file())?;
+    Some(parse_spent(&std::fs::read_to_string(file).ok()?))
+}
+
 fn label(theme: &Theme, icon: &'static str) -> gpui::Div {
     div()
         .min_w_0()
@@ -282,7 +321,13 @@ pub fn bar(
                 .flex_shrink_0()
                 .child(agent.clone())
                 .child(dot(theme, p.agent_status))
-                .child(status_label(p.agent_status)),
+                .child(status_label(p.agent_status))
+                .children(
+                    p.agent_session
+                        .as_ref()
+                        .and_then(|s| cached(&s.value, SPENT_TTL, read_spent, cx))
+                        .map(|n| div().text_color(theme.text_faint).child(format!("· {} tok", short_count(n)))),
+                ),
             None => label(theme, "icons/terminal.svg")
                 .child(div().min_w_0().truncate().child(p.terminal_title_stripped.clone().unwrap_or_default())),
         }))
@@ -343,6 +388,19 @@ mod tests {
         assert_eq!(parse_usage(body), Some(Usage { five_hour: 42.0, week: 18.0 }));
         assert_eq!(parse_usage(r#"{"five_hour":{"utilization":null},"seven_day":{"utilization":1}}"#), None);
         assert_eq!(parse_usage(r#"{"error":{"type":"authentication_error"}}"#), None);
+    }
+
+    #[test]
+    fn sums_transcript_tokens_once_per_answer() {
+        let line = |id: &str, out: u64| {
+            format!(r#"{{"type":"assistant","message":{{"id":"{id}","usage":{{"input_tokens":2,"output_tokens":{out},"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"service_tier":"standard"}}}}}}"#)
+        };
+        let jsonl = [line("a", 10), line("a", 10), r#"{"type":"user","message":{"content":"hi"}}"#.into(), line("b", 5)].join("\n");
+        assert_eq!(parse_spent(&jsonl), 1112 + 1107);
+        assert_eq!(parse_spent(""), 0);
+        assert_eq!(short_count(999), "999");
+        assert_eq!(short_count(1234), "1.2k");
+        assert_eq!(short_count(5_600_000), "5.6M");
     }
 
     #[test]
