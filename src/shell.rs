@@ -109,6 +109,10 @@ pub struct Shell {
     pane_drop: Option<pane_drag::PaneDrop>,
     /// The command panel (cmd-k), open over the window.
     command_panel: Option<crate::ui::Popup<(Entity<crate::ui::command_panel::Panel>, Subscription)>>,
+    /// Agents that started waiting or finished out of sight and have not been looked at since: the Dock badge.
+    unseen: std::collections::HashSet<String>,
+    /// The count on the Dock icon now.
+    badge: usize,
 }
 
 /// New worktree: the repo's workspace and the branch name being typed.
@@ -164,7 +168,23 @@ impl Shell {
                 })
                 .detach();
             cx.new(|cx| {
-                cx.observe_window_activation(window, |_, window, _| reapply_traffic_lights(window)).detach();
+                cx.observe_window_activation(window, |_: &mut Shell, window: &mut Window, cx: &mut Context<Shell>| {
+                    reapply_traffic_lights(window);
+                    cx.notify(); // the shown tab's agents count as seen once the window is active
+                })
+                .detach();
+                // A click on a notification brings its agent's tab up.
+                let this = cx.entity().downgrade();
+                cx.on_system_notification_response(move |response, cx| {
+                    let _ = this.update(cx, |s, cx| {
+                        let pane = s.snapshot.as_ref().and_then(|snap| snap.panes.iter().find(|p| p.pane_id == response.tag.as_ref()));
+                        if let Some(pane) = pane {
+                            s.selected_tab = Some(pane.tab_id.clone());
+                            cx.notify();
+                        }
+                    });
+                    cx.activate(true);
+                });
                 let shell = Shell {
                     snapshot: None,
                     error: None,
@@ -213,6 +233,8 @@ impl Shell {
                     settings: None,
                     pane_drop: None,
                     command_panel: None,
+                    unseen: Default::default(),
+                    badge: 0,
                 };
                 let client = shell.client.clone();
                 cx.set_global(PaneQueries(client.clone(), rt.clone()));
@@ -329,6 +351,53 @@ impl Shell {
 
     fn shown_tab(&self) -> Option<crate::model::Tab> {
         self.snapshot.as_ref()?.pick_tab_in(self.selected_tab.as_deref(), self.shown_workspace.as_deref()).cloned()
+    }
+
+    /// The tab you are looking at: none while the window is inactive or Settings covers the panes.
+    fn tab_in_view(&self, window_active: bool) -> Option<String> {
+        (window_active && self.settings.is_none()).then(|| self.shown_tab()).flatten().map(|t| t.tab_id)
+    }
+
+    /// Agents that just started waiting or finished out of sight: a notification each, and a place in the Dock count.
+    fn agents_changed(&mut self, next: &Snapshot, cx: &mut Context<Self>) {
+        let in_view = self.tab_in_view(cx.active_window().is_some());
+        let settings = &SettingsGlobal::of(cx).settings;
+        let (notify, sound) = (settings.notify_agents, settings.notify_sound);
+        let Some(old) = self.snapshot.as_ref() else { return };
+        for pane in crate::notify::arrivals(old, next) {
+            if in_view.as_deref() == Some(pane.tab_id.as_str()) {
+                continue;
+            }
+            self.unseen.insert(pane.pane_id.clone());
+            if notify {
+                let agent = pane.agent.as_deref().unwrap_or("Agent");
+                let workspace = next.workspaces.iter().find(|w| w.workspace_id == pane.workspace_id).map(|w| w.label.as_str());
+                let title = workspace.map_or_else(|| agent.to_string(), |w| format!("{agent} · {w}"));
+                let status = if pane.agent_status == AgentStatus::Blocked { "Waiting for you" } else { "Done" };
+                let body = match pane.terminal_title_stripped.as_deref().filter(|t| !t.is_empty()) {
+                    Some(t) => format!("{status}: {t}"),
+                    None => status.to_string(),
+                };
+                crate::notify::show(cx, &pane.pane_id, title, body, sound);
+            }
+        }
+    }
+
+    /// Agents leave the Dock count once their tab is in view or they moved on.
+    fn sync_badge(&mut self, window: &Window, cx: &App) {
+        let in_view = self.tab_in_view(window.is_window_active());
+        if let Some(snapshot) = &self.snapshot {
+            self.unseen.retain(|id| {
+                snapshot.panes.iter().any(|p| {
+                    &p.pane_id == id && crate::notify::wants_attention(p.agent_status) && in_view.as_deref() != Some(p.tab_id.as_str())
+                })
+            });
+        }
+        let count = if SettingsGlobal::of(cx).settings.dock_badge { self.unseen.len() } else { 0 };
+        if count != self.badge {
+            self.badge = count;
+            crate::notify::set_badge(count);
+        }
     }
 
     /// The pane keyboard actions apply to: the one with keyboard focus, else herdr's focused pane of the shown tab.
@@ -657,6 +726,7 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cl
             let alive = this.update(cx, |s, cx| {
                 match update {
                     Ok(snapshot) => {
+                        s.agents_changed(&snapshot, cx);
                         s.snapshot = Some(snapshot);
                         s.error = None;
                     }
@@ -1077,6 +1147,7 @@ pub(crate) fn row(theme: &Theme, selected: bool, id: impl Into<gpui::ElementId>)
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_badge(window, cx);
         crate::ui::reap_popup(&mut self.view_menu, window);
         crate::ui::reap_popup(&mut self.ws_menu, window);
         crate::ui::reap_popup(&mut self.pane_menu, window);

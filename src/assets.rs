@@ -43,6 +43,7 @@ impl gpui::AssetSource for Assets {
             "arrow-left",
             "arrow-right",
             "arrow-up",
+            "bell",
             "bot",
             "bot-filled",
             "check",
@@ -75,6 +76,7 @@ impl gpui::AssetSource for Assets {
             "split-rows",
             "terminal",
             "tuning",
+            "widget",
         ))
     }
 

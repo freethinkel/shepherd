@@ -34,6 +34,12 @@ pub struct Settings {
     pub agents_height: Option<f32>,
     /// What the command panel ran last, newest first: an action's name, `workspace:<id>` or `tab:<id>`.
     pub recent_commands: Vec<String>,
+    /// A macOS notification when an agent out of sight starts waiting or finishes.
+    pub notify_agents: bool,
+    /// Play a sound with those notifications.
+    pub notify_sound: bool,
+    /// The Dock icon counts agents waiting or done that you have not looked at.
+    pub dock_badge: bool,
 }
 
 /// Zeron's sidebar: 256 px by default, its edge drags it between 224 and 400.
@@ -60,6 +66,9 @@ impl Default for Settings {
             show_status_bar: true,
             agents_height: None,
             recent_commands: Vec::new(),
+            notify_agents: true,
+            notify_sound: true,
+            dock_badge: true,
         }
     }
 }
