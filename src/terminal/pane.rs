@@ -236,6 +236,10 @@ impl PaneTerminal {
         &self.pane_id
     }
 
+    pub fn geometry(&self) -> Option<GridGeometry> {
+        self.geometry
+    }
+
     pub fn ended(&self) -> Option<&str> {
         self.ended.as_deref()
     }

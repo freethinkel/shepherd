@@ -4,24 +4,113 @@ use super::Shell;
 use crate::commands::Command;
 use crate::model::{Frac, PaneFrame};
 use crate::theme::Theme;
+use crate::terminal::PaneTerminal;
+use crate::terminal::element::{resolve_color, terminal_panel_bg};
+use crate::terminal::emulator::{CellColor, CellSnapshot};
 use gpui::{
-    Context, CursorStyle, Div, DragMoveEvent, Hsla, IntoElement, MouseButton, ParentElement, Render, SharedString,
-    Stateful, Styled, Transformation, Window, div, prelude::*, px, radians, relative,
+    App, Bounds, Context, CursorStyle, Div, DragMoveEvent, Entity, Hsla, IntoElement, MouseButton, ParentElement,
+    Pixels, Point, Render, SharedString, Size, Stateful, Styled, TextRun, Transformation, Window, canvas, div, fill,
+    font, point, prelude::*, px, radians, relative, size,
 };
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-/// A pane being dragged, drawn under the pointer as a pill with its name.
+/// A pane being dragged, drawn under the pointer as a shrunk picture of it (Ghostty's), or a pill with its name
+/// when there is nothing to picture.
 #[derive(Clone)]
 pub(super) struct DraggedPane {
     pane_id: String,
     tab_id: String,
     label: String,
     theme: Theme,
+    preview: Option<Preview>,
+}
+
+/// The pane's grid at the drag's start, and where the pointer took hold of the grip.
+#[derive(Clone)]
+struct Preview {
+    lines: Rc<Vec<Vec<CellSnapshot>>>,
+    cell: Size<f32>,
+    grab: Point<Pixels>,
+}
+
+/// The largest the picture gets.
+const PREVIEW_MAX: Size<f32> = Size { width: 320., height: 240. };
+
+impl Preview {
+    fn take(pane: &Entity<PaneTerminal>, grab: Point<Pixels>, cx: &App) -> Option<Self> {
+        let pane = pane.read(cx);
+        let g = pane.geometry()?;
+        let lines = pane.active_grid_snapshot(cx)?.lines;
+        Some(Preview { lines: Rc::new(lines), cell: size(g.cell_w, g.line_h), grab })
+    }
+
+    /// The grid shrunk to fit `PREVIEW_MAX`: cell backgrounds, then one shaped line per row.
+    fn render(&self, theme: &Theme) -> impl IntoElement {
+        let (cols, rows) = (self.lines.first().map_or(0, |l| l.len()) as f32, self.lines.len() as f32);
+        let (w, h) = (cols * self.cell.width, rows * self.cell.height);
+        let scale = (PREVIEW_MAX.width / w).min(PREVIEW_MAX.height / h).min(1.);
+        let (cell_w, line_h) = (px(self.cell.width * scale), px(self.cell.height * scale));
+        let font_size = px(theme.terminal_font_size * scale);
+        let (lines, theme_) = (self.lines.clone(), theme.clone());
+        let pad = 4.;
+        // the root sits at the grab point; the picture hangs from the pointer, centred, like it is held by its grip
+        div().child(
+            div()
+                .absolute()
+                .left(self.grab.x - px(w * scale / 2. + pad))
+                .top(self.grab.y - px(pad + 3.))
+                .p(px(pad))
+                .rounded(px(8.))
+                .bg(terminal_panel_bg(theme))
+                .border_1()
+                .border_color(theme.border)
+                .shadow_lg()
+                .opacity(0.9)
+                .child(
+                    canvas(|_, _, _| {}, move |bounds, _, window, cx| {
+                        let mono = font(theme_.font_terminal.clone());
+                        for (r, row) in lines.iter().enumerate() {
+                            let y = bounds.origin.y + line_h * r as f32;
+                            let mut col = 0;
+                            for run in row.chunk_by(|a, b| a.display_colors().1 == b.display_colors().1) {
+                                let bg = run[0].display_colors().1;
+                                if bg != CellColor::Background {
+                                    let at = point(bounds.origin.x + cell_w * col as f32, y);
+                                    window.paint_quad(fill(Bounds::new(at, size(cell_w * run.len() as f32, line_h)), resolve_color(bg, &theme_)));
+                                }
+                                col += run.len();
+                            }
+                            let (mut text, mut runs) = (String::new(), Vec::<TextRun>::new());
+                            for cell in row.iter().filter(|c| !c.wide_spacer) {
+                                let ch = if cell.hidden { ' ' } else { cell.ch };
+                                let color = resolve_color(cell.display_colors().0, &theme_);
+                                text.push(ch);
+                                match runs.last_mut() {
+                                    Some(last) if last.color == color => last.len += ch.len_utf8(),
+                                    _ => runs.push(TextRun { len: ch.len_utf8(), font: mono.clone(), color, background_color: None, underline: None, strikethrough: None }),
+                                }
+                            }
+                            if text.trim().is_empty() {
+                                continue;
+                            }
+                            let line = window.text_system().shape_line(text.into(), font_size, &runs, None);
+                            let _ = line.paint(point(bounds.origin.x, y), line_h, gpui::TextAlign::Left, None, window, cx);
+                        }
+                    })
+                    .w(px(w * scale))
+                    .h(px(h * scale)),
+                ),
+        )
+    }
 }
 
 impl Render for DraggedPane {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
+        if let Some(preview) = &self.preview {
+            return preview.render(theme).into_any_element();
+        }
         div()
             .h(px(28.))
             .max_w(px(240.))
@@ -39,6 +128,7 @@ impl Render for DraggedPane {
             .text_color(theme.text)
             .child(gpui::svg().path("icons/terminal.svg").size(px(14.)).flex_none().text_color(theme.text_muted))
             .child(div().truncate().child(self.label.clone()))
+            .into_any_element()
     }
 }
 
@@ -184,7 +274,8 @@ impl Shell {
             .and_then(|p| p.agent.clone().or_else(|| p.terminal_title_stripped.clone()))
             .filter(|l| !l.is_empty())
             .unwrap_or_else(|| pane_id.to_string());
-        let dragged = DraggedPane { pane_id: pane_id.into(), tab_id: tab_id.into(), label, theme: theme.clone() };
+        let dragged = DraggedPane { pane_id: pane_id.into(), tab_id: tab_id.into(), label, theme: theme.clone(), preview: None };
+        let terminal = self.panes.get(pane_id).cloned();
         let shell = cx.entity().downgrade();
         let hover = theme.hover;
         div().absolute().top_0().left_0().w_full().flex().justify_center().child(
@@ -207,12 +298,13 @@ impl Shell {
                 .cursor(CursorStyle::OpenHand)
                 .occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_drag(dragged, move |d, _, _, cx| {
+                .on_drag(dragged, move |d, grab, _, cx| {
                     let _ = shell.update(cx, |shell, cx| {
                         shell.pane_drop = Some(PaneDrop::default());
                         cx.notify();
                     });
-                    cx.new(|_| d.clone())
+                    let preview = terminal.as_ref().and_then(|t| Preview::take(t, grab, cx));
+                    cx.new(|_| DraggedPane { preview, ..d.clone() })
                 })
                 .child(
                     gpui::svg()
