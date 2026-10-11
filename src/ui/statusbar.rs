@@ -167,16 +167,20 @@ pub fn parse_shortstat(out: &str) -> (u32, u32) {
 }
 
 // ponytail: untracked files don't count until they're added; `--intent-to-add` would touch the agents' index.
-/// What the worktree at `dir` changed: lines added and removed from its merge-base with the repo's `main` (else
-/// `master`) to its working tree, so commits, staged and unstaged edits all count. `None` with neither branch.
+/// What the worktree at `dir` changed: lines added and removed from its base to its working tree, so commits, staged
+/// and unstaged edits all count. The base is the newest commit it shares with any of `origin/HEAD`, its local twin
+/// (`develop` for `origin/develop`), `main` and `master`: a local default ahead of origin and an origin that already
+/// merged the branch both move it up. `None` without any of them.
 fn read_changes(dir: &str) -> Option<(u32, u32)> {
-    ["main", "master"].into_iter().find_map(|base| {
-        let out = std::process::Command::new("git")
-            .args(["--no-optional-locks", "-C", dir, "diff", "--shortstat", "--merge-base", base])
-            .output()
-            .ok()?;
-        out.status.success().then(|| parse_shortstat(&String::from_utf8_lossy(&out.stdout)))
-    })
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").args(["--no-optional-locks", "-C", dir]).args(args).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let remote = git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).unwrap_or_default();
+    let local = format!("refs/heads/{}", remote.trim().strip_prefix("origin/").unwrap_or("main"));
+    let refs = git(&["for-each-ref", "--format=%(objectname)", "refs/remotes/origin/HEAD", &local, "refs/heads/main", "refs/heads/master"])?;
+    let base = git(&[&["merge-base", "HEAD"][..], &refs.lines().collect::<Vec<_>>()].concat())?;
+    Some(parse_shortstat(&git(&["diff", "--shortstat", base.trim()])?))
 }
 
 /// `gh pr view --json state,isDraft`, read: `open`, `draft`, `merged` or `closed`.
