@@ -1,40 +1,44 @@
-# Push a tag v<Cargo.toml version> → a GitHub release with Shepherd-<version>-arm64.zip.
+# Every push to main builds and tests Shepherd.app. When Cargo.toml's version has no release yet, the run tags
+# v<version> and publishes Shepherd-<version>-arm64.zip: bump the version to release.
 # ponytail: ad-hoc signed, not notarized; Gatekeeper wants `xattr -dr com.apple.quarantine Shepherd.app` until a
 # Developer ID cert and notarytool are wired in.
 name: release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   macos:
     runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Tag matches Cargo.toml
-        if: startsWith(github.ref, 'refs/tags/')
-        run: test "$GITHUB_REF_NAME" = "v$(make -s version)"
-
       - run: make test
       - run: make zip
 
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" target/release/Shepherd-*.zip --generate-notes
+      - name: Release a new version
+        run: |
+          tag="v$(make -s version)"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag is already released"
+          else
+            gh release create "$tag" target/release/Shepherd-*.zip --target "$GITHUB_SHA" --title "$tag" --generate-notes
+          fi
 
-      - name: Artifact
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: Shepherd
           path: target/release/Shepherd-*.zip
