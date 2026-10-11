@@ -62,6 +62,8 @@ pub struct Shell {
     ws_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// Groups mid fold or unfold, by workspace id.
     fold_motion: HashMap<String, FoldMotion>,
+    /// Resize seams' hover: (hovered, flip count), keyed by the strip id.
+    seam_hover: HashMap<SharedString, (bool, u64)>,
     /// The workspace shown last, so closing its tab stays in it.
     shown_workspace: Option<String>,
     /// Saved in the settings when a drag ends.
@@ -98,6 +100,8 @@ pub struct Shell {
     pane_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// The status bar's spend popup, opened at this point (its bottom-left).
     spent_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
+    /// The status bar's limits popup, at its anchor.
+    usage_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     agents_scroll: gpui::ScrollHandle,
     tab_bar: tab_bar::TabBar,
     /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
@@ -207,6 +211,7 @@ impl Shell {
                     renaming: None,
                     folded: Default::default(),
                     fold_motion: Default::default(),
+                    seam_hover: Default::default(),
                     ws_menu: None,
                     shown_workspace: None,
                     sidebar_width: SettingsGlobal::of(cx).settings.sidebar_width,
@@ -222,6 +227,7 @@ impl Shell {
                     view_menu: None,
                     pane_menu: None,
                     spent_menu: None,
+                    usage_menu: None,
                     tab_menu: None,
                     worktree_dialog: None,
                     removing: Default::default(),
@@ -274,15 +280,21 @@ impl Shell {
             self.close_command_panel(cx);
             return;
         }
+        // the shown pane's repo, for the branches panel
+        let dir = crate::ui::statusbar::pane_dir(self.snapshot.as_ref(), self.active_pane(window, cx).as_deref());
         let items = match kind {
             Kind::Commands => {
                 let bindings = cx.try_global::<ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
                 crate::ui::command_panel::items(self.snapshot.as_ref(), &bindings)
             }
             Kind::Agents => crate::ui::command_panel::agent_items(self.snapshot.as_ref(), self.agent_sort),
+            Kind::Branches => match dir.as_deref() {
+                Some(d) => crate::ui::command_panel::branch_items(&crate::ui::statusbar::read_branches(d), crate::ui::statusbar::branch_of(d, cx).as_deref()),
+                None => Vec::new(),
+            },
         };
         let panel = cx.new(|cx| crate::ui::command_panel::Panel::new(kind, items, window, cx));
-        let events = cx.subscribe_in(&panel, window, |this, _, event: &PanelEvent, window, cx| {
+        let events = cx.subscribe_in(&panel, window, move |this, _, event: &PanelEvent, window, cx| {
             if !this.close_command_panel(cx) {
                 return;
             }
@@ -295,6 +307,18 @@ impl Shell {
                     }
                 }
                 PanelEvent::Run(Run::Tab(tab_id)) => this.selected_tab = Some(tab_id.clone()),
+                PanelEvent::Run(Run::Branch(branch)) => {
+                    let (Some(dir), branch) = (dir.clone(), branch.clone()) else { return };
+                    cx.spawn(async move |this, cx| {
+                        let d = dir.clone();
+                        let done = cx.background_spawn(async move { crate::ui::statusbar::switch_branch(&d, &branch) }).await;
+                        let _ = this.update(cx, |this, cx| match done {
+                            Ok(()) => crate::ui::statusbar::refresh_git(&dir, cx),
+                            Err(e) => this.show_error(e, cx),
+                        });
+                    })
+                    .detach();
+                }
                 PanelEvent::Dismiss => {}
             }
         });
@@ -813,6 +837,74 @@ fn edge_nudge(t: f32) -> f32 {
     5. * if t < out { smooth(t / out) } else { 1. - smooth((t - out) / (1. - out)) }
 }
 
+/// Zeron's resize seam (`Shell::resize_handle`): a 1 px `border_strong` line `at` px into the hit strip that
+/// fades out toward both ends. Shown while dragged; `hover` (hovered, flip count) fades it in and out like Zeron's
+/// `HOVER_FADE`, restarting on every flip.
+fn resize_seam(
+    id: SharedString,
+    vertical: bool,
+    at: f32,
+    color: Hsla,
+    dragging: bool,
+    hover: Option<(bool, u64)>,
+) -> gpui::AnyElement {
+    let clear = color.opacity(0.);
+    let angle = if vertical { 180. } else { 90. };
+    let half = |from, to| {
+        div().flex_1().bg(gpui::linear_gradient(
+            angle,
+            gpui::linear_color_stop(from, 0.),
+            gpui::linear_color_stop(to, 1.),
+        ))
+    };
+    let line = div().absolute().flex().child(half(clear, color)).child(half(color, clear));
+    let line = if vertical {
+        line.flex_col().top_0().bottom_0().left(px(at)).w(px(1.))
+    } else {
+        line.flex_row().left_0().right_0().top(px(at)).h(px(1.))
+    };
+    match (dragging, hover) {
+        (true, _) => line.into_any_element(),
+        (false, Some((on, flips))) => line
+            .with_animation(
+                SharedString::from(format!("{id}-fade-{flips}")),
+                gpui::Animation::new(SEAM_FADE).with_easing(ease_out),
+                move |el, t| el.opacity(if on { t } else { 1. - t }),
+            )
+            .into_any_element(),
+        (false, None) => line.invisible().into_any_element(),
+    }
+}
+
+const SEAM_FADE: Duration = Duration::from_millis(150);
+
+/// A pane divider's hit strip, centred on the panes' shared edge.
+const PANE_SEAM_HIT: f32 = 10.;
+
+/// A pane divider: a 1 px `rest` line always on the panes' shared edge (the strip's centre), lit `lit` while
+/// hovered (fading like `resize_seam`) or dragged.
+fn pane_seam(id: SharedString, vertical: bool, rest: Hsla, lit: Hsla, dragging: bool, hover: Option<(bool, u64)>) -> Div {
+    let line = |color: Hsla| {
+        let line = div().absolute().bg(color);
+        let at = px((PANE_SEAM_HIT - 1.) / 2.);
+        if vertical { line.top_0().bottom_0().left(at).w(px(1.)) } else { line.left_0().right_0().top(at).h(px(1.)) }
+    };
+    let glow = match (dragging, hover) {
+        (true, _) => Some(line(lit).into_any_element()),
+        (false, Some((on, flips))) => Some(
+            line(lit)
+                .with_animation(
+                    SharedString::from(format!("{id}-lit-{flips}")),
+                    gpui::Animation::new(SEAM_FADE).with_easing(ease_out),
+                    move |el, t| el.opacity(if on { t } else { 1. - t }),
+                )
+                .into_any_element(),
+        ),
+        (false, None) => None,
+    };
+    div().absolute().inset_0().child(line(rest)).children(glow)
+}
+
 fn fold_animation() -> gpui::Animation {
     gpui::Animation::new(FOLD_DURATION).with_easing(ease_out)
 }
@@ -870,6 +962,14 @@ impl Shell {
     }
 
     /// Hides or shows the sidebar with the fold tween; panes keep their grids until it lands.
+    fn hover_seam(&mut self, id: impl Into<SharedString>, on: bool, cx: &mut Context<Self>) {
+        let entry = self.seam_hover.entry(id.into()).or_insert((false, 0));
+        if entry.0 != on {
+            *entry = (on, entry.1 + 1);
+            cx.notify();
+        }
+    }
+
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let from = self.sidebar_now();
         self.sidebar_edge = None;
@@ -1152,6 +1252,7 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.ws_menu, window);
         crate::ui::reap_popup(&mut self.pane_menu, window);
         crate::ui::reap_popup(&mut self.spent_menu, window);
+        crate::ui::reap_popup(&mut self.usage_menu, window);
         crate::ui::reap_popup(&mut self.tab_menu, window);
         crate::ui::reap_popup(&mut self.worktree_dialog, window);
         crate::ui::reap_popup(&mut self.remove_confirm, window);
@@ -1388,7 +1489,7 @@ impl Render for Shell {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
             )
             .when(self.show_agents && !agents.is_empty(), |el| {
-                let (hover, active) = (theme.border_strong, theme.accent);
+                let seam = theme.border_strong;
                 let dragging = self.agents_drag.is_some();
                 el.child(
                     div()
@@ -1405,14 +1506,14 @@ impl Render for Shell {
                         .child(
                             div()
                                 .id("agents-resize")
+                                .on_hover(cx.listener(|this, on: &bool, _, cx| this.hover_seam("agents-resize", *on, cx)))
                                 .absolute()
                                 .top(px(-3.))
                                 .left_0()
                                 .right_0()
                                 .h(px(6.))
                                 .cursor_row_resize()
-                                .when(dragging, |el| el.bg(active.opacity(0.6)))
-                                .when(!dragging, |el| el.hover(move |s| s.bg(hover)))
+                                .child(resize_seam("agents-resize".into(), false, 3., seam, dragging, self.seam_hover.get("agents-resize").copied()))
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|this, e: &MouseDownEvent, _, cx| {
@@ -1516,10 +1617,10 @@ impl Render for Shell {
 
         let shown_tab_id = shown_tab.clone().unwrap_or_default();
         let grid_bounds = self.grid_bounds.clone();
-        let border = theme.border;
         let ring = theme.accent.opacity(0.5);
         let split = frames.len() > 1;
         let pane_drop = self.pane_drop_overlay(&frames, &shown_tab_id, &theme, window, cx);
+        let edges: Vec<f32> = splits.iter().map(|s| crate::model::split_edge(&frames, s)).collect();
         let grid = div()
             .flex_1()
             .min_h_0()
@@ -1541,9 +1642,7 @@ impl Render for Shell {
                     .left(relative(f.frame.x))
                     .top(relative(f.frame.y))
                     .w(relative(f.frame.w))
-                    .h(relative(f.frame.h))
-                    .p(px(0.5))
-                    .bg(border);
+                    .h(relative(f.frame.h));
                 match self.panes.get(&f.pane_id) {
                     Some(pane) => {
                         // a lone pane needs no marker of which pane has focus
@@ -1576,36 +1675,38 @@ impl Render for Shell {
                     ),
                 }
             }));
-        let hover = theme.border_strong;
-        let active = theme.accent;
+        let (seam, seam_lit) = (theme.border_strong, theme.accent);
         let grid = grid
-            .children(splits.into_iter().map(|split| {
+            .children(splits.into_iter().zip(edges).map(|(split, edge)| {
                 let dragging = self.divider.as_ref().is_some_and(|d| d.path == split.path);
-                let ratio = split.ratio; // already the live ratio while dragging (preview)
                 let id = SharedString::from(format!("split-{}", split.path.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>()));
+                // The hit strip is centred on the panes' shared edge (`edge`, already live while dragging).
                 let strip = if split.vertical {
                     div()
-                        .left(relative(split.frame.x + split.frame.w * ratio))
-                        .ml(px(-3.))
+                        .left(relative(edge))
+                        .ml(px(-PANE_SEAM_HIT / 2.))
                         .top(relative(split.frame.y))
                         .h(relative(split.frame.h))
-                        .w(px(6.))
+                        .w(px(PANE_SEAM_HIT))
                         .cursor_col_resize()
                 } else {
                     div()
-                        .top(relative(split.frame.y + split.frame.h * ratio))
-                        .mt(px(-3.))
+                        .top(relative(edge))
+                        .mt(px(-PANE_SEAM_HIT / 2.))
                         .left(relative(split.frame.x))
                         .w(relative(split.frame.w))
-                        .h(px(6.))
+                        .h(px(PANE_SEAM_HIT))
                         .cursor_row_resize()
                 };
                 let tab_id = shown_tab_id.clone();
                 strip
-                    .id(id)
+                    .id(id.clone())
+                    .on_hover({
+                        let id = id.clone();
+                        cx.listener(move |this, on: &bool, _, cx| this.hover_seam(id.clone(), *on, cx))
+                    })
                     .absolute()
-                    .when(dragging, |el| el.bg(active.opacity(0.6)))
-                    .when(!dragging, |el| el.hover(move |s| s.bg(hover)))
+                    .child(pane_seam(id.clone(), split.vertical, seam, seam_lit, dragging, self.seam_hover.get(&id).copied()))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -1635,20 +1736,21 @@ impl Render for Shell {
 
         let statusbar = self.show_status_bar.then(|| {
             let pane = self.active_pane(window, cx);
-            let on_waiting = cx.listener(|this, _: &ClickEvent, window, cx| {
-                let current = this.active_pane(window, cx);
-                let next = this.snapshot.as_ref().and_then(|s| crate::ui::statusbar::next_waiting(s, current.as_deref()));
-                if let Some(tab) = next {
-                    this.selected_tab = Some(tab.to_string());
-                    cx.notify();
-                }
+            let on_branch = cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.toggle_command_panel(crate::ui::command_panel::Kind::Branches, window, cx)
             });
             let on_spent = cx.listener(|this, _: &ClickEvent, window, cx| {
                 let at = gpui::point(window.mouse_position().x - px(12.), window.viewport_size().height - px(crate::ui::statusbar::HEIGHT + 4.));
                 this.spent_menu = Some(crate::ui::Popup::new(at));
                 cx.notify();
             });
-            crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, on_waiting, on_spent, cx)
+            let on_usage = cx.listener(|this, _: &ClickEvent, window, cx| {
+                // anchored at its right edge: the limits sit at the bar's right end
+                let at = gpui::point(window.mouse_position().x + px(12.), window.viewport_size().height - px(crate::ui::statusbar::HEIGHT + 4.));
+                this.usage_menu = Some(crate::ui::Popup::new(at));
+                cx.notify();
+            });
+            crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, on_branch, on_spent, on_usage, cx)
         });
         let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
         let on_page = settings_page.is_some();
@@ -1734,18 +1836,25 @@ impl Render for Shell {
             })
             // The sidebar's edge: drag to resize, double-click for the default width.
             .when(self.sidebar_open && !sliding && !on_page, |el| {
-                let (hover, active) = (theme.border_strong, theme.accent);
                 el.child(
                     div()
                         .id("sidebar-resize")
+                        .on_hover(cx.listener(|this, on: &bool, _, cx| this.hover_seam("sidebar-resize", *on, cx)))
                         .absolute()
                         .top(px(TITLEBAR_HEIGHT))
                         .bottom_0()
                         .left(px(sidebar_w - 3.))
                         .w(px(6.))
                         .cursor_col_resize()
-                        .when(self.sidebar_drag, |el| el.bg(active.opacity(0.6)))
-                        .when(!self.sidebar_drag, |el| el.hover(move |s| s.bg(hover)))
+                        // The sidebar's 1 px border sits at x = 2 of the strip.
+                        .child(resize_seam(
+                            "sidebar-resize".into(),
+                            true,
+                            2.,
+                            theme.border_strong,
+                            self.sidebar_drag,
+                            self.seam_hover.get("sidebar-resize").copied(),
+                        ))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, cx| {
@@ -2081,6 +2190,20 @@ impl Render for Shell {
                         .position(menu.value)
                         .snap_to_window_with_margin(px(8.))
                         .child(crate::ui::menu_motion("spent-menu-in", menu, card)),
+                )
+                .with_priority(1)
+            }))
+            .children(self.usage_menu.as_ref().map(|menu| {
+                let card = crate::ui::statusbar::usage_card(&theme, cx).on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    if let Some(m) = this.usage_menu.as_mut() { m.close() }
+                    cx.notify();
+                }));
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::BottomRight)
+                        .position(menu.value)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(crate::ui::menu_motion("usage-menu-in", menu, card)),
                 )
                 .with_priority(1)
             }))

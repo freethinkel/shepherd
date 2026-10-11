@@ -322,6 +322,21 @@ pub fn preview(panes: &[PaneFrame], splits: &[SplitFrame], path: &[bool], ratio:
     (panes, splits)
 }
 
+/// Where `split`'s divider is drawn, along its axis: the panes' shared edge nearest its ratio. herdr rounds panes
+/// to whole cells, so the ratio alone sits up to half a cell off the real boundary.
+pub fn split_edge(panes: &[PaneFrame], split: &SplitFrame) -> f32 {
+    let f = split.frame;
+    let (start, len) = if split.vertical { (f.x, f.w) } else { (f.y, f.h) };
+    let want = start + len * split.ratio;
+    panes
+        .iter()
+        .filter(|p| inside(p.frame, f))
+        .map(|p| if split.vertical { p.frame.x } else { p.frame.y })
+        .filter(|edge| *edge > start + 1e-4)
+        .min_by(|a, b| (a - want).abs().total_cmp(&(b - want).abs()))
+        .unwrap_or(want)
+}
+
 /// `f` lies within `node` (allowing float noise).
 fn inside(f: Frac, node: Frac) -> bool {
     const EPS: f32 = 1e-4;

@@ -40,9 +40,11 @@ pub struct GridSnapshot {
     pub marks: Vec<(usize, Range<usize>, bool)>,
 }
 
-/// While true, panes keep their grid size when their bounds change (a divider is being dragged): the box resizes
-/// live, the terminal and herdr's PTY resize once when the drag ends.
+/// While true (a divider or the sidebar is being dragged), panes reflow at most every `HELD_RESIZE`, so the
+/// terminal follows the drag without a SIGWINCH per pixel; the drag's end re-measures them all.
 pub struct GridHold(pub bool);
+
+const HELD_RESIZE: std::time::Duration = std::time::Duration::from_millis(80);
 
 impl gpui::Global for GridHold {}
 
@@ -161,6 +163,8 @@ pub struct PaneTerminal {
     session: Option<Session>,
     ended: Option<String>,
     geometry: Option<GridGeometry>,
+    /// The last grid resize, to pace them under `GridHold`.
+    resized_at: Option<std::time::Instant>,
     focus: FocusHandle,
     wheel_acc: f32,
     drag: Option<Drag>,
@@ -207,6 +211,7 @@ impl PaneTerminal {
             session: None,
             ended: None,
             geometry: None,
+            resized_at: None,
             focus: cx.focus_handle(),
             wheel_acc: 0.0,
             drag: None,
@@ -258,14 +263,16 @@ impl PaneTerminal {
     /// Element hook: this frame's grid placement. A size change resizes the emulator and herdr's view.
     pub fn on_grid_metrics(&mut self, geometry: GridGeometry, cx: &mut Context<Self>) {
         let first = self.geometry.is_none();
-        if !first && cx.try_global::<GridHold>().is_some_and(|hold| hold.0) {
-            return; // a divider is moving: re-measured when it is let go
-        }
-        self.geometry = Some(geometry);
         let (cols, rows) = (geometry.cols, geometry.rows);
         let resized = self.emulator.cols() != cols as usize || self.emulator.rows() != rows as usize;
+        let held = cx.try_global::<GridHold>().is_some_and(|hold| hold.0);
+        if !first && resized && held && self.resized_at.is_some_and(|at| at.elapsed() < HELD_RESIZE) {
+            return; // a drag is under way and the grid just reflowed: the next frame (or the drop) catches up
+        }
+        self.geometry = Some(geometry);
         if resized {
             self.emulator.resize(cols, rows);
+            self.resized_at = Some(std::time::Instant::now());
         }
         if first && self.session.is_none() && self.ended.is_none() {
             self.attach(false, cx);
@@ -847,8 +854,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_grid_holds_its_size_while_a_divider_moves(cx: &mut gpui::TestAppContext) {
-        // Panes resize live under a divider drag; herdr's PTYs resize once, when the drag ends.
+    fn the_grid_reflows_at_a_pace_while_a_divider_moves(cx: &mut gpui::TestAppContext) {
+        // Under a divider drag the grid reflows at most every HELD_RESIZE, not on every frame.
         // No client socket and no binary: the attach fails without touching a real herdr.
         unsafe {
             std::env::set_var("SHEPHERD_HERDR", "/nonexistent/herdr");
@@ -858,10 +865,15 @@ mod tests {
         pane.update(cx, |p, cx| p.on_grid_metrics(geometry(120, 40), cx));
         cx.update(|cx| cx.set_global(GridHold(true)));
         pane.update(cx, |p, cx| p.on_grid_metrics(geometry(90, 40), cx));
-        pane.read_with(cx, |p, _| assert_eq!(p.emulator.cols(), 120, "resized during the drag"));
+        pane.read_with(cx, |p, _| assert_eq!(p.emulator.cols(), 120, "reflowed twice within HELD_RESIZE"));
+        pane.update(cx, |p, cx| {
+            p.resized_at = Some(std::time::Instant::now() - HELD_RESIZE);
+            p.on_grid_metrics(geometry(90, 40), cx)
+        });
+        pane.read_with(cx, |p, _| assert_eq!(p.emulator.cols(), 90, "the drag reflows once the pace allows"));
         cx.update(|cx| cx.set_global(GridHold(false)));
-        pane.update(cx, |p, cx| p.on_grid_metrics(geometry(90, 40), cx));
-        pane.read_with(cx, |p, _| assert_eq!(p.emulator.cols(), 90));
+        pane.update(cx, |p, cx| p.on_grid_metrics(geometry(100, 40), cx));
+        pane.read_with(cx, |p, _| assert_eq!(p.emulator.cols(), 100));
     }
 
     #[test]

@@ -181,6 +181,20 @@ fn dragging_a_nested_divider_leaves_the_other_side_alone() {
 }
 
 #[test]
+fn a_divider_sits_on_the_panes_rounded_edge_not_its_ratio() {
+    // herdr's real layout: 69 rows split at 0.5594 → panes of 39 and 30 rows, the edge at row 39, not 38.6.
+    let (top, bottom) = (39.0 / 69.0, 30.0 / 69.0);
+    let panes = [pane("t", 0.0, 0.0, 1.0, top), pane("b", 0.0, top, 1.0, bottom)];
+    let full = Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+    assert_eq!(shepherd::model::split_edge(&panes, &split(vec![], false, 0.5594, full)), top);
+    // l | (t / b): the right column's divider snaps to its own panes' edge, never to the column's start.
+    let panes = [pane("l", 0.0, 0.0, 0.5, 1.0), pane("t", 0.5, 0.0, 0.5, 0.4), pane("b", 0.5, 0.4, 0.5, 0.6)];
+    let right = Frac { x: 0.5, y: 0.0, w: 0.5, h: 1.0 };
+    assert_eq!(shepherd::model::split_edge(&panes, &split(vec![true], false, 0.38, right)), 0.4);
+    assert_eq!(shepherd::model::split_edge(&panes, &split(vec![], true, 0.49, full)), 0.5);
+}
+
+#[test]
 fn nested_dividers_move_with_the_root() {
     let panes = [pane("l", 0.0, 0.0, 0.5, 1.0), pane("t", 0.5, 0.0, 0.5, 0.5), pane("b", 0.5, 0.5, 0.5, 0.5)];
     let full = Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
