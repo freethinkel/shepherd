@@ -185,6 +185,41 @@ fn label(theme: &Theme, icon: &'static str) -> gpui::Div {
         .child(gpui::svg().path(icon).size(px(12.)).flex_none().text_color(theme.text_muted.opacity(0.7)))
 }
 
+/// A 12 px progress ring: `used` percent of a turn from 12 o'clock, clockwise, over a full faint track.
+fn donut(used: f64, track: gpui::Hsla, color: gpui::Hsla) -> impl IntoElement {
+    let fraction = (used / 100.).clamp(0., 1.) as f32;
+    gpui::canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let d = f32::from(bounds.size.width.min(bounds.size.height));
+            let (width, center) = ((d / 6.).max(2.), bounds.center());
+            let r = (d - width) / 2.;
+            // ponytail: a polyline arc with butt caps; lyon's round caps aren't re-exported by gpui
+            let ring = |turn: f32| {
+                let mut path = gpui::PathBuilder::stroke(px(width));
+                let steps = (turn * 64.).ceil().max(1.) as usize;
+                for i in 0..=steps {
+                    let a = turn * std::f32::consts::TAU * i as f32 / steps as f32;
+                    let at = gpui::point(center.x + px(r * a.sin()), center.y - px(r * a.cos()));
+                    if i == 0 { path.move_to(at) } else { path.line_to(at) }
+                }
+                if turn >= 1. {
+                    path.close();
+                }
+                path.build().ok()
+            };
+            if let Some(path) = ring(1.) {
+                window.paint_path(path, track);
+            }
+            if let Some(path) = ring(fraction).filter(|_| fraction > 0.) {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .size(px(12.))
+    .flex_none()
+}
+
 /// A clickable label: a wash on hover.
 fn link(el: gpui::Stateful<gpui::Div>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let hover = theme.hover;
@@ -253,14 +288,12 @@ pub fn bar(
         }))
         .child(div().flex_1())
         .children(usage.map(|u| {
-            let pct = |window: &str, used: f64| {
-                let color = if used >= 90. { theme.danger } else if used >= 70. { theme.warning } else { muted };
-                div().flex_none().text_color(color).child(format!("{window} {}%", used.round()))
-            };
-            link(label(theme, "icons/claude-mark.svg").id("statusbar-usage"), theme)
-                .flex_shrink_0()
-                .child(pct("5h", u.five_hour))
-                .child(pct("7d", u.week))
+            // the dotfiles' statusbar: the ring fills with the 5-hour window, colored by the worse of the two
+            let worst = u.five_hour.max(u.week);
+            let color = if worst >= 90. { theme.danger } else if worst >= 70. { theme.warning } else { theme.accent };
+            link(div().id("statusbar-usage").flex_none().flex().items_center().gap(px(6.)).px(px(8.)), theme)
+                .child(donut(u.five_hour, theme.text.opacity(0.2), color))
+                .child(format!("{}%", u.five_hour.round()))
                 .on_click(|_, _, cx| cx.open_url("https://claude.ai/settings/usage"))
         }))
         .when(working + waiting + done > 0, |el| {
