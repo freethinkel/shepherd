@@ -23,6 +23,7 @@ pub enum Run {
 /// The heading an item sits under; also searched, so "tab" finds the tabs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Section {
+    Recent,
     Commands,
     Workspaces,
     Tabs,
@@ -32,6 +33,7 @@ pub enum Section {
 impl Section {
     fn title(self) -> &'static str {
         match self {
+            Section::Recent => "Recent",
             Section::Commands => "Commands",
             Section::Workspaces => "Workspaces",
             Section::Tabs => "Tabs",
@@ -42,6 +44,8 @@ impl Section {
 
 #[derive(Debug, Clone)]
 pub struct Item {
+    /// Names the item in the recent list: an action's name, `workspace:<id>` or `tab:<id>`.
+    pub key: String,
     pub section: Section,
     pub icon: &'static str,
     pub label: String,
@@ -138,6 +142,7 @@ pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<
         .iter()
         .filter(|(name, _)| *name != "CommandPanel")
         .map(|(name, label)| Item {
+            key: name.to_string(),
             section: Section::Commands,
             icon: action_icon(name),
             label: label.to_string(),
@@ -155,6 +160,7 @@ pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<
         if let Some(tab) = tab {
             let linked = w.worktree.as_ref().is_some_and(|t| t.is_linked_worktree);
             out.push(Item {
+                key: format!("workspace:{}", w.workspace_id),
                 section: Section::Workspaces,
                 icon: if linked { "icons/git-branch.svg" } else { "icons/folder.svg" },
                 label: w.label.clone(),
@@ -168,6 +174,7 @@ pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<
     for w in &workspaces {
         for t in s.tabs_of(&w.workspace_id) {
             out.push(Item {
+                key: format!("tab:{}", t.tab_id),
                 section: Section::Tabs,
                 icon: "icons/terminal.svg",
                 label: short_tab_label(&t.label).to_string(),
@@ -179,6 +186,28 @@ pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<
         }
     }
     out
+}
+
+/// How many recent items the empty command panel shows on top.
+const RECENT: usize = 5;
+
+/// `items` with the ones in `recent` (newest first) copied on top under Recent; gone ones are skipped.
+pub fn with_recent(mut items: Vec<Item>, recent: &[String]) -> Vec<Item> {
+    let top: Vec<Item> = recent
+        .iter()
+        .filter_map(|key| items.iter().find(|i| &i.key == key))
+        .take(RECENT)
+        .map(|i| Item { section: Section::Recent, ..i.clone() })
+        .collect();
+    items.splice(0..0, top);
+    items
+}
+
+/// `recent` with `key` moved to the front, at most [`RECENT`] long.
+pub fn remember(recent: &mut Vec<String>, key: &str) {
+    recent.retain(|k| k != key);
+    recent.insert(0, key.to_string());
+    recent.truncate(RECENT);
 }
 
 /// herdr's tab label without its number and path: "2 · main › claude › Fix tabs" reads "Fix tabs" (the
@@ -196,6 +225,7 @@ pub fn agent_items(snapshot: Option<&Snapshot>, sort: AgentSort) -> Vec<Item> {
         .map(|p| {
             let agent = p.agent.clone().unwrap_or_default();
             Item {
+                key: format!("agent:{}", p.pane_id),
                 section: Section::Agents,
                 icon: agent_icon(&agent),
                 label: p.terminal_title_stripped.clone().filter(|t| !t.is_empty()).unwrap_or(agent),
@@ -275,7 +305,14 @@ pub fn score(query: &str, text: &str) -> Option<i32> {
 /// Indices of the `items` matching `query`, by section, best match first in each; a section with a better best
 /// match comes first, and ties keep their order.
 pub fn rank(query: &str, items: &[Item]) -> Vec<usize> {
-    let mut hits: Vec<(usize, i32)> = items.iter().enumerate().filter_map(|(i, item)| Some((i, score(query, &item.haystack())?))).collect();
+    // Recent repeats items, so it shows only while nothing is typed
+    let typing = !query.trim().is_empty();
+    let mut hits: Vec<(usize, i32)> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| !(typing && item.section == Section::Recent))
+        .filter_map(|(i, item)| Some((i, score(query, &item.haystack())?)))
+        .collect();
     hits.sort_by_key(|&(_, s)| std::cmp::Reverse(s));
     let mut sections: Vec<Section> = Vec::new();
     for &(i, _) in &hits {
@@ -348,6 +385,10 @@ impl EventEmitter<PanelEvent> for Panel {}
 
 impl Panel {
     pub fn new(kind: Kind, items: Vec<Item>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let items = match kind {
+            Kind::Commands => with_recent(items, &crate::settings::SettingsGlobal::of(cx).settings.recent_commands),
+            Kind::Agents => items,
+        };
         let theme = Theme::of(cx).clone();
         let placeholder = match kind {
             Kind::Commands => "Search commands, workspaces and tabs",
@@ -404,9 +445,12 @@ impl Panel {
     }
 
     fn run(&mut self, row: usize, cx: &mut Context<Self>) {
-        if let Some(&i) = self.matches.get(row) {
-            cx.emit(PanelEvent::Run(self.items[i].run.clone()));
+        let Some(item) = self.matches.get(row).map(|&i| self.items[i].clone()) else { return };
+        // a settings file that failed to load is not overwritten
+        if self.kind == Kind::Commands && crate::settings::SettingsGlobal::of(cx).error.is_none() {
+            crate::ui::settings::update(cx, |s| remember(&mut s.recent_commands, &item.key));
         }
+        cx.emit(PanelEvent::Run(item.run));
     }
 }
 
@@ -677,7 +721,24 @@ mod tests {
 
     fn item(section: Section, label: &str) -> Item {
         let run = if section == Section::Commands { Run::Action("NewTab") } else { Run::Tab("t".into()) };
-        Item { section, icon: "", label: label.into(), hint: None, chord: None, status: None, run }
+        Item { key: label.into(), section, icon: "", label: label.into(), hint: None, chord: None, status: None, run }
+    }
+
+    #[test]
+    fn recent_items_lead_the_empty_list_and_hide_while_typing() {
+        let items = with_recent(commands(&["New tab", "Split right", "Settings"]), &["Settings".into(), "gone".into(), "New tab".into()]);
+        assert_eq!(ranked("", &items), ["Settings", "New tab", "New tab", "Split right", "Settings"]);
+        assert_eq!(items[0].section, Section::Recent);
+        assert_eq!(ranked("set", &items), ["Settings"], "no duplicate from Recent");
+    }
+
+    #[test]
+    fn remember_moves_to_front_and_caps() {
+        let mut recent: Vec<String> = ["a", "b", "c", "d", "e"].map(String::from).to_vec();
+        remember(&mut recent, "c");
+        assert_eq!(recent, ["c", "a", "b", "d", "e"]);
+        remember(&mut recent, "f");
+        assert_eq!(recent, ["f", "c", "a", "b", "d"]);
     }
 
     fn ranked(query: &str, items: &[Item]) -> Vec<String> {

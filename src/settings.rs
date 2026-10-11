@@ -28,6 +28,8 @@ pub struct Settings {
     pub show_agents: bool,
     /// The Agents list's height cap; dragging the section's top edge sets it, `None` is 40 % of the sidebar.
     pub agents_height: Option<f32>,
+    /// What the command panel ran last, newest first: an action's name, `workspace:<id>` or `tab:<id>`.
+    pub recent_commands: Vec<String>,
 }
 
 /// Zeron's sidebar: 256 px by default, its edge drags it between 224 and 400.
@@ -51,6 +53,7 @@ impl Default for Settings {
             agent_sort: AgentSort::default(),
             show_agents: true,
             agents_height: None,
+            recent_commands: Vec::new(),
         }
     }
 }
