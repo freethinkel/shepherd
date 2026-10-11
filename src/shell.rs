@@ -1070,6 +1070,30 @@ fn save_from_sidebar(cx: &mut App, change: impl FnOnce(&mut crate::settings::Set
     }
 }
 
+/// Zeron's update strip at the sidebar's foot: an accent chip while there is an update to offer; a click installs it.
+fn update_strip(theme: &Theme, cx: &App) -> Option<Stateful<Div>> {
+    let updates = crate::update::Updates::of(cx);
+    let (label, release) = updates.strip()?;
+    let tone = if matches!(updates, crate::update::Updates::Failed(..)) { theme.danger } else { theme.accent };
+    let hover = tone.opacity(0.22);
+    Some(
+        div()
+            .id("update-strip")
+            .m(px(8.))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded(px(8.))
+            .bg(tone.opacity(0.14))
+            .text_size(px(11.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(tone)
+            .child(div().truncate().child(label))
+            .when_some(release, |el, release| {
+                el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, cx| crate::update::install(release.clone(), cx))
+            }),
+    )
+}
+
 /// A popup menu's panel.
 pub(crate) fn menu_card(theme: &Theme, id: &'static str, min_w: f32) -> Stateful<Div> {
     div()
@@ -1613,7 +1637,8 @@ impl Render for Shell {
                     )
                     .child(crate::ui::scrollbar("agents-scrollbar", &self.agents_scroll, &theme)),
                 )
-            });
+            })
+            .children(update_strip(&theme, cx));
 
         let tabbar = self.render_tab_bar(&theme, shown_ws.clone(), shown_tab.clone(), sidebar_w, window, cx);
 

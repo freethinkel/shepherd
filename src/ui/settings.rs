@@ -8,6 +8,7 @@ use crate::herdr::{Client, HerdrConfig, config_path, set_binary, set_socket};
 use crate::settings::{Settings, SettingsGlobal, step_font_size, step_line_height};
 use crate::theme::{AppearanceMode, Theme, families};
 use crate::ui::input_style;
+use crate::update::{self as updater, Updates};
 use gpui::{
     App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Global, IntoElement,
     KeyDownEvent, Keystroke, KeystrokeEvent, ParentElement, Render, SharedString, Stateful, Styled, Subscription,
@@ -34,16 +35,18 @@ enum Section {
     Integrations,
     Herdr,
     Shortcuts,
+    About,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [
+    const ALL: [Section; 7] = [
         Section::Terminal,
         Section::Appearance,
         Section::Notifications,
         Section::Integrations,
         Section::Herdr,
         Section::Shortcuts,
+        Section::About,
     ];
 
     fn label(self) -> &'static str {
@@ -54,6 +57,7 @@ impl Section {
             Section::Integrations => "Integrations",
             Section::Herdr => "herdr",
             Section::Shortcuts => "Shortcuts",
+            Section::About => "About",
         }
     }
 
@@ -65,6 +69,7 @@ impl Section {
             Section::Integrations => "icons/widget.svg",
             Section::Herdr => "icons/remote-server.svg",
             Section::Shortcuts => "icons/keyboard.svg",
+            Section::About => "icons/info-circle.svg",
         }
     }
 }
@@ -845,6 +850,24 @@ impl Render for SettingsView {
                         )
                 })
                 .child(note(&theme, herdr_note)),
+            Section::About => {
+                let updates = Updates::of(cx).clone();
+                let button = match &updates {
+                    Updates::Available(r) => {
+                        let r = r.clone();
+                        action(&theme, "update-app", format!("Update to {}", r.version))
+                            .on_click(move |_: &ClickEvent, _, cx| updater::install(r.clone(), cx))
+                    }
+                    _ => action(&theme, "check-updates", "Check for Updates").on_click(|_: &ClickEvent, _, cx| updater::check(cx, false)),
+                };
+                div().child(page_header(&theme, "About", "The version of Shepherd and its updates from GitHub.")).child(
+                    card(&theme).child(
+                        card_row(&theme, true)
+                            .child(row_text(&theme, format!("Shepherd {}", env!("CARGO_PKG_VERSION")), updates.line()))
+                            .when(updater::app_bundle().is_some(), |row| row.child(button.when(updates.busy(), |b| b.opacity(0.5)))),
+                    ),
+                )
+            }
             Section::Shortcuts => {
                 let bindings = effective(&settings.keys);
                 div()

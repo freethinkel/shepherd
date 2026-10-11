@@ -59,6 +59,7 @@ impl gpui::AssetSource for Assets {
             "git-branch",
             "grok-mark",
             "hermes-mark",
+            "info-circle",
             "keyboard",
             "logout-2",
             "more-horizontal",

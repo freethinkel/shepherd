@@ -17,6 +17,7 @@ fn main() {
         shepherd::bindings::init_menu_actions(cx);
         cx.on_action(|_: &shepherd::bindings::OpenSettings, cx| shepherd::shell::Shell::toggle_settings(cx));
         cx.set_global(shepherd::ui::settings::Tokio(handle.clone()));
+        shepherd::update::start(cx);
 
         shepherd::shell::Shell::open(handle.clone(), cx);
         if std::env::var_os("SHEPHERD_SETTINGS").is_some() {
