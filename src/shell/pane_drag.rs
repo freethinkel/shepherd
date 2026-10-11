@@ -159,6 +159,14 @@ fn inset(f: Frac, by: f32) -> Frac {
 }
 
 impl Shell {
+    /// Shows the tab a moved pane landed in.
+    fn follow_moved_pane(&mut self, result: &serde_json::Value, cx: &mut Context<Self>) {
+        if let Some(tab) = crate::commands::moved_tab_id(result) {
+            self.selected_tab = Some(tab);
+            cx.notify();
+        }
+    }
+
     /// Runs `commands` one after another, stopping at the first error.
     fn send_all(&mut self, mut commands: Vec<Command>, cx: &mut Context<Self>) {
         if commands.is_empty() {
@@ -311,7 +319,7 @@ pub(super) fn accept_pane(el: Stateful<Div>, tab_id: &str, drop_bg: Hsla, cx: &C
             this.pane_drop = None;
             if d.tab_id != dropped {
                 let command = Command::MovePane { pane_id: d.pane_id.clone(), tab_id: dropped.clone(), down: false, target: None };
-                this.send(command, cx, |_, _, _| {});
+                this.send(command, cx, Shell::follow_moved_pane);
             }
         },
     ))
@@ -323,7 +331,7 @@ pub(super) fn accept_pane_in_workspace(el: Stateful<Div>, workspace_id: &str, dr
     el.drag_over::<DraggedPane>(move |s, _, _, _| s.bg(drop_bg)).on_drop(cx.listener(move |this, d: &DraggedPane, _, cx| {
         this.pane_drop = None;
         let command = Command::MovePaneToNewTab { pane_id: d.pane_id.clone(), workspace_id: Some(workspace_id.clone()) };
-        this.send(command, cx, |_, _, _| {});
+        this.send(command, cx, Shell::follow_moved_pane);
     }))
 }
 

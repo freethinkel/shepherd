@@ -123,6 +123,11 @@ pub fn created_tab_id(result: &Value) -> Option<String> {
     result["tab"]["tab_id"].as_str().map(str::to_string)
 }
 
+/// The tab a `pane.move` response put the pane in.
+pub fn moved_tab_id(result: &Value) -> Option<String> {
+    result["move_result"]["pane"]["tab_id"].as_str().map(str::to_string)
+}
+
 /// The branch herdr picks for a worktree created without one, from herdr's `generated_branch_slug`
 /// (src/worktree.rs @ v0.9.3, Apache-2.0); herdr seeds it with the time in microseconds.
 pub fn generated_branch(seed: u64) -> String {
@@ -269,5 +274,14 @@ mod tests {
         let ws = json!({"type": "workspace_created", "workspace": {"workspace_id": "wAA", "active_tab_id": "wAA:t1"},
                         "tab": {"tab_id": "wAA:t1"}, "root_pane": {"pane_id": "wAA:p1"}});
         assert_eq!(created_tab_id(&ws).as_deref(), Some("wAA:t1"));
+    }
+
+    #[test]
+    fn moved_tab_is_read_from_the_response() {
+        // herdr 0.9.3 `pane.move` into another workspace: the pane gets that workspace's ids
+        let result = json!({"type": "pane_move", "move_result": {"changed": true, "previous_pane_id": "w1:p2",
+                            "pane": {"pane_id": "w2:p2", "tab_id": "w2:t2", "workspace_id": "w2"}}});
+        assert_eq!(moved_tab_id(&result).as_deref(), Some("w2:t2"));
+        assert_eq!(moved_tab_id(&json!({"type": "pane_swap"})), None);
     }
 }
