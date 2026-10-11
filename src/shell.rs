@@ -125,7 +125,8 @@ pub struct Shell {
     unseen: std::collections::HashSet<String>,
     /// The count on the Dock icon now.
     badge: usize,
-    /// Saves the window's frame once it stops moving; a newer move drops it.
+    /// The window's frame not saved yet, and the save it waits for: half a second after the last move, or quitting.
+    frame: Option<WindowFrame>,
     frame_save: gpui::Task<()>,
 }
 
@@ -203,13 +204,17 @@ impl Shell {
                     });
                     cx.activate(true);
                 });
-                // ponytail: saved half a second after the last move, so a quit within it loses that move
                 cx.observe_window_bounds(window, |s: &mut Shell, window, cx| {
-                    let Some(frame) = window_frame(window, cx) else { return };
-                    s.frame_save = cx.spawn(async move |_, cx| {
+                    s.frame = window_frame(window, cx);
+                    s.frame_save = cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(Duration::from_millis(500)).await;
-                        let _ = cx.update(|cx| save_from_sidebar(cx, |s| s.window = Some(frame)));
+                        let _ = this.update(cx, |s, cx| s.save_frame(cx));
                     });
+                })
+                .detach();
+                cx.on_app_quit(|s: &mut Shell, cx| {
+                    s.save_frame(cx);
+                    async {}
                 })
                 .detach();
                 let shell = Shell {
@@ -268,6 +273,7 @@ impl Shell {
                     command_panel: None,
                     unseen: Default::default(),
                     badge: 0,
+                    frame: None,
                     frame_save: gpui::Task::ready(()),
                 };
                 let client = shell.client.clone();
@@ -1044,6 +1050,12 @@ impl Shell {
             cx.set_global(GridHold(false));
             self.save_sidebar_width(cx);
             cx.refresh_windows();
+        }
+    }
+
+    fn save_frame(&mut self, cx: &mut Context<Self>) {
+        if let Some(frame) = self.frame.take() {
+            save_from_sidebar(cx, |s| s.window = Some(frame));
         }
     }
 
