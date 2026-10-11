@@ -151,16 +151,23 @@ fn agent_icon(agent: Option<&str>) -> &'static str {
     }
 }
 
-/// The favicon's tile and mark: white on the brand's color where it has one, an inverted tile for monochrome
-/// marks, a muted one for a shell.
-// ponytail: brand colors only for marks that have one; the rest stay neutral tiles
+/// The favicon's tile and mark: the brand's colors (black for monochrome brands, as their app icons are), an
+/// inverted tile for agents without a mark, a muted one for a shell.
 fn agent_tint(agent: Option<&str>, theme: &Theme) -> (Hsla, Hsla) {
-    let brand = |hex: u32| (gpui::rgb(hex).into(), gpui::white());
+    let brand = |bg: u32, fg: u32| (gpui::rgb(bg).into(), gpui::rgb(fg).into());
     match agent {
         None => (theme.text_muted.opacity(0.55), theme.surface),
-        Some("claude") => brand(0xD97757),
-        Some("codex") => brand(0x10A37F),
-        Some("agy" | "gemini") => brand(0x4285F4),
+        Some("claude") => brand(0xD97757, 0xFFFFFF),
+        Some("codex") => brand(0x10A37F, 0xFFFFFF),
+        Some("agy" | "gemini") => brand(0x4285F4, 0xFFFFFF),
+        // cursor.com's signature orange
+        Some("cursor") => brand(0xF54E00, 0xFFFFFF),
+        // Cognition's Devin palette blue
+        Some("devin") => brand(0x0294DE, 0xFFFFFF),
+        // ponytail: pi.dev's yellow accent; pi has no published brand color
+        Some("pi") => brand(0xF1BE58, 0x1A1A1A),
+        // monochrome brands
+        Some("grok" | "opencode") => brand(0x0A0A0A, 0xFFFFFF),
         Some(_) => (theme.text, theme.surface),
     }
 }
@@ -302,6 +309,8 @@ fn favicon(t: &Shown) -> Div {
         .items_center()
         .justify_center()
         .bg(bg)
+        // a black tile would sink into a dark bar: a hairline keeps its edge
+        .when(bg.l < 0.1, |el| el.border_1().border_color(gpui::white().opacity(0.14)))
         .child(gpui::svg().path(t.icon).size(px(11.)).text_color(fg))
 }
 
