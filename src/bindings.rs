@@ -44,6 +44,9 @@ app_actions! {
     PreviousWorkspace: "Previous workspace",
     NextWorkspace: "Next workspace",
     ToggleSidebar: "Toggle sidebar",
+    FontSizeUp: "Bigger text",
+    FontSizeDown: "Smaller text",
+    FontSizeReset: "Default text size",
     OpenSettings: "Settings",
     CommandPanel: "Command panel",
     AgentsPanel: "Agents",
@@ -76,6 +79,10 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("PreviousWorkspace", "cmd-up"),
     ("NextWorkspace", "cmd-down"),
     ("ToggleSidebar", "cmd-b"),
+    ("FontSizeUp", "cmd-="),
+    ("FontSizeUp", "cmd-+"),
+    ("FontSizeDown", "cmd--"),
+    ("FontSizeReset", "cmd-0"),
     ("OpenSettings", "cmd-,"),
     ("CommandPanel", "cmd-k"),
     ("CommandPanel", "cmd-shift-p"),
@@ -291,8 +298,9 @@ mod tests {
 
     #[test]
     fn every_default_names_a_known_action() {
-        for (action, _) in DEFAULTS {
+        for (action, chord) in DEFAULTS {
             assert!(ACTIONS.iter().any(|(name, _)| name == action), "{action}");
+            assert!(normalize(chord).is_some(), "{chord}");
         }
     }
 }

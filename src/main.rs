@@ -16,6 +16,12 @@ fn main() {
         cx.on_action(|_: &shepherd::bindings::Quit, cx| cx.quit());
         shepherd::bindings::init_menu_actions(cx);
         cx.on_action(|_: &shepherd::bindings::OpenSettings, cx| shepherd::shell::Shell::toggle_settings(cx));
+        use shepherd::{settings::step_font_size, ui::settings::update};
+        cx.on_action(|_: &shepherd::bindings::FontSizeUp, cx| update(cx, |s| s.font_size = step_font_size(s.font_size, 1.0)));
+        cx.on_action(|_: &shepherd::bindings::FontSizeDown, cx| update(cx, |s| s.font_size = step_font_size(s.font_size, -1.0)));
+        cx.on_action(|_: &shepherd::bindings::FontSizeReset, cx| {
+            update(cx, |s| s.font_size = shepherd::settings::Settings::default().font_size)
+        });
         cx.set_global(shepherd::ui::settings::Tokio(handle.clone()));
         shepherd::update::start(cx);
         shepherd::notify::warn_if_denied(cx);
