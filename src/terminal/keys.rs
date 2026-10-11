@@ -14,7 +14,8 @@ pub fn keystroke_bytes(
     // Platform-primary combos (Cmd on macOS, the super key elsewhere) belong to
     // the app keymap, never the PTY.
     if mods.platform {
-        return None;
+        // Except Cmd+Backspace: delete to the line's start (Ctrl+U), as Terminal, iTerm2 and Ghostty do.
+        return (key == "backspace").then(|| vec![0x15]);
     }
     if mods.alt {
         // macOS composes Option chords (Option+B → "∫"); send what was composed, as Ghostty does by default.
@@ -286,6 +287,7 @@ mod tests {
         };
         assert_eq!(keystroke_bytes("j", Some("j"), &cmd, false), None);
         assert_eq!(keystroke_bytes("enter", None, &cmd, false), None);
+        assert_eq!(keystroke_bytes("backspace", None, &cmd, false), Some(vec![0x15]));
     }
 
     #[test]

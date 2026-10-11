@@ -23,6 +23,8 @@ pub fn arrivals<'a>(old: &'a Snapshot, new: &'a Snapshot) -> impl Iterator<Item 
 
 /// Posts a notification tagged with the pane, so a click can bring that pane up.
 pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool) {
+    // ponytail: outside an .app UNUserNotificationCenter aborts (gpui makes it a no-op), so a bare binary shows none;
+    // `cargo run` goes through scripts/run-bundled.sh, which runs it from inside Shepherd.app.
     if NSBundle::mainBundle().bundleIdentifier().is_some() {
         cx.show_system_notification(SystemNotification {
             tag: pane_id.to_string().into(),
@@ -30,12 +32,6 @@ pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool) {
             body: body.into(),
             actions: Vec::new(),
         });
-    } else {
-        // ponytail: outside an .app UNUserNotificationCenter aborts (gpui makes it a no-op), so `cargo run` builds post
-        // through osascript: shown as Script Editor's (silent when its notifications are off), and a click opens
-        // Script Editor. `scripts/bundle.sh` builds Shepherd.app, which gets real ones that bring the pane up.
-        let script = format!("display notification {} with title {}", applescript_string(&body), applescript_string(&title));
-        run(std::process::Command::new("osascript").args(["-e", &script]));
     }
     if sound {
         run(std::process::Command::new("afplay").arg("/System/Library/Sounds/Glass.aiff"));
@@ -47,11 +43,6 @@ fn run(command: &mut std::process::Command) {
     if let Ok(mut child) = command.spawn() {
         std::thread::spawn(move || child.wait());
     }
-}
-
-/// An AppleScript string literal.
-fn applescript_string(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// The Dock icon's badge: the count, or none at 0.
@@ -104,8 +95,4 @@ mod tests {
         assert!(ids(&snapshot(&[]), &snapshot(&[("p1", "done")])).is_empty());
     }
 
-    #[test]
-    fn applescript_strings_escape_quotes_and_backslashes() {
-        assert_eq!(applescript_string(r#"say "hi" \o/"#), r#""say \"hi\" \\o/""#);
-    }
 }

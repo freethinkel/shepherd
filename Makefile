@@ -20,7 +20,7 @@ help: ## This list
 build: ## Debug binary
 	cargo build
 
-run: ## Debug binary, run in place (notifications go through osascript)
+run: ## Debug app, run from target/debug/Shepherd.app (cargo runner)
 	cargo run
 
 test: ## All tests
