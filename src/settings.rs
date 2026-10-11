@@ -13,7 +13,12 @@ pub struct Settings {
     pub font_size: f32,
     /// Terminal row height as a multiple of the font size.
     pub line_height: f32,
-    pub theme_family: String,
+    /// The theme variant (`zeron-light`, `ghostty-…`) in light appearance, and in dark.
+    pub theme_light: String,
+    pub theme_dark: String,
+    /// Before the light and dark themes: one Zeron family for both. Read once, never written.
+    #[serde(skip_serializing)]
+    pub theme_family: Option<String>,
     pub appearance: AppearanceMode,
     /// The herdr binary; `None` is `herdr` on PATH.
     pub herdr_bin: Option<String>,
@@ -55,7 +60,9 @@ impl Default for Settings {
             font_family: font.family,
             font_size: font.size,
             line_height: font.line_height,
-            theme_family: "zeron".into(),
+            theme_light: crate::theme::DEFAULT_LIGHT.into(),
+            theme_dark: crate::theme::DEFAULT_DARK.into(),
+            theme_family: None,
             appearance: AppearanceMode::System,
             herdr_bin: None,
             herdr_socket: None,
@@ -93,6 +100,9 @@ impl Settings {
                 settings.font_size = settings.font_size.clamp(9.0, 32.0);
                 settings.line_height = step_line_height(settings.line_height, 0.0);
                 settings.sidebar_width = settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                if let Some(family) = settings.theme_family.take() {
+                    settings.adopt_family(&family);
+                }
                 (settings, None)
             }
             Err(e) => (Settings::default(), Some(format!("{} is not valid settings: {e}", path.display()))),
@@ -131,7 +141,15 @@ impl Settings {
     }
 
     pub fn theme(&self, system: WindowAppearance) -> Theme {
-        Theme::resolve(&self.theme_family, self.appearance, system, &self.font())
+        Theme::resolve(&self.theme_light, &self.theme_dark, self.appearance, system, &self.font())
+    }
+
+    /// The old single family as the light and dark themes: its variant of each appearance it has.
+    fn adopt_family(&mut self, family: &str) {
+        for v in crate::theme::variants().iter().filter(|v| v.family_id == family) {
+            let slot = if v.appearance.is_dark() { &mut self.theme_dark } else { &mut self.theme_light };
+            *slot = v.id.clone();
+        }
     }
 }
 
@@ -178,7 +196,7 @@ mod tests {
         assert!(err.is_none());
         assert_eq!(s.font_family, "Geist Mono");
         assert_eq!(s.font_size, 13.0);
-        assert_eq!(s.theme_family, "zeron");
+        assert_eq!(s.theme_dark, "zeron-dark");
     }
 
     #[test]
@@ -294,5 +312,14 @@ mod tests {
         s.keys.insert("SplitRight".into(), "cmd-shift-right".into());
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), (s, None));
+    }
+
+    #[test]
+    fn an_old_theme_family_becomes_the_light_and_dark_themes() {
+        let (_d, path) = tmp();
+        std::fs::write(&path, r#"{"theme_family": "nord"}"#).unwrap();
+        let (s, _) = Settings::load(&path);
+        assert_eq!((s.theme_light.as_str(), s.theme_dark.as_str()), ("zeron-light", "nord"));
+        assert!(!serde_json::to_string(&s).unwrap().contains("theme_family"));
     }
 }

@@ -1,5 +1,5 @@
 //! Window and terminal colors from Zeron's built-in theme families (the `zeron-theme` crate, MIT, see
-//! assets/NOTICE), laid out as Collie's tokens, with the terminal font from settings.
+//! assets/NOTICE) and Ghostty's themes, laid out as Collie's tokens, with the terminal font from settings.
 use gpui::{App, Global, Hsla, SharedString, WindowAppearance, hsla, rgb};
 use serde::{Deserialize, Serialize};
 use zeron_theme::{Color, ThemeRegistry, ThemeVariant};
@@ -78,39 +78,147 @@ fn color(c: Color) -> Hsla {
     gpui::Rgba { r: channel(c.r), g: channel(c.g), b: channel(c.b), a: channel(c.a) }.into()
 }
 
-/// Built-in theme families as (id, name), in Zeron's order.
-pub fn families() -> Vec<(String, String)> {
-    ThemeRegistry::builtin().families.iter().map(|f| (f.id.clone(), f.name.clone())).collect()
+/// Every theme variant: Zeron's built-in ones, then Ghostty's (assets/themes/ghostty.conf) under names Zeron
+/// does not have.
+pub fn variants() -> &'static [ThemeVariant] {
+    static VARIANTS: std::sync::OnceLock<Vec<ThemeVariant>> = std::sync::OnceLock::new();
+    VARIANTS.get_or_init(|| {
+        let mut all: Vec<ThemeVariant> = ThemeRegistry::builtin().families.iter().flat_map(|f| f.variants.iter().cloned()).collect();
+        for v in ghostty(include_str!("../assets/themes/ghostty.conf")) {
+            if !all.iter().any(|b| b.name.eq_ignore_ascii_case(&v.name)) {
+                all.push(v);
+            }
+        }
+        all
+    })
+}
+
+/// The variants of one appearance as (id, name): Zeron's first, then Ghostty's by name.
+pub fn variants_for(appearance: Appearance) -> Vec<(String, String)> {
+    let dark = appearance == Appearance::Dark;
+    variants().iter().filter(|v| v.appearance.is_dark() == dark).map(|v| (v.id.clone(), v.name.clone())).collect()
+}
+
+/// The default variant for each appearance.
+pub const DEFAULT_LIGHT: &str = "zeron-light";
+pub const DEFAULT_DARK: &str = "zeron-dark";
+
+/// Ghostty theme files, each after a `[Name]` line: `palette = N=#rrggbb`, `background`, `foreground`,
+/// `selection-background`. A theme without a background or foreground is skipped.
+fn ghostty(text: &str) -> Vec<ThemeVariant> {
+    let mut out = Vec::new();
+    let mut name: Option<&str> = None;
+    let mut keys: Vec<(&str, &str)> = Vec::new();
+    for line in text.lines().chain(std::iter::once("[]")) {
+        let line = line.trim();
+        if let Some(next) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            if let Some(v) = name.and_then(|n| ghostty_variant(n, &keys)) {
+                out.push(v);
+            }
+            (name, keys) = (Some(next), Vec::new());
+        } else if let Some((key, value)) = line.split_once('=') {
+            keys.push((key.trim(), value.trim()));
+        }
+    }
+    out
+}
+
+/// One Ghostty theme as a Zeron variant: the terminal colors as they are, the window's derived from them the
+/// way Zeron's built-ins derive theirs from a few seeds.
+fn ghostty_variant(name: &str, keys: &[(&str, &str)]) -> Option<ThemeVariant> {
+    use zeron_theme::{AccentRoles, SurfaceTreatment, TerminalPalette as Palette, ThemeColors, ThemeSource};
+    let get = |k: &str| keys.iter().find(|(key, _)| *key == k).and_then(|(_, v)| v.parse::<Color>().ok());
+    let (bg, fg) = (get("background")?, get("foreground")?);
+    let mut ansi = [fg; 16];
+    for (_, value) in keys.iter().filter(|(k, _)| *k == "palette") {
+        if let Some((i, c)) = value.split_once('=') {
+            if let (Ok(i), Ok(c)) = (i.trim().parse::<usize>(), c.trim().parse::<Color>()) {
+                if i < 16 { ansi[i] = c }
+            }
+        }
+    }
+    let dark = bg.best_on_color() == Color::WHITE;
+    let appearance = if dark { zeron_theme::Appearance::Dark } else { zeron_theme::Appearance::Light };
+    let tone = if dark { Color::WHITE } else { Color::BLACK };
+    let accent = AccentRoles::derive(ansi[4], appearance, bg);
+    let raised = bg.mix(fg, 0.10);
+    let card = bg.mix(fg, 0.04);
+    let solid = if dark { Color::rgb(235, 235, 239) } else { Color::rgb(35, 35, 40) };
+    let colors = ThemeColors {
+        background: bg,
+        shell: bg.mix(Color::BLACK, if dark { 0.18 } else { 0.04 }),
+        raised,
+        card,
+        dialog: card.mix(raised, if dark { 0.18 } else { 0.04 }),
+        overlay: card.mix(raised, if dark { 0.34 } else { 0.02 }),
+        hover: tone.with_alpha(if dark { 0.11 } else { 0.06 }),
+        active: accent.primary.with_alpha(if dark { 0.18 } else { 0.10 }),
+        border: tone.with_alpha(if dark { 0.10 } else { 0.12 }),
+        border_strong: tone.with_alpha(if dark { 0.18 } else { 0.22 }),
+        text: fg,
+        text_muted: fg.mix(bg, 0.30).ensure_contrast(bg, 4.5),
+        text_faint: fg.mix(bg, 0.50),
+        solid,
+        on_solid: solid.best_on_color(),
+        danger: ansi[1],
+        danger_muted: ansi[1].mix(fg, 0.28),
+        warning: ansi[3],
+        warning_muted: ansi[3].mix(fg, 0.25),
+        success: ansi[2],
+        success_muted: ansi[2].mix(fg, 0.25),
+        input: if dark { raised.with_alpha(0.72) } else { card },
+        cursor: fg.with_alpha(if dark { 0.40 } else { 0.55 }),
+        diff_add: ansi[2],
+        diff_delete: ansi[1],
+        diff_hunk: accent.primary.with_alpha(if dark { 0.08 } else { 0.07 }),
+    };
+    let slug: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    Some(ThemeVariant {
+        id: format!("ghostty-{slug}"),
+        family_id: "ghostty".into(),
+        name: name.into(),
+        appearance,
+        recommended_surface_treatment: SurfaceTreatment::Opaque,
+        colors,
+        accent,
+        syntax: Default::default(),
+        terminal: Palette {
+            background: bg,
+            foreground: fg,
+            selection: get("selection-background").unwrap_or(tone.with_alpha(if dark { 0.22 } else { 0.16 })),
+            ansi,
+        },
+        source: ThemeSource {
+            format: "ghostty".into(),
+            url: "https://github.com/mbadolato/iTerm2-Color-Schemes".into(),
+            revision: String::new(),
+            license: "MIT".into(),
+            asset_hash: String::new(),
+        },
+    })
 }
 
 impl Theme {
     /// Zeron's own theme for this appearance, with the default font.
     pub fn for_appearance(appearance: WindowAppearance) -> Theme {
-        Theme::resolve("zeron", AppearanceMode::System, appearance, &FontSettings::default())
+        Theme::resolve(DEFAULT_LIGHT, DEFAULT_DARK, AppearanceMode::System, appearance, &FontSettings::default())
     }
 
-    /// The variant of `family_id` for the mode (or the system's appearance); a family without that appearance
-    /// uses its other variant, and an unknown family is Zeron's.
-    pub fn resolve(family_id: &str, mode: AppearanceMode, system: WindowAppearance, font: &FontSettings) -> Theme {
-        let dark = match mode {
+    /// The light or the dark variant, whichever the mode (or the system's appearance) asks for; an unknown id is
+    /// Zeron's variant of that appearance.
+    pub fn resolve(light: &str, dark: &str, mode: AppearanceMode, system: WindowAppearance, font: &FontSettings) -> Theme {
+        let is_dark = match mode {
             AppearanceMode::Dark => true,
             AppearanceMode::Light => false,
             AppearanceMode::System => matches!(system, WindowAppearance::Dark | WindowAppearance::VibrantDark),
         };
-        let registry = ThemeRegistry::builtin();
-        let family = registry
-            .families
-            .iter()
-            .find(|f| f.id == family_id)
-            .or_else(|| registry.families.iter().find(|f| f.id == "zeron"))
-            .expect("Zeron's built-in family");
-        let variant = family
-            .variants
-            .iter()
-            .find(|v| v.appearance.is_dark() == dark)
-            .or(family.variants.first())
-            .expect("a family has variants");
-        Theme::from_zeron(variant, font)
+        let (id, fallback) = if is_dark { (dark, DEFAULT_DARK) } else { (light, DEFAULT_LIGHT) };
+        Theme::variant(id, font).unwrap_or_else(|| Theme::variant(fallback, font).expect("Zeron's built-in variants"))
+    }
+
+    /// The variant `id`, if there is one.
+    pub fn variant(id: &str, font: &FontSettings) -> Option<Theme> {
+        variants().iter().find(|v| v.id == id).map(|v| Theme::from_zeron(v, font))
     }
 
     pub fn from_zeron(v: &ThemeVariant, font: &FontSettings) -> Theme {
@@ -141,7 +249,8 @@ impl Theme {
             terminal: TerminalPalette {
                 background: color(v.terminal.background),
                 foreground: color(v.terminal.foreground),
-                selection: color(v.terminal.selection),
+                // the accent, washed: a selection reads as the theme's, not as a grey film
+                selection: color(v.accent.primary).opacity(if v.appearance.is_dark() { 0.30 } else { 0.20 }),
                 ansi: v.terminal.ansi.map(color),
             },
         }
@@ -193,9 +302,13 @@ mod tests {
         FontSettings::default()
     }
 
+    fn resolve(mode: AppearanceMode, system: gpui::WindowAppearance) -> Theme {
+        Theme::resolve(DEFAULT_LIGHT, DEFAULT_DARK, mode, system, &font())
+    }
+
     #[test]
     fn zeron_family_resolves_to_zeron_colors() {
-        let t = Theme::resolve("zeron", AppearanceMode::System, gpui::WindowAppearance::Dark, &font());
+        let t = resolve(AppearanceMode::System, gpui::WindowAppearance::Dark);
         assert_eq!(t.terminal.background, hex(0x090909));
         assert_eq!(t.terminal.ansi[1], hex(0xf87171));
         assert_eq!(t.surface, hex(0x0d0d0d));
@@ -203,32 +316,43 @@ mod tests {
     }
 
     #[test]
-    fn every_builtin_family_resolves_in_both_appearances() {
-        for (id, _) in families() {
-            for system in [gpui::WindowAppearance::Dark, gpui::WindowAppearance::Light] {
-                let t = Theme::resolve(&id, AppearanceMode::System, system, &font());
+    fn every_variant_resolves_with_its_own_appearance() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            let list = variants_for(appearance);
+            assert!(list.len() >= 50, "{appearance:?}: {}", list.len());
+            for (id, _) in list {
+                let t = Theme::variant(&id, &font()).unwrap();
+                assert_eq!(t.appearance, appearance, "{id}");
                 assert_ne!(t.terminal.background, t.terminal.foreground, "{id}");
             }
         }
-        assert!(families().len() >= 10);
+    }
+
+    #[test]
+    fn ghostty_themes_load_with_their_palette() {
+        let t = Theme::variant("ghostty-catppuccin-frappe", &font()).unwrap();
+        assert_eq!(t.terminal.background, hex(0x303446));
+        assert_eq!(t.terminal.ansi[1], hex(0xe78284));
+        // Zeron's own Catppuccin wins over Ghostty's of the same name.
+        assert_eq!(variants().iter().filter(|v| v.name == "Catppuccin Mocha").count(), 1);
     }
 
     #[test]
     fn an_explicit_mode_beats_the_system() {
-        let t = Theme::resolve("zeron", AppearanceMode::Light, gpui::WindowAppearance::Dark, &font());
+        let t = resolve(AppearanceMode::Light, gpui::WindowAppearance::Dark);
         assert_eq!(t.appearance, Appearance::Light);
         assert_eq!(t.terminal.background, hex(0xfafafa));
     }
 
     #[test]
-    fn unknown_family_falls_back_to_zeron() {
-        let t = Theme::resolve("no-such-theme", AppearanceMode::Dark, gpui::WindowAppearance::Dark, &font());
+    fn unknown_variant_falls_back_to_zeron() {
+        let t = Theme::resolve("no-such-theme", "no-such-theme", AppearanceMode::Dark, gpui::WindowAppearance::Dark, &font());
         assert_eq!(t.terminal.background, hex(0x090909));
     }
 
     #[test]
     fn font_settings_reach_the_terminal() {
-        let t = Theme::resolve("zeron", AppearanceMode::Dark, gpui::WindowAppearance::Dark, &FontSettings { family: "Menlo".into(), size: 16.0, line_height: 1.2 });
+        let t = Theme::resolve(DEFAULT_LIGHT, DEFAULT_DARK, AppearanceMode::Dark, gpui::WindowAppearance::Dark, &FontSettings { family: "Menlo".into(), size: 16.0, line_height: 1.2 });
         assert_eq!(t.font_terminal.as_ref(), "Menlo");
         assert_eq!(t.terminal_font_size, 16.0);
         assert_eq!(t.terminal_line_height, 1.2);

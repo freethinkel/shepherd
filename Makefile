@@ -16,7 +16,7 @@ NOTARY_PROFILE ?= shepherd-notary
 NOTARY_KEYCHAIN ?=
 export SIGN_IDENTITY
 
-.PHONY: help build run test app app-debug open install universal dist notarize version clean
+.PHONY: help build run test app app-debug open install universal dist notarize version ghostty-themes clean
 
 help: ## This list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
@@ -82,6 +82,13 @@ notarize: dist ## dist, notarized by Apple with the tickets stapled to the app a
 	spctl --assess --type execute -v $(DIST_APP)
 	spctl --assess --type open --context context:primary-signature -v $(DMG)
 	@echo $(ZIP) $(DMG)
+
+GHOSTTY_THEMES ?= /Applications/Ghostty.app/Contents/Resources/ghostty/themes
+ghostty-themes: ## Re-import Ghostty's themes into assets/themes/ghostty.conf
+	{ echo "# Ghostty's bundled themes (from iTerm2-Color-Schemes, MIT), one [Name] block each."; \
+	  echo "# Regenerate: make ghostty-themes"; \
+	  for f in "$(GHOSTTY_THEMES)"/*; do printf '\n[%s]\n' "$$(basename "$$f")"; \
+	    grep -E '^(palette|background|foreground|selection-background) =' "$$f"; done; } > assets/themes/ghostty.conf
 
 version: ## Cargo.toml's version
 	@echo $(VERSION)

@@ -6,7 +6,7 @@
 use crate::bindings::{ACTIONS, effective, rebind, recordable};
 use crate::herdr::{Client, HerdrConfig, config_path, set_binary, set_socket};
 use crate::settings::{Settings, SettingsGlobal, step_font_size, step_line_height};
-use crate::theme::{AppearanceMode, Theme, families};
+use crate::theme::{Appearance, AppearanceMode, Theme, variants_for};
 use crate::ui::input_style;
 use crate::update::{self as updater, Updates};
 use gpui::{
@@ -102,8 +102,10 @@ pub struct SettingsView {
     font: Entity<InputState>,
     herdr_bin: Entity<InputState>,
     herdr_socket: Entity<InputState>,
-    /// The Editor select's open list.
-    editor_menu: Option<crate::ui::Popup<()>>,
+    /// The open list of a select, by the select's id.
+    open_select: Option<crate::ui::Popup<&'static str>>,
+    /// The filter at the top of a long select's list.
+    select_search: Entity<InputState>,
     /// herdr's `config.toml` as last read or written, or why it could not be.
     herdr_config: Result<HerdrConfig, String>,
     /// Fields for `HERDR_FIELDS`, in order.
@@ -167,7 +169,12 @@ impl SettingsView {
             })
             .collect();
 
-        let mut subscriptions = Vec::new();
+        let select_search = field(None, "Search themes", window, cx);
+        let mut subscriptions = vec![cx.subscribe(&select_search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify()
+            }
+        })];
         for (input, apply) in [
             (&font, (|s: &mut Settings, v: String| if !v.is_empty() { s.font_family = v }) as fn(&mut Settings, String)),
             (&herdr_bin, |s: &mut Settings, v: String| s.herdr_bin = (!v.is_empty()).then_some(v)),
@@ -228,7 +235,8 @@ impl SettingsView {
             font,
             herdr_bin,
             herdr_socket,
-            editor_menu: None,
+            open_select: None,
+            select_search,
             herdr_config,
             herdr_fields,
             herdr_note: None,
@@ -239,6 +247,17 @@ impl SettingsView {
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
+        // SHEPHERD_SELECT=<select id>[:query] opens that list at launch, filtered, for screenshots.
+        if let Ok(spec) = std::env::var("SHEPHERD_SELECT") {
+            let (id, query) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+            if let Some(id) = ["light-theme-select", "dark-theme-select", "editor-select"].into_iter().find(|s| *s == id) {
+                view.open_select = Some(crate::ui::Popup::new(id));
+                view.select_search.update(cx, |input, cx| {
+                    input.set_value(query.to_string(), window, cx);
+                    input.focus(window, cx);
+                });
+            }
+        }
         view.load_integrations(cx);
         view
     }
@@ -335,49 +354,158 @@ impl SettingsView {
 }
 
 impl SettingsView {
-    /// A pill naming the editor; a click drops the list of `EDITORS` under it.
-    fn editor_select(&self, theme: &Theme, current: Option<&str>, cx: &mut Context<Self>) -> Div {
-        // A command typed into settings.json by hand shows as itself.
-        let label = EDITORS.iter().find(|(cmd, _)| *cmd == current).map_or_else(|| current.unwrap_or_default().to_string(), |(_, l)| l.to_string());
+    /// A pill naming the current option; a click drops the list of `labels` under it (Zeron's select).
+    /// `fallback` names a value that is none of the options; `leading` draws an option's swatch.
+    #[allow(clippy::too_many_arguments)]
+    fn select(
+        &self,
+        theme: &Theme,
+        id: &'static str,
+        labels: Vec<SharedString>,
+        current: Option<usize>,
+        fallback: SharedString,
+        leading: impl Fn(usize) -> Option<gpui::AnyElement>,
+        pick: impl Fn(usize, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let hover = theme.wash(0.10);
+        // A list longer than a screenful gets a filter.
+        let searchable = labels.len() > 12;
+        let label = current.and_then(|i| labels.get(i).cloned()).unwrap_or(fallback);
         let trigger = div()
-            .id("editor-select")
+            .id(id)
             .w(px(240.))
             .h(px(32.))
             .px(px(10.))
             .flex()
             .items_center()
+            .gap(px(8.))
             .rounded(px(8.))
             .bg(theme.wash(0.06))
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
+            .children(current.and_then(&leading))
             .child(div().flex_1().child(label))
             .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(14.)).text_color(theme.text_muted))
-            .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
-                v.editor_menu = Some(crate::ui::Popup::new(()));
+            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                v.open_select = Some(crate::ui::Popup::new(id));
+                if searchable {
+                    v.select_search.update(cx, |input, cx| {
+                        input.set_value("", window, cx);
+                        input.focus(window, cx);
+                    });
+                }
                 cx.notify();
             }));
-        let menu = self.editor_menu.as_ref().map(|menu| {
-            let card = crate::shell::menu_card(theme, "editor-menu", 240.)
+        let pick = std::rc::Rc::new(pick);
+        let menu = self.open_select.as_ref().filter(|m| m.value == id).map(|menu| {
+            let query = if searchable { self.select_search.read(cx).value().trim().to_lowercase() } else { String::new() };
+            let shown: Vec<usize> = (0..labels.len()).filter(|&i| labels[i].to_lowercase().contains(&query)).collect();
+            let first = shown.first().copied();
+            let rows = shown.into_iter().map(|i| {
+                let pick = pick.clone();
+                crate::shell::row(theme, false, (id, i))
+                    .h(px(28.))
+                    .flex_none()
+                    .rounded(px(6.))
+                    .gap(px(8.))
+                    .children(leading(i))
+                    .child(div().flex_1().child(labels[i].clone()))
+                    .when(current == Some(i), |el| el.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(theme.text_muted)))
+                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                        if let Some(m) = v.open_select.as_mut() { m.close() }
+                        pick(i, cx);
+                        cx.notify();
+                    }))
+            });
+            let list = div()
+                .id("select-list")
+                .max_h(px(320.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .children(rows)
+                .when(first.is_none(), |el| el.child(div().px(px(8.)).py(px(6.)).text_color(theme.text_muted).child("No matching themes")));
+            let pick = pick.clone();
+            let card = crate::shell::menu_card(theme, "select-menu", 240.)
+                .w(px(if searchable { 280. } else { 240. }))
                 .mt(px(4.))
+                .flex()
+                .flex_col()
                 .on_mouse_down_out(cx.listener(|v, _, _, cx| {
-                    if let Some(m) = v.editor_menu.as_mut() { m.close() }
+                    if let Some(m) = v.open_select.as_mut() { m.close() }
                     cx.notify();
                 }))
-                .children(EDITORS.into_iter().enumerate().map(|(i, (cmd, label))| {
-                    crate::shell::row(theme, false, ("editor-option", i))
-                        .h(px(28.))
-                        .rounded(px(6.))
-                        .child(div().flex_1().child(label))
-                        .when(cmd == current, |el| el.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(theme.text_muted)))
-                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                            if let Some(m) = v.editor_menu.as_mut() { m.close() }
-                            update(cx, |s| s.editor = cmd.map(String::from));
-                        }))
-                }));
-            gpui::deferred(gpui::anchored().snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion("editor-menu-in", menu, card))).with_priority(1)
+                // Enter takes the first match, Escape closes: caught before the field's own bindings.
+                .capture_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
+                    "enter" | "escape" => {
+                        if let Some(m) = v.open_select.as_mut() { m.close() }
+                        if let (Some(i), "enter") = (first, e.keystroke.key.as_str()) {
+                            pick(i, cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    _ => {}
+                }))
+                // Zeron's popup search: a borderless field on a faint wash, above the list.
+                .when(searchable, |el| {
+                    el.child(
+                        div()
+                            .mb(px(4.))
+                            .h(px(32.))
+                            .flex_none()
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .rounded(px(6.))
+                            .bg(theme.wash(0.04))
+                            .child(gpui::svg().path("icons/palette-search.svg").size(px(16.)).flex_none().text_color(theme.text_muted))
+                            .child(div().flex_1().min_w_0().flex().items_center().line_height(px(16.)).child(Input::new(&self.select_search))),
+                    )
+                })
+                .child(list);
+            // `anchored` is absolutely placed at its parent's origin: an in-flow wrapper puts that under the trigger.
+            div().child(gpui::deferred(gpui::anchored().snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion("select-menu-in", menu, card))).with_priority(1))
         });
         div().flex_none().flex().flex_col().child(trigger).children(menu)
+    }
+
+    /// The themes of one appearance, each with its colors; picking one sets that appearance's theme.
+    fn theme_select(&self, theme: &Theme, appearance: Appearance, current: &str, cx: &mut Context<Self>) -> Div {
+        let (id, light) = match appearance {
+            Appearance::Light => ("light-theme-select", true),
+            Appearance::Dark => ("dark-theme-select", false),
+        };
+        let list = variants_for(appearance);
+        let labels = list.iter().map(|(_, name)| SharedString::from(name.clone())).collect();
+        let index = list.iter().position(|(id, _)| id == current);
+        let ids: Vec<String> = list.into_iter().map(|(id, _)| id).collect();
+        // Drawn only for the rows shown: the current one, and the list while it is open.
+        let preview_ids = ids.clone();
+        let font = crate::theme::FontSettings::default();
+        self.select(
+            theme,
+            id,
+            labels,
+            index,
+            current.to_string().into(),
+            move |i| Theme::variant(&preview_ids[i], &font).map(|t| palette_preview(&t).into_any_element()),
+            move |i, cx| {
+                let id = ids[i].clone();
+                update(cx, move |s| if light { s.theme_light = id } else { s.theme_dark = id })
+            },
+            cx,
+        )
+    }
+
+    fn editor_select(&self, theme: &Theme, current: Option<&str>, cx: &mut Context<Self>) -> Div {
+        let labels = EDITORS.iter().map(|(_, l)| SharedString::from(*l)).collect();
+        let index = EDITORS.iter().position(|(cmd, _)| *cmd == current);
+        // A command typed into settings.json by hand shows as itself.
+        let fallback = SharedString::from(current.unwrap_or_default().to_string());
+        self.select(theme, "editor-select", labels, index, fallback, |_| None, |i, cx| update(cx, |s| s.editor = EDITORS[i].0.map(String::from)), cx)
     }
 }
 
@@ -467,7 +595,87 @@ fn toggle(theme: &Theme, id: impl Into<gpui::ElementId>, on: bool) -> Stateful<D
         .child(div().size(px(16.)).rounded_full().bg(gpui::white()).shadow_sm())
 }
 
-/// One option of a row of choices (the Appearance mode): outlined, filled when selected.
+/// A card of the Color scheme row: a preview of the look, its icon and name under it (Zeron's option card).
+fn option_card(theme: &Theme, icon: &'static str, label: &'static str, selected: bool, preview: impl IntoElement) -> Div {
+    let tone = if selected { theme.accent } else { theme.text_muted };
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(8.))
+        .cursor_pointer()
+        .child(
+            div()
+                .h(px(112.))
+                .w_full()
+                .rounded(px(6.))
+                .overflow_hidden()
+                .border_1()
+                .border_color(if selected { theme.accent } else { theme.border })
+                .child(preview),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_color(tone)
+                .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
+                .child(gpui::svg().path(icon).size(px(16.)).text_color(tone))
+                .child(label),
+        )
+}
+
+/// A sketch of the window in `theme`: a sidebar and a terminal pane, text as bars.
+fn miniature(theme: &Theme) -> Div {
+    let (line, strong) = (theme.text.opacity(0.22), theme.text.opacity(0.34));
+    let bar = |fraction: f32, tone| div().h(px(5.)).w(gpui::relative(fraction)).rounded(px(3.)).bg(tone);
+    div()
+        .size_full()
+        .flex()
+        .bg(theme.surface)
+        .child(div().w(px(40.)).flex_none().flex().flex_col().gap(px(7.)).px(px(8.)).pt(px(14.)).children([
+            bar(0.7, strong),
+            bar(1.0, line),
+            bar(0.85, line),
+        ]))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .my(px(8.))
+                .mr(px(8.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.terminal.background)
+                .flex()
+                .flex_col()
+                .gap(px(7.))
+                .p(px(10.))
+                .children([bar(0.62, strong), bar(0.88, line), bar(0.76, line), bar(0.52, line)]),
+        )
+}
+
+/// A theme's three colors in a small chip: window, terminal, accent.
+fn palette_preview(theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .w(px(30.))
+        .h(px(18.))
+        .rounded(px(5.))
+        .overflow_hidden()
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .child(div().w_1_3().h_full().bg(theme.surface))
+        .child(div().w_1_3().h_full().bg(theme.terminal.background))
+        .child(div().w_1_3().h_full().bg(theme.accent))
+}
+
+/// One option of a row of choices: outlined, filled when selected.
 fn choice(theme: &Theme, id: impl Into<gpui::ElementId>, label: &'static str, selected: bool) -> Stateful<Div> {
     let (selected_bg, hover) = (theme.wash(0.10), theme.hover);
     div()
@@ -514,7 +722,7 @@ pub(crate) fn display_chord(chord: &str) -> String {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::ui::reap_popup(&mut self.editor_menu, window);
+        crate::ui::reap_popup(&mut self.open_select, window);
         let theme = Theme::of(cx).clone();
         let global = SettingsGlobal::of(cx);
         let settings = global.settings.clone();
@@ -623,49 +831,40 @@ impl Render for SettingsView {
                         ),
                 ),
             Section::Appearance => {
-                let modes = [(AppearanceMode::System, "System"), (AppearanceMode::Light, "Light"), (AppearanceMode::Dark, "Dark")];
-                let system = window.appearance();
+                let modes = [
+                    (AppearanceMode::System, "System", "icons/monitor.svg"),
+                    (AppearanceMode::Light, "Light", "icons/sun.svg"),
+                    (AppearanceMode::Dark, "Dark", "icons/moon.svg"),
+                ];
+                let font = settings.font();
+                let light = Theme::resolve(&settings.theme_light, &settings.theme_dark, AppearanceMode::Light, window.appearance(), &font);
+                let dark = Theme::resolve(&settings.theme_light, &settings.theme_dark, AppearanceMode::Dark, window.appearance(), &font);
+                let cards = modes.into_iter().map(|(mode, label, icon)| {
+                    let selected = settings.appearance == mode;
+                    let preview = match mode {
+                        AppearanceMode::System => div()
+                            .size_full()
+                            .flex()
+                            .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&light)))
+                            .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&dark))),
+                        AppearanceMode::Light => miniature(&light),
+                        AppearanceMode::Dark => miniature(&dark),
+                    };
+                    option_card(&theme, icon, label, selected, preview)
+                        .id(SharedString::from(format!("mode-{label}")))
+                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| update(cx, |s| s.appearance = mode)))
+                }).collect::<Vec<_>>();
+                let light_select = self.theme_select(&theme, Appearance::Light, &settings.theme_light, cx);
+                let dark_select = self.theme_select(&theme, Appearance::Dark, &settings.theme_dark, cx);
                 div()
                     .child(page_header(&theme, "Appearance", "Window and terminal colors."))
-                    .child(card(&theme).child(card_row(&theme, true).child(row_text(&theme, "Mode", "Follow the system, or keep one look.")).child(
-                        div().flex().gap(px(8.)).children(modes.into_iter().map(|(mode, label)| {
-                            choice(&theme, SharedString::from(format!("mode-{label}")), label, settings.appearance == mode)
-                                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| update(cx, |s| s.appearance = mode)))
-                        })),
-                    )))
-                    .child(section_label(&theme, "Theme"))
-                    .child(card(&theme).mt_0().children(families().into_iter().enumerate().map(|(i, (id, name))| {
-                        let preview = Theme::resolve(&id, settings.appearance, system, &settings.font());
-                        let selected = settings.theme_family == id;
-                        let swatches = std::iter::once(preview.terminal.background)
-                            .chain(preview.terminal.ansi[1..7].iter().copied())
-                            .map(|c| div().size(px(12.)).rounded(px(3.)).bg(c).border_1().border_color(theme.border));
-                        let hover = theme.wash(0.03);
-                        div()
-                            .id(SharedString::from(format!("family-{id}")))
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(hover))
-                            .child(
-                                card_row(&theme, i == 0)
-                                    .min_h(px(44.))
-                                    .py(px(10.))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
-                                            .when(!selected, |el| el.text_color(theme.text_muted))
-                                            .child(name),
-                                    )
-                                    .child(div().flex().gap(px(3.)).children(swatches))
-                                    .child(div().size(px(16.)).flex_none().when(selected, |el| {
-                                        el.child(gpui::svg().path("icons/check.svg").size(px(16.)).text_color(theme.accent))
-                                    })),
-                            )
-                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                                let id = id.clone();
-                                update(cx, move |s| s.theme_family = id)
-                            }))
-                    })))
+                    .child(section_label(&theme, "Color scheme"))
+                    .child(div().flex().gap(px(16.)).children(cards))
+                    .child(
+                        card(&theme)
+                            .child(card_row(&theme, true).child(row_text(&theme, "Light theme", "When the window is light.")).child(light_select))
+                            .child(card_row(&theme, false).child(row_text(&theme, "Dark theme", "When the window is dark.")).child(dark_select)),
+                    )
             }
             Section::Notifications => {
                 let shepherd_rows: [(&'static str, &'static str, bool, fn(&mut crate::settings::Settings)); 3] = [
