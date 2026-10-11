@@ -52,8 +52,6 @@ pub struct Shell {
     divider: Option<DividerDrag>,
     /// A released divider's ratio, shown until herdr's snapshot catches up (no jump back to the old layout).
     settling: Option<(Vec<bool>, f32)>,
-    /// A herdr error from the last command, shown over the grid for a few seconds.
-    flash: Option<String>,
     /// The tab or workspace label being edited in place.
     renaming: Option<Rename>,
     // ponytail: in memory only; persist in settings if folds should survive a restart
@@ -209,7 +207,6 @@ impl Shell {
                     grid_bounds: Rc::new(Cell::new(None)),
                     divider: None,
                     settling: None,
-                    flash: None,
                     renaming: None,
                     folded: Default::default(),
                     fold_motion: Default::default(),
@@ -315,9 +312,9 @@ impl Shell {
                     cx.spawn(async move |this, cx| {
                         let d = dir.clone();
                         let done = cx.background_spawn(async move { crate::ui::statusbar::switch_branch(&d, &branch) }).await;
-                        let _ = this.update(cx, |this, cx| match done {
+                        let _ = this.update(cx, |_, cx| match done {
                             Ok(()) => crate::ui::statusbar::refresh_git(&dir, cx),
-                            Err(e) => this.show_error(e, cx),
+                            Err(e) => crate::ui::toast::error(cx, e),
                         });
                     })
                     .detach();
@@ -355,7 +352,7 @@ impl Shell {
     ) {
         self.send_then(command, cx, |shell, result, cx| match result {
             Ok(value) => then(shell, &value, cx),
-            Err(err) => shell.show_error(format!("{err:#}"), cx),
+            Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),
         });
     }
 
@@ -520,7 +517,7 @@ impl Shell {
             shell.pending_worktrees.retain(|p| *p != pending);
             match result {
                 Ok(value) => shell.selected_tab = crate::commands::created_tab_id(&value),
-                Err(err) => shell.show_error(format!("{err:#}"), cx),
+                Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),
             }
             cx.notify();
         });
@@ -541,7 +538,7 @@ impl Shell {
                     let label = shell.snapshot.as_ref().and_then(|s| s.workspaces.iter().find(|w| w.workspace_id == id)).map(|w| w.label.clone()).unwrap_or_default();
                     shell.remove_confirm = Some(crate::ui::Popup::new((id.clone(), label)));
                 } else {
-                    shell.show_error(message, cx);
+                    crate::ui::toast::error(cx, message);
                 }
                 cx.notify();
             }
@@ -615,21 +612,6 @@ impl Shell {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(Input::new(&rename.input)),
         )
-    }
-
-    fn show_error(&mut self, message: String, cx: &mut Context<Self>) {
-        self.flash = Some(message.clone());
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(4)).await;
-            let _ = this.update(cx, |shell, cx| {
-                if shell.flash.as_deref() == Some(message.as_str()) {
-                    shell.flash = None;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     fn start_divider(&mut self, tab_id: String, split: &SplitFrame, cx: &mut Context<Self>) {
@@ -1290,6 +1272,7 @@ impl Render for Shell {
         reapply_traffic_lights(window);
         let theme = Theme::of(cx).clone();
         let snapshot = self.snapshot.clone();
+        let toasts = crate::ui::toast::stack(&theme, TITLEBAR_HEIGHT + 8., window, cx);
         let tab = self.shown_tab();
         self.shown_workspace = tab.as_ref().map(|t| t.workspace_id.clone());
         let (mut frames, mut splits) = match (&snapshot, &tab) {
@@ -1742,24 +1725,7 @@ impl Render for Shell {
                         }),
                     )
             }))
-            .children(pane_drop)
-            .when_some(self.flash.clone(), |el, message| {
-                el.child(
-                    div()
-                        .absolute()
-                        .top(px(8.))
-                        .left(px(8.))
-                        .right(px(8.))
-                        .px_3()
-                        .py_2()
-                        .rounded(px(8.))
-                        .bg(theme.card)
-                        .border_1()
-                        .border_color(theme.danger.opacity(0.5))
-                        .text_color(theme.danger)
-                        .child(message),
-                )
-            });
+            .children(pane_drop);
 
         let statusbar = self.show_status_bar.then(|| {
             let pane = self.active_pane(window, cx);
@@ -2288,6 +2254,7 @@ impl Render for Shell {
                 )
                 .with_priority(1)
             }))
+            .child(toasts)
     }
 }
 

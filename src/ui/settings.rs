@@ -828,6 +828,13 @@ impl Render for SettingsView {
                             card_row(&theme, false)
                                 .child(row_text(&theme, "Editor", "Cmd+click on file:line opens it here. Neovim opens in a pane to the right."))
                                 .child(self.editor_select(&theme, settings.editor.as_deref(), cx)),
+                        )
+                        .child(
+                            card_row(&theme, false)
+                                .child(row_text(&theme, "Copy on select", "A finished selection goes to the clipboard, then clears."))
+                                .child(toggle(&theme, "copy-on-select", settings.copy_on_select).on_click(cx.listener(
+                                    |_, _: &ClickEvent, _, cx| update(cx, |s| s.copy_on_select = !s.copy_on_select),
+                                ))),
                         ),
                 ),
             Section::Appearance => {

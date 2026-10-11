@@ -46,6 +46,8 @@ pub struct Settings {
     pub notify_sound: bool,
     /// The Dock icon counts agents waiting or done that you have not looked at.
     pub dock_badge: bool,
+    /// A finished selection in a pane goes to the clipboard and clears, as in herdr.
+    pub copy_on_select: bool,
 }
 
 /// Zeron's sidebar: 256 px by default, its edge drags it between 224 and 400.
@@ -77,6 +79,7 @@ impl Default for Settings {
             notify_agents: true,
             notify_sound: true,
             dock_badge: true,
+            copy_on_select: true,
         }
     }
 }

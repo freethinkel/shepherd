@@ -6,6 +6,8 @@ use objc2::MainThreadMarker;
 use objc2::AllocAnyThread;
 use objc2_app_kit::{NSApplication, NSImage};
 use objc2_foundation::{NSBundle, NSData, NSString};
+use objc2_user_notifications::{UNAuthorizationStatus, UNNotificationSettings, UNUserNotificationCenter};
+use std::ptr::NonNull;
 
 /// Waiting for the user, or finished: worth a look.
 pub fn wants_attention(status: AgentStatus) -> bool {
@@ -36,6 +38,35 @@ pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool) {
     if sound {
         run(std::process::Command::new("afplay").arg("/System/Library/Sounds/Glass.aiff"));
     }
+}
+
+/// A toast when macOS has Shepherd's notifications turned off: gpui asks once, and after a "Don't Allow" every
+/// notification is dropped without a word. A click opens Shepherd's page in System Settings.
+pub fn warn_if_denied(cx: &mut App) {
+    let Some(id) = NSBundle::mainBundle().bundleIdentifier().map(|id| id.to_string()) else { return };
+    let (tx, rx) = futures::channel::oneshot::channel();
+    let tx = std::sync::Mutex::new(Some(tx));
+    // called once, on a thread of macOS's choosing
+    let answer = block2::RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+        let denied = unsafe { settings.as_ref() }.authorizationStatus() == UNAuthorizationStatus::Denied;
+        if let Some(tx) = tx.lock().unwrap().take() {
+            let _ = tx.send(denied);
+        }
+    });
+    UNUserNotificationCenter::currentNotificationCenter().getNotificationSettingsWithCompletionHandler(&answer);
+    cx.spawn(async move |cx| {
+        if rx.await != Ok(true) {
+            return;
+        }
+        let _ = cx.update(|cx| {
+            if crate::settings::SettingsGlobal::of(cx).settings.notify_agents {
+                let url = format!("x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={id}");
+                let open: std::rc::Rc<dyn Fn(&mut App)> = std::rc::Rc::new(move |_| run(std::process::Command::new("open").arg(&url)));
+                crate::ui::toast::info(cx, "Notifications are off for Shepherd in macOS. Click to turn them on.", Some(open));
+            }
+        });
+    })
+    .detach();
 }
 
 /// Runs the command off the main thread and reaps it, so no zombie is left behind.

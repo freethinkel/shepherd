@@ -666,9 +666,19 @@ impl PaneTerminal {
         }
     }
 
-    fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        if self.drag.take().is_some_and(|d| d.to_app) {
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else { return };
+        if drag.to_app {
             self.mouse("up", event.position, &event.modifiers);
+        }
+        if !drag.armed || !crate::settings::SettingsGlobal::of(cx).settings.copy_on_select {
+            return;
+        }
+        if let Some(text) = self.emulator.selection_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.emulator.clear_selection();
+            cx.notify();
+            crate::ui::toast::info(cx, "Copied to clipboard", None);
         }
     }
 }

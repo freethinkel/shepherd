@@ -2,6 +2,7 @@ pub mod command_panel;
 pub mod divider;
 pub mod settings;
 pub mod statusbar;
+pub mod toast;
 
 use crate::theme::Theme;
 use gpui::{ElementId, px};
