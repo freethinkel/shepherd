@@ -1,3 +1,4 @@
+pub mod command_panel;
 pub mod divider;
 pub mod settings;
 

@@ -98,6 +98,8 @@ pub struct Shell {
     focus: gpui::FocusHandle,
     /// The Settings page, shown in place of the sidebar and the panes while open.
     settings: Option<(Entity<crate::ui::settings::SettingsView>, Subscription)>,
+    /// The command panel (cmd-k), open over the window.
+    command_panel: Option<crate::ui::Popup<(Entity<crate::ui::command_panel::Panel>, Subscription)>>,
 }
 
 /// A tab being dragged along the tab bar, drawn under the pointer as a pill with its label.
@@ -228,6 +230,7 @@ impl Shell {
                     tabs_scroll: gpui::ScrollHandle::new(),
                     focus: cx.focus_handle(),
                     settings: None,
+                    command_panel: None,
                 };
                 let client = shell.client.clone();
                 cx.set_global(PaneQueries(client.clone(), rt.clone()));
@@ -258,6 +261,45 @@ impl Shell {
         window.focus(&view.focus_handle(cx), cx);
         self.settings = Some((view, close));
         cx.notify();
+    }
+
+    fn toggle_command_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::command_panel::{PanelEvent, Run};
+        if self.command_panel.as_ref().is_some_and(|p| p.is_open()) {
+            self.close_command_panel(cx);
+            return;
+        }
+        let bindings = cx.try_global::<ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
+        let items = crate::ui::command_panel::items(self.snapshot.as_ref(), &bindings);
+        let panel = cx.new(|cx| crate::ui::command_panel::Panel::new(items, window, cx));
+        let events = cx.subscribe_in(&panel, window, |this, _, event: &PanelEvent, window, cx| {
+            if !this.close_command_panel(cx) {
+                return;
+            }
+            match event {
+                // from the root, as the key binding would (focus goes back to herdr's pane on the next render)
+                PanelEvent::Run(Run::Action(name)) => {
+                    if let Ok(action) = cx.build_action(&format!("shepherd::{name}"), None) {
+                        window.focus(&this.focus, cx);
+                        window.dispatch_action(action, cx);
+                    }
+                }
+                PanelEvent::Run(Run::Tab(tab_id)) => this.selected_tab = Some(tab_id.clone()),
+                PanelEvent::Dismiss => {}
+            }
+        });
+        self.command_panel = Some(crate::ui::Popup::new((panel, events)));
+        cx.notify();
+    }
+
+    /// Fades the command panel out; false if it was not open.
+    fn close_command_panel(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(panel) = self.command_panel.as_mut().filter(|p| p.is_open()) else { return false };
+        panel.close();
+        // The panel's input held focus: give it back to herdr's focused pane on the next render.
+        self.focused = None;
+        cx.notify();
+        true
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -1065,6 +1107,7 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.tab_menu, window);
         crate::ui::reap_popup(&mut self.worktree_dialog, window);
         crate::ui::reap_popup(&mut self.remove_confirm, window);
+        crate::ui::reap_popup(&mut self.command_panel, window);
         if let Some(s) = &self.snapshot {
             self.removing.retain(|id| s.workspaces.iter().any(|w| &w.workspace_id == id));
         }
@@ -1691,6 +1734,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
+            .on_action(cx.listener(|this, _: &CommandPanel, window, cx| this.toggle_command_panel(window, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
                 this.drag_divider(e.position, cx);
                 this.drag_sidebar(e.position.x, cx);
@@ -1968,6 +2012,7 @@ impl Render for Shell {
                     );
                 modal("worktree-dialog", dialog, window, card)
             }))
+            .children(self.command_panel.as_ref().map(|panel| crate::ui::command_panel::overlay(panel, window)))
             .children(self.remove_confirm.as_ref().map(|confirm| {
                 let label = confirm.value.1.clone();
                 let card = dialog_card(&theme, "remove-dialog", "Remove worktree?")

@@ -41,6 +41,7 @@ impl gpui::AssetSource for Assets {
             "git-branch",
             "keyboard",
             "more-horizontal",
+            "palette-search",
             "remote-server",
             "settings",
             "sidebar-minimalistic-left",
