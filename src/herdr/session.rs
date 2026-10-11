@@ -10,7 +10,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use std::sync::Mutex;
@@ -35,18 +35,78 @@ fn client_socket() -> PathBuf {
     if let Some(path) = std::env::var_os("HERDR_CLIENT_SOCKET_PATH") {
         return path.into();
     }
-    let api = SOCKET.read().unwrap().clone().map(PathBuf::from).or_else(|| std::env::var_os("HERDR_SOCKET_PATH").map(PathBuf::from)).unwrap_or_else(|| {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config/herdr/herdr.sock")
-    });
+    let api = api_socket();
     let stem = api.file_stem().and_then(|s| s.to_str()).unwrap_or("herdr").to_string();
     api.with_file_name(format!("{stem}-client.sock"))
 }
 
+/// herdr's API socket: from settings, else `HERDR_SOCKET_PATH`, else `~/.config/herdr/herdr.sock`.
+fn api_socket() -> PathBuf {
+    SOCKET.read().unwrap().clone().map(PathBuf::from).or_else(|| std::env::var_os("HERDR_SOCKET_PATH").map(PathBuf::from)).unwrap_or_else(|| {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config/herdr/herdr.sock")
+    })
+}
+
 fn binary() -> String {
-    std::env::var("SHEPHERD_HERDR")
-        .ok()
-        .or_else(|| BINARY.read().unwrap().clone())
-        .unwrap_or_else(|| "herdr".into())
+    std::env::var("SHEPHERD_HERDR").ok().or_else(|| BINARY.read().unwrap().clone()).unwrap_or_else(find_herdr)
+}
+
+/// `herdr` on PATH, else where its installers put it: an app opened from Finder gets launchd's bare PATH.
+fn find_herdr() -> String {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .chain([home.join(".local/bin"), home.join(".cargo/bin"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()])
+        .map(|dir| dir.join("herdr"))
+        .find(|p| p.is_file())
+        .map_or_else(|| "herdr".into(), |p| p.to_string_lossy().into_owned())
+}
+
+/// Nothing listens on herdr's socket: it is missing, or a server died and left it behind.
+pub fn no_server(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        e.downcast_ref::<std::io::Error>()
+            .is_some_and(|e| matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused))
+    })
+}
+
+/// The herdr session whose server listens on `socket`: `Some(None)` for the default one, `Some(Some(name))` for
+/// `herdr --session <name>`, `None` for any other socket.
+fn session_of(socket: &Path, home: &Path) -> Option<Option<String>> {
+    let config = home.join(".config/herdr");
+    if socket == config.join("herdr.sock") {
+        return Some(None);
+    }
+    let dir = socket.strip_prefix(config.join("sessions")).ok()?;
+    let mut parts = dir.iter();
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(name), Some(file), None) if file == "herdr.sock" => Some(Some(name.to_string_lossy().into_owned())),
+        _ => None,
+    }
+}
+
+/// Runs herdr's headless server (`herdr server`) for the socket Shepherd uses, in its own process group so it
+/// outlives Shepherd, as one started from a terminal would. Only herdr's own sessions: a server pointed at another
+/// socket would still load the default session's state, and two servers would share it.
+pub fn start_server() -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let socket = api_socket();
+    let Some(session) = session_of(&socket, &home) else {
+        return Err(std::io::Error::other(format!("{} is not a herdr session's socket, so Shepherd leaves starting it to you", socket.display())));
+    };
+    let mut command = Command::new(binary());
+    if let Some(name) = session {
+        command.args(["--session", &name]);
+    }
+    command.arg("server").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
+    // Shepherd may itself run inside a herdr pane: the server must not take that pane's context.
+    for var in ["HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_SOCKET_PATH", "HERDR_CLIENT_SOCKET_PATH"] {
+        command.env_remove(var);
+    }
+    let mut child = command.spawn()?;
+    std::thread::spawn(move || child.wait()); // reaped whenever it exits
+    Ok(())
 }
 
 pub enum SessionEvent {
@@ -260,5 +320,21 @@ impl Drop for Session {
             let _ = child.kill();
             let _ = child.wait();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_herdrs_own_sessions_are_started() {
+        let home = Path::new("/Users/me");
+        let at = |p: &str| session_of(Path::new(p), home);
+        assert_eq!(at("/Users/me/.config/herdr/herdr.sock"), Some(None));
+        assert_eq!(at("/Users/me/.config/herdr/sessions/pets/herdr.sock"), Some(Some("pets".into())));
+        assert_eq!(at("/Users/me/.config/herdr/sessions/pets/other.sock"), None);
+        assert_eq!(at("/Users/me/.config/herdr/sessions/a/b/herdr.sock"), None);
+        assert_eq!(at("/tmp/herdr.sock"), None);
     }
 }

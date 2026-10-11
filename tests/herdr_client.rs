@@ -77,3 +77,19 @@ async fn subscription_ends_when_server_closes() {
     let mut rx = Client::at(path).subscribe(&["tab.created"]).await.unwrap();
     assert!(rx.recv().await.is_none());
 }
+
+#[tokio::test]
+async fn a_missing_or_dead_socket_means_no_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = Client::at(dir.path().join("herdr.sock")).call("ping", json!({})).await.unwrap_err();
+    assert!(shepherd::herdr::no_server(&missing), "{missing:#}");
+    // A server that died leaves its socket file behind: connecting is refused.
+    let stale = dir.path().join("stale.sock");
+    drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+    let refused = Client::at(stale).call("ping", json!({})).await.unwrap_err();
+    assert!(shepherd::herdr::no_server(&refused), "{refused:#}");
+    // An answer that is an error is a running server.
+    let path = fake_server(&dir, |req| vec![json!({"id": req["id"], "error": {"code": "x", "message": "y"}})]);
+    let answered = Client::at(path).call("ping", json!({})).await.unwrap_err();
+    assert!(!shepherd::herdr::no_server(&answered));
+}

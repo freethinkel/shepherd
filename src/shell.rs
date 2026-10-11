@@ -709,6 +709,9 @@ fn reapply_traffic_lights(window: &mut Window) {
 
 /// Subscribe, then snapshot; every event (coalesced) triggers another snapshot. Reconnects forever.
 async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, client: Client, cx: &mut gpui::AsyncApp) {
+    // When nothing listens on the socket, Shepherd starts herdr's server itself: again after 10 s if it never came
+    // up, after a minute if it could not be run at all.
+    let (mut next_start, mut spawned, mut start_error) = (Instant::now(), None::<Instant>, None::<String>);
     loop {
         let sub = {
             let c = client.clone();
@@ -717,8 +720,23 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cl
         let mut rx = match sub.await.expect("tokio") {
             Ok(rx) => rx,
             Err(err) => {
+                let no_server = crate::herdr::no_server(&err);
+                if no_server && Instant::now() >= next_start {
+                    match crate::herdr::start_server() {
+                        Ok(()) => (spawned, start_error, next_start) = (Some(Instant::now()), None, Instant::now() + Duration::from_secs(10)),
+                        Err(e) => {
+                            start_error = Some(format!("herdr isn't running, and running it failed: {e}. Install herdr or set its path in Settings."));
+                            next_start = Instant::now() + Duration::from_secs(60);
+                        }
+                    }
+                }
+                let message = match (&start_error, spawned) {
+                    (Some(e), _) if no_server => e.clone(),
+                    (None, Some(at)) if no_server && at.elapsed() < Duration::from_secs(10) => "Starting herdr…".into(),
+                    _ => format!("{err:#}"),
+                };
                 let alive = this.update(cx, |s, cx| {
-                    s.error = Some(format!("{err:#}"));
+                    s.error = Some(message);
                     cx.notify()
                 });
                 if alive.is_err() {
