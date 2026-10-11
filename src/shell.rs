@@ -21,6 +21,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+mod tab_bar;
+
 const TITLEBAR_HEIGHT: f32 = 38.0;
 /// The titlebar's left cluster: traffic lights, then the sidebar toggle at Zeron's `titlebar_cluster_start` (88).
 const TOGGLE_LEFT: f32 = 88.0;
@@ -93,42 +95,12 @@ pub struct Shell {
     /// A pane's right-click menu: the pane and where it was clicked.
     pane_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     agents_scroll: gpui::ScrollHandle,
-    tabs_scroll: gpui::ScrollHandle,
+    tab_bar: tab_bar::TabBar,
     /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
     /// actions still dispatch.
     focus: gpui::FocusHandle,
     /// The Settings page, shown in place of the sidebar and the panes while open.
     settings: Option<(Entity<crate::ui::settings::SettingsView>, Subscription)>,
-}
-
-/// A tab being dragged along the tab bar, drawn under the pointer as a pill with its label.
-#[derive(Clone)]
-struct DraggedTab {
-    tab_id: String,
-    label: String,
-    index: usize,
-    theme: Theme,
-}
-
-impl Render for DraggedTab {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let theme = &self.theme;
-        div()
-            .h(px(28.))
-            .max_w(px(240.))
-            .px(px(10.))
-            .flex()
-            .items_center()
-            .rounded(px(8.))
-            .bg(theme.card)
-            .border_1()
-            .border_color(theme.border)
-            .shadow_lg()
-            .font_family(theme.font_ui.clone())
-            .text_size(px(13.))
-            .text_color(theme.text)
-            .child(div().truncate().child(self.label.clone()))
-    }
 }
 
 /// New worktree: the repo's workspace and the branch name being typed.
@@ -227,7 +199,7 @@ impl Shell {
                     remove_confirm: None,
                     pending_worktrees: Vec::new(),
                     agents_scroll: gpui::ScrollHandle::new(),
-                    tabs_scroll: gpui::ScrollHandle::new(),
+                    tab_bar: Default::default(),
                     focus: cx.focus_handle(),
                     settings: None,
                 };
@@ -683,25 +655,6 @@ fn icon_button(theme: &Theme, id: &'static str, glyph: &'static str) -> Stateful
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
         .child(glyph)
-}
-
-/// `×` that shows while the pointer is over its row (`group`).
-fn close_button(theme: &Theme, group: &SharedString, id: SharedString) -> Stateful<Div> {
-    let hover = theme.hover;
-    div()
-        .id(id)
-        .size(px(20.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(5.))
-        .text_size(px(16.))
-        .text_color(theme.text_faint)
-        .invisible()
-        .group_hover(group.clone(), |s| s.visible())
-        .hover(move |s| s.bg(hover))
-        .child("×")
 }
 
 /// Zeron's sidebar disclosure (`motion::COLLAPSE`): 180 ms CSS ease-out.
@@ -1429,115 +1382,7 @@ impl Render for Shell {
                 )
             });
 
-        let tabs = match (&snapshot, &shown_ws) {
-            (Some(s), Some(ws)) => s.tabs_of(ws).into_iter().cloned().collect(),
-            _ => Vec::new(),
-        };
-        let tabbar = div()
-            .h(px(TITLEBAR_HEIGHT))
-            .flex_none()
-            // opaque, so the edge fades (same color) blend in exactly
-            .bg(theme.surface)
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            // the 28 px `+` sits as far from the right edge as from the top and bottom
-            .pr(px((TITLEBAR_HEIGHT - 28.) / 2.))
-            // clear the traffic lights and the sidebar toggle once the sidebar no longer sits under them
-            .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
-            .child(div().flex_1().min_w_0().h_full().relative().child(div()
-                .id("tabbar")
-                .size_full()
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .overflow_x_scroll()
-                .track_scroll(&self.tabs_scroll)
-                // re-render so the edge fades follow the scroll position
-                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-                .children(tabs.into_iter().enumerate().map(|(index, t)| {
-                let selected = shown_tab.as_deref() == Some(t.tab_id.as_str());
-                let id = t.tab_id.clone();
-                let editing = self.rename_field(&RenameTarget::Tab(t.tab_id.clone()), cx);
-                let label = t.label.clone();
-                let group = SharedString::from(format!("tab-row-{}", t.tab_id));
-                let close_id = t.tab_id.clone();
-                let dragged = editing.is_none().then(|| DraggedTab {
-                    tab_id: t.tab_id.clone(),
-                    label: t.label.clone(),
-                    index,
-                    theme: theme.clone(),
-                });
-                let drop_bg = theme.accent.opacity(0.15);
-                row(&theme, selected, SharedString::from(format!("tab-{}", t.tab_id)))
-                    .group(group.clone())
-                    // off the titlebar's drag strip: a press here drags the tab, not the window; the wheel still scrolls the bar
-                    .block_mouse_except_scroll()
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_mouse_down(MouseButton::Right, cx.listener({
-                        let id = t.tab_id.clone();
-                        move |this, e: &MouseDownEvent, _, cx| {
-                            this.tab_menu = Some(crate::ui::Popup::new((id.clone(), e.position)));
-                            cx.notify();
-                        }
-                    }))
-                    .when_some(dragged, |el, dragged| el.on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone())))
-                    .drag_over::<DraggedTab>(move |s, d, _, _| if d.index == index { s } else { s.bg(drop_bg) })
-                    // Dropped on a tab, the dragged one takes its place: herdr's slot is after it when moving right.
-                    .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| {
-                        if d.index != index {
-                            let insert_index = if d.index < index { index + 1 } else { index };
-                            this.send(Command::MoveTab { tab_id: d.tab_id.clone(), insert_index }, cx, |_, _, _| {});
-                        }
-                    }))
-                    .h(px(28.))
-                    .max_w(px(240.))
-                    .when(!selected, |el| el.text_color(theme.text_muted))
-                    .child(status_dot(t.agent_status, &theme))
-                    .map(|el| match editing {
-                        Some(field) => el.child(field),
-                        None => el.child(div().min_w_0().truncate().child(t.label.clone())),
-                    })
-                    .child(close_button(&theme, &group, SharedString::from(format!("tab-x-{}", t.tab_id))).on_click(
-                        cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.send(Command::CloseTab { tab_id: close_id.clone() }, cx, |_, _, _| {});
-                        }),
-                    ))
-                    .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                        if e.click_count() == 2 {
-                            this.start_rename(RenameTarget::Tab(id.clone()), label.clone(), window, cx);
-                            return;
-                        }
-                        this.selected_tab = Some(id.clone());
-                        cx.notify();
-                    }))
-            }))
-            )
-            // ponytail: gpui has no alpha mask, so the fades are gradients of the bar's own color over the tabs
-            .map(|el| {
-                let (offset, max) = (-f32::from(self.tabs_scroll.offset().x), f32::from(self.tabs_scroll.max_offset().x));
-                let fade = |angle: f32| {
-                    div().absolute().top_0().bottom_0().w(px(32.)).bg(linear_gradient(
-                        angle,
-                        linear_color_stop(theme.surface, 0.),
-                        linear_color_stop(theme.surface.opacity(0.), 1.),
-                    ))
-                };
-                el.when(offset > 0.5, |el| el.child(fade(90.).left_0()))
-                    .when(offset < max - 0.5, |el| el.child(fade(270.).right_0()))
-            }))
-            // `+` stays put on the right; only the tabs scroll
-            .when_some(shown_ws.clone(), |el, ws| {
-                el.child(
-                    icon_button(&theme, "new-tab", "+")
-                        .size(px(28.))
-                        .text_size(px(19.))
-                        .block_mouse_except_scroll()
-                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.new_tab(ws.clone(), cx))),
-                )
-            });
+        let tabbar = self.render_tab_bar(&theme, shown_ws.clone(), shown_tab.clone(), sidebar_w, window, cx);
 
         let shown_tab_id = shown_tab.clone().unwrap_or_default();
         let grid_bounds = self.grid_bounds.clone();
