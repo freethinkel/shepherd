@@ -85,6 +85,8 @@ pub struct Shell {
     agents_drag: Option<(f32, f32)>,
     /// The sidebar's `…` menu, open where it was clicked.
     view_menu: Option<crate::ui::Popup<()>>,
+    /// An agent's pane to give the keyboard once it is shown, over herdr's focused pane of its tab.
+    focus_next: Option<String>,
     /// The `…` menu's Sort submenu is out: the pointer went over its row and has not moved to another.
     sort_submenu: bool,
     /// Where the Sort submenu was painted: a press there is inside the `…` menu, though outside its card.
@@ -188,9 +190,8 @@ impl Shell {
                 cx.on_system_notification_response(move |response, cx| {
                     let _ = this.update(cx, |s, cx| {
                         let pane = s.snapshot.as_ref().and_then(|snap| snap.panes.iter().find(|p| p.pane_id == response.tag.as_ref()));
-                        if let Some(pane) = pane {
-                            s.selected_tab = Some(pane.tab_id.clone());
-                            cx.notify();
+                        if let Some((tab, pane)) = pane.map(|p| (p.tab_id.clone(), p.pane_id.clone())) {
+                            s.show_agent(tab, pane, cx);
                         }
                     });
                     cx.activate(true);
@@ -231,6 +232,7 @@ impl Shell {
                     agents_height: SettingsGlobal::of(cx).settings.agents_height,
                     agents_drag: None,
                     view_menu: None,
+                    focus_next: None,
                     sort_submenu: false,
                     sort_submenu_bounds: Default::default(),
                     pane_menu: None,
@@ -1070,6 +1072,13 @@ impl Shell {
         }
     }
 
+    /// Brings the agent's tab up and its pane to the keyboard.
+    fn show_agent(&mut self, tab_id: String, pane_id: String, cx: &mut Context<Self>) {
+        self.selected_tab = Some(tab_id);
+        self.focus_next = Some(pane_id);
+        cx.notify();
+    }
+
     fn set_agent_sort(&mut self, sort: AgentSort, cx: &mut Context<Self>) {
         self.agent_sort = sort;
         if let Some(m) = self.view_menu.as_mut() { m.close() }
@@ -1363,6 +1372,11 @@ impl Render for Shell {
                 self.focused = Some(f.pane_id.clone());
             }
         }
+        // after herdr's focus, so the agent's pane wins; its tab is already the shown one
+        if let Some(id) = self.focus_next.take().filter(|id| self.settings.is_none() && shown.iter().any(|f| &f.pane_id == id)) {
+            let handle = self.panes[&id].read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
 
         if window.focused(cx).is_none() && self.settings.is_none() {
             window.focus(&self.focus, cx);
@@ -1636,7 +1650,7 @@ impl Render for Shell {
                                         .into_any_element()
                                 });
                                 let selected = shown_tab.as_deref() == Some(pane.tab_id.as_str());
-                                let tab_id = pane.tab_id.clone();
+                                let (tab_id, pane_id) = (pane.tab_id.clone(), pane.pane_id.clone());
                                 let title = pane.terminal_title_stripped.clone().unwrap_or_default();
                                 let agent = row(&theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
                                     .h(px(44.))
@@ -1671,8 +1685,7 @@ impl Render for Shell {
                                             ),
                                     )
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.selected_tab = Some(tab_id.clone());
-                                        cx.notify();
+                                        this.show_agent(tab_id.clone(), pane_id.clone(), cx)
                                     }));
                                 heading.into_iter().chain([agent.into_any_element()])
                             })),
