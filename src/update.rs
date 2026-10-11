@@ -64,7 +64,7 @@ impl Updates {
     /// The sidebar strip: its label and the release a click installs. `None` while there is nothing to offer.
     pub fn strip(&self) -> Option<(String, Option<Release>)> {
         match self {
-            Updates::Available(r) => Some((format!("Update available — v{}", r.version), Some(r.clone()))),
+            Updates::Available(r) => Some((format!("Update to v{}", r.version), Some(r.clone()))),
             Updates::Downloading { version, percent } => Some((format!("Downloading v{version}… {percent}%"), None)),
             Updates::Installing => Some(("Installing, Shepherd restarts…".into(), None)),
             Updates::Failed(why, Some(r)) => Some((format!("Update failed: {why}"), Some(r.clone()))),

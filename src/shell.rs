@@ -773,7 +773,7 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cl
                     match crate::herdr::start_server() {
                         Ok(()) => (spawned, start_error, next_start) = (Some(Instant::now()), None, Instant::now() + Duration::from_secs(10)),
                         Err(e) => {
-                            start_error = Some(format!("herdr isn't running, and running it failed: {e}. Install herdr or set its path in Settings."));
+                            start_error = Some(format!("herdr isn't running and Shepherd couldn't start it: {e}. Install herdr or set its path in Settings."));
                             next_start = Instant::now() + Duration::from_secs(60);
                         }
                     }

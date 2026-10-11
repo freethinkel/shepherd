@@ -553,7 +553,7 @@ impl Render for Panel {
                 Kind::Commands => ("No results", "Try a command, a workspace or a tab."),
                 Kind::Agents if self.items.is_empty() => ("No agents", "Agents herdr finds in your panes show up here."),
                 Kind::Agents => ("No results", "Try an agent's task or its workspace."),
-                Kind::Branches if self.items.is_empty() => ("No branches", "The shown pane is not in a git repo."),
+                Kind::Branches if self.items.is_empty() => ("No branches", "This pane isn't in a git repo."),
                 Kind::Branches => ("No results", "Try a branch name."),
             };
             div().py(px(24.)).flex().flex_col().items_center().gap(px(6.)).child(title).child(div().text_color(theme.text_muted).child(hint))

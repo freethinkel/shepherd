@@ -551,7 +551,7 @@ impl PaneTerminal {
             let pane = client.call("pane.get", serde_json::json!({"pane_id": pane_id})).await.map(|r| r["pane"].clone()).unwrap_or_default();
             let cwd = pane["foreground_cwd"].as_str().or(pane["cwd"].as_str()).unwrap_or("/");
             let Some(path) = resolve(&path, Path::new(cwd)) else { return };
-            if editor.as_deref().and_then(|e| e.split_whitespace().next()).is_some_and(|w| w.rsplit('/').next() == Some("nvim")) {
+            if is_nvim(editor.as_deref()) {
                 // A terminal editor gets a pane to the right; its shell drops typeahead until the prompt is drawn.
                 let params = serde_json::json!({"target_pane_id": pane_id, "direction": "right", "focus": true, "cwd": cwd});
                 let Ok(r) = client.call("pane.split", params).await else { return };
@@ -749,6 +749,11 @@ pub fn editor_argv(editor: Option<&str>, path: &Path, line: Option<u32>, col: Op
         return vec![code, "-g".into(), target];
     }
     vec!["open".into(), path.display().to_string()]
+}
+
+/// Whether the editor command runs nvim, which opens in a pane instead of its own window.
+pub fn is_nvim(editor: Option<&str>) -> bool {
+    editor.and_then(|e| e.split_whitespace().next()).is_some_and(|w| w.rsplit('/').next() == Some("nvim"))
 }
 
 /// The shell line opening `path` at its line and column in nvim; `exec`, so quitting nvim closes its pane.

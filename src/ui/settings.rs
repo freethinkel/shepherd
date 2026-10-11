@@ -579,20 +579,10 @@ fn action(theme: &Theme, id: impl Into<gpui::ElementId>, label: impl Into<Shared
         .child(label.into())
 }
 
-/// An on/off switch: an accent track with the knob on the right when on.
-fn toggle(theme: &Theme, id: impl Into<gpui::ElementId>, on: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .w(px(34.))
-        .h(px(20.))
-        .p(px(2.))
-        .flex()
-        .when(on, |el| el.justify_end())
-        .rounded_full()
-        .bg(if on { theme.accent } else { theme.wash(0.14) })
-        .cursor_pointer()
-        .child(div().size(px(16.)).rounded_full().bg(gpui::white()).shadow_sm())
+/// The shared switch (`crate::ui::switch`), clickable.
+fn toggle(theme: &Theme, id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
+    let id = id.into();
+    div().id(id.clone()).flex_none().cursor_pointer().child(crate::ui::switch(theme, on, id))
 }
 
 /// A card of the Color scheme row: a preview of the look, its icon and name under it (Zeron's option card).
@@ -735,7 +725,7 @@ impl Render for SettingsView {
             .err()
             .cloned()
             .or_else(|| self.herdr_note.clone())
-            .unwrap_or_else(|| format!("Saved to {}; herdr reloads it at once.", config_path().display()));
+            .unwrap_or_else(|| format!("Saved to {}. herdr reloads it right away.", config_path().display()));
 
         let nav = div()
             .w(px(settings.sidebar_width))
@@ -826,7 +816,11 @@ impl Render for SettingsView {
                         )
                         .child(
                             card_row(&theme, false)
-                                .child(row_text(&theme, "Editor", "Cmd+click on file:line opens it here. Neovim opens in a pane to the right."))
+                                .child(row_text(&theme, "Editor", if crate::terminal::pane::is_nvim(settings.editor.as_deref()) {
+                                    "Cmd+click on file:line opens it in Neovim, in a pane to the right."
+                                } else {
+                                    "Cmd+click on file:line opens it in this editor."
+                                }))
                                 .child(self.editor_select(&theme, settings.editor.as_deref(), cx)),
                         )
                         .child(
@@ -1015,7 +1009,7 @@ impl Render for SettingsView {
                         )
                         .child(
                             card_row(&theme, false)
-                                .child(row_text(&theme, "API socket", "A new socket is used after Shepherd restarts."))
+                                .child(row_text(&theme, "API socket", "Shepherd switches to a new socket when it restarts."))
                                 .child(field(&theme, &self.herdr_socket)),
                         )
                         .child(
@@ -1035,7 +1029,7 @@ impl Render for SettingsView {
                     let channel = herdr.str("update.channel").unwrap_or("stable").to_string();
                     let fields = [
                         ("Shell", "For new panes. Empty is $SHELL."),
-                        ("New pane folder", "follow (the pane it was opened from), home, current, or a path."),
+                        ("New pane folder", "follow, home, current or a path. follow takes the folder of the pane it opens from."),
                         ("Worktrees folder", "Where new worktrees are checked out."),
                     ];
                     card(&theme)
@@ -1078,7 +1072,7 @@ impl Render for SettingsView {
                     }
                     _ => action(&theme, "check-updates", "Check for Updates").on_click(|_: &ClickEvent, _, cx| updater::check(cx, false)),
                 };
-                div().child(page_header(&theme, "About", "The version of Shepherd and its updates from GitHub.")).child(
+                div().child(page_header(&theme, "About", "Shepherd's version. Updates come from its GitHub releases.")).child(
                     card(&theme).child(
                         card_row(&theme, true)
                             .child(row_text(&theme, format!("Shepherd {}", env!("CARGO_PKG_VERSION")), updates.line()))
