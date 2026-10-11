@@ -1181,6 +1181,7 @@ impl Render for Shell {
                             let editing = self.rename_field(&rename_target, cx);
                             let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
                             row(&theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
+                                .map(|el| pane_drag::accept_pane_in_workspace(el, &w.workspace_id, theme.accent.opacity(0.15), cx))
                                 .when(nested, |el| el.pl(px(30.)))
                                 .child(
                                     gpui::svg()

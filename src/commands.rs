@@ -45,8 +45,8 @@ pub enum Command {
     /// Moves a pane, process and all, into a tab: split right (or down) of `target`, or of the whole tab when
     /// `None`. herdr does nothing (`same_tab`) when the pane is already in that tab.
     MovePane { pane_id: String, tab_id: String, down: bool, target: Option<String> },
-    /// Moves a pane into a new tab of its workspace.
-    MovePaneToNewTab { pane_id: String },
+    /// Moves a pane into a new tab of `workspace_id`, or of its own workspace.
+    MovePaneToNewTab { pane_id: String, workspace_id: Option<String> },
     SetSplitRatio { tab_id: String, path: Vec<bool>, ratio: f32 },
 }
 
@@ -104,8 +104,12 @@ impl Command {
                 }
                 ("pane.move", json!({"pane_id": pane_id, "destination": destination, "focus": false}))
             }
-            Command::MovePaneToNewTab { pane_id } => {
-                ("pane.move", json!({"pane_id": pane_id, "destination": {"type": "new_tab"}, "focus": false}))
+            Command::MovePaneToNewTab { pane_id, workspace_id } => {
+                let mut destination = json!({"type": "new_tab"});
+                if let Some(workspace_id) = workspace_id {
+                    destination["workspace_id"] = json!(workspace_id);
+                }
+                ("pane.move", json!({"pane_id": pane_id, "destination": destination, "focus": false}))
             }
             Command::SetSplitRatio { tab_id, path, ratio } => {
                 ("layout.set_split_ratio", json!({"tab_id": tab_id, "path": path, "ratio": ratio}))
@@ -239,8 +243,12 @@ mod tests {
             ("pane.move", json!({"pane_id": "w1:p1", "focus": false, "destination": {"type": "tab", "tab_id": "w1:t2", "split": "right"}}))
         );
         assert_eq!(
-            req(Command::MovePaneToNewTab { pane_id: "w1:p1".into() }),
+            req(Command::MovePaneToNewTab { pane_id: "w1:p1".into(), workspace_id: None }),
             ("pane.move", json!({"pane_id": "w1:p1", "focus": false, "destination": {"type": "new_tab"}}))
+        );
+        assert_eq!(
+            req(Command::MovePaneToNewTab { pane_id: "w1:p1".into(), workspace_id: Some("w2".into()) }),
+            ("pane.move", json!({"pane_id": "w1:p1", "focus": false, "destination": {"type": "new_tab", "workspace_id": "w2"}}))
         );
     }
 

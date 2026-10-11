@@ -76,12 +76,14 @@ fn landing(f: Frac, zone: Zone) -> Frac {
     }
 }
 
-/// The herdr calls that drop `source` on `zone` of `target`, both panes of `tab_id`. herdr refuses `pane.move`
-/// within a tab (`same_tab`) and only splits right or down, so the pane hops out to a new tab and back (the
-/// emptied tab closes), and a left or top split is a right or down one plus a swap.
+/// The herdr calls that drop `source` (a pane of `source_tab`) on `zone` of `target`, a pane of `tab_id`.
+/// herdr refuses `pane.move` within a tab (`same_tab`) and only splits right or down, so within a tab the pane
+/// hops out to a new tab and back (the emptied tab closes), and a left or top split is a right or down one plus
+/// a swap. herdr swaps only within a tab, so the middle of a pane in another tab takes nothing.
 // ponytail: the hop flashes a tab for a moment; one call once herdr moves within a tab and splits left/up.
-pub(super) fn plan(source: &str, target: &str, tab_id: &str, zone: Zone) -> Vec<Command> {
-    if source == target {
+pub(super) fn plan(source: &str, source_tab: &str, target: &str, tab_id: &str, zone: Zone) -> Vec<Command> {
+    let same_tab = source_tab == tab_id;
+    if source == target || (zone == Zone::Center && !same_tab) {
         return Vec::new();
     }
     let swap = Command::SwapPanes { source: source.into(), target: target.into() };
@@ -92,10 +94,9 @@ pub(super) fn plan(source: &str, target: &str, tab_id: &str, zone: Zone) -> Vec<
         Zone::Bottom => (true, false),
         Zone::Top => (true, true),
     };
-    let mut plan = vec![
-        Command::MovePaneToNewTab { pane_id: source.into() },
-        Command::MovePane { pane_id: source.into(), tab_id: tab_id.into(), down, target: Some(target.into()) },
-    ];
+    let hop = same_tab.then(|| Command::MovePaneToNewTab { pane_id: source.into(), workspace_id: None });
+    let mut plan: Vec<_> = hop.into_iter().collect();
+    plan.push(Command::MovePane { pane_id: source.into(), tab_id: tab_id.into(), down, target: Some(target.into()) });
     if then_swap {
         plan.push(swap);
     }
@@ -107,7 +108,12 @@ pub(super) fn plan(source: &str, target: &str, tab_id: &str, zone: Zone) -> Vec<
 pub(super) struct PaneDrop {
     target: Option<(String, Zone)>,
     glide: Option<Glide>,
+    /// The tab under the pointer, opened if the pane rests there for `OPEN_TAB`.
+    over_tab: Option<String>,
 }
+
+/// How long a dragged pane rests on a tab before that tab opens to take it.
+const OPEN_TAB: Duration = Duration::from_millis(500);
 
 /// The placeholder's move between zones, and its fade in and out.
 const GLIDE: Duration = Duration::from_millis(140);
@@ -235,6 +241,7 @@ impl Shell {
             g.now()
         });
         let (frames, tab_id, accent) = (frames.to_vec(), tab_id.to_string(), theme.accent);
+        let tab_id_move = tab_id.clone();
         Some(
             div()
                 .id("pane-drop")
@@ -245,8 +252,10 @@ impl Shell {
                     let (b, p) = (e.bounds, e.event.position);
                     let x = f32::from(p.x - b.origin.x) / f32::from(b.size.width);
                     let y = f32::from(p.y - b.origin.y) / f32::from(b.size.height);
-                    let source = e.drag(cx).pane_id.clone();
-                    let target = target_at(&frames, x, y).filter(|(id, _)| *id != source);
+                    let d = e.drag(cx);
+                    let (source, source_tab) = (d.pane_id.clone(), d.tab_id.clone());
+                    let target = target_at(&frames, x, y)
+                        .filter(|(id, zone)| !plan(&source, &source_tab, id, &tab_id_move, *zone).is_empty());
                     if let Some(drop) = this.pane_drop.as_mut().filter(|d| d.target != target) {
                         drop.target = target;
                         cx.notify();
@@ -254,7 +263,7 @@ impl Shell {
                 }))
                 .on_drop(cx.listener(move |this, d: &DraggedPane, _, cx| {
                     if let Some((target, zone)) = this.pane_drop.take().and_then(|drop| drop.target) {
-                        this.send_all(plan(&d.pane_id, &target, &tab_id, zone), cx);
+                        this.send_all(plan(&d.pane_id, &d.tab_id, &target, &tab_id, zone), cx);
                     }
                 }))
                 .children(placeholder.filter(|(_, alpha)| *alpha > 0.).map(|(f, alpha)| {
@@ -272,10 +281,32 @@ impl Shell {
     }
 }
 
-/// Lets a tab in the tab bar take a dragged pane: it moves into that tab, split right of the whole tab.
+/// Lets a tab in the tab bar take a dragged pane: it moves into that tab, split right of the whole tab. Resting
+/// on the tab for `OPEN_TAB` opens it, to drop the pane on one of its panes instead.
 pub(super) fn accept_pane(el: Stateful<Div>, tab_id: &str, drop_bg: Hsla, cx: &Context<Shell>) -> Stateful<Div> {
-    let (over, dropped) = (tab_id.to_string(), tab_id.to_string());
-    el.drag_over::<DraggedPane>(move |s, d, _, _| if d.tab_id == over { s } else { s.bg(drop_bg) }).on_drop(cx.listener(
+    let (over, dropped, rest) = (tab_id.to_string(), tab_id.to_string(), tab_id.to_string());
+    el.on_drag_move(cx.listener(move |this, e: &DragMoveEvent<DraggedPane>, _, cx| {
+        let Some(drop) = this.pane_drop.as_mut() else { return };
+        let inside = e.bounds.contains(&e.event.position);
+        if inside && drop.over_tab.as_deref() != Some(rest.as_str()) {
+            drop.over_tab = Some(rest.clone());
+            let tab = rest.clone();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(OPEN_TAB).await;
+                let _ = this.update(cx, |shell, cx| {
+                    if shell.pane_drop.as_ref().is_some_and(|d| d.over_tab.as_ref() == Some(&tab)) && cx.has_active_drag() {
+                        shell.selected_tab = Some(tab);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        } else if !inside && drop.over_tab.as_deref() == Some(rest.as_str()) {
+            drop.over_tab = None;
+        }
+    }))
+    .drag_over::<DraggedPane>(move |s, d, _, _| if d.tab_id == over { s } else { s.bg(drop_bg) })
+    .on_drop(cx.listener(
         move |this, d: &DraggedPane, _, cx| {
             this.pane_drop = None;
             if d.tab_id != dropped {
@@ -284,6 +315,16 @@ pub(super) fn accept_pane(el: Stateful<Div>, tab_id: &str, drop_bg: Hsla, cx: &C
             }
         },
     ))
+}
+
+/// Lets a workspace in the sidebar take a dragged pane: it moves into a new tab of that workspace.
+pub(super) fn accept_pane_in_workspace(el: Stateful<Div>, workspace_id: &str, drop_bg: Hsla, cx: &Context<Shell>) -> Stateful<Div> {
+    let workspace_id = workspace_id.to_string();
+    el.drag_over::<DraggedPane>(move |s, _, _, _| s.bg(drop_bg)).on_drop(cx.listener(move |this, d: &DraggedPane, _, cx| {
+        this.pane_drop = None;
+        let command = Command::MovePaneToNewTab { pane_id: d.pane_id.clone(), workspace_id: Some(workspace_id.clone()) };
+        this.send(command, cx, |_, _, _| {});
+    }))
 }
 
 #[cfg(test)]
@@ -334,11 +375,14 @@ mod tests {
     fn plans() {
         let (src, dst, tab) = ("w1:p1", "w1:p2", "w1:t1");
         let swap = Command::SwapPanes { source: src.into(), target: dst.into() };
-        let hop = Command::MovePaneToNewTab { pane_id: src.into() };
+        let hop = Command::MovePaneToNewTab { pane_id: src.into(), workspace_id: None };
         let back = |down| Command::MovePane { pane_id: src.into(), tab_id: tab.into(), down, target: Some(dst.into()) };
-        assert_eq!(plan(src, dst, tab, Zone::Center), vec![swap.clone()]);
-        assert_eq!(plan(src, dst, tab, Zone::Bottom), vec![hop.clone(), back(true)]);
-        assert_eq!(plan(src, dst, tab, Zone::Left), vec![hop, back(false), swap]);
-        assert!(plan(src, src, tab, Zone::Right).is_empty());
+        assert_eq!(plan(src, tab, dst, tab, Zone::Center), vec![swap.clone()]);
+        assert_eq!(plan(src, tab, dst, tab, Zone::Bottom), vec![hop.clone(), back(true)]);
+        assert_eq!(plan(src, tab, dst, tab, Zone::Left), vec![hop, back(false), swap.clone()]);
+        assert!(plan(src, tab, src, tab, Zone::Right).is_empty());
+        // from another tab: no hop, and no swap across tabs
+        assert_eq!(plan(src, "w1:t2", dst, tab, Zone::Top), vec![back(true), swap]);
+        assert!(plan(src, "w1:t2", dst, tab, Zone::Center).is_empty());
     }
 }
