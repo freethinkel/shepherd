@@ -25,6 +25,15 @@ pub enum Link {
     File { path: String, line: Option<u32>, col: Option<u32> },
 }
 
+/// What an OSC 8 hyperlink opens: web and mail links as they are; `file://host/path` as `file:///path`, since
+/// `ls --hyperlink` names the host. Other schemes open nothing: the link's text hides where they lead.
+pub fn hyperlink(uri: &str) -> Option<Link> {
+    if let Some(rest) = uri.strip_prefix("file://") {
+        return Some(Link::Url(format!("file://{}", &rest[rest.find('/')?..])));
+    }
+    ["https://", "http://", "mailto:"].iter().any(|s| uri.starts_with(s)).then(|| Link::Url(uri.into()))
+}
+
 /// The URL or path (`src/a.rs:12:5`) under char `at`, with its char range in `line`.
 // ponytail: one row; a URL wrapped onto the next row opens cut short.
 pub fn link_at(line: &[char], at: usize) -> Option<(Range<usize>, Link)> {
@@ -102,6 +111,16 @@ mod tests {
         assert_eq!(link_at(&chars("lib.rs:7:"), 0).map(|l| l.1), Some(Link::File { path: "lib.rs".into(), line: Some(7), col: None }));
         assert_eq!(link_at(&chars("lib.rs"), 0), None);
         assert_eq!(link_at(&chars("12:30"), 0), None);
+    }
+
+    #[test]
+    fn hyperlinks_open_web_mail_and_local_files_only() {
+        let url = |s: &str| Some(Link::Url(s.into()));
+        assert_eq!(hyperlink("https://a.b/c"), url("https://a.b/c"));
+        assert_eq!(hyperlink("mailto:x@a.b"), url("mailto:x@a.b"));
+        assert_eq!(hyperlink("file://mac.local/Users/x/a%20b"), url("file:///Users/x/a%20b"));
+        assert_eq!(hyperlink("file:///tmp"), url("file:///tmp"));
+        assert_eq!(hyperlink("ssh://host"), None);
     }
 
     #[test]

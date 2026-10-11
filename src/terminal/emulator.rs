@@ -392,6 +392,17 @@ impl Emulator {
         })
     }
 
+    /// The OSC 8 hyperlink at a viewport cell: the cells around it on that row with the same URI, and the URI.
+    // ponytail: one row, like text links; a hyperlink wrapped onto the next row underlines one row at a time.
+    pub fn hyperlink_at(&self, viewport_row: usize, col: usize) -> Option<(std::ops::Range<usize>, String)> {
+        let row = &self.term.grid()[Line(viewport_row as i32 - self.display_offset() as i32)];
+        let uri = row[Column(col)].hyperlink()?.uri().to_string();
+        let same = |c: &usize| row[Column(*c)].hyperlink().is_some_and(|h| h.uri() == uri);
+        let start = (0..col).rev().take_while(same).last().unwrap_or(col);
+        let end = (col + 1..self.cols()).take_while(same).last().unwrap_or(col) + 1;
+        Some((start..end, uri))
+    }
+
     /// Test/diagnostic helper: a viewport row as trimmed text (wide-char
     /// spacers skipped).
     pub fn row_text(&self, viewport_row: usize) -> String {
@@ -684,5 +695,16 @@ mod tests {
         e.feed(&bytes[..1]);
         e.feed(&bytes[1..]);
         assert_eq!(e.row_text(0), "é");
+    }
+
+    #[test]
+    fn an_osc8_hyperlink_spans_its_cells() {
+        // A style change inside the link keeps it one span.
+        let mut e = emu(30, 2);
+        e.feed(b"see \x1b]8;;https://a.b\x1b\\li\x1b[1mnk\x1b]8;;\x1b\\ ok");
+        assert_eq!(e.hyperlink_at(0, 6), Some((4..8, "https://a.b".into())));
+        assert_eq!(e.hyperlink_at(0, 4).map(|h| h.0), Some(4..8));
+        assert_eq!(e.hyperlink_at(0, 2), None);
+        assert_eq!(e.hyperlink_at(0, 9), None);
     }
 }
