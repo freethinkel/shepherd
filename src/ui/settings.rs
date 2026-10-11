@@ -60,6 +60,7 @@ pub struct SettingsView {
     font: Entity<InputState>,
     herdr_bin: Entity<InputState>,
     herdr_socket: Entity<InputState>,
+    editor: Entity<InputState>,
     /// The action whose chord the next keystroke becomes.
     recording: Option<&'static str>,
     ping: Option<String>,
@@ -104,12 +105,14 @@ impl SettingsView {
         let font = field(Some(settings.font_family.clone()), "Geist Mono", window, cx);
         let herdr_bin = field(settings.herdr_bin.clone(), "herdr on PATH", window, cx);
         let herdr_socket = field(settings.herdr_socket.clone(), "~/.config/herdr/herdr.sock", window, cx);
+        let editor = field(settings.editor.clone(), "Zed, Cursor or VS Code", window, cx);
 
         let mut subscriptions = Vec::new();
         for (input, apply) in [
             (&font, (|s: &mut Settings, v: String| if !v.is_empty() { s.font_family = v }) as fn(&mut Settings, String)),
             (&herdr_bin, |s: &mut Settings, v: String| s.herdr_bin = (!v.is_empty()).then_some(v)),
             (&herdr_socket, |s: &mut Settings, v: String| s.herdr_socket = (!v.is_empty()).then_some(v)),
+            (&editor, |s: &mut Settings, v: String| s.editor = (!v.is_empty()).then_some(v)),
         ] {
             subscriptions.push(cx.subscribe_in(input, window, move |_, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
@@ -155,6 +158,7 @@ impl SettingsView {
             font,
             herdr_bin,
             herdr_socket,
+            editor,
             recording: None,
             ping: None,
             focus: cx.focus_handle(),
@@ -365,6 +369,11 @@ impl Render for SettingsView {
                                             |_, _: &ClickEvent, _, cx| update(cx, |s| s.line_height = step_line_height(s.line_height, 0.1)),
                                         ))),
                                 ),
+                        )
+                        .child(
+                            card_row(&theme, false)
+                                .child(row_text(&theme, "Editor", "Cmd+click on file:line opens it here: a command like zed or code -g."))
+                                .child(field(&theme, &self.editor)),
                         ),
                 ),
             Section::Appearance => {

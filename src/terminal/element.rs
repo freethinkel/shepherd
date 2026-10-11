@@ -342,6 +342,17 @@ impl gpui::Element for TerminalElement {
         let block_cursor = snapshot.cursor.as_ref().filter(|_| self.focused).map(|c| (c.row, c.col));
         let cursor_text = Hsla { a: 1.0, ..theme.terminal.background };
 
+        // Search matches wash their cells under the selection; the current one stands out.
+        for (row, cells, current) in &snapshot.marks {
+            let color = if *current { theme.accent.opacity(0.6) } else { theme.warning.opacity(0.3) };
+            sel_quads.push(fill(
+                Bounds::new(
+                    point(origin.x + cell_w * cells.start as f32, origin.y + line_h * *row as f32),
+                    size(cell_w * cells.len() as f32, line_h),
+                ),
+                color,
+            ));
+        }
         for (row_ix, row) in snapshot.lines.iter().enumerate() {
             let y = origin.y + line_h * row_ix as f32;
             // Selected runs, merged the same way background runs are: one quad

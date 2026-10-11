@@ -4,16 +4,20 @@
 //! assets/NOTICE).
 use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement, cell_at};
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, Side};
+use super::find::{Link, find_all, link_at};
 use super::keys::{keystroke_bytes, paste_bytes};
 use crate::herdr::{Client, Session, SessionEvent};
 use crate::theme::Theme;
 use alacritty_terminal::index::Point as GridPoint;
 use alacritty_terminal::selection::SelectionType;
 use gpui::{
-    App, AsyncApp, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, Styled, Task, WeakEntity, Window, div, prelude::*, px,
+    App, AsyncApp, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
+    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Subscription, Task, WeakEntity, Window, div, prelude::*, px,
 };
+use gpui_base::input::{Input, InputEvent, InputState};
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 
@@ -32,6 +36,8 @@ pub struct GridGeometry {
 pub struct GridSnapshot {
     pub lines: Vec<Vec<CellSnapshot>>,
     pub cursor: Option<CursorSnapshot>,
+    /// Search matches on screen: (row, cells, the current one).
+    pub marks: Vec<(usize, Range<usize>, bool)>,
 }
 
 /// While true, panes keep their grid size when their bounds change (a divider is being dragged): the box resizes
@@ -100,6 +106,38 @@ impl gpui_base::ScrollbarHandle for HerdrScroll {
     }
 }
 
+/// herdr's line `line` (counted from the oldest) brought to mid-screen, as an offset from the bottom; `None` when it
+/// is on screen already.
+pub fn reveal_offset(s: ScrollState, line: usize, rows: usize) -> Option<u32> {
+    let top = s.max_offset_from_bottom as i64 - s.offset_from_bottom as i64;
+    let line = line as i64;
+    if (top..top + rows as i64).contains(&line) {
+        return None;
+    }
+    Some((s.max_offset_from_bottom as i64 + rows as i64 / 2 - line).clamp(0, s.max_offset_from_bottom as i64) as u32)
+}
+
+/// Cmd+F: herdr's whole history is searched (`pane.read`) to step through; matches on screen come from the grid.
+struct Search {
+    input: Entity<InputState>,
+    /// Matches in herdr's history: line from the oldest one, char range.
+    hits: Vec<(usize, Range<usize>)>,
+    current: Option<usize>,
+    _events: Subscription,
+    _read: Option<Task<()>>,
+}
+
+/// A row's chars and, per char, its cell (wide chars' spacers skipped).
+fn row_chars(cells: &[CellSnapshot]) -> (Vec<char>, Vec<usize>) {
+    cells.iter().enumerate().filter(|(_, c)| !c.wide_spacer).map(|(i, c)| (c.ch, i)).unzip()
+}
+
+/// A char range of `row_chars` as cells.
+fn cell_range(cells: &[CellSnapshot], cols: &[usize], chars: Range<usize>) -> Range<usize> {
+    let last = cols[chars.end - 1];
+    cols[chars.start]..last + 1 + usize::from(cells[last].wide)
+}
+
 /// Lines per line-height of wheel/trackpad travel.
 const WHEEL_SPEED: f32 = 1.5;
 
@@ -138,6 +176,10 @@ pub struct PaneTerminal {
     scroll_local_until: Option<std::time::Instant>,
     _scroll_settle: Option<Task<()>>,
     _pump: Option<Task<()>>,
+    search: Option<Search>,
+    /// The pointer, and the link under it while Cmd is held: (row, cells).
+    pointer: Option<gpui::Point<Pixels>>,
+    hover: Option<(usize, Range<usize>)>,
 }
 
 impl PaneTerminal {
@@ -177,6 +219,9 @@ impl PaneTerminal {
             scroll_local_until: None,
             _scroll_settle: None,
             _pump: None,
+            search: None,
+            pointer: None,
+            hover: None,
         }
         // Attaching waits for the first measured grid (`on_grid_metrics`): herdr resizes the real PTY to
         // whatever size the attach names.
@@ -278,8 +323,200 @@ impl PaneTerminal {
         cx.notify();
     }
 
-    pub fn active_grid_snapshot(&self, _cx: &App) -> Option<GridSnapshot> {
-        Some(GridSnapshot { lines: self.emulator.lines(), cursor: self.emulator.cursor() })
+    pub fn active_grid_snapshot(&self, cx: &App) -> Option<GridSnapshot> {
+        let mut lines = self.emulator.lines();
+        if let Some((row, cells)) = &self.hover {
+            for cell in lines.get_mut(*row).into_iter().flat_map(|l| l[cells.clone()].iter_mut()) {
+                cell.underline = true;
+            }
+        }
+        let marks = self.search_marks(&lines, cx);
+        Some(GridSnapshot { lines, cursor: self.emulator.cursor(), marks })
+    }
+
+    fn search_marks(&self, lines: &[Vec<CellSnapshot>], cx: &App) -> Vec<(usize, Range<usize>, bool)> {
+        let Some(search) = &self.search else { return Vec::new() };
+        let query: Vec<char> = search.input.read(cx).value().chars().collect();
+        // The current hit's row on screen: herdr's lines count from the oldest, the screen's top is `max - offset`.
+        let current = search.current.and_then(|i| search.hits.get(i)).and_then(|(line, chars)| {
+            let row = *line as i64 - (self.scroll.max_offset_from_bottom as i64 - self.scroll.offset_from_bottom as i64);
+            usize::try_from(row).ok().map(|row| (row, chars.clone()))
+        });
+        let mut marks = Vec::new();
+        for (row, cells) in lines.iter().enumerate() {
+            let (chars, cols) = row_chars(cells);
+            for hit in find_all(&chars, &query) {
+                let now = current.as_ref().is_some_and(|(r, c)| *r == row && *c == hit);
+                marks.push((row, cell_range(cells, &cols, hit), now));
+            }
+        }
+        marks
+    }
+
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            let theme = Theme::of(cx).clone();
+            let input = cx.new(|cx| {
+                let mut input = InputState::new(window, cx).placeholder("Find");
+                input.set_editor_style(crate::ui::input_style(&theme));
+                input
+            });
+            let events = cx.subscribe_in(&input, window, |pane, _, event: &InputEvent, _, cx| match event {
+                InputEvent::Change => pane.search_history(cx),
+                InputEvent::PressEnter { shift, .. } => pane.step(!shift, cx),
+                _ => {}
+            });
+            self.search = Some(Search { input, hits: Vec::new(), current: None, _events: events, _read: None });
+        }
+        if let Some(search) = &self.search {
+            search.input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Reads herdr's history and finds the query in it; the current match becomes the newest one not below the
+    /// screen.
+    fn search_history(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        let query: Vec<char> = search.input.read(cx).value().chars().collect();
+        search.hits.clear();
+        search.current = None;
+        search._read = None;
+        cx.notify();
+        let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>().filter(|_| !query.is_empty()) else { return };
+        let (client, pane_id) = (client.clone(), self.pane_id.clone());
+        let read = rt.spawn(async move {
+            let read = client.call("pane.read", serde_json::json!({"pane_id": pane_id, "source": "recent", "lines": u32::MAX})).await;
+            let text = read.ok().and_then(|r| r["read"]["text"].as_str().map(str::to_owned)).unwrap_or_default();
+            let lines = text.lines().enumerate();
+            lines.flat_map(|(i, l)| find_all(&l.chars().collect::<Vec<_>>(), &query).into_iter().map(move |r| (i, r))).collect::<Vec<_>>()
+        });
+        search._read = Some(cx.spawn(async move |this, cx| {
+            let Ok(hits) = read.await else { return };
+            let _ = this.update(cx, |pane, cx| {
+                let s = pane.scroll;
+                let bottom = (s.max_offset_from_bottom - s.offset_from_bottom.min(s.max_offset_from_bottom)) as usize + pane.emulator.rows();
+                let Some(search) = &mut pane.search else { return };
+                search.current = hits.iter().rposition(|(line, _)| *line < bottom).or(hits.len().checked_sub(1));
+                search.hits = hits;
+                pane.reveal(cx);
+            });
+        }));
+    }
+
+    /// The next match up into history (`older`) or back down, wrapping around.
+    fn step(&mut self, older: bool, cx: &mut Context<Self>) {
+        let Some(search) = &mut self.search else { return };
+        let n = search.hits.len();
+        if n == 0 {
+            return;
+        }
+        search.current = Some(match search.current {
+            None => n - 1,
+            Some(i) if older => (i + n - 1) % n,
+            Some(i) => (i + 1) % n,
+        });
+        self.reveal(cx);
+    }
+
+    /// Scrolls herdr to the current match unless it is on screen.
+    fn reveal(&mut self, cx: &mut Context<Self>) {
+        let line = self.search.as_ref().and_then(|s| s.current.and_then(|i| s.hits.get(i))).map(|(line, _)| *line);
+        match line.and_then(|line| reveal_offset(self.scroll, line, self.emulator.rows())) {
+            Some(offset) => self.scroll_by(offset as i64 - self.scroll.offset_from_bottom as i64, cx),
+            None => cx.notify(),
+        }
+    }
+
+    fn search_bar(&self, search: &Search, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let count = match (search.current, search.hits.len()) {
+            (Some(i), n) => format!("{}/{n}", i + 1),
+            _ if search.input.read(cx).value().is_empty() => String::new(),
+            _ => "No results".into(),
+        };
+        div()
+            .id("search")
+            .absolute()
+            .top(px(8.))
+            .right(px(20.))
+            .w(px(300.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .pl_2()
+            .pr_3()
+            .py_1()
+            .rounded_md()
+            .bg(theme.card)
+            .border_1()
+            .border_color(theme.border)
+            .text_sm()
+            .text_color(theme.text)
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .capture_key_down(cx.listener(|pane, e: &KeyDownEvent, window, cx| {
+                let k = &e.keystroke;
+                match k.key.as_str() {
+                    "escape" => pane.close_search(window, cx),
+                    "g" if k.modifiers.platform => pane.step(!k.modifiers.shift, cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }))
+            .child(div().flex_1().child(Input::new(&search.input)))
+            .child(div().flex_none().text_color(theme.text_muted).child(count))
+            .into_any_element()
+    }
+
+    /// The link under a window position: its row, cells and target.
+    fn link_under(&self, position: gpui::Point<Pixels>) -> Option<(usize, Range<usize>, Link)> {
+        let g = self.geometry?;
+        if !g.bounds.contains(&position) {
+            return None;
+        }
+        let (row, col, _, _) = self.hit(position)?;
+        let cells = self.emulator.line(row as usize);
+        let (chars, cols) = row_chars(&cells);
+        let at = cols.iter().rposition(|&c| c <= col as usize)?;
+        let (chars_range, link) = link_at(&chars, at)?;
+        Some((row as usize, cell_range(&cells, &cols, chars_range), link))
+    }
+
+    fn update_hover(&mut self, cmd: bool, cx: &mut Context<Self>) {
+        let hover = self.pointer.filter(|_| cmd).and_then(|p| self.link_under(p)).map(|(row, cells, _)| (row, cells));
+        if hover != self.hover {
+            self.hover = hover;
+            cx.notify();
+        }
+    }
+
+    /// URLs go to the browser; paths that exist (relative to the pane's shell) to the editor.
+    fn open_link(&self, link: Link, cx: &mut Context<Self>) {
+        let (path, line, col) = match link {
+            Link::Url(url) => return cx.open_url(&url),
+            Link::File { path, line, col } => (path, line, col),
+        };
+        let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>() else { return };
+        let editor = cx.try_global::<crate::settings::SettingsGlobal>().and_then(|s| s.settings.editor.clone());
+        let (client, pane_id) = (client.clone(), self.pane_id.clone());
+        rt.spawn(async move {
+            let pane = client.call("pane.get", serde_json::json!({"pane_id": pane_id})).await.map(|r| r["pane"].clone()).unwrap_or_default();
+            let cwd = pane["foreground_cwd"].as_str().or(pane["cwd"].as_str()).unwrap_or("/");
+            let Some(path) = resolve(&path, Path::new(cwd)) else { return };
+            let argv = editor_argv(editor.as_deref(), &path, line, col);
+            if let Ok(mut child) = tokio::process::Command::new(&argv[0]).args(&argv[1..]).spawn() {
+                let _ = child.wait().await;
+            }
+        });
     }
 
     fn input(&self, bytes: &[u8]) {
@@ -288,9 +525,22 @@ impl PaneTerminal {
         }
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) {
+            return; // typing in the search bar
+        }
         let ks = &event.keystroke;
         let mods = &ks.modifiers;
+        if ks.key == "f" && mods.platform {
+            self.open_search(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if ks.key == "g" && mods.platform && self.search.is_some() {
+            self.step(!mods.shift, cx);
+            cx.stop_propagation();
+            return;
+        }
         if ks.key == "v" && mods.platform {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 // ponytail: always bracketed; herdr's frames do not tell us whether the app asked for it.
@@ -345,6 +595,10 @@ impl PaneTerminal {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        if let Some((_, _, link)) = self.link_under(event.position).filter(|_| event.modifiers.platform) {
+            self.open_link(link, cx);
+            return;
+        }
         let Some((_, _, point, side)) = self.hit(event.position) else { return };
         // Ghostty: an app that captures the mouse gets it, Shift takes it back for a selection. A CLI session
         // cannot tell, so it keeps forwarding (herdr drops events the app did not ask for) and selects as well.
@@ -365,7 +619,9 @@ impl PaneTerminal {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.pointer = Some(event.position);
         if !event.dragging() {
+            self.update_hover(event.modifiers.platform, cx);
             return;
         }
         let Some(mut drag) = self.drag else { return };
@@ -396,6 +652,42 @@ impl PaneTerminal {
             self.mouse("up", event.position, &event.modifiers);
         }
     }
+}
+
+/// A clicked path as a file that exists: `~` is home, a relative path is the pane's shell's.
+fn resolve(path: &str, cwd: &Path) -> Option<PathBuf> {
+    let path = match path.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => cwd.join(path),
+    };
+    path.exists().then_some(path)
+}
+
+/// The command opening `path` at its line: the user's editor, else the first of Zed, Cursor and VS Code installed,
+/// else macOS's default app for the file (which cannot take a line).
+pub fn editor_argv(editor: Option<&str>, path: &Path, line: Option<u32>, col: Option<u32>) -> Vec<String> {
+    let target = match (line, col) {
+        (Some(l), Some(c)) => format!("{}:{l}:{c}", path.display()),
+        (Some(l), None) => format!("{}:{l}", path.display()),
+        _ => path.display().to_string(),
+    };
+    // An app opened from Finder gets launchd's PATH, without the usual homes of these CLIs.
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let installed = |name: &str| {
+        let dirs = path_env.split(':').chain(["/usr/local/bin", "/opt/homebrew/bin"]);
+        dirs.map(|d| Path::new(d).join(name)).find(|p| p.is_file()).map(|p| p.display().to_string())
+    };
+    if let Some(words) = editor.map(|e| e.split_whitespace().map(String::from).collect::<Vec<_>>()).filter(|w| !w.is_empty()) {
+        let program = if words[0].contains('/') { None } else { installed(&words[0]) };
+        return [vec![program.unwrap_or_else(|| words[0].clone())], words[1..].to_vec(), vec![target]].concat();
+    }
+    if let Some(zed) = installed("zed") {
+        return vec![zed, target];
+    }
+    if let Some(code) = installed("cursor").or_else(|| installed("code")) {
+        return vec![code, "-g".into(), target];
+    }
+    vec!["open".into(), path.display().to_string()]
 }
 
 /// herdr allows one controller per terminal; its refusal names the flag that replaces the other one.
@@ -492,6 +784,7 @@ impl Render for PaneTerminal {
                 .into_any_element();
         }
         let focused = self.focus.is_focused(window);
+        let search_bar = self.search.as_ref().map(|search| self.search_bar(search, &theme, cx));
         self.scrollbar.0.state.set(self.scroll);
         if let Some(g) = self.geometry {
             self.scrollbar.0.bounds.set(g.bounds);
@@ -509,8 +802,11 @@ impl Render for PaneTerminal {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_modifiers_changed(cx.listener(|pane, e: &ModifiersChangedEvent, _, cx| pane.update_hover(e.modifiers.platform, cx)))
+            .when(self.hover.is_some(), |el| el.cursor_pointer())
             .child(TerminalElement::new(cx.entity(), focused))
             .child(crate::ui::scrollbar(SharedString::from(format!("scrollbar-{}", self.pane_id)), &self.scrollbar, &theme))
+            .children(search_bar)
             .into_any_element()
     }
 }
@@ -583,6 +879,24 @@ mod tests {
         assert_eq!(offset_for(s, -1200.0, 4.0), 0); // bottom: live
         assert_eq!(offset_for(s, -9999.0, 4.0), 0); // clamped
         assert_eq!(offset_for(s, -600.0, 0.0), 0); // no measured grid: stays where it is
+    }
+
+    #[test]
+    fn a_match_off_screen_is_brought_to_mid_screen() {
+        // 100 lines of history above a 20-row screen at the live bottom: the screen shows lines 100..120.
+        let s = ScrollState { offset_from_bottom: 0, max_offset_from_bottom: 100, viewport_rows: 20 };
+        assert_eq!(reveal_offset(s, 110, 20), None);
+        assert_eq!(reveal_offset(s, 50, 20), Some(60)); // top at 40, line 50 on row 10
+        assert_eq!(reveal_offset(s, 2, 20), Some(100)); // clamped to the oldest line
+        let up = ScrollState { offset_from_bottom: 60, ..s };
+        assert_eq!(reveal_offset(up, 118, 20), Some(0));
+    }
+
+    #[test]
+    fn the_editor_gets_the_line() {
+        let path = Path::new("/tmp/a.rs");
+        assert_eq!(editor_argv(Some("/bin/ed -g"), path, Some(3), Some(4)), ["/bin/ed", "-g", "/tmp/a.rs:3:4"]);
+        assert_eq!(editor_argv(Some("/bin/ed"), path, Some(3), None), ["/bin/ed", "/tmp/a.rs:3"]);
     }
 
     #[test]
