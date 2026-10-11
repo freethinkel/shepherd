@@ -7,7 +7,8 @@ profile=${1:-release}
 if [ "$profile" = release ]; then cargo build --release; else cargo build; fi
 app="target/$profile/Shepherd.app"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+cp assets/app-icon/Shepherd.icns "$app/Contents/Resources/Shepherd.icns"
 cp "target/$profile/shepherd" "$app/Contents/MacOS/shepherd"
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -17,6 +18,7 @@ cat > "$app/Contents/Info.plist" <<EOF
 	<key>CFBundleIdentifier</key><string>dev.freethinkel.shepherd</string>
 	<key>CFBundleName</key><string>Shepherd</string>
 	<key>CFBundleExecutable</key><string>shepherd</string>
+	<key>CFBundleIconFile</key><string>Shepherd</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleVersion</key><string>$version</string>
 	<key>CFBundleShortVersionString</key><string>$version</string>
