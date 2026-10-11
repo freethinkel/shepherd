@@ -51,6 +51,9 @@ pub enum Command {
     /// Moves a pane into a new tab of `workspace_id`, or of its own workspace.
     MovePaneToNewTab { pane_id: String, workspace_id: Option<String> },
     SetSplitRatio { tab_id: String, path: Vec<bool>, ratio: f32 },
+    /// Enter in the pane, without attaching to it: a waiting agent takes its highlighted choice (Claude's and Codex's
+    /// is "Yes").
+    Approve { pane_id: String },
 }
 
 impl Command {
@@ -118,6 +121,7 @@ impl Command {
             Command::SetSplitRatio { tab_id, path, ratio } => {
                 ("layout.set_split_ratio", json!({"tab_id": tab_id, "path": path, "ratio": ratio}))
             }
+            Command::Approve { pane_id } => ("pane.send_input", json!({"pane_id": pane_id, "keys": ["enter"]})),
         }
     }
 }
@@ -267,6 +271,10 @@ mod tests {
         assert_eq!(
             req(Command::SetSplitRatio { tab_id: "w1:t1".into(), path: vec![false, true], ratio: 0.25 }),
             ("layout.set_split_ratio", json!({"tab_id": "w1:t1", "path": [false, true], "ratio": 0.25}))
+        );
+        assert_eq!(
+            req(Command::Approve { pane_id: "w1:p1".into() }),
+            ("pane.send_input", json!({"pane_id": "w1:p1", "keys": ["enter"]}))
         );
     }
 

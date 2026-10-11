@@ -1,6 +1,8 @@
 //! herdr's `session.snapshot`, parsed. Events only invalidate it: the app refetches
 //! (herdr's docs: events have no shared sequence with snapshots, so never replay them onto one).
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// How the sidebar orders its agents (its `…` menu); saved in the settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -8,10 +10,31 @@ use serde::{Deserialize, Serialize};
 pub enum AgentSort {
     /// Under a heading per workspace, in the sidebar's workspace order.
     Grouped,
+    /// Waiting or done, the longest first; the rest after, in status order.
+    Waiting,
     /// Blocked, working, done, idle: what needs you first. Also what an unknown (old or future) value reads as.
     #[default]
     #[serde(other)]
     Status,
+}
+
+/// Since when each agent pane has had its status, as Shepherd saw it change: herdr's snapshot carries no time.
+pub type Since = HashMap<String, (AgentStatus, Instant)>;
+
+/// When the pane's agent started waiting or finished, while it still is.
+pub fn waiting_since(since: &Since, pane: &Pane) -> Option<Instant> {
+    let (status, at) = since.get(&pane.pane_id)?;
+    (*status == pane.agent_status && crate::notify::wants_attention(*status)).then_some(*at)
+}
+
+/// A wait as the sidebar shows it: "now", "4m", "1h", "2d".
+pub fn ago(wait: Duration) -> String {
+    match wait.as_secs() / 60 {
+        0 => "now".into(),
+        m @ 1..60 => format!("{m}m"),
+        m @ 60..1440 => format!("{}h", m / 60),
+        m => format!("{}d", m / 1440),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -217,11 +240,26 @@ impl Snapshot {
         agents
     }
 
-    /// The agents in `sort` order, ties in status order.
-    pub fn agents_by(&self, sort: AgentSort) -> Vec<&Pane> {
+    /// `since` moved on to this snapshot: an agent whose status changed starts its clock at `now`; gone panes leave.
+    // ponytail: an agent already waiting when Shepherd connects counts from then; herdr keeps no timestamp.
+    pub fn track(&self, since: &mut Since, now: Instant) {
+        since.retain(|id, _| self.panes.iter().any(|p| &p.pane_id == id && p.agent.is_some()));
+        for p in self.panes.iter().filter(|p| p.agent.is_some()) {
+            if since.get(&p.pane_id).is_none_or(|(status, _)| *status != p.agent_status) {
+                since.insert(p.pane_id.clone(), (p.agent_status, now));
+            }
+        }
+    }
+
+    /// The agents in `sort` order, ties in status order. `since` orders [`AgentSort::Waiting`].
+    pub fn agents_by(&self, sort: AgentSort, since: &Since) -> Vec<&Pane> {
         let mut agents = self.agents();
         match sort {
             AgentSort::Status => {}
+            AgentSort::Waiting => agents.sort_by_key(|p| {
+                let at = waiting_since(since, p);
+                (at.is_none(), at)
+            }),
             AgentSort::Grouped => {
                 let order: Vec<_> = self.workspace_tree().into_iter().map(|(w, _)| w.workspace_id.as_str()).collect();
                 agents.sort_by_key(|p| order.iter().position(|id| *id == p.workspace_id).unwrap_or(usize::MAX));

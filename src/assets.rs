@@ -51,6 +51,7 @@ impl gpui::AssetSource for Assets {
             "claude-mark",
             "close",
             "close-circle",
+            "clock-circle",
             "cursor-mark",
             "devin-mark",
             "drag-handle",
