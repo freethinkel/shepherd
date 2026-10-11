@@ -35,6 +35,7 @@ impl gpui::AssetSource for Assets {
             name,
             "arrow-left",
             "alt-arrow-right",
+            "bot",
             "check",
             "checklist",
             "folder",

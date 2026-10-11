@@ -72,6 +72,7 @@ pub struct Shell {
     sidebar_edge: Option<(f32, Instant)>,
     agent_sort: AgentSort,
     show_agents: bool,
+    show_status_bar: bool,
     /// Saved in the settings when a drag ends.
     agents_height: Option<f32>,
     /// The Agents section's top edge is being dragged: the pointer's y and the list's height at the press.
@@ -215,6 +216,7 @@ impl Shell {
                     sidebar_edge: None,
                     agent_sort: SettingsGlobal::of(cx).settings.agent_sort,
                     show_agents: SettingsGlobal::of(cx).settings.show_agents,
+                    show_status_bar: SettingsGlobal::of(cx).settings.show_status_bar,
                     agents_height: SettingsGlobal::of(cx).settings.agents_height,
                     agents_drag: None,
                     view_menu: None,
@@ -647,7 +649,7 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cl
     }
 }
 
-fn status_color(status: AgentStatus, theme: &Theme) -> Option<Hsla> {
+pub(crate) fn status_color(status: AgentStatus, theme: &Theme) -> Option<Hsla> {
     match status {
         AgentStatus::Working => Some(theme.accent),
         AgentStatus::Blocked => Some(theme.warning),
@@ -860,6 +862,13 @@ impl Shell {
         self.show_agents = !self.show_agents;
         let show = self.show_agents;
         save_from_sidebar(cx, |s| s.show_agents = show);
+        cx.notify();
+    }
+
+    fn toggle_status_bar(&mut self, cx: &mut Context<Self>) {
+        self.show_status_bar = !self.show_status_bar;
+        let show = self.show_status_bar;
+        save_from_sidebar(cx, |s| s.show_status_bar = show);
         cx.notify();
     }
 
@@ -1644,6 +1653,18 @@ impl Render for Shell {
                 )
             });
 
+        let statusbar = self.show_status_bar.then(|| {
+            let pane = self.active_pane(window, cx);
+            let on_waiting = cx.listener(|this, _: &ClickEvent, window, cx| {
+                let current = this.active_pane(window, cx);
+                let next = this.snapshot.as_ref().and_then(|s| crate::ui::statusbar::next_waiting(s, current.as_deref()));
+                if let Some(tab) = next {
+                    this.selected_tab = Some(tab.to_string());
+                    cx.notify();
+                }
+            });
+            crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, on_waiting, cx)
+        });
         let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
         let on_page = settings_page.is_some();
         div()
@@ -1722,7 +1743,7 @@ impl Render for Shell {
             })
             .map(|el| match settings_page {
                 Some(page) => el.child(page),
-                None => el.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).child(grid)),
+                None => el.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).child(grid).children(statusbar)),
             })
             // The sidebar's edge: drag to resize, double-click for the default width.
             .when(self.sidebar_open && !sliding && !on_page, |el| {
@@ -1794,6 +1815,7 @@ impl Render for Shell {
                 let at = gpui::point(px(sidebar_w - 8. - 24.), px(TRAFFIC_LIGHTS_CENTER + 12. + 4.));
                 let sort = self.agent_sort;
                 let show_agents = self.show_agents;
+                let show_status_bar = self.show_status_bar;
                 gpui::deferred(
                     gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
                         "view-menu-in",
@@ -1820,6 +1842,14 @@ impl Render for Shell {
                                     .child(div().flex_1().child("Show agents"))
                                     .child(crate::ui::switch(&theme, show_agents, "show-agents"))
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_agents(cx))),
+                            )
+                            .child(
+                                row(&theme, false, "show-status-bar")
+                                    .h(px(30.))
+                                    .rounded(px(6.))
+                                    .child(div().flex_1().child("Show status bar"))
+                                    .child(crate::ui::switch(&theme, show_status_bar, "show-status-bar"))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_status_bar(cx))),
                             )
                             .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
                             .child(menu_choice(&theme, "open-settings", "icons/settings.svg", "Settings", false).on_click(

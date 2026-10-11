@@ -1,5 +1,6 @@
 pub mod divider;
 pub mod settings;
+pub mod statusbar;
 
 use crate::theme::Theme;
 use gpui::{ElementId, px};
