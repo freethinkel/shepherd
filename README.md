@@ -1,4 +1,4 @@
-<h1><img src="docs/icon.png" width="48" height="48" align="center" alt=""> Shepherd</h1>
+<h1 align="center"><img src="docs/icon.png" width="48" height="48" align="center" alt=""> Shepherd</h1>
 
 A native macOS window for [herdr](https://herdr.dev). herdr runs your shells and coding agents in workspaces, tabs and panes. Shepherd shows the same session with a sidebar, real tabs and a list of every agent, so you can see which one is waiting on you without cycling through panes.
 
