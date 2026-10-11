@@ -125,7 +125,7 @@ pub struct Shell {
     unseen: std::collections::HashSet<String>,
     /// The count on the Dock icon now.
     badge: usize,
-    /// The window's frame not saved yet, and the save it waits for: half a second after the last move, or quitting.
+    /// The window's frame not saved yet, and the save it waits for: half a second after the last move, closing or quitting.
     frame: Option<WindowFrame>,
     frame_save: gpui::Task<()>,
 }
@@ -217,6 +217,11 @@ impl Shell {
                     async {}
                 })
                 .detach();
+                let this = cx.entity().downgrade();
+                window.on_window_should_close(cx, move |_, cx| {
+                    let _ = this.update(cx, |s, cx| s.save_frame(cx));
+                    true
+                });
                 let shell = Shell {
                     snapshot: None,
                     error: None,
