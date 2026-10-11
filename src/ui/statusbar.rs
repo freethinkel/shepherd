@@ -194,7 +194,6 @@ fn donut(used: f64, track: gpui::Hsla, color: gpui::Hsla) -> impl IntoElement {
             let d = f32::from(bounds.size.width.min(bounds.size.height));
             let (width, center) = ((d / 6.).max(2.), bounds.center());
             let r = (d - width) / 2.;
-            // ponytail: a polyline arc with butt caps; lyon's round caps aren't re-exported by gpui
             let ring = |turn: f32| {
                 let mut path = gpui::PathBuilder::stroke(px(width));
                 let steps = (turn * 64.).ceil().max(1.) as usize;
@@ -213,6 +212,15 @@ fn donut(used: f64, track: gpui::Hsla, color: gpui::Hsla) -> impl IntoElement {
             }
             if let Some(path) = ring(fraction).filter(|_| fraction > 0.) {
                 window.paint_path(path, color);
+            }
+            // Round caps: gpui doesn't re-export lyon's LineCap, so a dot the line's width sits on each end.
+            if fraction > 0. && fraction < 1. {
+                for turn in [0., fraction] {
+                    let a = turn * std::f32::consts::TAU;
+                    let at = gpui::point(center.x + px(r * a.sin() - width / 2.), center.y - px(r * a.cos() + width / 2.));
+                    let dot = gpui::Bounds::new(at, gpui::size(px(width), px(width)));
+                    window.paint_quad(gpui::fill(dot, color).corner_radii(px(width / 2.)));
+                }
             }
         },
     )
