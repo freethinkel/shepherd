@@ -3,8 +3,9 @@
 use crate::model::{AgentStatus, Pane, Snapshot};
 use gpui::{App, SystemNotification};
 use objc2::MainThreadMarker;
-use objc2_app_kit::NSApplication;
-use objc2_foundation::{NSBundle, NSString};
+use objc2::AllocAnyThread;
+use objc2_app_kit::{NSApplication, NSImage};
+use objc2_foundation::{NSBundle, NSData, NSString};
 
 /// Waiting for the user, or finished: worth a look.
 pub fn wants_attention(status: AgentStatus) -> bool {
@@ -58,6 +59,14 @@ pub fn set_badge(count: usize) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
     NSApplication::sharedApplication(mtm).dockTile().setBadgeLabel(label.as_deref());
+}
+
+/// The Dock icon. A bare `cargo run` binary has no bundle to take it from.
+pub fn set_app_icon() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let data = NSData::with_bytes(include_bytes!("../assets/app-icon/Shepherd.icns"));
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else { return };
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
 }
 
 #[cfg(test)]
