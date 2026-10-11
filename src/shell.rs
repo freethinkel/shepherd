@@ -263,15 +263,21 @@ impl Shell {
         cx.notify();
     }
 
-    fn toggle_command_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::ui::command_panel::{PanelEvent, Run};
-        if self.command_panel.as_ref().is_some_and(|p| p.is_open()) {
+    /// cmd-k (commands) or the agents key: opens that panel over the window, or closes it when it is open.
+    fn toggle_command_panel(&mut self, kind: crate::ui::command_panel::Kind, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::command_panel::{Kind, PanelEvent, Run};
+        if self.command_panel.as_ref().is_some_and(|p| p.is_open() && p.value.0.read(cx).kind == kind) {
             self.close_command_panel(cx);
             return;
         }
-        let bindings = cx.try_global::<ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
-        let items = crate::ui::command_panel::items(self.snapshot.as_ref(), &bindings);
-        let panel = cx.new(|cx| crate::ui::command_panel::Panel::new(items, window, cx));
+        let items = match kind {
+            Kind::Commands => {
+                let bindings = cx.try_global::<ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
+                crate::ui::command_panel::items(self.snapshot.as_ref(), &bindings)
+            }
+            Kind::Agents => crate::ui::command_panel::agent_items(self.snapshot.as_ref(), self.agent_sort),
+        };
+        let panel = cx.new(|cx| crate::ui::command_panel::Panel::new(kind, items, window, cx));
         let events = cx.subscribe_in(&panel, window, |this, _, event: &PanelEvent, window, cx| {
             if !this.close_command_panel(cx) {
                 return;
@@ -699,7 +705,7 @@ fn status_color(status: AgentStatus, theme: &Theme) -> Option<Hsla> {
 }
 
 /// Collie's status dot: 8 px, filled for an agent state, a faint ring when idle.
-fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
+pub(crate) fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
     let dot = div().size(px(8.)).rounded_full().flex_none();
     match status_color(status, theme) {
         Some(c) => dot.bg(c),
@@ -1734,7 +1740,8 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
-            .on_action(cx.listener(|this, _: &CommandPanel, window, cx| this.toggle_command_panel(window, cx)))
+            .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
+            .on_action(cx.listener(|this, _: &AgentsPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Agents, w, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
                 this.drag_divider(e.position, cx);
                 this.drag_sidebar(e.position.x, cx);

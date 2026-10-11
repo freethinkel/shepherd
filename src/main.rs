@@ -3,6 +3,7 @@ fn main() {
     let handle = rt.handle().clone();
     gpui_platform::application().with_assets(shepherd::assets::Assets).run(move |cx| {
         gpui_base::init(cx);
+        shepherd::ui::command_panel::init(cx);
         shepherd::assets::register_fonts(cx);
         let path = shepherd::settings::Settings::path();
         let (settings, error) = shepherd::settings::Settings::load(&path);
