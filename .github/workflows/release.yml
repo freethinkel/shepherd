@@ -1,7 +1,6 @@
 # Every push to main builds and tests Shepherd.app. When Cargo.toml's version has no release yet, the run tags
 # v<version> and publishes Shepherd-<version>-arm64.zip: bump the version to release.
-# ponytail: ad-hoc signed, not notarized; Gatekeeper wants `xattr -dr com.apple.quarantine Shepherd.app` until a
-# Developer ID cert and notarytool are wired in.
+# With the signing secrets set the app is signed with the Developer ID and notarized; without them, ad hoc.
 name: release
 
 on:
@@ -21,13 +20,36 @@ jobs:
     runs-on: macos-15
     env:
       GH_TOKEN: ${{ github.token }}
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Signing keychain
+        if: env.MACOS_CERT_P12 != ''
+        env:
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          pw="$(uuidgen)"
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          xcrun notarytool store-credentials shepherd-notary --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" \
+            --team-id Z7PK4B5KU2 --keychain "$kc"
+          echo "NOTARY_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+
       - run: make test
-      - run: make zip
+      - name: Build, sign, notarize
+        run: make ${{ env.MACOS_CERT_P12 != '' && 'notarize' || 'zip' }}
 
       - name: Release a new version
         run: |
