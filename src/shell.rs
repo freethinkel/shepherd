@@ -85,6 +85,8 @@ pub struct Shell {
     agents_drag: Option<(f32, f32)>,
     /// The sidebar's `…` menu, open where it was clicked.
     view_menu: Option<crate::ui::Popup<()>>,
+    /// The done agent's pane herdr was last told you looked at, so it is told once, not every frame.
+    marked_seen: Option<String>,
     /// An agent's pane to give the keyboard once it is shown, over herdr's focused pane of its tab.
     focus_next: Option<String>,
     /// The `…` menu's Sort submenu is out: the pointer went over its row and has not moved to another.
@@ -233,6 +235,7 @@ impl Shell {
                     agents_drag: None,
                     view_menu: None,
                     focus_next: None,
+                    marked_seen: None,
                     sort_submenu: false,
                     sort_submenu_bounds: Default::default(),
                     pane_menu: None,
@@ -432,6 +435,24 @@ impl Shell {
         if count != self.badge {
             self.badge = count;
             crate::notify::set_badge(count);
+        }
+    }
+
+    /// herdr keeps an agent done until its pane has herdr's focus; the pane with the keyboard in the active window
+    /// counts as looked at, so herdr is told and the agent turns idle.
+    fn mark_seen(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let focused = window.is_window_active().then(|| {
+            self.panes.iter().find(|(_, pane)| pane.read(cx).focus_handle(cx).is_focused(window)).map(|(id, _)| id.clone())
+        });
+        let done = focused.flatten().filter(|id| {
+            self.snapshot.as_ref().is_some_and(|s| s.panes.iter().any(|p| &p.pane_id == id && p.agent_status == AgentStatus::Done))
+        });
+        if done == self.marked_seen {
+            return;
+        }
+        self.marked_seen = done.clone();
+        if let Some(pane_id) = done {
+            self.send_then(Command::MarkSeen { pane_id }, cx, |_, _, _| {});
         }
     }
 
@@ -1322,6 +1343,7 @@ pub(crate) fn row(theme: &Theme, selected: bool, id: impl Into<gpui::ElementId>)
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_badge(window, cx);
+        self.mark_seen(window, cx);
         crate::ui::reap_popup(&mut self.view_menu, window);
         crate::ui::reap_popup(&mut self.ws_menu, window);
         crate::ui::reap_popup(&mut self.pane_menu, window);

@@ -39,6 +39,9 @@ pub enum Command {
     Split { pane_id: String, down: bool },
     ClosePane { pane_id: String },
     FocusPane { pane_id: String, direction: Direction },
+    /// Gives the pane herdr's focus, which is how herdr marks a done agent seen (done → idle). The focus is shared
+    /// with herdr's TUI clients, so it is sent only for a done agent you just looked at.
+    MarkSeen { pane_id: String },
     Zoom { pane_id: String },
     /// Swaps two panes of one tab (herdr refuses `cross_tab`); the processes keep running.
     SwapPanes { source: String, target: String },
@@ -92,6 +95,7 @@ impl Command {
             Command::FocusPane { pane_id, direction } => {
                 ("pane.focus_direction", json!({"pane_id": pane_id, "direction": direction.name()}))
             }
+            Command::MarkSeen { pane_id } => ("pane.focus", json!({"pane_id": pane_id})),
             Command::Zoom { pane_id } => ("pane.zoom", json!({"pane_id": pane_id, "mode": "toggle"})),
             Command::SwapPanes { source, target } => {
                 ("pane.swap", json!({"source_pane_id": source, "target_pane_id": target}))
@@ -229,6 +233,7 @@ mod tests {
             req(Command::FocusPane { pane_id: "w1:p1".into(), direction: Direction::Left }),
             ("pane.focus_direction", json!({"pane_id": "w1:p1", "direction": "left"}))
         );
+        assert_eq!(req(Command::MarkSeen { pane_id: "w1:p1".into() }), ("pane.focus", json!({"pane_id": "w1:p1"})));
         assert_eq!(req(Command::Zoom { pane_id: "w1:p1".into() }), ("pane.zoom", json!({"pane_id": "w1:p1", "mode": "toggle"})));
     }
 
