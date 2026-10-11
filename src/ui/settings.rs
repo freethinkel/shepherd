@@ -900,7 +900,19 @@ impl Render for SettingsView {
                             .child(toggle(&theme, SharedString::from(format!("notify-{i}")), on).on_click(cx.listener(
                                 move |_, _: &ClickEvent, _, cx| update(cx, flip),
                             )))
-                    })))
+                    })).child({
+                        let denied = cx.has_global::<crate::notify::Denied>();
+                        let text = if denied {
+                            row_text(&theme, "Turned off in macOS", "macOS blocks Shepherd's notifications, so none show up. Allow them in System Settings.")
+                                .text_color(theme.danger)
+                        } else {
+                            row_text(&theme, "In macOS", "Banners, sounds and whether they show while you use other apps.")
+                        };
+                        card_row(&theme, false).child(text).child(
+                            action(&theme, "notify-system-settings", "Open System Settings")
+                                .on_click(|_: &ClickEvent, _, _| crate::notify::open_system_settings()),
+                        )
+                    }))
                     .child(section_label(&theme, "In herdr's terminal app"))
                     .child(
                         card(&theme)
