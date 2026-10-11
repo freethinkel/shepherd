@@ -174,6 +174,9 @@ pub struct PaneTerminal {
     /// A `pane.get` is out; `scroll_stale` asks for one more when it lands.
     scroll_fetching: bool,
     scroll_stale: bool,
+    /// Output arrived since herdr was last asked for the scroll position; asked when the pane is next drawn, so
+    /// hidden panes (kept attached for a quick tab switch) never ask.
+    scroll_due: bool,
     scrollbar: HerdrScroll,
     _scrollbar_drag: Task<()>,
     /// Until then `scroll.offset_from_bottom` is our own prediction, not herdr's (stale) report.
@@ -219,6 +222,7 @@ impl PaneTerminal {
             scroll: ScrollState::default(),
             scroll_fetching: false,
             scroll_stale: false,
+            scroll_due: false,
             scrollbar,
             _scrollbar_drag: scrollbar_drag,
             scroll_local_until: None,
@@ -287,6 +291,9 @@ impl PaneTerminal {
 
     /// Element hook: this frame's grid placement. A size change resizes the emulator and herdr's view.
     pub fn on_grid_metrics(&mut self, geometry: GridGeometry, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.scroll_due) {
+            self.refresh_scroll(cx);
+        }
         let first = self.geometry.is_none();
         let (cols, rows) = (geometry.cols, geometry.rows);
         let resized = self.emulator.cols() != cols as usize || self.emulator.rows() != rows as usize;
@@ -802,7 +809,7 @@ async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionE
                 }
             }
             if !ended {
-                pane.refresh_scroll(cx);
+                pane.scroll_due = true;
             }
             cx.notify();
         });

@@ -549,6 +549,7 @@ fn shape_row(
     let mut text = String::with_capacity(row.len());
     let mut runs: Vec<TextRun> = Vec::new();
     let mut seg_col = 0usize;
+    let font_id = window.text_system().resolve_font(mono);
 
     for (col, cell) in row.iter().enumerate() {
         if cell.wide_spacer {
@@ -577,6 +578,9 @@ fn shape_row(
             });
             continue;
         }
+        // The mono font's own cell-width glyphs (Cyrillic, Greek, accents…) stay in the run: pinning each one cost
+        // a shaped line, a layer and a bounds-tree entry per letter. Only fallbacks and wide glyphs are pinned.
+        let pinned = pinned && (cell.wide || !fits_grid(ch, font_id, window));
         if pinned {
             flush(
                 &mut segments,
@@ -643,6 +647,24 @@ fn shape_row(
         window,
     );
     segments
+}
+
+/// `ch` is in the mono font itself (no fallback) at the font's `m` advance, so a run keeps it on the grid.
+/// Cached per font and char: it is asked for every non-ASCII cell of every frame.
+fn fits_grid(ch: char, font_id: gpui::FontId, window: &Window) -> bool {
+    thread_local! {
+        static FITS: std::cell::RefCell<HashMap<(gpui::FontId, char), bool>> = Default::default();
+    }
+    let text = window.text_system();
+    FITS.with_borrow_mut(|fits| {
+        *fits.entry((font_id, ch)).or_insert_with(|| {
+            let size = px(100.);
+            match (text.advance(font_id, size, ch), text.em_advance(font_id, size)) {
+                (Ok(advance), Ok(em)) => (advance.width - em).abs() < px(0.5),
+                _ => false,
+            }
+        })
+    })
 }
 
 pub struct CustomGlyph {
