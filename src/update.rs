@@ -1,5 +1,5 @@
 //! Updating Shepherd.app from its GitHub releases (Collie's updater): the latest release from GitHub's API, its
-//! `Shepherd-<V>-<arch>.zip` downloaded and unpacked next to the running app, checked to be signed by the
+//! `Shepherd-<V>-universal.zip` downloaded and unpacked next to the running app, checked to be signed by the
 //! running app's team, swapped in, then a relaunch. Checked at launch and every few hours; the sidebar offers
 //! what it finds (Zeron's update strip), Settings → About checks by hand.
 use anyhow::{Context as _, bail};
@@ -189,14 +189,18 @@ fn latest() -> anyhow::Result<Release> {
         .body_mut()
         .read_to_string()?;
     let json: serde_json::Value = serde_json::from_str(&body)?;
-    release_of(&json).with_context(|| format!("the latest release has no Shepherd zip for {ARCH}"))
+    release_of(&json).with_context(|| format!("the latest release has no universal or {ARCH} Shepherd zip"))
 }
 
-/// A release from GitHub's JSON: `v0.2.0` with `Shepherd-0.2.0-arm64.zip` among its assets.
+/// A release from GitHub's JSON: `v0.2.0` with `Shepherd-0.2.0-universal.zip` (or, from before universal builds,
+/// `Shepherd-0.2.0-arm64.zip`) among its assets.
 fn release_of(json: &serde_json::Value) -> Option<Release> {
     let version = json["tag_name"].as_str()?.strip_prefix('v')?.to_string();
-    let name = format!("Shepherd-{version}-{ARCH}.zip");
-    let asset = json["assets"].as_array()?.iter().find(|a| a["name"] == name.as_str())?;
+    let assets = json["assets"].as_array()?;
+    let asset = ["universal", ARCH].iter().find_map(|kind| {
+        let name = format!("Shepherd-{version}-{kind}.zip");
+        assets.iter().find(|a| a["name"] == name.as_str())
+    })?;
     Some(Release { url: asset["browser_download_url"].as_str()?.into(), size: asset["size"].as_u64()?, version })
 }
 
@@ -315,6 +319,16 @@ mod tests {
         });
         assert_eq!(release_of(&json), Some(Release { version: "0.2.0".into(), url: "https://x/zip".into(), size: 7 }));
         assert_eq!(release_of(&serde_json::json!({ "tag_name": "v0.2.0", "assets": [] })), None);
+        // A universal zip runs on every Mac and wins over an arch's.
+        let json = serde_json::json!({
+            "tag_name": "v0.3.0",
+            "assets": [
+                { "name": format!("Shepherd-0.3.0-{ARCH}.zip"), "size": 7, "browser_download_url": "https://x/arch" },
+                { "name": "Shepherd-0.3.0-universal.zip", "size": 9, "browser_download_url": "https://x/universal" },
+                { "name": "Shepherd-0.3.0-universal.dmg", "size": 9, "browser_download_url": "https://x/dmg" },
+            ],
+        });
+        assert_eq!(release_of(&json), Some(Release { version: "0.3.0".into(), url: "https://x/universal".into(), size: 9 }));
     }
 
     #[test]
