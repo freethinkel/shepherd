@@ -15,6 +15,9 @@ futures = "0.3"
 gpui = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda" }
 gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "103f13da91ff2c7c52941bdc2b1910f29716dc19" }
 zeron-theme = { git = "https://github.com/zeronsh/comet", rev = "9e17e401710412adca91fe485886d65aa2d7e3eb" }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSString"] }
 image = { version = "0.25", default-features = false }
 gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["font-kit", "runtime_shaders"] }
 serde = { version = "1", features = ["derive"] }
@@ -22,6 +25,7 @@ serde_json = "1"
 bincode = { version = "2", features = ["serde"] }
 tiny-skia = "0.11"
 tokio = { version = "1", features = ["full"] }
+toml_edit = "0.25"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["test-support"] }

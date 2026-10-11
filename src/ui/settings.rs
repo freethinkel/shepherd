@@ -1,8 +1,10 @@
 //! The Settings page, shown in the main window in place of the sidebar and the panes (Zeron's settings route):
 //! section tabs where the sidebar was, then a centered column of titled cards. Terminal font, appearance and
-//! theme family, herdr's binary and socket, key bindings. Every change is saved at once and applied to all windows.
+//! theme family, notifications, herdr's integrations and server settings, herdr's binary and socket, key
+//! bindings. Every change is saved at once and applied to all windows; herdr's own settings go to its
+//! `config.toml`, which herdr then reloads.
 use crate::bindings::{ACTIONS, effective, rebind, recordable};
-use crate::herdr::{Client, set_binary, set_socket};
+use crate::herdr::{Client, HerdrConfig, config_path, set_binary, set_socket};
 use crate::settings::{Settings, SettingsGlobal, step_font_size, step_line_height};
 use crate::theme::{AppearanceMode, Theme, families};
 use crate::ui::input_style;
@@ -12,6 +14,8 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 /// The app's tokio runtime, for calls made from windows (the herdr connection test).
 pub struct Tokio(pub tokio::runtime::Handle);
@@ -26,17 +30,28 @@ const PAGE_MAX_WIDTH: f32 = 760.0;
 enum Section {
     Terminal,
     Appearance,
+    Notifications,
+    Integrations,
     Herdr,
     Shortcuts,
 }
 
 impl Section {
-    const ALL: [Section; 4] = [Section::Terminal, Section::Appearance, Section::Herdr, Section::Shortcuts];
+    const ALL: [Section; 6] = [
+        Section::Terminal,
+        Section::Appearance,
+        Section::Notifications,
+        Section::Integrations,
+        Section::Herdr,
+        Section::Shortcuts,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Section::Terminal => "Terminal",
             Section::Appearance => "Appearance",
+            Section::Notifications => "Notifications",
+            Section::Integrations => "Integrations",
             Section::Herdr => "herdr",
             Section::Shortcuts => "Shortcuts",
         }
@@ -46,6 +61,8 @@ impl Section {
         match self {
             Section::Terminal => "icons/terminal.svg",
             Section::Appearance => "icons/tuning.svg",
+            Section::Notifications => "icons/bell.svg",
+            Section::Integrations => "icons/widget.svg",
             Section::Herdr => "icons/remote-server.svg",
             Section::Shortcuts => "icons/keyboard.svg",
         }
@@ -55,11 +72,37 @@ impl Section {
 /// Back, or Escape: the window shows the panes again.
 pub struct Close;
 
+/// One of herdr's agent integrations (`integration.list`): hooks that report the agent's state to herdr.
+#[derive(Debug, Clone, Deserialize)]
+struct Integration {
+    target: String,
+    label: String,
+    command: String,
+    /// The agent's command is on PATH.
+    available: bool,
+    /// `not_installed`, `current` or `outdated`.
+    state: String,
+}
+
+/// herdr's text settings shown as fields: the config key and what an empty field means.
+const HERDR_FIELDS: [(&str, &str); 3] =
+    [("terminal.default_shell", "$SHELL"), ("terminal.new_cwd", "follow"), ("worktrees.directory", "~/.herdr/worktrees")];
+
 pub struct SettingsView {
     section: Section,
     font: Entity<InputState>,
     herdr_bin: Entity<InputState>,
     herdr_socket: Entity<InputState>,
+    /// herdr's `config.toml` as last read or written, or why it could not be.
+    herdr_config: Result<HerdrConfig, String>,
+    /// Fields for `HERDR_FIELDS`, in order.
+    herdr_fields: Vec<Entity<InputState>>,
+    /// The outcome of the last change to herdr's settings or integrations, when there is something to say.
+    herdr_note: Option<String>,
+    /// `None` until herdr answers `integration.list`.
+    integrations: Option<Result<Vec<Integration>, String>>,
+    /// The integration being installed or removed.
+    integration_busy: Option<String>,
     /// The action whose chord the next keystroke becomes.
     recording: Option<&'static str>,
     ping: Option<String>,
@@ -104,6 +147,14 @@ impl SettingsView {
         let font = field(Some(settings.font_family.clone()), "Geist Mono", window, cx);
         let herdr_bin = field(settings.herdr_bin.clone(), "herdr on PATH", window, cx);
         let herdr_socket = field(settings.herdr_socket.clone(), "~/.config/herdr/herdr.sock", window, cx);
+        let herdr_config = HerdrConfig::load(&config_path()).map_err(|e| format!("{e:#}"));
+        let herdr_fields: Vec<_> = HERDR_FIELDS
+            .iter()
+            .map(|(key, empty)| {
+                let value = herdr_config.as_ref().ok().and_then(|c| c.str(key)).map(str::to_string);
+                field(value, empty, window, cx)
+            })
+            .collect();
 
         let mut subscriptions = Vec::new();
         for (input, apply) in [
@@ -115,6 +166,17 @@ impl SettingsView {
                 if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                     let value = input.read(cx).value().trim().to_string();
                     update(cx, |s| apply(s, value));
+                }
+            }));
+        }
+        for (input, (key, _)) in herdr_fields.iter().zip(HERDR_FIELDS) {
+            subscriptions.push(cx.subscribe_in(input, window, move |v: &mut Self, input, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let value = input.read(cx).value().trim().to_string();
+                    let current = v.herdr_config.as_ref().ok().and_then(|c| c.str(key)).unwrap_or_default();
+                    if value != current {
+                        v.edit_herdr(key, (!value.is_empty()).then(|| value.into()), cx);
+                    }
                 }
             }));
         }
@@ -150,16 +212,92 @@ impl SettingsView {
             .ok()
             .and_then(|name| Section::ALL.into_iter().find(|s| s.label().eq_ignore_ascii_case(&name)))
             .unwrap_or(Section::Terminal);
-        SettingsView {
+        let mut view = SettingsView {
             section,
             font,
             herdr_bin,
             herdr_socket,
+            herdr_config,
+            herdr_fields,
+            herdr_note: None,
+            integrations: None,
+            integration_busy: None,
             recording: None,
             ping: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
+        };
+        view.load_integrations(cx);
+        view
+    }
+
+    /// A request to the herdr Shepherd is connected to; `done` gets the result on the main thread.
+    fn herdr_call(
+        &self,
+        method: &'static str,
+        params: Value,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Self, anyhow::Result<Value>) + 'static,
+    ) {
+        let socket = SettingsGlobal::of(cx).settings.herdr_socket.clone().filter(|p| !p.trim().is_empty());
+        let client = socket.map_or_else(Client::local, |p| Client::at(p.into()));
+        let call = cx.global::<Tokio>().0.spawn(async move { client.call(method, params).await });
+        cx.spawn(async move |this, cx| {
+            let result = call.await.unwrap_or_else(|e| Err(e.into()));
+            let _ = this.update(cx, |v, cx| {
+                done(v, result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Changes one of herdr's settings (`None` puts back its default) and has herdr reload them. The file is read
+    /// again first, so edits made elsewhere in the meantime are kept.
+    fn edit_herdr(&mut self, key: &str, value: Option<toml_edit::Value>, cx: &mut Context<Self>) {
+        let path = config_path();
+        let saved = HerdrConfig::load(&path).and_then(|mut config| {
+            config.set(key, value)?;
+            config.save(&path)?;
+            Ok(config)
+        });
+        match saved {
+            Ok(config) => {
+                self.herdr_config = Ok(config);
+                self.herdr_note = None;
+                self.herdr_call("server.reload_config", json!({}), cx, |v, result| {
+                    v.herdr_note = result.err().map(|e| format!("Saved, but herdr did not reload it: {e:#}"));
+                });
+            }
+            Err(e) => self.herdr_note = Some(format!("{e:#}")),
         }
+        cx.notify();
+    }
+
+    fn load_integrations(&mut self, cx: &mut Context<Self>) {
+        self.herdr_call("integration.list", json!({}), cx, |v, result| {
+            v.integrations = Some(result.map_err(|e| format!("{e:#}")).and_then(|r| {
+                let mut list: Vec<Integration> = serde_json::from_value(r["integrations"].clone()).map_err(|e| e.to_string())?;
+                list.sort_by_key(|i| !i.available); // agents you have first, in herdr's order
+                Ok(list)
+            }));
+        });
+    }
+
+    /// Installs (or updates) or uninstalls an integration, then lists them again.
+    fn run_integration(&mut self, target: String, install: bool, cx: &mut Context<Self>) {
+        let method = if install { "integration.install" } else { "integration.uninstall" };
+        self.integration_busy = Some(target.clone());
+        self.herdr_call(method, json!({"target": target}), cx, |v, result| {
+            v.integration_busy = None;
+            v.herdr_note = Some(match result {
+                Ok(r) => r["messages"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join("\n"),
+                Err(e) => format!("{e:#}"),
+            })
+            .filter(|note| !note.is_empty());
+        });
+        self.load_integrations(cx);
+        cx.notify();
     }
 
     fn test_connection(&mut self, cx: &mut Context<Self>) {
@@ -254,6 +392,46 @@ fn action(theme: &Theme, id: impl Into<gpui::ElementId>, label: impl Into<Shared
         .child(label.into())
 }
 
+/// An on/off switch: an accent track with the knob on the right when on.
+fn toggle(theme: &Theme, id: impl Into<gpui::ElementId>, on: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .w(px(34.))
+        .h(px(20.))
+        .p(px(2.))
+        .flex()
+        .when(on, |el| el.justify_end())
+        .rounded_full()
+        .bg(if on { theme.accent } else { theme.wash(0.14) })
+        .cursor_pointer()
+        .child(div().size(px(16.)).rounded_full().bg(gpui::white()).shadow_sm())
+}
+
+/// One option of a row of choices (the Appearance mode): outlined, filled when selected.
+fn choice(theme: &Theme, id: impl Into<gpui::ElementId>, label: &'static str, selected: bool) -> Stateful<Div> {
+    let (selected_bg, hover) = (theme.wash(0.10), theme.hover);
+    div()
+        .id(id)
+        .h(px(36.))
+        .px(px(14.))
+        .flex()
+        .items_center()
+        .rounded(px(8.))
+        .border_1()
+        .cursor_pointer()
+        .map(|el| match selected {
+            true => el.bg(selected_bg).border_color(theme.border_strong).font_weight(FontWeight::MEDIUM),
+            false => el.border_color(theme.border).text_color(theme.text_muted).hover(move |s| s.bg(hover)),
+        })
+        .child(label)
+}
+
+/// A muted line under a card: where a setting is saved, or what the last change did.
+fn note(theme: &Theme, text: impl Into<SharedString>) -> Div {
+    div().mt(px(8.)).px(px(8.)).text_size(px(12.)).line_height(px(16.)).text_color(theme.text_muted).child(text.into())
+}
+
 /// A text field in a row: the filled pill of Zeron's selects.
 fn field(theme: &Theme, input: &Entity<InputState>) -> Div {
     div().w(px(240.)).flex_none().h(px(32.)).px(px(10.)).flex().items_center().rounded(px(8.)).bg(theme.wash(0.06)).child(Input::new(input))
@@ -281,6 +459,15 @@ impl Render for SettingsView {
         let global = SettingsGlobal::of(cx);
         let settings = global.settings.clone();
         let error = global.error.clone();
+        let herdr = self.herdr_config.as_ref().ok().cloned().unwrap_or_default();
+        // Under herdr's cards: why its config cannot be read, what the last change did, else where it is saved.
+        let herdr_note = self
+            .herdr_config
+            .as_ref()
+            .err()
+            .cloned()
+            .or_else(|| self.herdr_note.clone())
+            .unwrap_or_else(|| format!("Saved to {}; herdr reloads it at once.", config_path().display()));
 
         let nav = div()
             .w(px(settings.sidebar_width))
@@ -311,6 +498,9 @@ impl Render for SettingsView {
                         .child(gpui::svg().path(section.icon()).size(px(16.)).flex_none().text_color(theme.text_muted))
                         .child(section.label())
                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                            if section == Section::Integrations && v.section != section {
+                                v.load_integrations(cx); // installed from a terminal meanwhile
+                            }
                             v.section = section;
                             v.recording = None;
                             cx.notify();
@@ -370,26 +560,11 @@ impl Render for SettingsView {
             Section::Appearance => {
                 let modes = [(AppearanceMode::System, "System"), (AppearanceMode::Light, "Light"), (AppearanceMode::Dark, "Dark")];
                 let system = window.appearance();
-                let (selected_bg, hover) = (theme.wash(0.10), theme.hover);
                 div()
                     .child(page_header(&theme, "Appearance", "Window and terminal colors."))
                     .child(card(&theme).child(card_row(&theme, true).child(row_text(&theme, "Mode", "Follow the system, or keep one look.")).child(
                         div().flex().gap(px(8.)).children(modes.into_iter().map(|(mode, label)| {
-                            let selected = settings.appearance == mode;
-                            div()
-                                .id(SharedString::from(format!("mode-{label}")))
-                                .h(px(36.))
-                                .px(px(14.))
-                                .flex()
-                                .items_center()
-                                .rounded(px(8.))
-                                .border_1()
-                                .cursor_pointer()
-                                .map(|el| match selected {
-                                    true => el.bg(selected_bg).border_color(theme.border_strong).font_weight(FontWeight::MEDIUM),
-                                    false => el.border_color(theme.border).text_color(theme.text_muted).hover(move |s| s.bg(hover)),
-                                })
-                                .child(label)
+                            choice(&theme, SharedString::from(format!("mode-{label}")), label, settings.appearance == mode)
                                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| update(cx, |s| s.appearance = mode)))
                         })),
                     )))
@@ -427,6 +602,125 @@ impl Render for SettingsView {
                             }))
                     })))
             }
+            Section::Notifications => {
+                let shepherd_rows: [(&'static str, &'static str, bool, fn(&mut crate::settings::Settings)); 3] = [
+                    (
+                        "Notify when an agent needs you",
+                        "A macOS notification when an agent you are not looking at waits for you or finishes.",
+                        settings.notify_agents,
+                        |s| s.notify_agents = !s.notify_agents,
+                    ),
+                    ("Sound", "Play a sound with each notification.", settings.notify_sound, |s| s.notify_sound = !s.notify_sound),
+                    (
+                        "Dock badge",
+                        "Count the agents waiting or done that you have not looked at yet.",
+                        settings.dock_badge,
+                        |s| s.dock_badge = !s.dock_badge,
+                    ),
+                ];
+                let delivery = herdr.str("ui.toast.delivery").unwrap_or("off").to_string();
+                let delay = herdr.int("ui.toast.delay_seconds", 1);
+                let sounds = herdr.bool("ui.sound.enabled", true);
+                div()
+                    .child(page_header(&theme, "Notifications", "When an agent waits for you or finishes."))
+                    .child(card(&theme).children(shepherd_rows.into_iter().enumerate().map(|(i, (title, description, on, flip))| {
+                        card_row(&theme, i == 0)
+                            .child(row_text(&theme, title, description))
+                            .child(toggle(&theme, SharedString::from(format!("notify-{i}")), on).on_click(cx.listener(
+                                move |_, _: &ClickEvent, _, cx| update(cx, flip),
+                            )))
+                    })))
+                    .child(section_label(&theme, "In herdr's terminal app"))
+                    .child(
+                        card(&theme)
+                            .mt_0()
+                            .child(
+                                card_row(&theme, true).child(row_text(&theme, "Pop-ups", "Where herdr shows them.")).child(
+                                    div().flex().gap(px(8.)).children(
+                                        [("off", "Off"), ("herdr", "In herdr"), ("terminal", "Terminal"), ("system", "System")].into_iter().map(
+                                            |(value, label)| {
+                                                choice(&theme, SharedString::from(format!("delivery-{value}")), label, delivery == value)
+                                                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                                                        v.edit_herdr("ui.toast.delivery", Some(value.into()), cx)
+                                                    }))
+                                            },
+                                        ),
+                                    ),
+                                ),
+                            )
+                            .child(
+                                card_row(&theme, false)
+                                    .child(row_text(&theme, "Delay", "Seconds before a pop-up shows."))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .child(action(&theme, "delay-down", "−").w(px(32.)).on_click(cx.listener(
+                                                move |v, _: &ClickEvent, _, cx| {
+                                                    v.edit_herdr("ui.toast.delay_seconds", Some((delay - 1).clamp(0, 30).into()), cx)
+                                                },
+                                            )))
+                                            .child(div().w(px(40.)).flex().justify_center().child(format!("{delay}")))
+                                            .child(action(&theme, "delay-up", "+").w(px(32.)).on_click(cx.listener(
+                                                move |v, _: &ClickEvent, _, cx| {
+                                                    v.edit_herdr("ui.toast.delay_seconds", Some((delay + 1).clamp(0, 30).into()), cx)
+                                                },
+                                            ))),
+                                    ),
+                            )
+                            .child(
+                                card_row(&theme, false)
+                                    .child(row_text(&theme, "Sounds", "When an agent in a background workspace changes state."))
+                                    .child(toggle(&theme, "herdr-sounds", sounds).on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                                        v.edit_herdr("ui.sound.enabled", Some((!sounds).into()), cx)
+                                    }))),
+                            ),
+                    )
+                    .child(note(&theme, herdr_note))
+            }
+            Section::Integrations => {
+                let body = match &self.integrations {
+                    None => note(&theme, "Asking herdr…").into_any_element(),
+                    Some(Err(e)) => note(&theme, e.clone()).text_color(theme.danger).into_any_element(),
+                    Some(Ok(list)) => card(&theme)
+                        .children(list.iter().enumerate().map(|(i, integration)| {
+                            let busy = self.integration_busy.as_deref() == Some(integration.target.as_str());
+                            let (status, button) = match integration.state.as_str() {
+                                "current" => ("Installed", "Uninstall"),
+                                "outdated" => ("Update available", "Update"),
+                                _ => ("Not installed", "Install"),
+                            };
+                            let status = match integration.available {
+                                true => status.to_string(),
+                                false => format!("{status} · `{}` is not on PATH", integration.command),
+                            };
+                            let (target, install) = (integration.target.clone(), button != "Uninstall");
+                            card_row(&theme, i == 0)
+                                .min_h(px(52.))
+                                .py(px(8.))
+                                .when(!integration.available, |el| el.text_color(theme.text_muted))
+                                .child(row_text(&theme, integration.label.clone(), status))
+                                .child(
+                                    action(&theme, SharedString::from(format!("integration-{}", integration.target)), if busy { "…" } else { button })
+                                        .when(!busy, |el| {
+                                            el.on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                                                v.run_integration(target.clone(), install, cx)
+                                            }))
+                                        }),
+                                )
+                        }))
+                        .into_any_element(),
+                };
+                div()
+                    .child(page_header(
+                        &theme,
+                        "Integrations",
+                        "Hooks that tell herdr what each agent is doing: working, waiting for you, done.",
+                    ))
+                    .child(body)
+                    .children(self.herdr_note.clone().map(|text| note(&theme, text)))
+            }
             Section::Herdr => div()
                 .child(page_header(&theme, "herdr", "Where Shepherd finds herdr. Empty fields use herdr's defaults."))
                 .child(
@@ -450,7 +744,47 @@ impl Render for SettingsView {
                                 ))
                                 .child(action(&theme, "ping", "Test connection").on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.test_connection(cx)))),
                         ),
-                ),
+                )
+                .child(section_label(&theme, "Server"))
+                .child({
+                    let resume = herdr.bool("session.resume_agents_on_restore", true);
+                    let history = herdr.bool("experimental.pane_history", false);
+                    let channel = herdr.str("update.channel").unwrap_or("stable").to_string();
+                    let fields = [
+                        ("Shell", "For new panes. Empty is $SHELL."),
+                        ("New pane folder", "follow (the pane it was opened from), home, current, or a path."),
+                        ("Worktrees folder", "Where new worktrees are checked out."),
+                    ];
+                    card(&theme)
+                        .mt_0()
+                        .children(fields.into_iter().zip(&self.herdr_fields).enumerate().map(|(i, ((title, description), input))| {
+                            card_row(&theme, i == 0).child(row_text(&theme, title, description)).child(field(&theme, input))
+                        }))
+                        .child(
+                            card_row(&theme, false)
+                                .child(row_text(&theme, "Resume agents", "Reopen agent conversations after herdr restarts."))
+                                .child(toggle(&theme, "herdr-resume", resume).on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                                    v.edit_herdr("session.resume_agents_on_restore", Some((!resume).into()), cx)
+                                }))),
+                        )
+                        .child(
+                            card_row(&theme, false)
+                                .child(row_text(&theme, "Pane history", "Keep recent screen history across server restarts. Experimental."))
+                                .child(toggle(&theme, "herdr-history", history).on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                                    v.edit_herdr("experimental.pane_history", Some((!history).into()), cx)
+                                }))),
+                        )
+                        .child(
+                            card_row(&theme, false).child(row_text(&theme, "Updates", "herdr's release channel.")).child(
+                                div().flex().gap(px(8.)).children([("stable", "Stable"), ("preview", "Preview")].into_iter().map(|(value, label)| {
+                                    choice(&theme, SharedString::from(format!("channel-{value}")), label, channel == value).on_click(cx.listener(
+                                        move |v, _: &ClickEvent, _, cx| v.edit_herdr("update.channel", Some(value.into()), cx),
+                                    ))
+                                })),
+                            ),
+                        )
+                })
+                .child(note(&theme, herdr_note)),
             Section::Shortcuts => {
                 let bindings = effective(&settings.keys);
                 div()

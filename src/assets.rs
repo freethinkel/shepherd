@@ -35,6 +35,7 @@ impl gpui::AssetSource for Assets {
             name,
             "arrow-left",
             "alt-arrow-right",
+            "bell",
             "check",
             "checklist",
             "folder",
@@ -47,6 +48,7 @@ impl gpui::AssetSource for Assets {
             "spinner",
             "terminal",
             "tuning",
+            "widget",
         ))
     }
 

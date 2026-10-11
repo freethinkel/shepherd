@@ -28,6 +28,12 @@ pub struct Settings {
     pub show_agents: bool,
     /// The Agents list's height cap; dragging the section's top edge sets it, `None` is 40 % of the sidebar.
     pub agents_height: Option<f32>,
+    /// A macOS notification when an agent out of sight starts waiting or finishes.
+    pub notify_agents: bool,
+    /// Play a sound with those notifications.
+    pub notify_sound: bool,
+    /// The Dock icon counts agents waiting or done that you have not looked at.
+    pub dock_badge: bool,
 }
 
 /// Zeron's sidebar: 256 px by default, its edge drags it between 224 and 400.
@@ -51,6 +57,9 @@ impl Default for Settings {
             agent_sort: AgentSort::default(),
             show_agents: true,
             agents_height: None,
+            notify_agents: true,
+            notify_sound: true,
+            dock_badge: true,
         }
     }
 }
