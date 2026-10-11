@@ -205,7 +205,8 @@ impl Shell {
                     cx.activate(true);
                 });
                 cx.observe_window_bounds(window, |s: &mut Shell, window, cx| {
-                    s.frame = window_frame(window, cx);
+                    let last = s.frame.clone().or_else(|| SettingsGlobal::of(cx).settings.window.clone());
+                    s.frame = window_frame(window, last.as_ref(), cx);
                     s.frame_save = cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(Duration::from_millis(500)).await;
                         let _ = this.update(cx, |s, cx| s.save_frame(cx));
@@ -1126,20 +1127,24 @@ fn saved_window(cx: &App) -> Option<(gpui::DisplayId, gpui::WindowBounds)> {
     let frame = SettingsGlobal::of(cx).settings.window.clone()?;
     let display = cx.displays().into_iter().find(|d| d.uuid().is_ok_and(|u| u.to_string() == frame.display))?;
     let bounds = frame.bounds_on(display.bounds().size)?;
-    let bounds = if frame.fullscreen { gpui::WindowBounds::Fullscreen(bounds) } else { gpui::WindowBounds::Windowed(bounds) };
+    let bounds = match (frame.fullscreen, frame.maximized) {
+        (true, _) => gpui::WindowBounds::Fullscreen(bounds),
+        (_, true) => gpui::WindowBounds::Maximized(bounds),
+        _ => gpui::WindowBounds::Windowed(bounds),
+    };
     Some((display.id(), bounds))
 }
 
-/// The window's frame to save: in full screen, the one it leaves full screen to. ponytail: a zoomed window saves its
-/// zoomed frame as a plain one; restore `Maximized` if un-zooming after a relaunch matters.
-fn window_frame(window: &Window, cx: &App) -> Option<WindowFrame> {
+/// The window's frame to save: in full screen, the one it leaves full screen to; zoomed, the one before (`last`).
+fn window_frame(window: &Window, last: Option<&WindowFrame>, cx: &App) -> Option<WindowFrame> {
     let display = window.display(cx)?.uuid().ok()?.to_string();
     let (bounds, fullscreen) = match window.window_bounds() {
         gpui::WindowBounds::Fullscreen(b) => (b, true),
         b => (b.get_bounds(), false),
     };
     let (x, y, width, height) = (bounds.origin.x.into(), bounds.origin.y.into(), bounds.size.width.into(), bounds.size.height.into());
-    Some(WindowFrame { display, x, y, width, height, fullscreen })
+    let frame = WindowFrame { display, x, y, width, height, fullscreen, maximized: false };
+    Some(if !fullscreen && window.is_maximized() { frame.zoomed(last) } else { frame })
 }
 
 /// Saves a choice made in the sidebar, or where the window was moved. A settings file that failed to load is the user's to fix: the sidebar must

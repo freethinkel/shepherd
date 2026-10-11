@@ -63,9 +63,17 @@ pub struct WindowFrame {
     pub width: f32,
     pub height: f32,
     pub fullscreen: bool,
+    /// Zoomed (the green button's fill); the frame is then the one un-zooming goes back to.
+    pub maximized: bool,
 }
 
 impl WindowFrame {
+    /// This frame zoomed: it keeps `last`'s frame on the same display, the one un-zooming goes back to.
+    pub fn zoomed(self, last: Option<&WindowFrame>) -> WindowFrame {
+        let base = last.filter(|l| l.display == self.display).cloned().unwrap_or(self);
+        WindowFrame { maximized: true, fullscreen: false, ..base }
+    }
+
     /// The frame on a display of `display` size, or `None` when it is bogus or less than 64 px of it is on screen.
     pub fn bounds_on(&self, display: Size<Pixels>) -> Option<Bounds<Pixels>> {
         let finite = [self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite());
@@ -336,9 +344,18 @@ mod tests {
     }
 
     #[test]
+    fn a_zoomed_window_keeps_the_frame_it_unzooms_to() {
+        let last = WindowFrame { display: "d".into(), x: 100., y: 50., width: 1180., height: 760., ..Default::default() };
+        let full = WindowFrame { x: 0., y: 0., width: 1512., height: 945., ..last.clone() };
+        assert_eq!(full.clone().zoomed(Some(&last)), WindowFrame { maximized: true, ..last.clone() });
+        let elsewhere = WindowFrame { display: "e".into(), ..last };
+        assert_eq!(full.clone().zoomed(Some(&elsewhere)), WindowFrame { maximized: true, ..full });
+    }
+
+    #[test]
     fn a_window_frame_off_the_display_or_bogus_opens_centered() {
         let display = size(px(1512.), px(982.));
-        let frame = WindowFrame { display: "d".into(), x: 100., y: 50., width: 1180., height: 760., fullscreen: false };
+        let frame = WindowFrame { display: "d".into(), x: 100., y: 50., width: 1180., height: 760., ..Default::default() };
         assert!(frame.bounds_on(display).is_some());
         assert!(WindowFrame { x: 3000., ..frame.clone() }.bounds_on(display).is_none(), "on a display now gone");
         assert!(WindowFrame { x: 1490., ..frame.clone() }.bounds_on(display).is_none(), "a sliver on screen");
