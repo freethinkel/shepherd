@@ -14,6 +14,10 @@ const GIT_TTL: Duration = Duration::from_secs(5);
 const USAGE_TTL: Duration = Duration::from_secs(300);
 /// How often the shown agent's transcript is summed again.
 const SPENT_TTL: Duration = Duration::from_secs(10);
+/// How often a sidebar worktree's diff against its base is asked again.
+const CHANGES_TTL: Duration = Duration::from_secs(30);
+/// How often gh is asked about a worktree's PR; it goes over the network.
+const PR_TTL: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Git {
@@ -154,6 +158,59 @@ fn read_git(dir: &str) -> Option<Git> {
         .output()
         .ok()?;
     parse_git(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `git diff --shortstat`, read: lines added and removed; `(0, 0)` for no changes.
+pub fn parse_shortstat(out: &str) -> (u32, u32) {
+    let count = |word: &str| out.split(", ").find(|p| p.contains(word)).and_then(|p| p.trim().split(' ').next()?.parse().ok()).unwrap_or(0);
+    (count("insertion"), count("deletion"))
+}
+
+// ponytail: untracked files don't count until they're added; `--intent-to-add` would touch the agents' index.
+/// What the worktree at `dir` changed: lines added and removed from its merge-base with the repo's `main` (else
+/// `master`) to its working tree, so commits, staged and unstaged edits all count. `None` with neither branch.
+fn read_changes(dir: &str) -> Option<(u32, u32)> {
+    ["main", "master"].into_iter().find_map(|base| {
+        let out = std::process::Command::new("git")
+            .args(["--no-optional-locks", "-C", dir, "diff", "--shortstat", "--merge-base", base])
+            .output()
+            .ok()?;
+        out.status.success().then(|| parse_shortstat(&String::from_utf8_lossy(&out.stdout)))
+    })
+}
+
+/// `gh pr view --json state,isDraft`, read: `open`, `draft`, `merged` or `closed`.
+pub fn parse_pr(json: &str) -> Option<&'static str> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    match (v["state"].as_str()?, v["isDraft"].as_bool().unwrap_or(false)) {
+        ("OPEN", true) => Some("draft"),
+        ("OPEN", false) => Some("open"),
+        ("MERGED", _) => Some("merged"),
+        ("CLOSED", _) => Some("closed"),
+        _ => None,
+    }
+}
+
+/// The state of the PR of `dir`'s branch; `None` without gh, its login, or a PR.
+fn read_pr(dir: &str) -> Option<&'static str> {
+    // An app opened from Finder gets launchd's PATH, without Homebrew's.
+    let gh = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"].into_iter().find(|p| Path::new(p).is_file()).unwrap_or("gh");
+    let out = std::process::Command::new(gh).args(["pr", "view", "--json", "state,isDraft"]).current_dir(dir).output().ok()?;
+    parse_pr(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The worktree at `dir`'s cached changes and PR state, asked again after their TTLs while `active` (the window
+/// is key); in the background only a first lookup runs.
+pub fn changes_of(dir: &str, active: bool, cx: &mut App) -> (Option<(u32, u32)>, Option<&'static str>) {
+    let (ttl, pr_ttl) = if active { (CHANGES_TTL, PR_TTL) } else { (Duration::MAX, Duration::MAX) };
+    (cached(dir, ttl, read_changes, cx), cached(dir, pr_ttl, read_pr, cx))
+}
+
+/// Asks git about the worktree at `dir`'s changes again on the next render, as when its agent stops.
+pub fn refresh_changes(dir: &str, cx: &mut App) {
+    if let Some(entry) = cx.default_global::<Cache<(u32, u32)>>().0.get_mut(dir) {
+        entry.fetched = None;
+    }
 }
 
 /// Claude's plan usage, in percent of each window, and when each resets (unix seconds).
@@ -588,6 +645,17 @@ mod tests {
         let detached = "# branch.oid 7d9be72aaaa\n# branch.head (detached)\n? new.txt\n";
         assert_eq!(parse_git(detached), Some(Git { branch: "7d9be72".into(), dirty: true, ..Git::default() }));
         assert_eq!(parse_git(""), None);
+    }
+
+    #[test]
+    fn parses_worktree_changes_and_pr() {
+        assert_eq!(parse_shortstat(" 3 files changed, 12 insertions(+), 3 deletions(-)\n"), (12, 3));
+        assert_eq!(parse_shortstat(" 1 file changed, 1 insertion(+)\n"), (1, 0));
+        assert_eq!(parse_shortstat(" 1 file changed, 4 deletions(-)\n"), (0, 4));
+        assert_eq!(parse_shortstat(""), (0, 0));
+        assert_eq!(parse_pr(r#"{"isDraft":true,"state":"OPEN"}"#), Some("draft"));
+        assert_eq!(parse_pr(r#"{"isDraft":false,"state":"MERGED"}"#), Some("merged"));
+        assert_eq!(parse_pr(""), None);
     }
 
     #[test]
