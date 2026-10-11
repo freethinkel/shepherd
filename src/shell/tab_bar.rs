@@ -1,33 +1,42 @@
 //! The tab bar: Zeron's terminal-panel tabs (28 px, 8 px radius, a wash under the active one) with what runs in
-//! each tab, sized to their labels. A new tab grows in, a closed one stays mounted while it shrinks out (the
-//! `Popup` recipe), and the active wash slides between tabs.
+//! each tab as a colored favicon (Superlogical's tabs), sized to their labels. A new tab grows in, a closed one
+//! stays mounted while it shrinks out (the `Popup` recipe), the active wash slides between tabs, a reorder
+//! slides the tabs to their new places, and a dropped tab flies from where it was let go back into its slot.
 use super::*;
+use std::cell::RefCell;
 
-/// Zeron's `motion::COLLAPSE` for a tab growing in or shrinking out, `TAB_SLIDE` for the active wash.
+/// Zeron's `motion::COLLAPSE` for a tab growing in or shrinking out, `TAB_SLIDE` for the wash and a reorder.
 const ENTER: Duration = Duration::from_millis(180);
 const EXIT: Duration = Duration::from_millis(150);
 const SLIDE: Duration = Duration::from_millis(150);
+/// A dropped tab's flight home.
+const LAND: Duration = Duration::from_millis(220);
 
 const TAB_H: f32 = 28.;
+/// The tabs' top inside the bar.
+const TAB_TOP: f32 = (TITLEBAR_HEIGHT - TAB_H) / 2.;
 /// Space after each tab; it collapses with a closing tab so neighbours close in smoothly.
 const GAP: f32 = 2.;
-const PAD_L: f32 = 8.;
+const PAD_L: f32 = 6.;
 const PAD_R: f32 = 4.;
 const INNER_GAP: f32 = 6.;
-const ICON: f32 = 14.;
+/// The favicon tile.
+const ICON: f32 = 18.;
 /// The trailing slot: the status dot, swapped in place for `×` while the tab is hovered.
 const SLOT: f32 = 20.;
 const MIN_W: f32 = 96.;
 const MAX_W: f32 = 220.;
 const FONT_SIZE: f32 = 12.5;
 
-/// Tab-bar state that outlives a frame: the scroll, the tabs as last drawn (closing ones included) and the wash.
+/// Tab-bar state that outlives a frame: the scroll, the tabs as last drawn (closing ones included), the wash,
+/// and the tab being dragged with its ghost's top-left in the window (written by the ghost as it follows the pointer).
 #[derive(Default)]
 pub(super) struct TabBar {
     pub scroll: gpui::ScrollHandle,
     workspace: Option<String>,
     entries: Vec<Entry>,
     wash: Option<Wash>,
+    drag: Rc<RefCell<Option<(String, gpui::Point<Pixels>)>>>,
 }
 
 /// One tab as drawn.
@@ -37,6 +46,8 @@ struct Shown {
     label: String,
     status: AgentStatus,
     icon: &'static str,
+    /// The favicon's tile and mark colors.
+    tint: (Hsla, Hsla),
     /// The full width: label measured, clamped.
     width: f32,
 }
@@ -46,22 +57,49 @@ struct Entry {
     tab: Shown,
     enter: Option<Instant>,
     exit: Option<Instant>,
+    /// Off its slot: sliding after a reorder, or flying home after a drop (`lifted`, drawn over everything).
+    moved: Option<Move>,
+    /// Where it was drawn last frame: content x and the offset from the bar's row.
+    drawn: (f32, f32),
+}
+
+#[derive(Clone, Copy)]
+struct Move {
+    from: (f32, f32),
+    started: Instant,
+    duration: Duration,
+    lifted: bool,
 }
 
 impl Entry {
+    fn new(tab: Shown, enter: Option<Instant>) -> Self {
+        Entry { tab, enter, exit: None, moved: None, drawn: (0., 0.) }
+    }
+
     /// How far the tab is in: 0 collapsed, 1 full width.
     fn presence(&self, now: Instant) -> f32 {
-        let t = |since: Instant, d: Duration| (now.duration_since(since).as_secs_f32() / d.as_secs_f32()).min(1.);
         match (self.exit, self.enter) {
-            (Some(since), _) => 1. - ease_out(t(since, EXIT)),
-            (None, Some(since)) => ease_out(t(since, ENTER)),
+            (Some(since), _) => 1. - ease_out(progress(since, EXIT, now)),
+            (None, Some(since)) => ease_out(progress(since, ENTER, now)),
             (None, None) => 1.,
         }
     }
 
     fn moving(&self, now: Instant) -> bool {
-        self.exit.is_some_and(|s| now.duration_since(s) < EXIT) || self.enter.is_some_and(|s| now.duration_since(s) < ENTER)
+        let running = |since: Instant, d: Duration| now.duration_since(since) < d;
+        self.exit.is_some_and(|s| running(s, EXIT))
+            || self.enter.is_some_and(|s| running(s, ENTER))
+            || self.moved.is_some_and(|m| running(m.started, m.duration))
     }
+
+    /// Mid-flight home after a drop.
+    fn lifted(&self, now: Instant) -> bool {
+        self.moved.is_some_and(|m| m.lifted && now.duration_since(m.started) < m.duration)
+    }
+}
+
+fn progress(since: Instant, d: Duration, now: Instant) -> f32 {
+    (now.duration_since(since).as_secs_f32() / d.as_secs_f32()).min(1.)
 }
 
 /// The active wash: where it slides from, when it set off, and where it was last drawn (x, width).
@@ -98,7 +136,7 @@ fn merge(prev: &[&str], now: &[&str]) -> Vec<(String, Phase)> {
 /// a terminal for a plain shell.
 fn agent_icon(agent: Option<&str>) -> &'static str {
     match agent {
-        None => "icons/terminal.svg",
+        None => "icons/prompt.svg",
         Some("claude") => "icons/claude-mark.svg",
         Some("codex") => "icons/openai-mark.svg",
         Some("cursor") => "icons/cursor-mark.svg",
@@ -107,8 +145,28 @@ fn agent_icon(agent: Option<&str>) -> &'static str {
         Some("grok") => "icons/grok-mark.svg",
         Some("devin") => "icons/devin-mark.svg",
         Some("agy") => "icons/antigravity-mark.svg",
-        Some(_) => "icons/bot.svg",
+        Some(_) => "icons/bot-filled.svg",
     }
+}
+
+/// The favicon's tile and mark: white on the brand's color where it has one, an inverted tile for monochrome
+/// marks, a muted one for a shell.
+// ponytail: brand colors only for marks that have one; the rest stay neutral tiles
+fn agent_tint(agent: Option<&str>, theme: &Theme) -> (Hsla, Hsla) {
+    let brand = |hex: u32| (gpui::rgb(hex).into(), gpui::white());
+    match agent {
+        None => (theme.text_muted.opacity(0.55), theme.surface),
+        Some("claude") => brand(0xD97757),
+        Some("codex") => brand(0x10A37F),
+        Some("agy" | "gemini") => brand(0x4285F4),
+        Some(_) => (theme.text, theme.surface),
+    }
+}
+
+/// `a` toward `b` by `t`, channel by channel.
+fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
+    let l = |x: f32, y: f32| x + (y - x) * t;
+    gpui::hsla(l(a.h, b.h), l(a.s, b.s), l(a.l, b.l), l(a.a, b.a))
 }
 
 fn tab_width(label_w: f32) -> f32 {
@@ -116,16 +174,21 @@ fn tab_width(label_w: f32) -> f32 {
 }
 
 impl TabBar {
-    /// Takes this frame's tabs; another workspace's tabs replace the old ones without motion.
+    /// Takes this frame's tabs; another workspace's tabs replace the old ones without motion. A reorder slides
+    /// the tabs from where they were drawn.
     fn sync(&mut self, workspace: Option<&str>, tabs: Vec<Shown>, now: Instant) {
         if self.workspace.as_deref() != workspace {
             self.workspace = workspace.map(str::to_string);
-            self.entries = tabs.into_iter().map(|tab| Entry { tab, enter: None, exit: None }).collect();
+            self.entries = tabs.into_iter().map(|tab| Entry::new(tab, None)).collect();
             self.wash = None;
             return;
         }
         let prev: Vec<&str> = self.entries.iter().map(|e| e.tab.id.as_str()).collect();
         let ids: Vec<&str> = tabs.iter().map(|t| t.id.as_str()).collect();
+        let kept = |list: &[&str]| -> Vec<String> {
+            list.iter().filter(|id| prev.contains(id) && ids.contains(id)).map(|id| id.to_string()).collect()
+        };
+        let reordered = kept(&prev) != kept(&ids);
         let order = merge(&prev, &ids);
         let entries = order
             .into_iter()
@@ -133,8 +196,18 @@ impl TabBar {
                 let old = self.entries.iter().find(|e| e.tab.id == id);
                 let fresh = || tabs.iter().find(|t| t.id == id).cloned();
                 match phase {
-                    Phase::New => Some(Entry { tab: fresh()?, enter: Some(now), exit: None }),
-                    Phase::Stay => Some(Entry { tab: fresh()?, enter: old?.enter, exit: None }),
+                    Phase::New => Some(Entry::new(fresh()?, Some(now))),
+                    Phase::Stay => {
+                        let old = old?;
+                        let moved = if reordered {
+                            let lifted = old.lifted(now);
+                            let duration = if lifted { LAND } else { SLIDE };
+                            Some(Move { from: old.drawn, started: now, duration, lifted })
+                        } else {
+                            old.moved
+                        };
+                        Some(Entry { tab: fresh()?, exit: None, moved, ..old.clone() })
+                    }
                     Phase::Gone => {
                         let old = old?;
                         let exit = old.exit.unwrap_or(now);
@@ -146,31 +219,52 @@ impl TabBar {
         self.entries = entries;
     }
 
-    /// Each entry's x, full width and presence, laid out left to right.
-    fn layout(&self, now: Instant) -> Vec<(f32, f32, f32)> {
+    /// Sends the tab `id` flying home from `from` (content x, offset from the row).
+    fn land(&mut self, id: &str, from: (f32, f32), now: Instant) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.tab.id == id) {
+            e.moved = Some(Move { from, started: now, duration: LAND, lifted: true });
+        }
+    }
+
+    /// Each entry's slot x, full width and presence, laid out left to right; records where each is drawn
+    /// (its slot, or on its way there).
+    fn layout(&mut self, now: Instant) -> Vec<(f32, f32, f32)> {
         let mut x = 0.;
         self.entries
-            .iter()
+            .iter_mut()
             .map(|e| {
                 let k = e.presence(now);
                 let at = x;
                 x += (e.tab.width + GAP) * k;
+                e.drawn = match e.moved {
+                    Some(m) => {
+                        let t = ease_out(progress(m.started, m.duration, now));
+                        (m.from.0 + (at - m.from.0) * t, m.from.1 * (1. - t))
+                    }
+                    None => (at, 0.),
+                };
                 (at, e.tab.width, k)
             })
             .collect()
     }
 
     /// Where the active wash is drawn this frame (x, width): sliding from where it was toward `selected`.
-    fn wash(&mut self, selected: Option<&str>, layout: &[(f32, f32, f32)], now: Instant) -> Option<(f32, f32)> {
+    /// Hidden while the tab is dragged or flies home (the tab carries its own look), it then reappears in the
+    /// slot without sliding.
+    fn wash(&mut self, selected: Option<&str>, dragged: Option<&str>, layout: &[(f32, f32, f32)], now: Instant) -> Option<(f32, f32)> {
         let i = self.entries.iter().position(|e| Some(e.tab.id.as_str()) == selected && e.exit.is_none())?;
-        let (x, w, k) = layout[i];
-        let target = (x, w * k);
+        if dragged == selected || self.entries[i].lifted(now) {
+            self.wash = None;
+            return None;
+        }
+        let (_, w, k) = layout[i];
+        let target = (self.entries[i].drawn.0, w * k);
         let wash = match self.wash.take() {
             Some(w) if w.tab == self.entries[i].tab.id => w,
             Some(w) => Wash { tab: self.entries[i].tab.id.clone(), from: w.shown, started: now, shown: w.shown },
             None => Wash { tab: self.entries[i].tab.id.clone(), from: target, started: now - SLIDE, shown: target },
         };
-        let t = ease_out((now.duration_since(wash.started).as_secs_f32() / SLIDE.as_secs_f32()).min(1.));
+        let t = ease_out(progress(wash.started, SLIDE, now));
         let lerp = |a: f32, b: f32| a + (b - a) * t;
         let shown = (lerp(wash.from.0, target.0), lerp(wash.from.1, target.1));
         self.wash = Some(Wash { shown, ..wash });
@@ -182,37 +276,65 @@ impl TabBar {
     }
 }
 
-/// A tab being dragged along the tab bar, drawn under the pointer as a pill with its label.
+/// The favicon: the mark on a filled tile of its color, the same size for every kind.
+fn favicon(t: &Shown) -> Div {
+    let (bg, fg) = t.tint;
+    div()
+        .size(px(ICON))
+        .flex_none()
+        .rounded(px(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(bg)
+        .child(gpui::svg().path(t.icon).size(px(11.)).text_color(fg))
+}
+
+/// A tab's face at full width: favicon, label, trailing slot.
+fn face(theme: &Theme, t: &Shown, width: f32, selected: bool) -> Div {
+    div()
+        .w(px(width))
+        .h(px(TAB_H))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(INNER_GAP))
+        .pl(px(PAD_L))
+        .pr(px(PAD_R))
+        .rounded(px(8.))
+        .font_family(theme.font_ui.clone())
+        .text_size(px(FONT_SIZE))
+        .text_color(if selected { theme.text } else { theme.text_muted })
+        .child(favicon(t))
+}
+
+fn dot_slot(theme: &Theme, status: AgentStatus) -> Div {
+    div().size(px(SLOT)).flex_none().flex().items_center().justify_center().child(status_dot(status, theme))
+}
+
+/// A tab being dragged along the tab bar: its own face under the pointer, lifted on a card.
 #[derive(Clone)]
 pub(super) struct DraggedTab {
-    tab_id: String,
-    label: String,
-    icon: &'static str,
+    tab: Shown,
     index: usize,
     theme: Theme,
+    /// Where the pointer grabbed the tab, from its top-left.
+    grab: gpui::Point<Pixels>,
+    drag: Rc<RefCell<Option<(String, gpui::Point<Pixels>)>>>,
 }
 
 impl Render for DraggedTab {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // gpui draws the ghost at the pointer less the grab: remember it, a drop flies home from there
+        *self.drag.borrow_mut() = Some((self.tab.id.clone(), window.mouse_position() - self.grab));
         let theme = &self.theme;
-        div()
-            .h(px(TAB_H))
-            .max_w(px(MAX_W))
-            .pl(px(PAD_L))
-            .pr(px(10.))
-            .flex()
-            .items_center()
-            .gap(px(INNER_GAP))
-            .rounded(px(8.))
+        face(theme, &self.tab, self.tab.width, true)
             .bg(theme.card)
             .border_1()
             .border_color(theme.border)
             .shadow_lg()
-            .font_family(theme.font_ui.clone())
-            .text_size(px(FONT_SIZE))
-            .text_color(theme.text)
-            .child(gpui::svg().path(self.icon).size(px(ICON)).flex_none().text_color(theme.text_muted))
-            .child(div().truncate().child(self.label.clone()))
+            .child(div().flex_1().min_w_0().truncate().child(self.tab.label.clone()))
+            .child(dot_slot(theme, self.tab.status))
     }
 }
 
@@ -249,6 +371,7 @@ impl Shell {
                             label: t.label.clone(),
                             status: t.agent_status,
                             icon: agent_icon(agent),
+                            tint: agent_tint(agent, theme),
                             width: tab_width(f32::from(label_w)),
                         }
                     })
@@ -257,35 +380,58 @@ impl Shell {
             _ => Vec::new(),
         };
         self.tab_bar.sync(shown_ws.as_deref(), tabs, now);
+
+        // The drag ended (dropped on a tab or anywhere): the tab flies home from where its ghost was let go.
+        let bar = self.tab_bar.scroll.bounds();
+        let (bar_x, bar_y) = (f32::from(bar.origin.x) + f32::from(self.tab_bar.scroll.offset().x), f32::from(bar.origin.y) + TAB_TOP);
+        let dragging = cx.has_active_drag();
+        let dragged = self.tab_bar.drag.borrow().clone();
+        if let (false, Some((id, at))) = (dragging, &dragged) {
+            self.tab_bar.drag.borrow_mut().take();
+            self.tab_bar.land(id, (f32::from(at.x) - bar_x, f32::from(at.y) - bar_y), now);
+        }
+        let lifted_id = dragged.filter(|_| dragging).map(|(id, _)| id);
+
         let layout = self.tab_bar.layout(now);
-        let wash = self.tab_bar.wash(shown_tab.as_deref(), &layout, now);
+        let wash = self.tab_bar.wash(shown_tab.as_deref(), lifted_id.as_deref(), &layout, now);
         if self.tab_bar.entries.iter().any(|e| e.moving(now)) || self.tab_bar.sliding(now) {
             window.request_animation_frame();
         }
 
         let mut index = 0;
         let mut items = Vec::new();
-        for (entry, (_, full_w, k)) in self.tab_bar.entries.clone().into_iter().zip(layout) {
-            let t = entry.tab;
+        let mut flying = Vec::new();
+        for (entry, (slot_x, full_w, k)) in self.tab_bar.entries.clone().into_iter().zip(layout) {
+            let t = entry.tab.clone();
             let closing = entry.exit.is_some();
             let selected = !closing && shown_tab.as_deref() == Some(t.id.as_str());
             let editing = (!closing).then(|| self.rename_field(&RenameTarget::Tab(t.id.clone()), cx)).flatten();
             let draggable = editing.is_none();
             let full_w = if draggable { full_w } else { MAX_W };
+            // While dragged, the ghost carries the tab; while it flies home, a copy over everything does.
+            let lifted = lifted_id.as_deref() == Some(t.id.as_str()) || entry.lifted(now);
+            if entry.lifted(now) {
+                let t_land = ease_out(entry.moved.map_or(1., |m| progress(m.started, m.duration, now)));
+                let at = gpui::point(px(bar_x + entry.drawn.0), px(bar_y + entry.drawn.1));
+                flying.push(
+                    gpui::deferred(
+                        gpui::anchored().position(at).child(
+                            face(theme, &t, full_w, selected)
+                                // the card settles into the tab's own look: the wash if active, else bare
+                                .bg(mix(theme.card, if selected { theme.selected } else { theme.card.opacity(0.) }, t_land))
+                                .border_1()
+                                .border_color(theme.border.opacity(1. - t_land))
+                                .child(div().flex_1().min_w_0().truncate().child(t.label.clone()))
+                                .child(dot_slot(theme, t.status)),
+                        ),
+                    )
+                    .with_priority(1)
+                    .into_any_element(),
+                );
+            }
             let group = SharedString::from(format!("tab-row-{}", t.id));
-            let text = if selected { theme.text } else { theme.text_muted };
-            let glyph = if selected { theme.text_muted } else { theme.text_muted.opacity(0.7) };
-            // The content keeps its full width and is clipped while the tab grows or shrinks.
-            let content = div()
-                .w(px(full_w))
-                .h_full()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(INNER_GAP))
-                .pl(px(PAD_L))
-                .pr(px(PAD_R))
-                .child(gpui::svg().path(t.icon).size(px(ICON)).flex_none().text_color(glyph))
+            // The face keeps its full width and is clipped while the tab grows or shrinks.
+            let content = face(theme, &t, full_w, selected)
                 .map(|el| match editing {
                     Some(field) => el.child(field),
                     None => el.child(div().flex_1().min_w_0().truncate().child(t.label.clone())),
@@ -298,16 +444,7 @@ impl Shell {
                         .relative()
                         .rounded(px(6.))
                         .hover(|s| s.bg(theme.hover))
-                        .child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .group_hover(group.clone(), |s| s.opacity(0.))
-                                .child(status_dot(t.status, theme)),
-                        )
+                        .child(dot_slot(theme, t.status).absolute().inset_0().group_hover(group.clone(), |s| s.opacity(0.)))
                         .child(
                             div()
                                 .absolute()
@@ -335,15 +472,15 @@ impl Shell {
             let tab = div()
                 .id(SharedString::from(format!("tab-{}", t.id)))
                 .group(group)
+                .relative()
+                .left(px(entry.drawn.0 - slot_x))
                 .flex_none()
                 .h(px(TAB_H))
                 .w(px(full_w * k))
                 .mr(px(GAP * k))
                 .overflow_hidden()
-                .opacity(k)
+                .opacity(if lifted { 0. } else { k })
                 .rounded(px(8.))
-                .text_size(px(FONT_SIZE))
-                .text_color(text)
                 .cursor_pointer()
                 // off the titlebar's drag strip: a press here drags the tab, not the window; the wheel still scrolls the bar
                 .block_mouse_except_scroll()
@@ -358,11 +495,11 @@ impl Shell {
             index += 1;
             let id = t.id.clone();
             let dragged = draggable.then(|| DraggedTab {
-                tab_id: t.id.clone(),
-                label: t.label.clone(),
-                icon: t.icon,
+                tab: t.clone(),
                 index: i,
                 theme: theme.clone(),
+                grab: gpui::Point::default(),
+                drag: self.tab_bar.drag.clone(),
             });
             let drop_bg = theme.accent.opacity(0.15);
             let label = t.label.clone();
@@ -381,14 +518,20 @@ impl Shell {
                         this.send(Command::CloseTab { tab_id: id.clone() }, cx, |_, _, _| {});
                     }
                 }))
-                .when_some(dragged, |el, dragged| el.on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone())))
+                .when_some(dragged, |el, dragged| {
+                    el.on_drag(dragged, |d, grab, _, cx| {
+                        let d = DraggedTab { grab, ..d.clone() };
+                        cx.new(|_| d)
+                    })
+                })
                 .drag_over::<DraggedTab>(move |s, d, _, _| if d.index == i { s } else { s.bg(drop_bg) })
                 // Dropped on a tab, the dragged one takes its place: herdr's slot is after it when moving right.
                 .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| {
                     if d.index != i {
                         let insert_index = if d.index < i { i + 1 } else { i };
-                        this.send(Command::MoveTab { tab_id: d.tab_id.clone(), insert_index }, cx, |_, _, _| {});
+                        this.send(Command::MoveTab { tab_id: d.tab.id.clone(), insert_index }, cx, |_, _, _| {});
                     }
+                    cx.notify();
                 }))
                 .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                     if e.click_count() == 2 {
@@ -412,7 +555,7 @@ impl Shell {
             .items_center()
             .gap(px(2.))
             // the 28 px `+` sits as far from the right edge as from the top and bottom
-            .pr(px((TITLEBAR_HEIGHT - TAB_H) / 2.))
+            .pr(px(TAB_TOP))
             // clear the traffic lights and the sidebar toggle once the sidebar no longer sits under them
             .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
             .child(
@@ -436,7 +579,7 @@ impl Shell {
                                 el.child(
                                     div()
                                         .absolute()
-                                        .top(px((TITLEBAR_HEIGHT - TAB_H) / 2.))
+                                        .top(px(TAB_TOP))
                                         .left(px(x))
                                         .w(px(w))
                                         .h(px(TAB_H))
@@ -460,6 +603,7 @@ impl Shell {
                             .when(offset < max - 0.5, |el| el.child(fade(270.).right_0()))
                     }),
             )
+            .children(flying)
             // `+` stays put on the right; only the tabs scroll
             .when_some(shown_ws, |el, ws| {
                 el.child(
@@ -479,6 +623,10 @@ impl Shell {
 mod tests {
     use super::*;
 
+    fn tab(id: &str) -> Shown {
+        Shown { id: id.into(), label: id.into(), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), width: 100. }
+    }
+
     #[test]
     fn closed_tabs_stay_in_place_and_new_ones_join() {
         use Phase::*;
@@ -488,21 +636,20 @@ mod tests {
         // the first tab closing keeps the front; neighbours closing together keep their order
         let got = merge(&["a", "b", "c"], &["c"]);
         assert_eq!(got, [("a", Gone), ("b", Gone), ("c", Stay)].map(|(id, p)| (id.to_string(), p)));
-        // a reorder is herdr's new order, no motion
+        // a reorder is herdr's new order
         assert_eq!(merge(&["a", "b"], &["b", "a"]), [("b", Stay), ("a", Stay)].map(|(id, p)| (id.to_string(), p)));
     }
 
     #[test]
     fn agents_get_their_mark() {
-        assert_eq!(agent_icon(None), "icons/terminal.svg");
+        assert_eq!(agent_icon(None), "icons/prompt.svg");
         assert_eq!(agent_icon(Some("claude")), "icons/claude-mark.svg");
         assert_eq!(agent_icon(Some("codex")), "icons/openai-mark.svg");
-        assert_eq!(agent_icon(Some("kimi")), "icons/bot.svg");
+        assert_eq!(agent_icon(Some("kimi")), "icons/bot-filled.svg");
     }
 
     #[test]
     fn a_closing_tab_shrinks_out_then_goes() {
-        let tab = |id: &str| Shown { id: id.into(), label: id.into(), status: AgentStatus::Idle, icon: "", width: 100. };
         let t0 = Instant::now();
         let mut bar = TabBar::default();
         bar.sync(Some("w"), vec![tab("a"), tab("b")], t0);
@@ -514,5 +661,26 @@ mod tests {
         // another workspace swaps the tabs without motion
         bar.sync(Some("v"), vec![tab("c")], t0 + EXIT);
         assert_eq!(bar.entries[0].presence(t0 + EXIT), 1.);
+    }
+
+    #[test]
+    fn reordered_and_dropped_tabs_slide_home() {
+        let t0 = Instant::now();
+        let mut bar = TabBar::default();
+        bar.sync(Some("w"), vec![tab("a"), tab("b")], t0);
+        bar.layout(t0);
+        bar.sync(Some("w"), vec![tab("b"), tab("a")], t0);
+        bar.layout(t0);
+        // `a` starts where it was drawn and ends in its new slot
+        assert_eq!(bar.entries[1].drawn, (0., 0.));
+        bar.layout(t0 + SLIDE);
+        assert_eq!(bar.entries[1].drawn, (102., 0.));
+        // dropped 40 px below the bar, `b` flies home from there
+        bar.land("b", (300., 40.), t0);
+        bar.layout(t0);
+        assert_eq!(bar.entries[0].drawn, (300., 40.));
+        assert!(bar.entries[0].lifted(t0));
+        bar.layout(t0 + LAND);
+        assert_eq!(bar.entries[0].drawn, (0., 0.));
     }
 }
