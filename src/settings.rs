@@ -1,4 +1,5 @@
 //! Shepherd's settings: a JSON file every field of which has a default, so old, partial or future files load.
+use crate::model::AgentSort;
 use crate::theme::{AppearanceMode, FontSettings, Theme};
 use gpui::{App, Global, WindowAppearance};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,8 @@ use std::path::{Path, PathBuf};
 pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
+    /// Terminal row height as a multiple of the font size.
+    pub line_height: f32,
     pub theme_family: String,
     pub appearance: AppearanceMode,
     /// The herdr binary; `None` is `herdr` on PATH.
@@ -20,6 +23,11 @@ pub struct Settings {
     pub keys: BTreeMap<String, String>,
     /// The workspaces sidebar's width; dragging its edge sets it.
     pub sidebar_width: f32,
+    pub agent_sort: AgentSort,
+    /// The sidebar's Agents section; the `…` menu's switch hides it.
+    pub show_agents: bool,
+    /// The Agents list's height cap; dragging the section's top edge sets it, `None` is 40 % of the sidebar.
+    pub agents_height: Option<f32>,
 }
 
 /// Zeron's sidebar: 256 px by default, its edge drags it between 224 and 400.
@@ -33,12 +41,16 @@ impl Default for Settings {
         Settings {
             font_family: font.family,
             font_size: font.size,
+            line_height: font.line_height,
             theme_family: "zeron".into(),
             appearance: AppearanceMode::System,
             herdr_bin: None,
             herdr_socket: None,
             keys: BTreeMap::new(),
             sidebar_width: SIDEBAR_WIDTH,
+            agent_sort: AgentSort::default(),
+            show_agents: true,
+            agents_height: None,
         }
     }
 }
@@ -60,6 +72,7 @@ impl Settings {
             Ok(mut settings) => {
                 // A hand-edited size of 0 would make zero-height rows and a 500×500 PTY in herdr.
                 settings.font_size = settings.font_size.clamp(9.0, 32.0);
+                settings.line_height = step_line_height(settings.line_height, 0.0);
                 settings.sidebar_width = settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
                 (settings, None)
             }
@@ -95,7 +108,7 @@ impl Settings {
     }
 
     pub fn font(&self) -> FontSettings {
-        FontSettings { family: self.font_family.clone(), size: self.font_size }
+        FontSettings { family: self.font_family.clone(), size: self.font_size, line_height: self.line_height }
     }
 
     pub fn theme(&self, system: WindowAppearance) -> Theme {
@@ -106,6 +119,11 @@ impl Settings {
 /// The terminal font size one step up or down, within 9…32.
 pub fn step_font_size(size: f32, delta: f32) -> f32 {
     (size + delta).clamp(9.0, 32.0)
+}
+
+/// The terminal line height one 0.1 step up or down, within 1.0…2.0. Rounded so steps never drift (1.4 + 0.1 = 1.5).
+pub fn step_line_height(v: f32, delta: f32) -> f32 {
+    ((v + delta) * 10.0).round().clamp(10.0, 20.0) / 10.0
 }
 
 /// The loaded settings, the load error (shown in Settings) and where they live.
@@ -191,6 +209,14 @@ mod tests {
     }
 
     #[test]
+    fn line_height_steps_within_bounds() {
+        assert_eq!(step_line_height(1.4, 0.1), 1.5);
+        assert_eq!(step_line_height(1.0, -0.1), 1.0);
+        assert_eq!(step_line_height(2.0, 0.1), 2.0);
+        assert_eq!(step_line_height(0.0, 0.0), 1.0, "a hand-edited 0 clamps up");
+    }
+
+    #[test]
     fn an_unchanged_value_is_no_change() {
         // Leaving a field without editing must not save (a broken file would be overwritten with defaults).
         let s = Settings::default();
@@ -222,6 +248,15 @@ mod tests {
         assert_eq!(Settings::load(&path).0.font_size, 9.0);
         std::fs::write(&path, r#"{"font_size": 400}"#).unwrap();
         assert_eq!(Settings::load(&path).0.font_size, 32.0);
+    }
+
+    #[test]
+    fn an_unknown_agent_sort_reads_as_status() {
+        let (_d, path) = tmp();
+        std::fs::write(&path, r#"{"agent_sort": "workspace", "font_size": 15}"#).unwrap();
+        let (s, err) = Settings::load(&path);
+        assert!(err.is_none());
+        assert_eq!((s.agent_sort, s.font_size), (AgentSort::Status, 15.0));
     }
 
     #[test]

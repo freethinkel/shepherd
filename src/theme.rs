@@ -24,11 +24,13 @@ pub enum AppearanceMode {
 pub struct FontSettings {
     pub family: String,
     pub size: f32,
+    /// Terminal row height as a multiple of `size`.
+    pub line_height: f32,
 }
 
 impl Default for FontSettings {
     fn default() -> Self {
-        FontSettings { family: "Geist Mono".into(), size: 13.0 }
+        FontSettings { family: "Geist Mono".into(), size: 13.0, line_height: 1.4 }
     }
 }
 
@@ -60,6 +62,7 @@ pub struct Theme {
     pub font_ui: SharedString,
     pub font_terminal: SharedString,
     pub terminal_font_size: f32,
+    pub terminal_line_height: f32,
     pub terminal: TerminalPalette,
 }
 
@@ -129,11 +132,12 @@ impl Theme {
             selected: color(c.active),
             border: color(c.border),
             border_strong: color(c.border_strong),
-            // Zeron: translucent so the glyph under the block stays legible.
-            cursor: text.opacity(if appearance == Appearance::Dark { 0.40 } else { 0.55 }),
+            // The theme's accent, opaque like Ghostty's: the cell under the block takes the background color.
+            cursor: color(v.accent.primary),
             font_ui: "Geist".into(),
             font_terminal: font.family.clone().into(),
             terminal_font_size: font.size,
+            terminal_line_height: font.line_height,
             terminal: TerminalPalette {
                 background: color(v.terminal.background),
                 foreground: color(v.terminal.foreground),
@@ -186,7 +190,7 @@ mod tests {
     use super::*;
 
     fn font() -> FontSettings {
-        FontSettings { family: "Geist Mono".into(), size: 13.0 }
+        FontSettings::default()
     }
 
     #[test]
@@ -224,9 +228,10 @@ mod tests {
 
     #[test]
     fn font_settings_reach_the_terminal() {
-        let t = Theme::resolve("zeron", AppearanceMode::Dark, gpui::WindowAppearance::Dark, &FontSettings { family: "Menlo".into(), size: 16.0 });
+        let t = Theme::resolve("zeron", AppearanceMode::Dark, gpui::WindowAppearance::Dark, &FontSettings { family: "Menlo".into(), size: 16.0, line_height: 1.2 });
         assert_eq!(t.font_terminal.as_ref(), "Menlo");
         assert_eq!(t.terminal_font_size, 16.0);
+        assert_eq!(t.terminal_line_height, 1.2);
     }
 
     #[test]
@@ -238,10 +243,9 @@ mod tests {
     }
 
     #[test]
-    fn block_cursor_lets_the_glyph_under_it_show() {
-        // Painted over the glyphs: opaque would hide the character in vim's normal mode.
-        assert_eq!(Theme::for_appearance(gpui::WindowAppearance::Dark).cursor.a, 0.40);
-        assert_eq!(Theme::for_appearance(gpui::WindowAppearance::Light).cursor.a, 0.55);
+    fn cursor_is_the_opaque_accent() {
+        let t = Theme::for_appearance(gpui::WindowAppearance::Dark);
+        assert_eq!(t.cursor, t.accent);
     }
 
     #[test]

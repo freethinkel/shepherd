@@ -6,12 +6,12 @@ use crate::herdr::{Client, EVENT_TYPES};
 use crate::terminal::pane::{GridHold, PaneQueries};
 use crate::ui::divider::{Throttle, drag_ratio};
 use gpui_base::input::{Input, InputEvent, InputState};
-use crate::model::{AgentStatus, PaneFrame, Snapshot, SplitFrame, attachable};
+use crate::model::{AgentSort, AgentStatus, PaneFrame, Snapshot, SplitFrame, attachable};
 use crate::terminal::PaneTerminal;
 use crate::settings::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_WIDTH, SettingsGlobal};
 use crate::theme::Theme;
 use gpui::{
-    AnimationExt, App, Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    linear_color_stop, linear_gradient, AnimationExt, App, Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     ParentElement, Render, SharedString, Stateful, Styled, TitlebarOptions, Window, WindowBackgroundAppearance,
     Subscription, WindowControlArea, WindowOptions, canvas, div, point, prelude::*, px, relative, size,
 };
@@ -22,10 +22,12 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const TITLEBAR_HEIGHT: f32 = 38.0;
-/// The titlebar's left cluster: traffic lights, then the sidebar toggle.
-const TOGGLE_LEFT: f32 = 78.0;
+/// The titlebar's left cluster: traffic lights, then the sidebar toggle at Zeron's `titlebar_cluster_start` (88).
+const TOGGLE_LEFT: f32 = 88.0;
 /// Centre line of the traffic lights (placed at y 14), measured on a 2x screen; the toggle centres on it, not on the titlebar.
 const TRAFFIC_LIGHTS_CENTER: f32 = 21.25;
+/// The Agents list's least height when dragged: one agent row and a bit.
+const AGENTS_MIN: f32 = 60.0;
 const TITLEBAR_CLUSTER: f32 = TOGGLE_LEFT + 24.0 + 8.0;
 
 pub struct Shell {
@@ -53,7 +55,7 @@ pub struct Shell {
     // ponytail: in memory only; persist in settings if folds should survive a restart
     folded: std::collections::HashSet<String>,
     /// A workspace's right-click menu and where it opened.
-    ws_menu: Option<(String, gpui::Point<Pixels>)>,
+    ws_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// Groups mid fold or unfold, by workspace id.
     fold_motion: HashMap<String, FoldMotion>,
     /// The workspace shown last, so closing its tab stays in it.
@@ -68,9 +70,71 @@ pub struct Shell {
     sidebar_drag: bool,
     /// The drag hit a width limit (-1 min, +1 max) at this instant: the edge nudges past it and springs back.
     sidebar_edge: Option<(f32, Instant)>,
+    agent_sort: AgentSort,
+    show_agents: bool,
+    /// Saved in the settings when a drag ends.
+    agents_height: Option<f32>,
+    /// The Agents section's top edge is being dragged: the pointer's y and the list's height at the press.
+    agents_drag: Option<(f32, f32)>,
+    /// The sidebar's `…` menu, open where it was clicked.
+    view_menu: Option<crate::ui::Popup<()>>,
+    /// Worktrees herdr is removing: their rows show a spinner until they leave the snapshot.
+    removing: std::collections::HashSet<String>,
+    /// Remove a worktree with changes anyway? The workspace and its label.
+    remove_confirm: Option<crate::ui::Popup<(String, String)>>,
+    /// The New worktree dialog, open over the window.
+    worktree_dialog: Option<crate::ui::Popup<WorktreeDialog>>,
+    /// Worktrees herdr is still creating, as (workspace the dialog was opened on, branch): herdr answers
+    /// `worktree.create` only after git and plugin hooks finish, so the sidebar shows a placeholder until then.
+    pending_worktrees: Vec<(String, String)>,
+    /// A tab's right-click menu: the tab and where it was clicked.
+    tab_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
+    /// A pane's right-click menu: the pane and where it was clicked.
+    pane_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
+    agents_scroll: gpui::ScrollHandle,
+    tabs_scroll: gpui::ScrollHandle,
     /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
     /// actions still dispatch.
     focus: gpui::FocusHandle,
+    /// The Settings page, shown in place of the sidebar and the panes while open.
+    settings: Option<(Entity<crate::ui::settings::SettingsView>, Subscription)>,
+}
+
+/// A tab being dragged along the tab bar, drawn under the pointer as a pill with its label.
+#[derive(Clone)]
+struct DraggedTab {
+    tab_id: String,
+    label: String,
+    index: usize,
+    theme: Theme,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let theme = &self.theme;
+        div()
+            .h(px(28.))
+            .max_w(px(240.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .rounded(px(8.))
+            .bg(theme.card)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_lg()
+            .font_family(theme.font_ui.clone())
+            .text_size(px(13.))
+            .text_color(theme.text)
+            .child(div().truncate().child(self.label.clone()))
+    }
+}
+
+/// New worktree: the repo's workspace and the branch name being typed.
+struct WorktreeDialog {
+    workspace_id: String,
+    input: Entity<InputState>,
+    _events: Subscription,
 }
 
 #[derive(Clone, PartialEq)]
@@ -119,6 +183,7 @@ impl Shell {
                 })
                 .detach();
             cx.new(|cx| {
+                cx.observe_window_activation(window, |_, window, _| reapply_traffic_lights(window)).detach();
                 let shell = Shell {
                     snapshot: None,
                     error: None,
@@ -148,7 +213,21 @@ impl Shell {
                     sidebar_motion: None,
                     sidebar_drag: false,
                     sidebar_edge: None,
+                    agent_sort: SettingsGlobal::of(cx).settings.agent_sort,
+                    show_agents: SettingsGlobal::of(cx).settings.show_agents,
+                    agents_height: SettingsGlobal::of(cx).settings.agents_height,
+                    agents_drag: None,
+                    view_menu: None,
+                    pane_menu: None,
+                    tab_menu: None,
+                    worktree_dialog: None,
+                    removing: Default::default(),
+                    remove_confirm: None,
+                    pending_worktrees: Vec::new(),
+                    agents_scroll: gpui::ScrollHandle::new(),
+                    tabs_scroll: gpui::ScrollHandle::new(),
                     focus: cx.focus_handle(),
+                    settings: None,
                 };
                 let client = shell.client.clone();
                 cx.set_global(PaneQueries(client.clone(), rt.clone()));
@@ -159,6 +238,35 @@ impl Shell {
         .expect("open window");
     }
 
+    /// Shows Settings in the active Shepherd window (or the first one), or hides it if it is shown there. For
+    /// callers outside a window (the menu with no window focused, launch); deferred because a window busy
+    /// dispatching cannot be updated.
+    pub fn toggle_settings(cx: &mut App) {
+        cx.defer(|cx| {
+            let active = cx.active_window().and_then(|w| w.downcast::<Shell>());
+            let Some(window) = active.or_else(|| cx.windows().into_iter().find_map(|w| w.downcast::<Shell>())) else { return };
+            let _ = window.update(cx, |shell, window, cx| shell.toggle_settings_here(window, cx));
+        });
+    }
+
+    fn toggle_settings_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() {
+            return self.close_settings(cx);
+        }
+        let view = cx.new(|cx| crate::ui::settings::SettingsView::new(window, cx));
+        let close = cx.subscribe(&view, |this, _, _: &crate::ui::settings::Close, cx| this.close_settings(cx));
+        window.focus(&view.focus_handle(cx), cx);
+        self.settings = Some((view, close));
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings = None;
+        // Settings held focus: give it back to herdr's focused pane on the next render.
+        self.focused = None;
+        cx.notify();
+    }
+
     /// Send a command to herdr; `then` gets the result. Errors show over the grid for 4 s.
     fn send(
         &mut self,
@@ -166,15 +274,25 @@ impl Shell {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Shell, &serde_json::Value, &mut Context<Shell>) + 'static,
     ) {
+        self.send_then(command, cx, |shell, result, cx| match result {
+            Ok(value) => then(shell, &value, cx),
+            Err(err) => shell.show_error(format!("{err:#}"), cx),
+        });
+    }
+
+    /// [`Self::send`] that sees failures too.
+    fn send_then(
+        &mut self,
+        command: Command,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Shell, anyhow::Result<serde_json::Value>, &mut Context<Shell>) + 'static,
+    ) {
         let (method, params) = command.request();
         let client = self.client.clone();
         let call = self.rt.spawn(async move { client.call(method, params).await });
         cx.spawn(async move |this, cx| {
             let result = call.await.map_err(anyhow::Error::from).and_then(|r| r);
-            let _ = this.update(cx, |shell, cx| match result {
-                Ok(value) => then(shell, &value, cx),
-                Err(err) => shell.show_error(format!("{err:#}"), cx),
-            });
+            let _ = this.update(cx, |shell, cx| then(shell, result, cx));
         })
         .detach();
     }
@@ -206,6 +324,15 @@ impl Shell {
         }
     }
 
+    fn step_tab(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let (Some(snapshot), Some(tab)) = (self.snapshot.as_ref(), self.shown_tab()) else { return };
+        let tabs = snapshot.tabs_of(&tab.workspace_id);
+        let Some(i) = tabs.iter().position(|t| t.tab_id == tab.tab_id) else { return };
+        let n = tabs.len();
+        self.selected_tab = Some(tabs[if forward { (i + 1) % n } else { (i + n - 1) % n }].tab_id.clone());
+        cx.notify();
+    }
+
     fn step_workspace(&mut self, forward: bool, cx: &mut Context<Self>) {
         let (Some(snapshot), Some(tab)) = (self.snapshot.as_ref(), self.shown_tab()) else { return };
         // sidebar order, so Cmd+Up/Down walk the tree as shown
@@ -222,6 +349,87 @@ impl Shell {
             shell.selected_tab = crate::commands::created_tab_id(result);
             cx.notify();
         });
+    }
+
+    fn open_worktree_dialog(&mut self, workspace_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let theme = Theme::of(cx).clone();
+        let input = cx.new(|cx| {
+            // herdr's own generated name, shown so it can be kept or typed over.
+            let mut input = InputState::new(window, cx).placeholder("Branch").default_value(new_branch_name());
+            input.set_editor_style(crate::ui::input_style(&theme));
+            input
+        });
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        let events = cx.subscribe_in(&input, window, |shell, _, event: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                shell.finish_worktree_dialog(true, cx);
+            }
+        });
+        self.worktree_dialog = Some(crate::ui::Popup::new(WorktreeDialog { workspace_id, input, _events: events }));
+        cx.notify();
+    }
+
+    /// Create (an empty name lets herdr pick one) or cancel; either way the dialog fades out.
+    fn finish_worktree_dialog(&mut self, create: bool, cx: &mut Context<Self>) {
+        let Some(dialog) = self.worktree_dialog.as_mut().filter(|d| d.is_open()) else { return };
+        dialog.close();
+        // The input held focus: give it back to herdr's focused pane on the next render.
+        self.focused = None;
+        if create {
+            let workspace_id = dialog.value.workspace_id.clone();
+            let branch = dialog.value.input.read(cx).value().trim().to_string();
+            let branch = if branch.is_empty() { new_branch_name() } else { branch };
+            self.new_worktree(workspace_id, branch, cx);
+        }
+        cx.notify();
+    }
+
+    fn new_worktree(&mut self, workspace_id: String, branch: String, cx: &mut Context<Self>) {
+        let pending = (workspace_id.clone(), branch.clone());
+        self.pending_worktrees.push(pending.clone());
+        self.send_then(Command::CreateWorktree { workspace_id, branch: Some(branch) }, cx, move |shell, result, cx| {
+            shell.pending_worktrees.retain(|p| *p != pending);
+            match result {
+                Ok(value) => shell.selected_tab = crate::commands::created_tab_id(&value),
+                Err(err) => shell.show_error(format!("{err:#}"), cx),
+            }
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// herdr deletes the checkout and closes the workspace; one with changes asks first, then goes with `force`.
+    fn remove_worktree(&mut self, workspace_id: String, force: bool, cx: &mut Context<Self>) {
+        self.removing.insert(workspace_id.clone());
+        cx.notify();
+        let id = workspace_id.clone();
+        self.send_then(Command::RemoveWorktree { workspace_id, force }, cx, move |shell, result, cx| {
+            // on success the row keeps its spinner until herdr's snapshot drops the workspace
+            if let Err(err) = result {
+                shell.removing.remove(&id);
+                let message = format!("{err:#}");
+                if message.starts_with("dirty_worktree_requires_force") {
+                    let label = shell.snapshot.as_ref().and_then(|s| s.workspaces.iter().find(|w| w.workspace_id == id)).map(|w| w.label.clone()).unwrap_or_default();
+                    shell.remove_confirm = Some(crate::ui::Popup::new((id.clone(), label)));
+                } else {
+                    shell.show_error(message, cx);
+                }
+                cx.notify();
+            }
+        });
+    }
+
+    fn finish_remove_confirm(&mut self, remove: bool, cx: &mut Context<Self>) {
+        let Some(confirm) = self.remove_confirm.as_mut().filter(|c| c.is_open()) else { return };
+        confirm.close();
+        let workspace_id = confirm.value.0.clone();
+        if remove {
+            self.remove_worktree(workspace_id, true, cx);
+        }
+        cx.notify();
     }
 
     fn new_workspace(&mut self, cx: &mut Context<Self>) {
@@ -385,6 +593,12 @@ fn prune<S>(surfaces: &mut HashMap<String, S>, focused: &mut Option<String>, sho
     }
 }
 
+/// AppKit lays the traffic lights out again while the window is inactive (a screen recorder takes focus), and gpui
+/// moves them back only when it becomes key; setting the title (hidden) re-applies `traffic_light_position`.
+fn reapply_traffic_lights(window: &mut Window) {
+    window.set_window_title("Shepherd");
+}
+
 /// Subscribe, then snapshot; every event (coalesced) triggers another snapshot. Reconnects forever.
 async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, client: Client, cx: &mut gpui::AsyncApp) {
     loop {
@@ -442,9 +656,9 @@ fn status_color(status: AgentStatus, theme: &Theme) -> Option<Hsla> {
     }
 }
 
-/// Collie's status dot: 6 px, filled for an agent state, a faint ring when idle.
+/// Collie's status dot: 8 px, filled for an agent state, a faint ring when idle.
 fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
-    let dot = div().size(px(6.)).rounded_full().flex_none();
+    let dot = div().size(px(8.)).rounded_full().flex_none();
     match status_color(status, theme) {
         Some(c) => dot.bg(c),
         None => dot.border_1().border_color(theme.text_faint.opacity(0.6)),
@@ -474,13 +688,13 @@ fn close_button(theme: &Theme, group: &SharedString, id: SharedString) -> Statef
     let hover = theme.hover;
     div()
         .id(id)
-        .size(px(16.))
+        .size(px(20.))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(4.))
-        .text_size(px(13.))
+        .rounded(px(5.))
+        .text_size(px(16.))
         .text_color(theme.text_faint)
         .invisible()
         .group_hover(group.clone(), |s| s.visible())
@@ -623,12 +837,129 @@ impl Shell {
     }
 
     fn save_sidebar_width(&self, cx: &mut Context<Self>) {
-        // A settings file that failed to load is the user's to fix: a drag must not overwrite it with defaults.
-        if SettingsGlobal::of(cx).error.is_none() {
-            let width = self.sidebar_width;
-            crate::ui::settings::update(cx, |s| s.sidebar_width = width);
+        let width = self.sidebar_width;
+        save_from_sidebar(cx, |s| s.sidebar_width = width);
+    }
+
+    fn drag_agents(&mut self, y: Pixels, window: &Window, cx: &mut Context<Self>) {
+        let Some((y0, h0)) = self.agents_drag else { return };
+        // ponytail: capped at 60 % of the window so the workspaces list keeps some room
+        let max = f32::from(window.viewport_size().height) * 0.6;
+        self.agents_height = Some((h0 + y0 - f32::from(y)).clamp(AGENTS_MIN, max.max(AGENTS_MIN)));
+        cx.notify();
+    }
+
+    fn end_agents_drag(&mut self, cx: &mut Context<Self>) {
+        if self.agents_drag.take().is_some() {
+            let height = self.agents_height;
+            save_from_sidebar(cx, |s| s.agents_height = height);
         }
     }
+
+    fn toggle_agents(&mut self, cx: &mut Context<Self>) {
+        self.show_agents = !self.show_agents;
+        let show = self.show_agents;
+        save_from_sidebar(cx, |s| s.show_agents = show);
+        cx.notify();
+    }
+
+    fn set_agent_sort(&mut self, sort: AgentSort, cx: &mut Context<Self>) {
+        self.agent_sort = sort;
+        if let Some(m) = self.view_menu.as_mut() { m.close() }
+        save_from_sidebar(cx, |s| s.agent_sort = sort);
+        cx.notify();
+    }
+}
+
+/// Saves a choice made in the sidebar. A settings file that failed to load is the user's to fix: the sidebar must
+/// not overwrite it with defaults.
+fn save_from_sidebar(cx: &mut App, change: impl FnOnce(&mut crate::settings::Settings)) {
+    if SettingsGlobal::of(cx).error.is_none() {
+        crate::ui::settings::update(cx, change);
+    }
+}
+
+/// A popup menu's panel.
+fn menu_card(theme: &Theme, id: &'static str, min_w: f32) -> Stateful<Div> {
+    div()
+        .id(id)
+        .occlude()
+        .min_w(px(min_w))
+        .p(px(4.))
+        .rounded(px(10.))
+        .bg(theme.card)
+        .border_1()
+        .border_color(theme.border)
+        .shadow_lg()
+}
+
+/// Zeron's modal: a 35 % scrim over the window, the 360 px dialog card centred on it; both fade with the popup.
+fn modal<T>(name: &'static str, popup: &crate::ui::Popup<T>, window: &Window, card: Stateful<Div>) -> impl IntoElement {
+    let viewport = window.viewport_size();
+    let scrim = div()
+        .id(SharedString::from(format!("{name}-scrim")))
+        .occlude()
+        .w(viewport.width)
+        .h(viewport.height)
+        .bg(gpui::black().opacity(0.35))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(crate::ui::dialog_motion(format!("{name}-in"), popup, card, 2.));
+    gpui::deferred(
+        gpui::anchored()
+            .position(point(px(0.), px(0.)))
+            .child(crate::ui::dialog_motion(format!("{name}-scrim-in"), popup, scrim, 0.)),
+    )
+    .with_priority(2)
+}
+
+/// Zeron's dialog card (`popover::dialog_card`) with its title.
+fn dialog_card(theme: &Theme, id: &'static str, title: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w(px(360.))
+        .p(px(20.))
+        .rounded(px(16.))
+        .bg(theme.card)
+        .border_1()
+        .border_color(theme.border)
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .text_color(theme.text)
+        .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title))
+}
+
+/// Zeron's `btnGhost`: quiet text, a wash on hover.
+fn ghost_button(theme: &Theme, id: &'static str, label: &'static str) -> Stateful<Div> {
+    let hover = theme.hover;
+    div().id(id).px(px(12.)).py(px(6.)).rounded(px(8.)).text_color(theme.text_muted).cursor_pointer().hover(move |s| s.bg(hover)).child(label)
+}
+
+/// Zeron's `btnPrimary` (and `btnDestructive` with the danger fill).
+fn solid_button(id: &'static str, label: &'static str, fill: gpui::Hsla, text: gpui::Hsla) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px(px(12.))
+        .py(px(6.))
+        .rounded(px(8.))
+        .bg(fill)
+        .text_color(text)
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.9))
+        .child(label)
+}
+
+/// A row of the sidebar's `…` menu: icon, label, a check on the current choice.
+fn menu_choice(theme: &Theme, id: &'static str, icon: &'static str, label: &'static str, checked: bool) -> Stateful<Div> {
+    row(theme, false, id)
+        .h(px(28.))
+        .rounded(px(6.))
+        .child(gpui::svg().path(icon).size(px(14.)).flex_none().text_color(theme.text_muted))
+        .child(div().flex_1().child(label))
+        .when(checked, |el| el.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(theme.text_muted)))
 }
 
 /// Zeron's titlebar button: 24 px, a 16 px muted icon, a wash on hover. It occludes the drag strip under it.
@@ -646,6 +977,44 @@ fn titlebar_button(theme: &Theme, id: &'static str, icon: &'static str) -> State
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .child(gpui::svg().path(icon).size(px(16.)).text_color(theme.text_muted))
+}
+
+/// A branch name the way herdr generates one.
+fn new_branch_name() -> String {
+    let micros = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_micros() as u64);
+    crate::commands::generated_branch(micros)
+}
+
+/// A 14 px spinner turning once every 900 ms.
+fn spinner(theme: &Theme, id: String) -> impl IntoElement {
+    gpui::svg()
+        .path("icons/spinner.svg")
+        .size(px(14.))
+        .flex_none()
+        .text_color(theme.text_faint)
+        .with_animation(
+            SharedString::from(id),
+            gpui::Animation::new(std::time::Duration::from_millis(900)).repeat(),
+            |svg, t| svg.with_transformation(gpui::Transformation::rotate(gpui::percentage(t))),
+        )
+}
+
+/// A worktree herdr is still creating: its branch with a spinner, not selectable.
+fn pending_worktree_row(theme: &Theme, branch: &str) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("ws-pending-{branch}")))
+        .flex_shrink_0()
+        .h(px(32.))
+        .pl(px(30.))
+        .pr(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .rounded(px(8.))
+        .text_size(px(13.))
+        .text_color(theme.text_faint)
+        .child(spinner(theme, format!("ws-pending-spin-{branch}")))
+        .child(div().flex_1().min_w_0().truncate().child(branch.to_string()))
 }
 
 /// Zeron's disclosure chevron: points right when folded, turns a quarter down as the group opens.
@@ -690,6 +1059,16 @@ pub(crate) fn row(theme: &Theme, selected: bool, id: impl Into<gpui::ElementId>)
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::ui::reap_popup(&mut self.view_menu, window);
+        crate::ui::reap_popup(&mut self.ws_menu, window);
+        crate::ui::reap_popup(&mut self.pane_menu, window);
+        crate::ui::reap_popup(&mut self.tab_menu, window);
+        crate::ui::reap_popup(&mut self.worktree_dialog, window);
+        crate::ui::reap_popup(&mut self.remove_confirm, window);
+        if let Some(s) = &self.snapshot {
+            self.removing.retain(|id| s.workspaces.iter().any(|w| &w.workspace_id == id));
+        }
+        reapply_traffic_lights(window);
         let theme = Theme::of(cx).clone();
         let snapshot = self.snapshot.clone();
         let tab = self.shown_tab();
@@ -717,14 +1096,14 @@ impl Render for Shell {
                 let id = f.pane_id.clone();
                 self.panes.insert(id.clone(), cx.new(|cx| PaneTerminal::new(id, cx)));
             }
-            if f.focused && self.focused.as_deref() != Some(f.pane_id.as_str()) {
+            if f.focused && self.settings.is_none() && self.focused.as_deref() != Some(f.pane_id.as_str()) {
                 let handle = self.panes[&f.pane_id].read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
                 self.focused = Some(f.pane_id.clone());
             }
         }
 
-        if window.focused(cx).is_none() {
+        if window.focused(cx).is_none() && self.settings.is_none() {
             window.focus(&self.focus, cx);
         }
         let shown_ws = tab.as_ref().map(|t| t.workspace_id.clone());
@@ -741,7 +1120,7 @@ impl Render for Shell {
         let agents: Vec<(crate::model::Pane, String)> = snapshot
             .as_ref()
             .map(|s| {
-                s.agents()
+                s.agents_by(self.agent_sort)
                     .into_iter()
                     .map(|p| {
                         let ws = s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id);
@@ -750,6 +1129,7 @@ impl Render for Shell {
                     .collect()
             })
             .unwrap_or_default();
+        let agent_workspaces: Vec<String> = agents.iter().map(|(p, _)| p.workspace_id.clone()).collect();
         let hover_bg = theme.hover;
         let sidebar_w = self.sidebar_now();
         let sliding = self.sidebar_motion.is_some_and(|m| m.animating());
@@ -808,8 +1188,14 @@ impl Render for Shell {
                                     Some(field) => el.child(field),
                                     None => el.child(div().flex_1().min_w_0().truncate().child(w.label.clone())),
                                 })
-                                .child(status_dot(w.agent_status, &theme))
-                                .child(div().text_size(px(11.)).text_color(theme.text_faint).child(w.number.to_string()))
+                                .map(|el| {
+                                    if self.removing.contains(&w.workspace_id) {
+                                        el.text_color(theme.text_faint).child(spinner(&theme, format!("ws-removing-{}", w.workspace_id)))
+                                    } else {
+                                        el.child(status_dot(w.agent_status, &theme))
+                                            .child(div().text_size(px(11.)).text_color(theme.text_faint).child(w.number.to_string()))
+                                    }
+                                })
                                 .children(chevron)
                                 .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                                     if e.click_count() == 2 {
@@ -822,17 +1208,36 @@ impl Render for Shell {
                                 .on_mouse_down(MouseButton::Right, cx.listener({
                                     let id = w.workspace_id.clone();
                                     move |this, e: &MouseDownEvent, _, cx| {
-                                        this.ws_menu = Some((id.clone(), e.position));
+                                        this.ws_menu = Some(crate::ui::Popup::new((id.clone(), e.position)));
                                         cx.notify();
                                     }
                                 }))
                         };
                         groups.into_iter().map(|(w, kids)| {
-                            if kids.is_empty() {
+                            // Pending worktrees join the group of the workspace their dialog was opened on.
+                            // herdr opens the worktree's workspace before it answers (hooks still run): once
+                            // its checkout shows up, the real row replaces the placeholder.
+                            let checked_out = |branch: &str| {
+                                let slug = crate::commands::branch_path_slug(branch);
+                                kids.iter().any(|k| {
+                                    k.worktree.as_ref().is_some_and(|t| {
+                                        std::path::Path::new(&t.checkout_path).file_name().is_some_and(|n| *n == *slug)
+                                    })
+                                })
+                            };
+                            let pending: Vec<String> = self
+                                .pending_worktrees
+                                .iter()
+                                .filter(|(id, _)| *id == w.workspace_id || kids.iter().any(|k| k.workspace_id == *id))
+                                .filter(|(_, branch)| !checked_out(branch))
+                                .map(|(_, branch)| branch.clone())
+                                .collect();
+                            if kids.is_empty() && pending.is_empty() {
                                 return ws_row(&w, false, None, cx).into_any_element();
                             }
-                            let open = !self.folded.contains(&w.workspace_id);
-                            let full = kids.len() as f32 * 34.;
+                            // A folded group opens while one of its worktrees is being created.
+                            let open = !self.folded.contains(&w.workspace_id) || !pending.is_empty();
+                            let full = (kids.len() + pending.len()) as f32 * 34.;
                             let tween = self.fold_motion.get(&w.workspace_id).copied().filter(|m| m.animating());
                             let chevron = fold_chevron(&theme, &w.workspace_id, open, full, tween).on_click(cx.listener({
                                 let id = w.workspace_id.clone();
@@ -851,7 +1256,8 @@ impl Render for Shell {
                                 .flex_col()
                                 .pt(px(2.))
                                 .gap(px(2.))
-                                .children(kids.iter().map(|k| ws_row(k, true, None, cx)).collect::<Vec<_>>());
+                                .children(kids.iter().map(|k| ws_row(k, true, None, cx).into_any_element()).collect::<Vec<_>>())
+                                .children(pending.iter().map(|b| pending_worktree_row(&theme, b).into_any_element()));
                             let body = match tween {
                                 None => body.h(px(if open { full } else { 0. })).into_any_element(),
                                 // Zeron's disclosure: the height tweens, the rows fade up from 35 % and slide 3 px.
@@ -889,9 +1295,12 @@ impl Render for Shell {
                     .child("New workspace")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
             )
-            .when(!agents.is_empty(), |el| {
+            .when(self.show_agents && !agents.is_empty(), |el| {
+                let (hover, active) = (theme.border_strong, theme.accent);
+                let dragging = self.agents_drag.is_some();
                 el.child(
                     div()
+                        .relative()
                         .px(px(16.))
                         .pt(px(12.))
                         .pb(px(6.))
@@ -899,57 +1308,115 @@ impl Render for Shell {
                         .border_color(theme.border)
                         .text_size(px(11.))
                         .text_color(theme.text_faint)
-                        .child("Agents"),
+                        .child("Agents")
+                        // The section's top edge: drag to resize the list, double-click for the default height.
+                        .child(
+                            div()
+                                .id("agents-resize")
+                                .absolute()
+                                .top(px(-3.))
+                                .left_0()
+                                .right_0()
+                                .h(px(6.))
+                                .cursor_row_resize()
+                                .when(dragging, |el| el.bg(active.opacity(0.6)))
+                                .when(!dragging, |el| el.hover(move |s| s.bg(hover)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        let height = f32::from(this.agents_scroll.bounds().size.height);
+                                        this.agents_drag = Some((f32::from(e.position.y), height));
+                                        cx.notify();
+                                    }),
+                                )
+                                .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
+                                    if e.click_count() == 2 {
+                                        this.agents_height = None;
+                                        save_from_sidebar(cx, |s| s.agents_height = None);
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
                 )
                 .child(
                     div()
-                        .id("agents")
+                        .relative()
                         .flex_none()
-                        .max_h(relative(0.4))
-                        .overflow_y_scroll()
-                        .px(px(8.))
+                        .map(|el| match self.agents_height {
+                            Some(h) => el.max_h(px(h)),
+                            None => el.max_h(relative(0.4)),
+                        })
                         .flex()
                         .flex_col()
-                        .gap(px(2.))
-                        .children(agents.into_iter().map(|(pane, workspace)| {
-                            let selected = shown_tab.as_deref() == Some(pane.tab_id.as_str());
-                            let tab_id = pane.tab_id.clone();
-                            let title = pane.terminal_title_stripped.clone().unwrap_or_default();
-                            row(&theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
-                                .h(px(44.))
-                                .child(status_dot(pane.agent_status, &theme))
-                                .child(
+                        .child(
+                        div()
+                            .id("agents")
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.agents_scroll)
+                            .px(px(8.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .children(agents.into_iter().enumerate().flat_map(|(i, (pane, workspace))| {
+                                // Grouped: a heading where the workspace changes, which the rows then leave out.
+                                let grouped = self.agent_sort == AgentSort::Grouped;
+                                let heading = (grouped && (i == 0 || agent_workspaces[i - 1] != pane.workspace_id)).then(|| {
                                     div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .gap(px(6.))
-                                                .child(pane.agent.clone().unwrap_or_default())
-                                                .child(
-                                                    div()
-                                                        .min_w_0()
-                                                        .truncate()
-                                                        .text_color(theme.text_faint)
-                                                        .child(workspace),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .text_size(px(11.))
-                                                .text_color(theme.text_muted)
-                                                .child(title),
-                                        ),
-                                )
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    this.selected_tab = Some(tab_id.clone());
-                                    cx.notify();
-                                }))
-                        })),
+                                        .flex_none()
+                                        .px(px(8.))
+                                        .pt(px(if i == 0 { 2. } else { 8. }))
+                                        .pb(px(2.))
+                                        .truncate()
+                                        .text_size(px(11.))
+                                        .text_color(theme.text_faint)
+                                        .child(workspace.clone())
+                                        .into_any_element()
+                                });
+                                let selected = shown_tab.as_deref() == Some(pane.tab_id.as_str());
+                                let tab_id = pane.tab_id.clone();
+                                let title = pane.terminal_title_stripped.clone().unwrap_or_default();
+                                let agent = row(&theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
+                                    .h(px(44.))
+                                    .child(status_dot(pane.agent_status, &theme))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .gap(px(6.))
+                                                    .child(pane.agent.clone().unwrap_or_default())
+                                                    .when(!grouped, |el| {
+                                                        el.child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .text_color(theme.text_faint)
+                                                                .child(workspace),
+                                                        )
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .truncate()
+                                                    .text_size(px(11.))
+                                                    .text_color(theme.text_muted)
+                                                    .child(title),
+                                            ),
+                                    )
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.selected_tab = Some(tab_id.clone());
+                                        cx.notify();
+                                    }));
+                                heading.into_iter().chain([agent.into_any_element()])
+                            })),
+                    )
+                    .child(crate::ui::scrollbar("agents-scrollbar", &self.agents_scroll, &theme)),
                 )
             });
 
@@ -958,25 +1425,62 @@ impl Render for Shell {
             _ => Vec::new(),
         };
         let tabbar = div()
-            .id("tabbar")
             .h(px(TITLEBAR_HEIGHT))
             .flex_none()
+            // opaque, so the edge fades (same color) blend in exactly
+            .bg(theme.surface)
             .flex()
             .items_center()
             .gap(px(2.))
-            .pr(px(8.))
+            // the 28 px `+` sits as far from the right edge as from the top and bottom
+            .pr(px((TITLEBAR_HEIGHT - 28.) / 2.))
             // clear the traffic lights and the sidebar toggle once the sidebar no longer sits under them
             .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
-            .overflow_x_scroll()
-            .children(tabs.into_iter().map(|t| {
+            .child(div().flex_1().min_w_0().h_full().relative().child(div()
+                .id("tabbar")
+                .size_full()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .overflow_x_scroll()
+                .track_scroll(&self.tabs_scroll)
+                // re-render so the edge fades follow the scroll position
+                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                .children(tabs.into_iter().enumerate().map(|(index, t)| {
                 let selected = shown_tab.as_deref() == Some(t.tab_id.as_str());
                 let id = t.tab_id.clone();
                 let editing = self.rename_field(&RenameTarget::Tab(t.tab_id.clone()), cx);
                 let label = t.label.clone();
                 let group = SharedString::from(format!("tab-row-{}", t.tab_id));
                 let close_id = t.tab_id.clone();
+                let dragged = editing.is_none().then(|| DraggedTab {
+                    tab_id: t.tab_id.clone(),
+                    label: t.label.clone(),
+                    index,
+                    theme: theme.clone(),
+                });
+                let drop_bg = theme.accent.opacity(0.15);
                 row(&theme, selected, SharedString::from(format!("tab-{}", t.tab_id)))
                     .group(group.clone())
+                    // off the titlebar's drag strip: a press here drags the tab, not the window; the wheel still scrolls the bar
+                    .block_mouse_except_scroll()
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    .on_mouse_down(MouseButton::Right, cx.listener({
+                        let id = t.tab_id.clone();
+                        move |this, e: &MouseDownEvent, _, cx| {
+                            this.tab_menu = Some(crate::ui::Popup::new((id.clone(), e.position)));
+                            cx.notify();
+                        }
+                    }))
+                    .when_some(dragged, |el, dragged| el.on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone())))
+                    .drag_over::<DraggedTab>(move |s, d, _, _| if d.index == index { s } else { s.bg(drop_bg) })
+                    // Dropped on a tab, the dragged one takes its place: herdr's slot is after it when moving right.
+                    .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| {
+                        if d.index != index {
+                            let insert_index = if d.index < index { index + 1 } else { index };
+                            this.send(Command::MoveTab { tab_id: d.tab_id.clone(), insert_index }, cx, |_, _, _| {});
+                        }
+                    }))
                     .h(px(28.))
                     .max_w(px(240.))
                     .when(!selected, |el| el.text_color(theme.text_muted))
@@ -1000,9 +1504,28 @@ impl Render for Shell {
                         cx.notify();
                     }))
             }))
+            )
+            // ponytail: gpui has no alpha mask, so the fades are gradients of the bar's own color over the tabs
+            .map(|el| {
+                let (offset, max) = (-f32::from(self.tabs_scroll.offset().x), f32::from(self.tabs_scroll.max_offset().x));
+                let fade = |angle: f32| {
+                    div().absolute().top_0().bottom_0().w(px(32.)).bg(linear_gradient(
+                        angle,
+                        linear_color_stop(theme.surface, 0.),
+                        linear_color_stop(theme.surface.opacity(0.), 1.),
+                    ))
+                };
+                el.when(offset > 0.5, |el| el.child(fade(90.).left_0()))
+                    .when(offset < max - 0.5, |el| el.child(fade(270.).right_0()))
+            }))
+            // `+` stays put on the right; only the tabs scroll
             .when_some(shown_ws.clone(), |el, ws| {
                 el.child(
                     icon_button(&theme, "new-tab", "+")
+                        .size(px(28.))
+                        .text_size(px(19.))
+                        .block_mouse_except_scroll()
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.new_tab(ws.clone(), cx))),
                 )
             });
@@ -1011,6 +1534,7 @@ impl Render for Shell {
         let grid_bounds = self.grid_bounds.clone();
         let border = theme.border;
         let ring = theme.accent.opacity(0.5);
+        let split = frames.len() > 1;
         let grid = div()
             .flex_1()
             .min_h_0()
@@ -1037,8 +1561,17 @@ impl Render for Shell {
                     .bg(border);
                 match self.panes.get(&f.pane_id) {
                     Some(pane) => {
-                        let focused = pane.read(cx).focus_handle(cx).is_focused(window);
-                        cell.child(
+                        // a lone pane needs no marker of which pane has focus
+                        let focused = split && pane.read(cx).focus_handle(cx).is_focused(window);
+                        let pane_id = f.pane_id.clone();
+                        cell.on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                this.pane_menu = Some(crate::ui::Popup::new((pane_id.clone(), e.position)));
+                                cx.notify();
+                            }),
+                        )
+                        .child(
                             div().size_full().relative().child(pane.clone()).when(focused, |el| {
                                 // ponytail: overlay, not a border on the container, which shrank the grid by 1px
                                 el.child(div().absolute().inset_0().border_1().border_color(ring))
@@ -1111,6 +1644,8 @@ impl Render for Shell {
                 )
             });
 
+        let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
+        let on_page = settings_page.is_some();
         div()
             .id("root")
             .track_focus(&self.focus)
@@ -1150,23 +1685,29 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &Tab7, _, cx| this.go_to_tab(6, cx)))
             .on_action(cx.listener(|this, _: &Tab8, _, cx| this.go_to_tab(7, cx)))
             .on_action(cx.listener(|this, _: &Tab9, _, cx| this.go_to_tab(8, cx)))
+            .on_action(cx.listener(|this, _: &PreviousTab, _, cx| this.step_tab(false, cx)))
+            .on_action(cx.listener(|this, _: &NextTab, _, cx| this.step_tab(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.step_workspace(false, cx)))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
                 this.drag_divider(e.position, cx);
                 this.drag_sidebar(e.position.x, cx);
+                this.drag_agents(e.position.y, w, cx);
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
                 this.end_sidebar_drag(cx);
+                this.end_agents_drag(cx);
             }))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
                 this.end_sidebar_drag(cx);
+                this.end_agents_drag(cx);
             }))
             .child(self.drag_strip())
-            .when(sidebar_w > 0., |el| {
+            .when(sidebar_w > 0. && !on_page, |el| {
                 el.child(
                     div()
                         .w(px(sidebar_w))
@@ -1179,9 +1720,12 @@ impl Render for Shell {
                         .child(sidebar),
                 )
             })
-            .child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).child(grid))
+            .map(|el| match settings_page {
+                Some(page) => el.child(page),
+                None => el.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).child(grid)),
+            })
             // The sidebar's edge: drag to resize, double-click for the default width.
-            .when(self.sidebar_open && !sliding, |el| {
+            .when(self.sidebar_open && !sliding && !on_page, |el| {
                 let (hover, active) = (theme.border_strong, theme.accent);
                 el.child(
                     div()
@@ -1212,45 +1756,325 @@ impl Render for Shell {
                         })),
                 )
             })
-            .child(
-                titlebar_button(&theme, "toggle-sidebar", "icons/sidebar-minimalistic-left.svg")
-                    .absolute()
-                    .top(px(TRAFFIC_LIGHTS_CENTER - 12.))
-                    .left(px(TOGGLE_LEFT))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.toggle_sidebar(cx);
-                    })),
-            )
-            .children(self.ws_menu.clone().map(|(id, at)| {
+            .when(!on_page, |el| {
+                el.child(
+                    titlebar_button(&theme, "toggle-sidebar", "icons/sidebar-minimalistic-left.svg")
+                        .absolute()
+                        .top(px(TRAFFIC_LIGHTS_CENTER - 12.))
+                        .left(px(TOGGLE_LEFT))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_sidebar(cx);
+                        })),
+                )
+            })
+            // Zeron's sidebar `…`: in the titlebar at the sidebar's right edge, hidden once the sidebar is too
+            // narrow to hold it beside the toggle.
+            .when(sidebar_w >= TITLEBAR_CLUSTER + 32. && !on_page, |el| {
+                el.child(
+                    titlebar_button(&theme, "sidebar-view", "icons/more-horizontal.svg")
+                        .absolute()
+                        .top(px(TRAFFIC_LIGHTS_CENTER - 12.))
+                        .left(px(sidebar_w - 8. - 24.))
+                        .when(self.view_menu.as_ref().is_some_and(|m| m.is_open()), |el| el.bg(theme.hover))
+                        // Capture, so a press on the open menu's trigger closes it instead of the menu's
+                        // click-outside closing it and the click reopening it.
+                        .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            match this.view_menu.as_mut() {
+                                Some(menu) if menu.is_open() => menu.close(),
+                                _ => this.view_menu = Some(crate::ui::Popup::new(())),
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .children(self.view_menu.as_ref().map(|menu| {
+                // under the `…` button, its left edge on the button's
+                let at = gpui::point(px(sidebar_w - 8. - 24.), px(TRAFFIC_LIGHTS_CENTER + 12. + 4.));
+                let sort = self.agent_sort;
+                let show_agents = self.show_agents;
                 gpui::deferred(
-                    gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(
-                        div()
-                            .id("ws-menu")
-                            .occlude()
-                            .min_w(px(180.))
-                            .p(px(4.))
-                            .rounded(px(10.))
-                            .bg(theme.card)
-                            .border_1()
-                            .border_color(theme.border)
-                            .shadow_lg()
+                    gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
+                        "view-menu-in",
+                        menu,
+                        menu_card(&theme, "view-menu", 200.)
                             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                this.ws_menu = None;
+                                if let Some(m) = this.view_menu.as_mut() { m.close() }
                                 cx.notify();
                             }))
+                            .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child("Sort agents"))
+                            .children([
+                                (AgentSort::Status, "sort-status", "icons/checklist.svg", "Status"),
+                                (AgentSort::Grouped, "sort-grouped", "icons/folder.svg", "Grouped"),
+                            ]
+                            .map(|(choice, id, icon, label)| {
+                                menu_choice(&theme, id, icon, label, sort == choice)
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_agent_sort(choice, cx)))
+                            }))
+                            .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
+                            .child(
+                                row(&theme, false, "show-agents")
+                                    .h(px(30.))
+                                    .rounded(px(6.))
+                                    .child(div().flex_1().child("Show agents"))
+                                    .child(crate::ui::switch(&theme, show_agents, "show-agents"))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_agents(cx))),
+                            )
+                            .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
+                            .child(menu_choice(&theme, "open-settings", "icons/settings.svg", "Settings", false).on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    if let Some(m) = this.view_menu.as_mut() {
+                                        m.close()
+                                    }
+                                    this.toggle_settings_here(window, cx);
+                                }),
+                            )),
+                    )),
+                )
+                .with_priority(1)
+            }))
+            .children(self.ws_menu.as_ref().map(|menu| {
+                let (id, at) = menu.value.clone();
+                let worktree = snapshot
+                    .as_ref()
+                    .and_then(|s| s.workspaces.iter().find(|w| w.workspace_id == id))
+                    .and_then(|w| w.worktree.clone());
+                // a repo's checkout makes worktrees; a linked worktree removes itself instead
+                let linked = worktree.as_ref().is_some_and(|w| w.is_linked_worktree);
+                let has_repo = worktree.is_some() && !linked;
+                let checkout = worktree.map(|w| w.checkout_path).filter(|p| !p.is_empty());
+                gpui::deferred(
+                    gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
+                        "ws-menu-in",
+                        menu,
+                        menu_card(&theme, "ws-menu", 180.)
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                if let Some(m) = this.ws_menu.as_mut() { m.close() }
+                                cx.notify();
+                            }))
+                            .when(has_repo, |el| {
+                                el.child(row(&theme, false, "ws-menu-worktree").h(px(28.)).rounded(px(6.)).child("New worktree").on_click(
+                                    cx.listener({
+                                        let id = id.clone();
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            if let Some(m) = this.ws_menu.as_mut() { m.close() }
+                                            this.open_worktree_dialog(id.clone(), window, cx);
+                                        }
+                                    }),
+                                ))
+                            })
+                            .child(row(&theme, false, "ws-menu-new-tab").h(px(28.)).rounded(px(6.)).child("New tab").on_click(
+                                cx.listener({
+                                    let id = id.clone();
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        if let Some(m) = this.ws_menu.as_mut() { m.close() }
+                                        this.new_tab(id.clone(), cx);
+                                    }
+                                }),
+                            ))
+                            .child(row(&theme, false, "ws-menu-rename").h(px(28.)).rounded(px(6.)).child("Rename").on_click(
+                                cx.listener({
+                                    let id = id.clone();
+                                    move |this, _: &ClickEvent, window, cx| {
+                                        if let Some(m) = this.ws_menu.as_mut() { m.close() }
+                                        let label = this
+                                            .snapshot
+                                            .as_ref()
+                                            .and_then(|s| s.workspaces.iter().find(|w| w.workspace_id == id))
+                                            .map(|w| w.label.clone())
+                                            .unwrap_or_default();
+                                        this.start_rename(RenameTarget::Workspace(id.clone()), label, window, cx);
+                                    }
+                                }),
+                            ))
+                            .when_some(checkout, |el, path| {
+                                el.child(row(&theme, false, "ws-menu-reveal").h(px(28.)).rounded(px(6.)).child("Reveal in Finder").on_click(
+                                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        if let Some(m) = this.ws_menu.as_mut() { m.close() }
+                                        cx.reveal_path(std::path::Path::new(&path));
+                                        cx.notify();
+                                    }),
+                                ))
+                            })
+                            .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
                             .child(
                                 row(&theme, false, "ws-menu-close")
                                     .h(px(28.))
                                     .rounded(px(6.))
                                     .text_color(theme.danger)
                                     .child("Close workspace")
+                                    .on_click(cx.listener({
+                                        let id = id.clone();
+                                        move |this, _: &ClickEvent, _, cx| {
+                                            if let Some(m) = this.ws_menu.as_mut() { m.close() }
+                                            this.send(Command::CloseWorkspace { workspace_id: id.clone() }, cx, |_, _, _| {});
+                                        }
+                                    })),
+                            )
+                            .when(linked, |el| {
+                                el.child(
+                                    row(&theme, false, "ws-menu-remove")
+                                        .h(px(28.))
+                                        .rounded(px(6.))
+                                        .text_color(theme.danger)
+                                        .child("Remove worktree")
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                            if let Some(m) = this.ws_menu.as_mut() { m.close() }
+                                            this.remove_worktree(id.clone(), false, cx);
+                                        })),
+                                )
+                            }),
+                    )),
+                )
+                .with_priority(1)
+            }))
+            .children(self.worktree_dialog.as_ref().map(|dialog| {
+                let card = dialog_card(&theme, "worktree-dialog", "New worktree")
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_worktree_dialog(false, cx)))
+                    .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
+                        if e.keystroke.key == "escape" {
+                            cx.stop_propagation();
+                            this.finish_worktree_dialog(false, cx);
+                        }
+                    }))
+                    .child(div().mt(px(4.)).text_color(theme.text_muted).child("Branch name"))
+                    .child(
+                        div()
+                            .mt(px(8.))
+                            .px(px(12.))
+                            .py(px(8.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.wash(0.04))
+                            .text_size(px(14.))
+                            .child(Input::new(&dialog.value.input)),
+                    )
+                    .child(
+                        div()
+                            .mt(px(16.))
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.))
+                            .child(
+                                ghost_button(&theme, "worktree-cancel", "Cancel")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_worktree_dialog(false, cx))),
+                            )
+                            .child(
+                                solid_button("worktree-create", "Create", theme.text, theme.surface)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_worktree_dialog(true, cx))),
+                            ),
+                    );
+                modal("worktree-dialog", dialog, window, card)
+            }))
+            .children(self.remove_confirm.as_ref().map(|confirm| {
+                let label = confirm.value.1.clone();
+                let card = dialog_card(&theme, "remove-dialog", "Remove worktree?")
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_remove_confirm(false, cx)))
+                    .child(
+                        div()
+                            .mt(px(8.))
+                            .line_height(px(19.))
+                            .text_color(theme.text_muted)
+                            .child(format!("{label} has uncommitted changes. Removing it deletes them; its branch stays.")),
+                    )
+                    .child(
+                        div()
+                            .mt(px(16.))
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.))
+                            .child(
+                                ghost_button(&theme, "remove-cancel", "Cancel")
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_remove_confirm(false, cx))),
+                            )
+                            .child(
+                                solid_button("remove-force", "Remove anyway", theme.danger, gpui::white())
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_remove_confirm(true, cx))),
+                            ),
+                    );
+                modal("remove-dialog", confirm, window, card)
+            }))
+            .children(self.tab_menu.as_ref().map(|menu| {
+                let (id, at) = menu.value.clone();
+                gpui::deferred(
+                    gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
+                        "tab-menu-in",
+                        menu,
+                        menu_card(&theme, "tab-menu", 180.)
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                if let Some(m) = this.tab_menu.as_mut() { m.close() }
+                                cx.notify();
+                            }))
+                            .child(row(&theme, false, "tab-menu-rename").h(px(28.)).rounded(px(6.)).child("Rename").on_click(
+                                cx.listener({
+                                    let id = id.clone();
+                                    move |this, _: &ClickEvent, window, cx| {
+                                        if let Some(m) = this.tab_menu.as_mut() { m.close() }
+                                        let label = this
+                                            .snapshot
+                                            .as_ref()
+                                            .and_then(|s| s.tabs.iter().find(|t| t.tab_id == id))
+                                            .map(|t| t.label.clone())
+                                            .unwrap_or_default();
+                                        this.start_rename(RenameTarget::Tab(id.clone()), label, window, cx);
+                                    }
+                                }),
+                            ))
+                            .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
+                            .child(
+                                row(&theme, false, "tab-menu-close")
+                                    .h(px(28.))
+                                    .rounded(px(6.))
+                                    .text_color(theme.danger)
+                                    .child("Close tab")
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.ws_menu = None;
-                                        this.send(Command::CloseWorkspace { workspace_id: id.clone() }, cx, |_, _, _| {});
+                                        if let Some(m) = this.tab_menu.as_mut() { m.close() }
+                                        this.send(Command::CloseTab { tab_id: id.clone() }, cx, |_, _, _| {});
                                     })),
                             ),
-                    ),
+                    )),
+                )
+                .with_priority(1)
+            }))
+            .children(self.pane_menu.as_ref().map(|menu| {
+                let (pane_id, at) = menu.value.clone();
+                let chords = cx.try_global::<ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
+                let items: [(&str, fn(String) -> Command); 4] = [
+                    ("SplitRight", |pane_id| Command::Split { pane_id, down: false }),
+                    ("SplitDown", |pane_id| Command::Split { pane_id, down: true }),
+                    ("ToggleZoom", |pane_id| Command::Zoom { pane_id }),
+                    ("ClosePane", |pane_id| Command::ClosePane { pane_id }),
+                ];
+                gpui::deferred(
+                    gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
+                        "pane-menu-in",
+                        menu,
+                        menu_card(&theme, "pane-menu", 200.)
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                if let Some(m) = this.pane_menu.as_mut() { m.close() }
+                                cx.notify();
+                            }))
+                            .children(items.into_iter().enumerate().flat_map(|(i, (action, make))| {
+                                let label = ACTIONS.iter().find(|(a, _)| *a == action).map_or(action, |(_, l)| l);
+                                let chord = chords.iter().find(|(a, _)| a == action).map(|(_, k)| crate::ui::settings::display_chord(k));
+                                let close = action == "ClosePane";
+                                let pane_id = pane_id.clone();
+                                let separator = close.then(|| div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border).into_any_element());
+                                let item = row(&theme, false, ("pane-menu-item", i))
+                                    .h(px(28.))
+                                    .rounded(px(6.))
+                                    .when(close, |el| el.text_color(theme.danger))
+                                    .child(div().flex_1().child(label))
+                                    .when_some(chord, |el, chord| el.child(div().text_size(px(11.)).text_color(theme.text_faint).child(chord)))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        if let Some(m) = this.pane_menu.as_mut() { m.close() }
+                                        this.send(make(pane_id.clone()), cx, |_, _, _| {});
+                                    }));
+                                separator.into_iter().chain([item.into_any_element()])
+                            })),
+                    )),
                 )
                 .with_priority(1)
             }))

@@ -1,14 +1,15 @@
-//! The Settings window: terminal font, appearance and theme family, herdr's binary and socket, key bindings.
-//! Every change is saved at once and applied to all windows.
+//! The Settings page, shown in the main window in place of the sidebar and the panes (Zeron's settings route):
+//! section tabs where the sidebar was, then a centered column of titled cards. Terminal font, appearance and
+//! theme family, herdr's binary and socket, key bindings. Every change is saved at once and applied to all windows.
 use crate::bindings::{ACTIONS, effective, rebind, recordable};
-use crate::herdr::{Client, set_binary};
-use crate::settings::{Settings, SettingsGlobal, step_font_size};
+use crate::herdr::{Client, set_binary, set_socket};
+use crate::settings::{Settings, SettingsGlobal, step_font_size, step_line_height};
 use crate::theme::{AppearanceMode, Theme, families};
 use crate::ui::input_style;
 use gpui::{
-    App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, Focusable, Global, IntoElement, KeystrokeEvent,
-    ParentElement, Render, SharedString, Stateful, Styled, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowOptions, div, point, prelude::*, px, size,
+    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Global, IntoElement,
+    KeyDownEvent, Keystroke, KeystrokeEvent, ParentElement, Render, SharedString, Stateful, Styled, Subscription,
+    Window, div, prelude::*, px,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
 
@@ -17,26 +18,42 @@ pub struct Tokio(pub tokio::runtime::Handle);
 
 impl Global for Tokio {}
 
+const TITLEBAR_HEIGHT: f32 = 38.0;
+/// Zeron's page column: a centered measure with air on either side.
+const PAGE_MAX_WIDTH: f32 = 760.0;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     Terminal,
     Appearance,
     Herdr,
-    Keys,
+    Shortcuts,
 }
 
 impl Section {
-    const ALL: [Section; 4] = [Section::Terminal, Section::Appearance, Section::Herdr, Section::Keys];
+    const ALL: [Section; 4] = [Section::Terminal, Section::Appearance, Section::Herdr, Section::Shortcuts];
 
     fn label(self) -> &'static str {
         match self {
             Section::Terminal => "Terminal",
             Section::Appearance => "Appearance",
             Section::Herdr => "herdr",
-            Section::Keys => "Keys",
+            Section::Shortcuts => "Shortcuts",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Section::Terminal => "icons/terminal.svg",
+            Section::Appearance => "icons/tuning.svg",
+            Section::Herdr => "icons/remote-server.svg",
+            Section::Shortcuts => "icons/keyboard.svg",
         }
     }
 }
+
+/// Back, or Escape: the window shows the panes again.
+pub struct Close;
 
 pub struct SettingsView {
     section: Section,
@@ -50,24 +67,7 @@ pub struct SettingsView {
     _subscriptions: Vec<Subscription>,
 }
 
-/// Opens Settings, or brings the open one forward.
-pub fn open(cx: &mut App) {
-    if let Some(window) = cx.windows().into_iter().find_map(|w| w.downcast::<SettingsView>()) {
-        let _ = window.update(cx, |_, window, _| window.activate_window());
-        return;
-    }
-    let options = WindowOptions {
-        window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::centered(None, size(px(720.), px(580.)), cx))),
-        titlebar: Some(TitlebarOptions {
-            title: Some("Settings".into()),
-            appears_transparent: true,
-            traffic_light_position: Some(point(px(14.), px(14.))),
-        }),
-        window_background: WindowBackgroundAppearance::Blurred,
-        ..Default::default()
-    };
-    let _ = cx.open_window(options, |window, cx| cx.new(|cx| SettingsView::new(window, cx)));
-}
+impl EventEmitter<Close> for SettingsView {}
 
 /// Changes the settings, saves them and applies them everywhere.
 pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
@@ -82,6 +82,7 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     let saved = settings.save(&path);
     cx.global_mut::<SettingsGlobal>().error = saved.err().map(|e| format!("cannot save {}: {e:#}", path.display()));
     set_binary(settings.herdr_bin.clone());
+    set_socket(settings.herdr_socket.clone());
     cx.set_global(settings.theme(cx.window_appearance()));
     if keys_changed {
         rebind(cx, &settings.keys);
@@ -90,7 +91,7 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
 }
 
 impl SettingsView {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = SettingsGlobal::of(cx).settings.clone();
         let theme = Theme::of(cx).clone();
         let field = |value: Option<String>, placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
@@ -121,7 +122,7 @@ impl SettingsView {
         let view = cx.entity().downgrade();
         let settings_window = window.window_handle();
         subscriptions.push(cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
-            // Only keys pressed in this window: typing in a terminal while Record is armed stays typing.
+            // Only keys pressed in this window: typing in another window's terminal while Record is armed stays typing.
             if window.window_handle() != settings_window {
                 return;
             }
@@ -189,27 +190,89 @@ impl Focusable for SettingsView {
     }
 }
 
-fn heading(theme: &Theme, text: &'static str) -> Div {
-    div().text_size(px(11.)).text_color(theme.text_faint).mt(px(14.)).mb(px(6.)).child(text)
+/// Page headline and its muted subtitle.
+fn page_header(theme: &Theme, title: &'static str, subtitle: &'static str) -> Div {
+    div()
+        .px(px(8.))
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(div().text_size(px(20.)).line_height(px(26.)).font_weight(FontWeight::MEDIUM).child(title))
+        .child(div().text_color(theme.text_muted).line_height(px(17.)).child(subtitle))
 }
 
-fn field_box(theme: &Theme) -> Div {
-    div().h(px(32.)).px(px(10.)).flex().items_center().rounded(px(8.)).bg(theme.wash(0.06)).border_1().border_color(theme.border)
+/// The small plain label above a card.
+fn section_label(theme: &Theme, label: &'static str) -> Div {
+    div().mt(px(32.)).mb(px(8.)).px(px(8.)).text_color(theme.text_muted).child(label)
 }
 
-fn button(theme: &Theme, id: impl Into<gpui::ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
-    let hover = theme.hover;
+/// A filled, rounded block of related rows: a faint wash, no outline.
+fn card(theme: &Theme) -> Div {
+    div().mt(px(24.)).rounded(px(12.)).bg(theme.wash(0.045)).overflow_hidden().flex().flex_col()
+}
+
+/// One row of a card: text on the left, the control on the right, a hairline above all but the first.
+fn card_row(theme: &Theme, first: bool) -> Div {
+    div()
+        .mx(px(16.))
+        .py(px(12.))
+        .min_h(px(60.))
+        .when(!first, |el| el.border_t_1().border_color(theme.border.opacity(0.6)))
+        .flex()
+        .items_center()
+        .gap(px(16.))
+}
+
+/// A row's title and, under it, its description.
+fn row_text(theme: &Theme, title: impl Into<SharedString>, description: impl Into<SharedString>) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(div().font_weight(FontWeight::MEDIUM).line_height(px(17.)).child(title.into()))
+        .child(div().text_size(px(12.)).line_height(px(16.)).text_color(theme.text_muted).child(description.into()))
+}
+
+/// Zeron's filled action: a borderless pill that lifts on hover.
+fn action(theme: &Theme, id: impl Into<gpui::ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    let lifted = theme.wash(0.10);
     div()
         .id(id)
-        .h(px(28.))
+        .flex_none()
+        .min_h(px(32.))
         .px(px(10.))
         .flex()
         .items_center()
-        .rounded(px(7.))
-        .bg(theme.wash(0.08))
+        .justify_center()
+        .rounded(px(8.))
+        .bg(theme.wash(0.06))
+        .text_size(px(12.5))
         .cursor_pointer()
-        .hover(move |s| s.bg(hover))
+        .hover(move |s| s.bg(lifted))
         .child(label.into())
+}
+
+/// A text field in a row: the filled pill of Zeron's selects.
+fn field(theme: &Theme, input: &Entity<InputState>) -> Div {
+    div().w(px(240.)).flex_none().h(px(32.)).px(px(10.)).flex().items_center().rounded(px(8.)).bg(theme.wash(0.06)).child(Input::new(input))
+}
+
+/// A chord as Zeron shows it: `cmd-shift-t` → `Cmd+Shift+T`.
+pub(crate) fn display_chord(chord: &str) -> String {
+    let Ok(k) = Keystroke::parse(chord) else { return chord.to_string() };
+    let m = k.modifiers;
+    let key = match k.key.as_str() {
+        key if key.chars().count() == 1 => key.to_uppercase(),
+        key => key[..1].to_uppercase() + &key[1..],
+    };
+    [(m.control, "Ctrl"), (m.alt, "Opt"), (m.shift, "Shift"), (m.platform, "Cmd"), (m.function, "Fn")]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name.to_string()))
+        .chain(std::iter::once(key))
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 impl Render for SettingsView {
@@ -220,72 +283,144 @@ impl Render for SettingsView {
         let error = global.error.clone();
 
         let nav = div()
-            .w(px(180.))
+            .w(px(settings.sidebar_width))
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
-            .gap(px(2.))
-            .pt(px(44.))
-            .px(px(8.))
+            .pt(px(TITLEBAR_HEIGHT))
             .bg(theme.wash(0.05))
             .border_r_1()
             .border_color(theme.border)
-            .children(Section::ALL.into_iter().map(|section| {
-                crate::shell::row(&theme, self.section == section, SharedString::from(section.label()))
-                    .child(section.label())
-                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                        v.section = section;
-                        cx.notify();
-                    }))
-            }));
+            // Zeron's Back: a muted tab at the top of the column, an arrow and the word.
+            .child(
+                div().px(px(8.)).child(
+                    crate::shell::row(&theme, false, "settings-back")
+                        .text_color(theme.text_muted)
+                        .child(gpui::svg().path("icons/arrow-left.svg").size(px(16.)).flex_none().text_color(theme.text_muted))
+                        .child("Back")
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Close))),
+                ),
+            )
+            .child(div().flex_1().min_h_0().flex().flex_col().gap(px(2.)).px(px(8.)).pt(px(12.)).children(Section::ALL.into_iter().map(
+                |section| {
+                    let selected = self.section == section;
+                    crate::shell::row(&theme, selected, SharedString::from(format!("settings-{}", section.label())))
+                        .text_color(if selected { theme.text } else { theme.text_muted })
+                        .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
+                        .child(gpui::svg().path(section.icon()).size(px(16.)).flex_none().text_color(theme.text_muted))
+                        .child(section.label())
+                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                            v.section = section;
+                            v.recording = None;
+                            cx.notify();
+                        }))
+                },
+            )));
 
         let body = match self.section {
             Section::Terminal => div()
-                .child(heading(&theme, "Font family"))
-                .child(field_box(&theme).child(Input::new(&self.font)))
+                .child(page_header(&theme, "Terminal", "The font every pane draws with."))
                 .child(
-                    div()
-                        .mt(px(6.))
-                        .text_size(px(12.))
-                        .text_color(theme.text_faint)
-                        .child("Any installed monospace font. Icons missing from it come from installed Nerd Fonts."),
-                )
-                .child(heading(&theme, "Font size"))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(button(&theme, "size-down", "−").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                            update(cx, |s| s.font_size = step_font_size(s.font_size, -1.0))
-                        })))
-                        .child(div().w(px(40.)).flex().justify_center().child(format!("{}", settings.font_size)))
-                        .child(button(&theme, "size-up", "+").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                            update(cx, |s| s.font_size = step_font_size(s.font_size, 1.0))
-                        }))),
+                    card(&theme)
+                        .child(
+                            card_row(&theme, true)
+                                .child(row_text(
+                                    &theme,
+                                    "Font family",
+                                    "Any installed monospace font. Icons missing from it come from installed Nerd Fonts.",
+                                ))
+                                .child(field(&theme, &self.font)),
+                        )
+                        .child(
+                            card_row(&theme, false)
+                                .child(row_text(&theme, "Font size", "In points, for every pane."))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .child(action(&theme, "size-down", "−").w(px(32.)).on_click(cx.listener(
+                                            |_, _: &ClickEvent, _, cx| update(cx, |s| s.font_size = step_font_size(s.font_size, -1.0)),
+                                        )))
+                                        .child(div().w(px(40.)).flex().justify_center().child(format!("{}", settings.font_size)))
+                                        .child(action(&theme, "size-up", "+").w(px(32.)).on_click(cx.listener(
+                                            |_, _: &ClickEvent, _, cx| update(cx, |s| s.font_size = step_font_size(s.font_size, 1.0)),
+                                        ))),
+                                ),
+                        )
+                        .child(
+                            card_row(&theme, false)
+                                .child(row_text(&theme, "Line height", "Row height as a multiple of the font size."))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .child(action(&theme, "line-height-down", "−").w(px(32.)).on_click(cx.listener(
+                                            |_, _: &ClickEvent, _, cx| update(cx, |s| s.line_height = step_line_height(s.line_height, -0.1)),
+                                        )))
+                                        .child(div().w(px(40.)).flex().justify_center().child(format!("{:.1}", settings.line_height)))
+                                        .child(action(&theme, "line-height-up", "+").w(px(32.)).on_click(cx.listener(
+                                            |_, _: &ClickEvent, _, cx| update(cx, |s| s.line_height = step_line_height(s.line_height, 0.1)),
+                                        ))),
+                                ),
+                        ),
                 ),
             Section::Appearance => {
                 let modes = [(AppearanceMode::System, "System"), (AppearanceMode::Light, "Light"), (AppearanceMode::Dark, "Dark")];
                 let system = window.appearance();
+                let (selected_bg, hover) = (theme.wash(0.10), theme.hover);
                 div()
-                    .child(heading(&theme, "Appearance"))
-                    .child(div().flex().gap(px(4.)).children(modes.into_iter().map(|(mode, label)| {
-                        let selected = settings.appearance == mode;
-                        button(&theme, SharedString::from(format!("mode-{label}")), label)
-                            .when(selected, |el| el.bg(theme.selected).border_1().border_color(theme.accent.opacity(0.6)))
-                            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| update(cx, |s| s.appearance = mode)))
-                    })))
-                    .child(heading(&theme, "Theme"))
-                    .child(div().flex().flex_col().gap(px(2.)).children(families().into_iter().map(|(id, name)| {
+                    .child(page_header(&theme, "Appearance", "Window and terminal colors."))
+                    .child(card(&theme).child(card_row(&theme, true).child(row_text(&theme, "Mode", "Follow the system, or keep one look.")).child(
+                        div().flex().gap(px(8.)).children(modes.into_iter().map(|(mode, label)| {
+                            let selected = settings.appearance == mode;
+                            div()
+                                .id(SharedString::from(format!("mode-{label}")))
+                                .h(px(36.))
+                                .px(px(14.))
+                                .flex()
+                                .items_center()
+                                .rounded(px(8.))
+                                .border_1()
+                                .cursor_pointer()
+                                .map(|el| match selected {
+                                    true => el.bg(selected_bg).border_color(theme.border_strong).font_weight(FontWeight::MEDIUM),
+                                    false => el.border_color(theme.border).text_color(theme.text_muted).hover(move |s| s.bg(hover)),
+                                })
+                                .child(label)
+                                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| update(cx, |s| s.appearance = mode)))
+                        })),
+                    )))
+                    .child(section_label(&theme, "Theme"))
+                    .child(card(&theme).mt_0().children(families().into_iter().enumerate().map(|(i, (id, name))| {
                         let preview = Theme::resolve(&id, settings.appearance, system, &settings.font());
                         let selected = settings.theme_family == id;
                         let swatches = std::iter::once(preview.terminal.background)
                             .chain(preview.terminal.ansi[1..7].iter().copied())
                             .map(|c| div().size(px(12.)).rounded(px(3.)).bg(c).border_1().border_color(theme.border));
-                        crate::shell::row(&theme, selected, SharedString::from(format!("family-{id}")))
-                            .child(div().flex_1().child(name))
-                            .child(div().flex().gap(px(3.)).children(swatches))
+                        let hover = theme.wash(0.03);
+                        div()
+                            .id(SharedString::from(format!("family-{id}")))
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(hover))
+                            .child(
+                                card_row(&theme, i == 0)
+                                    .min_h(px(44.))
+                                    .py(px(10.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
+                                            .when(!selected, |el| el.text_color(theme.text_muted))
+                                            .child(name),
+                                    )
+                                    .child(div().flex().gap(px(3.)).children(swatches))
+                                    .child(div().size(px(16.)).flex_none().when(selected, |el| {
+                                        el.child(gpui::svg().path("icons/check.svg").size(px(16.)).text_color(theme.accent))
+                                    })),
+                            )
                             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                                 let id = id.clone();
                                 update(cx, move |s| s.theme_family = id)
@@ -293,67 +428,76 @@ impl Render for SettingsView {
                     })))
             }
             Section::Herdr => div()
-                .child(heading(&theme, "herdr binary"))
-                .child(field_box(&theme).child(Input::new(&self.herdr_bin)))
-                .child(heading(&theme, "API socket"))
-                .child(field_box(&theme).child(Input::new(&self.herdr_socket)))
+                .child(page_header(&theme, "herdr", "Where Shepherd finds herdr. Empty fields use herdr's defaults."))
                 .child(
-                    div()
-                        .mt(px(6.))
-                        .text_size(px(12.))
-                        .text_color(theme.text_faint)
-                        .child("A new socket is used after Shepherd restarts. Empty fields use herdr's defaults."),
-                )
-                .child(
-                    div()
-                        .mt(px(14.))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .child(button(&theme, "ping", "Test connection").on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.test_connection(cx))))
-                        .children(self.ping.clone().map(|text| div().text_size(px(12.)).text_color(theme.text_muted).child(text))),
+                    card(&theme)
+                        .child(
+                            card_row(&theme, true)
+                                .child(row_text(&theme, "herdr binary", "A path to herdr, or the one on PATH."))
+                                .child(field(&theme, &self.herdr_bin)),
+                        )
+                        .child(
+                            card_row(&theme, false)
+                                .child(row_text(&theme, "API socket", "A new socket is used after Shepherd restarts."))
+                                .child(field(&theme, &self.herdr_socket)),
+                        )
+                        .child(
+                            card_row(&theme, false)
+                                .child(row_text(
+                                    &theme,
+                                    "Connection",
+                                    self.ping.clone().unwrap_or_else(|| "Checks that herdr answers on this socket.".into()),
+                                ))
+                                .child(action(&theme, "ping", "Test connection").on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.test_connection(cx)))),
+                        ),
                 ),
-            Section::Keys => {
+            Section::Shortcuts => {
                 let bindings = effective(&settings.keys);
                 div()
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .child(heading(&theme, "Key bindings").flex_1())
-                            .child(button(&theme, "reset-keys", "Reset to defaults").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                            .items_start()
+                            .child(page_header(&theme, "Shortcuts", "Click a shortcut, then press the new chord. Esc cancels, ⌫ unbinds.").flex_1())
+                            .child(action(&theme, "reset-keys", "Reset to defaults").on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                                v.recording = None;
                                 update(cx, |s| s.keys.clear())
                             }))),
                     )
-                    .children(ACTIONS.iter().map(|(action, label)| {
-                        let chord = bindings.iter().find(|(a, _)| a == action).map(|(_, k)| k.clone());
+                    .child(card(&theme).children(ACTIONS.iter().enumerate().map(|(i, (action, label))| {
+                        let chord = bindings.iter().find(|(a, _)| a == action).map(|(_, k)| display_chord(k));
                         let recording = self.recording == Some(*action);
                         let action = *action;
-                        div()
-                            .h(px(34.))
-                            .flex()
-                            .items_center()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .child(div().flex_1().child(*label))
-                            .child(
-                                div()
-                                    .min_w(px(120.))
-                                    .text_color(if recording { theme.accent } else { theme.text_muted })
-                                    .child(if recording {
-                                        "Press keys… (Esc cancels, ⌫ unbinds)".to_string()
-                                    } else {
-                                        chord.unwrap_or_else(|| "—".into())
-                                    }),
-                            )
-                            .child(button(&theme, SharedString::from(format!("record-{action}")), "Record").on_click(cx.listener(
-                                move |v, _: &ClickEvent, window, cx| {
+                        let hover = theme.border_strong;
+                        card_row(&theme, i == 0).min_h(px(48.)).py(px(8.)).child(div().flex_1().child(*label)).child(
+                            div()
+                                .id(SharedString::from(format!("record-{action}")))
+                                .h(px(28.))
+                                .min_w(px(64.))
+                                .px(px(10.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.))
+                                .bg(theme.surface)
+                                .border_1()
+                                .font_family(theme.font_terminal.clone())
+                                .text_size(px(12.))
+                                .cursor_pointer()
+                                .map(|el| match (recording, &chord) {
+                                    (true, _) => el.border_color(theme.accent).text_color(theme.accent).child("Press keys…"),
+                                    (false, Some(chord)) => el.border_color(theme.border).hover(move |s| s.border_color(hover)).child(chord.clone()),
+                                    (false, None) => {
+                                        el.border_color(theme.border).text_color(theme.text_faint).hover(move |s| s.border_color(hover)).child("—")
+                                    }
+                                })
+                                .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                                     v.recording = Some(action);
                                     window.focus(&v.focus, cx);
                                     cx.notify();
-                                },
-                            )))
-                    }))
+                                })),
+                        )
+                    })))
             }
         };
 
@@ -362,25 +506,48 @@ impl Render for SettingsView {
             .track_focus(&self.focus)
             .size_full()
             .flex()
-            .bg(theme.glass())
-            .text_color(theme.text)
-            .font_family(theme.font_ui.clone())
-            .text_size(px(13.))
+            .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
+                if e.keystroke.key == "escape" && v.recording.is_none() {
+                    cx.stop_propagation();
+                    cx.emit(Close);
+                }
+            }))
             .child(nav)
             .child(
-                div()
-                    .id("settings-body")
-                    .flex_1()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .pt(px(30.))
-                    .px(px(24.))
-                    .pb(px(24.))
-                    .bg(theme.card.opacity(0.6))
-                    .children(error.map(|e| {
-                        div().mb(px(10.)).px_3().py_2().rounded(px(8.)).border_1().border_color(theme.danger.opacity(0.5)).text_color(theme.danger).child(e)
-                    }))
-                    .child(body),
+                div().id("settings-body").flex_1().min_w_0().h_full().overflow_y_scroll().child(
+                    div()
+                        .w_full()
+                        .max_w(px(PAGE_MAX_WIDTH))
+                        .mx_auto()
+                        .px(px(40.))
+                        .pt(px(TITLEBAR_HEIGHT + 16.))
+                        .pb(px(48.))
+                        .children(error.map(|e| {
+                            div()
+                                .mb(px(16.))
+                                .px_3()
+                                .py_2()
+                                .rounded(px(12.))
+                                .border_1()
+                                .border_color(theme.danger.opacity(0.2))
+                                .bg(theme.danger.opacity(0.06))
+                                .text_color(theme.danger)
+                                .child(e)
+                        }))
+                        .child(body),
+                ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_chord;
+
+    #[test]
+    fn chords_read_as_zeron_shows_them() {
+        assert_eq!(display_chord("cmd-shift-t"), "Shift+Cmd+T");
+        assert_eq!(display_chord("ctrl-alt-space"), "Ctrl+Opt+Space");
+        assert_eq!(display_chord("cmd-,"), "Cmd+,");
     }
 }

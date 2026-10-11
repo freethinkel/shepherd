@@ -10,26 +10,27 @@
 //!   non-default cells, one `ShapedLine` per row (same font whatever the
 //!   colors — paint never changes layout), and the cursor block.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use gpui::{
-    App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, PaintQuad, Pixels, ShapedLine,
-    SharedString, Style, TextRun, Window, fill, font, outline, point, px, relative, size,
+    App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, PaintQuad, Pixels, RenderImage,
+    ShapedLine, SharedString, Style, TextRun, Window, fill, font, outline, point, px, relative,
+    size,
 };
 
 use crate::theme::{Appearance, Theme, rgb_to_hsl};
 
+use super::sprite;
 use super::emulator::{CellColor, CellSnapshot, Side};
 use super::pane::{GridGeometry, PaneTerminal};
 
 /// Default terminal font metrics; the rendered values come from the theme.
-pub const TERM_FONT_SIZE: f32 = 13.0;
 pub const TERM_LINE_HEIGHT: f32 = 18.0;
-/// Line height as a multiple of the font size, so a user-chosen size keeps the
-/// default's row rhythm.
-const TERM_LINE_HEIGHT_RATIO: f32 = TERM_LINE_HEIGHT / TERM_FONT_SIZE;
 // ponytail: a fixed list of common Nerd Font families; a setting when someone uses another.
 const NERD_FALLBACKS: [&str; 3] = ["Symbols Nerd Font Mono", "IoskeleyMonoNL Nerd Font Mono", "FiraCode Nerd Font Mono"];
-/// Inner padding of the grid area.
-pub const TERM_PADDING: f32 = 12.0;
+/// Inner padding of the grid area: Ghostty's default `window-padding-x/y`.
+pub const TERM_PADDING: f32 = 2.0;
 
 // ---------------------------------------------------------------------------
 // Palette
@@ -210,12 +211,19 @@ pub struct TerminalPrepaint {
     /// Per row, the shaped segments and the grid COLUMN each one starts at.
     /// Not one line per row: see [`shape_row`].
     lines: Vec<Vec<(usize, ShapedLine)>>,
+    /// Per row, the cells drawn by [`sprite`] instead of the font.
+    glyphs: Vec<Vec<CustomGlyph>>,
+    /// Light line width for sprite glyphs, in logical pixels.
+    stroke: f32,
     /// Grid cell advance, so paint can place segments by column.
     cell_w: Pixels,
     /// Grid row height, so paint places rows on the same baselines prepaint
     /// measured the grid with.
     line_h: Pixels,
     cursor: Option<PaintQuad>,
+    /// The focused block cursor is opaque, so it goes under the text (whose
+    /// cell flips to the background color); the unfocused outline goes over.
+    cursor_under_text: bool,
 }
 
 impl gpui::IntoElement for TerminalElement {
@@ -285,7 +293,7 @@ impl gpui::Element for TerminalElement {
             .text_system()
             .em_advance(font_id, font_size)
             .unwrap_or(px(theme.terminal_font_size * 0.6));
-        let line_h = px(theme.terminal_font_size * TERM_LINE_HEIGHT_RATIO);
+        let line_h = px((theme.terminal_font_size * theme.terminal_line_height).round());
 
         let inner_w = f32::from(bounds.size.width) - 2.0 * TERM_PADDING;
         let inner_h = f32::from(bounds.size.height) - 2.0 * TERM_PADDING;
@@ -317,15 +325,22 @@ impl gpui::Element for TerminalElement {
                 bg_quads: Vec::new(),
                 sel_quads: Vec::new(),
                 lines: Vec::new(),
+                glyphs: Vec::new(),
+                stroke: 1.0,
                 cell_w,
                 line_h,
                 cursor: None,
+                cursor_under_text: false,
             };
         };
 
         let mut bg_quads = Vec::new();
         let mut sel_quads = Vec::new();
         let mut lines = Vec::with_capacity(snapshot.lines.len());
+        let mut glyphs = Vec::with_capacity(snapshot.lines.len());
+        // Ghostty's block cursor: the cell's text takes the background color.
+        let block_cursor = snapshot.cursor.as_ref().filter(|_| self.focused).map(|c| (c.row, c.col));
+        let cursor_text = Hsla { a: 1.0, ..theme.terminal.background };
 
         for (row_ix, row) in snapshot.lines.iter().enumerate() {
             let y = origin.y + line_h * row_ix as f32;
@@ -376,7 +391,10 @@ impl gpui::Element for TerminalElement {
                     _ => {}
                 }
             }
-            lines.push(shape_row(row, &theme, &mono, font_size, window));
+            let mut row_glyphs = Vec::new();
+            let cursor_col = block_cursor.filter(|&(r, _)| r == row_ix).map(|(_, c)| (c, cursor_text));
+            lines.push(shape_row(row, &theme, &mono, font_size, cursor_col, &mut row_glyphs, window));
+            glyphs.push(row_glyphs);
         }
 
         let cursor = snapshot.cursor.map(|c| {
@@ -388,7 +406,6 @@ impl gpui::Element for TerminalElement {
                 size(cell_w, line_h),
             );
             if self.focused {
-                // Translucent block: the glyph underneath stays legible.
                 fill(cursor_bounds, theme.cursor)
             } else {
                 outline(cursor_bounds, theme.cursor, gpui::BorderStyle::Solid)
@@ -399,9 +416,15 @@ impl gpui::Element for TerminalElement {
             bg_quads,
             sel_quads,
             lines,
+            glyphs,
+            // The font's underline thickness is ~0.05em; Ghostty strokes box
+            // lines with it. ponytail: gpui doesn't expose the real
+            // metric, so approximate it.
+            stroke: theme.terminal_font_size * 0.05,
             cell_w,
             line_h,
             cursor,
+            cursor_under_text: self.focused,
         }
     }
 
@@ -427,6 +450,11 @@ impl gpui::Element for TerminalElement {
             for quad in prepaint.sel_quads.drain(..) {
                 window.paint_quad(quad);
             }
+            if prepaint.cursor_under_text {
+                if let Some(cursor) = prepaint.cursor.take() {
+                    window.paint_quad(cursor);
+                }
+            }
             let cell_w = prepaint.cell_w;
             for (ix, segments) in prepaint.lines.iter().enumerate() {
                 let y = origin.y + line_h * ix as f32;
@@ -439,6 +467,17 @@ impl gpui::Element for TerminalElement {
                         window,
                         cx,
                     );
+                }
+            }
+            for (ix, row) in prepaint.glyphs.iter().enumerate() {
+                let y = origin.y + line_h * ix as f32;
+                for glyph in row {
+                    let left = origin.x + cell_w * glyph.col as f32;
+                    let bounds = Bounds::from_corners(
+                        point(left, y),
+                        point(left + cell_w * glyph.cells as f32, y + line_h),
+                    );
+                    paint_custom_glyph(glyph, bounds, prepaint.stroke, window, cx);
                 }
             }
             if let Some(cursor) = prepaint.cursor.take() {
@@ -470,6 +509,8 @@ fn shape_row(
     theme: &Theme,
     mono: &gpui::Font,
     font_size: Pixels,
+    cursor: Option<(usize, Hsla)>,
+    glyphs: &mut Vec<CustomGlyph>,
     window: &Window,
 ) -> Vec<(usize, ShapedLine)> {
     fn flush(
@@ -503,8 +544,28 @@ fn shape_row(
             continue;
         }
         let ch = if cell.hidden { ' ' } else { cell.ch };
+        let (fg, _) = cell.display_colors();
+        let mut color = resolve_color(fg, theme);
+        if cell.dim {
+            color.a *= 0.6;
+        }
+        if let Some((_, cursor_text)) = cursor.filter(|&(c, _)| c == col) {
+            color = cursor_text;
+        }
         // Anything that can leave the mono font gets its own pinned segment.
         let pinned = !ch.is_ascii() || cell.wide;
+        if pinned && sprite::has_char(ch) {
+            // Drawn to the cell by paint, not shaped. Flushing keeps the next
+            // ASCII run from sliding into this column.
+            flush(&mut segments, &mut text, &mut runs, seg_col, font_size, window);
+            glyphs.push(CustomGlyph {
+                col,
+                ch,
+                cells: if cell.wide { 2 } else { 1 },
+                color,
+            });
+            continue;
+        }
         if pinned {
             flush(
                 &mut segments,
@@ -517,11 +578,6 @@ fn shape_row(
         }
         if text.is_empty() {
             seg_col = col;
-        }
-        let (fg, _) = cell.display_colors();
-        let mut color = resolve_color(fg, theme);
-        if cell.dim {
-            color.a *= 0.6;
         }
         let mut cell_font = mono.clone();
         cell_font.weight = if cell.bold {
@@ -576,6 +632,79 @@ fn shape_row(
         window,
     );
     segments
+}
+
+pub struct CustomGlyph {
+    col: usize,
+    ch: char,
+    cells: usize,
+    color: Hsla,
+}
+
+/// Drawn sprite glyphs, keyed by char, device-pixel cell size, line
+/// thickness and color (images are full color, so the color is baked in).
+#[derive(Default)]
+struct CustomGlyphCache(HashMap<(char, u32, u32, u32, [u8; 4]), (Arc<RenderImage>, u32, u32)>);
+
+impl gpui::Global for CustomGlyphCache {}
+
+/// Paint one sprite glyph drawn at the exact device-pixel size of its cell,
+/// so neighbouring cells tile without seams or resampling. The sprite is
+/// padded on every side (a glyph may spill past its cell), so it is placed
+/// up-left of the cell by the padding.
+fn paint_custom_glyph(
+    glyph: &CustomGlyph,
+    bounds: Bounds<Pixels>,
+    stroke: f32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let scale = window.scale_factor();
+    let device = |v: Pixels| (f32::from(v) * scale).round();
+    let (left, top) = (device(bounds.left()), device(bounds.top()));
+    let w = (device(bounds.right()) - left) as u32;
+    let h = (device(bounds.bottom()) - top) as u32;
+    let thickness = (stroke * scale).ceil().max(1.0) as u32;
+    let rgba = gpui::Rgba::from(glyph.color);
+    let color = [rgba.r, rgba.g, rgba.b, rgba.a].map(|c| (c * 255.0).round() as u8);
+    let key = (glyph.ch, w, h, thickness, color);
+
+    let cache = cx.default_global::<CustomGlyphCache>();
+    let (image, pad_x, pad_y) = match cache.0.get(&key) {
+        Some(hit) => hit.clone(),
+        None => {
+            let metrics = sprite::Metrics {
+                cell_width: w / glyph.cells as u32,
+                cell_height: h,
+                box_thickness: thickness,
+            };
+            let Some(drawn) = sprite::render(glyph.ch, w, h, &metrics) else { return };
+            // Coverage → straight-alpha BGRA in the glyph color.
+            let [r, g, b, a] = color;
+            let bgra: Vec<u8> =
+                drawn.alpha.iter().flat_map(|&cov| [b, g, r, (cov as u16 * a as u16 / 255) as u8]).collect();
+            let Some(buffer) = image::RgbaImage::from_raw(drawn.width, drawn.height, bgra) else { return };
+            let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+            // ponytail: drop everything past a cap (old sizes after a zoom,
+            // truecolor gradients); an LRU if that ever thrashes. Images live
+            // in this window's atlas, so other windows may keep stale copies.
+            if cache.0.len() >= 4096 {
+                for (_, (old, _, _)) in cache.0.drain() {
+                    let _ = window.drop_image(old);
+                }
+            }
+            let hit = (image, drawn.padding_x, drawn.padding_y);
+            cache.0.insert(key, hit.clone());
+            hit
+        }
+    };
+    let size = image.size(0);
+    let logical = |v: f32| px(v / scale);
+    let bounds = Bounds::new(
+        point(logical(left - pad_x as f32), logical(top - pad_y as f32)),
+        gpui::size(logical(size.width.0 as f32), logical(size.height.0 as f32)),
+    );
+    let _ = window.paint_image(bounds, Default::default(), image, 0, false);
 }
 
 #[cfg(test)]

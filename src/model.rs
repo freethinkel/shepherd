@@ -1,6 +1,18 @@
 //! herdr's `session.snapshot`, parsed. Events only invalidate it: the app refetches
 //! (herdr's docs: events have no shared sequence with snapshots, so never replay them onto one).
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+/// How the sidebar orders its agents (its `…` menu); saved in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentSort {
+    /// Under a heading per workspace, in the sidebar's workspace order.
+    Grouped,
+    /// Blocked, working, done, idle: what needs you first. Also what an unknown (old or future) value reads as.
+    #[default]
+    #[serde(other)]
+    Status,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -39,6 +51,8 @@ pub struct Workspace {
 pub struct Worktree {
     pub repo_key: String,
     pub is_linked_worktree: bool,
+    #[serde(default)]
+    pub checkout_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -148,9 +162,8 @@ impl Snapshot {
     }
 
     pub fn tabs_of(&self, workspace_id: &str) -> Vec<&Tab> {
-        let mut tabs: Vec<_> = self.tabs.iter().filter(|t| t.workspace_id == workspace_id).collect();
-        tabs.sort_by_key(|t| t.number);
-        tabs
+        // herdr lists tabs in their order; `number` is the tab's id and stays put when `tab.move` reorders them
+        self.tabs.iter().filter(|t| t.workspace_id == workspace_id).collect()
     }
 
     /// Workspaces in sidebar order: linked worktrees right under their repo's checkout workspace, with
@@ -188,6 +201,19 @@ impl Snapshot {
         };
         let mut agents: Vec<_> = self.panes.iter().filter(|p| p.agent.is_some()).collect();
         agents.sort_by_key(|p| rank(p.agent_status));
+        agents
+    }
+
+    /// The agents in `sort` order, ties in status order.
+    pub fn agents_by(&self, sort: AgentSort) -> Vec<&Pane> {
+        let mut agents = self.agents();
+        match sort {
+            AgentSort::Status => {}
+            AgentSort::Grouped => {
+                let order: Vec<_> = self.workspace_tree().into_iter().map(|(w, _)| w.workspace_id.as_str()).collect();
+                agents.sort_by_key(|p| order.iter().position(|id| *id == p.workspace_id).unwrap_or(usize::MAX));
+            }
+        }
         agents
     }
 

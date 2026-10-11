@@ -5,7 +5,7 @@ Geist and Geist Mono (assets/fonts/*.ttf)
 
 Zeron
   The theme families (the zeron-theme crate), the theme tokens in src/theme.rs (via Collie) the terminal code
-  in src/terminal/, the sidebar icons in assets/icons/ and the sidebar fold motion are from or adapted from Zeron
+  in src/terminal/, the sidebar and settings icons in assets/icons/, the settings page layout and the sidebar fold motion are from or adapted from Zeron
   (https://github.com/zeronsh/zeron), MIT License, Copyright (c) 2026 Wing:
 
   MIT License
@@ -29,3 +29,37 @@ Zeron
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
+
+Ghostty
+  The sprite glyphs in src/terminal/sprite/ (box drawing, blocks, braille, branch, geometric shapes, Powerline
+  and Legacy Computing symbols) and their reference renders in src/terminal/sprite/testdata/ are ported from
+  Ghostty's src/font/sprite/ (https://github.com/ghostty-org/ghostty), MIT License:
+
+  MIT License
+
+  Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+herdr
+  src/herdr/wire.rs reproduces part of herdr's client socket protocol (src/protocol/wire.rs at v0.9.3,
+  https://github.com/herdrdev/herdr), Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+  Changes: only the messages a terminal session uses; the rest are index placeholders.
+  generated_branch and branch_path_slug in src/commands.rs follow herdr's generated_branch_slug and
+  branch_to_path_slug (src/worktree.rs at v0.9.3).

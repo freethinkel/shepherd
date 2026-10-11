@@ -16,20 +16,38 @@ pub fn register_fonts(cx: &App) {
     }
 }
 
-/// Zeron's sidebar icons, served at `icons/<name>.svg`.
+/// Zeron's sidebar and settings icons, served at `icons/<name>.svg`.
 pub struct Assets;
+
+macro_rules! icons {
+    ($name:expr, $($icon:literal),+ $(,)?) => {
+        match $name {
+            $($icon => Some(Cow::Borrowed(include_bytes!(concat!("../assets/icons/", $icon, ".svg")).as_slice())),)+
+            _ => None,
+        }
+    };
+}
 
 impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        Ok(match path {
-            "icons/alt-arrow-right.svg" => Some(Cow::Borrowed(include_bytes!("../assets/icons/alt-arrow-right.svg"))),
-            "icons/folder.svg" => Some(Cow::Borrowed(include_bytes!("../assets/icons/folder.svg"))),
-            "icons/git-branch.svg" => Some(Cow::Borrowed(include_bytes!("../assets/icons/git-branch.svg"))),
-            "icons/sidebar-minimalistic-left.svg" => {
-                Some(Cow::Borrowed(include_bytes!("../assets/icons/sidebar-minimalistic-left.svg")))
-            }
-            _ => None,
-        })
+        let Some(name) = path.strip_prefix("icons/").and_then(|p| p.strip_suffix(".svg")) else { return Ok(None) };
+        Ok(icons!(
+            name,
+            "arrow-left",
+            "alt-arrow-right",
+            "check",
+            "checklist",
+            "folder",
+            "git-branch",
+            "keyboard",
+            "more-horizontal",
+            "remote-server",
+            "settings",
+            "sidebar-minimalistic-left",
+            "spinner",
+            "terminal",
+            "tuning",
+        ))
     }
 
     fn list(&self, _path: &str) -> gpui::Result<Vec<gpui::SharedString>> {

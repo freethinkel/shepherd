@@ -1,4 +1,4 @@
-use shepherd::model::{AgentStatus, Frac, Snapshot, attachable, split_path};
+use shepherd::model::{AgentSort, AgentStatus, Frac, Snapshot, attachable, split_path};
 
 fn fixture() -> Snapshot {
     let value: serde_json::Value = serde_json::from_str(include_str!("fixtures/snapshot.json")).unwrap();
@@ -78,6 +78,14 @@ fn tabs_of_a_workspace_in_order() {
     let labels: Vec<_> = s.tabs_of("w1").iter().map(|t| t.label.as_str()).collect();
     assert_eq!(labels, ["main", "logs"]);
     assert!(s.tabs_of("w7").is_empty());
+}
+
+#[test]
+fn tabs_keep_herdrs_order_not_their_numbers() {
+    let mut s = fixture();
+    s.tabs.reverse(); // as after a tab.move: the list reorders, each tab keeps its number
+    let labels: Vec<_> = s.tabs_of("w1").iter().map(|t| t.label.as_str()).collect();
+    assert_eq!(labels, ["logs", "main"]);
 }
 
 #[test]
@@ -204,6 +212,20 @@ fn agents_are_panes_with_an_agent_most_urgent_first() {
     s.panes[0].agent = None;
     let order: Vec<_> = s.agents().iter().map(|p| p.pane_id.as_str()).collect();
     assert_eq!(order, ["w1:p2", "w1:p3"]);
+}
+
+#[test]
+fn grouped_agents_follow_workspace_order_ties_in_status_order() {
+    let mut s = fixture();
+    for p in &mut s.panes {
+        p.agent = Some("claude".into());
+    }
+    s.panes[1].agent_status = AgentStatus::Blocked; // status order: p2, p1, p3
+    let ids = |agents: Vec<&shepherd::model::Pane>| agents.iter().map(|p| p.pane_id.clone()).collect::<Vec<_>>();
+    s.workspaces = vec![ws("w2", 1, None), ws("w1", 2, None)];
+    s.panes[2].workspace_id = "w2".into();
+    assert_eq!(ids(s.agents_by(AgentSort::Grouped)), ["w1:p3", "w1:p2", "w1:p1"]);
+    assert_eq!(ids(s.agents_by(AgentSort::Status)), ["w1:p2", "w1:p1", "w1:p3"]);
 }
 
 fn ws(id: &str, number: u32, repo: Option<(&str, bool)>) -> shepherd::model::Workspace {

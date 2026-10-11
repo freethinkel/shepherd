@@ -26,8 +26,15 @@ pub enum Command {
     NewTab { workspace_id: String },
     CloseTab { tab_id: String },
     RenameTab { tab_id: String, label: String },
+    /// `insert_index` is a slot in the workspace's tab list before the move: 0 puts it first, the tab count last.
+    MoveTab { tab_id: String, insert_index: usize },
     NewWorkspace { cwd: Option<String> },
     CloseWorkspace { workspace_id: String },
+    /// A linked worktree of the workspace's repo, opened as its own workspace; without a branch herdr names one.
+    CreateWorktree { workspace_id: String, branch: Option<String> },
+    /// Deletes a linked worktree's checkout and closes its workspace; the branch stays. Without `force` herdr
+    /// refuses a checkout with changes (`dirty_worktree_requires_force`).
+    RemoveWorktree { workspace_id: String, force: bool },
     RenameWorkspace { workspace_id: String, label: String },
     Split { pane_id: String, down: bool },
     ClosePane { pane_id: String },
@@ -44,6 +51,9 @@ impl Command {
             Command::NewTab { workspace_id } => ("tab.create", json!({"workspace_id": workspace_id, "focus": false})),
             Command::CloseTab { tab_id } => ("tab.close", json!({"tab_id": tab_id})),
             Command::RenameTab { tab_id, label } => ("tab.rename", json!({"tab_id": tab_id, "label": label})),
+            Command::MoveTab { tab_id, insert_index } => {
+                ("tab.move", json!({"tab_id": tab_id, "insert_index": insert_index}))
+            }
             Command::NewWorkspace { cwd } => {
                 let mut params = json!({"focus": false});
                 if let Some(cwd) = cwd {
@@ -53,6 +63,16 @@ impl Command {
             }
             Command::CloseWorkspace { workspace_id } => {
                 ("workspace.close", json!({"workspace_id": workspace_id, "close_group": false}))
+            }
+            Command::CreateWorktree { workspace_id, branch } => {
+                let mut params = json!({"workspace_id": workspace_id, "focus": false});
+                if let Some(branch) = branch {
+                    params["branch"] = json!(branch);
+                }
+                ("worktree.create", params)
+            }
+            Command::RemoveWorktree { workspace_id, force } => {
+                ("worktree.remove", json!({"workspace_id": workspace_id, "force": force}))
             }
             Command::RenameWorkspace { workspace_id, label } => {
                 ("workspace.rename", json!({"workspace_id": workspace_id, "label": label}))
@@ -78,9 +98,43 @@ pub fn created_tab_id(result: &Value) -> Option<String> {
     result["tab"]["tab_id"].as_str().map(str::to_string)
 }
 
+/// The branch herdr picks for a worktree created without one, from herdr's `generated_branch_slug`
+/// (src/worktree.rs @ v0.9.3, Apache-2.0); herdr seeds it with the time in microseconds.
+pub fn generated_branch(seed: u64) -> String {
+    const ADJECTIVES: [&str; 8] = ["brave", "calm", "clear", "green", "lucky", "quiet", "rapid", "silver"];
+    const NOUNS: [&str; 8] = ["river", "cloud", "field", "forest", "harbor", "meadow", "stone", "valley"];
+    let adjective = ADJECTIVES[seed as usize % ADJECTIVES.len()];
+    let noun = NOUNS[(seed / ADJECTIVES.len() as u64) as usize % NOUNS.len()];
+    format!("worktree/{adjective}-{noun}-{:04x}", seed & 0xffff)
+}
+
+/// The directory herdr checks a branch out into, from herdr's `branch_to_path_slug`: lowercase ASCII
+/// alphanumerics, every other run collapsed to one `-`.
+pub fn branch_path_slug(branch: &str) -> String {
+    let mut slug = String::new();
+    for ch in branch.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() { "worktree".into() } else { slug.into() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_branch_matches_herdr() {
+        assert_eq!(generated_branch(0), "worktree/brave-river-0000");
+        assert_eq!(generated_branch(9), "worktree/calm-cloud-0009");
+        assert_eq!(branch_path_slug("worktree/brave-river"), "worktree-brave-river");
+        assert_eq!(branch_path_slug("issue/137 Worktree Spaces"), "issue-137-worktree-spaces");
+        assert_eq!(branch_path_slug("///"), "worktree");
+    }
     use serde_json::json;
 
     fn req(c: Command) -> (&'static str, serde_json::Value) {
@@ -95,6 +149,10 @@ mod tests {
             req(Command::RenameTab { tab_id: "w1:t2".into(), label: "logs".into() }),
             ("tab.rename", json!({"tab_id": "w1:t2", "label": "logs"}))
         );
+        assert_eq!(
+            req(Command::MoveTab { tab_id: "w1:t2".into(), insert_index: 0 }),
+            ("tab.move", json!({"tab_id": "w1:t2", "insert_index": 0}))
+        );
     }
 
     #[test]
@@ -107,6 +165,18 @@ mod tests {
         assert_eq!(
             req(Command::CloseWorkspace { workspace_id: "w1".into() }),
             ("workspace.close", json!({"workspace_id": "w1", "close_group": false}))
+        );
+        assert_eq!(
+            req(Command::RemoveWorktree { workspace_id: "w2".into(), force: false }),
+            ("worktree.remove", json!({"workspace_id": "w2", "force": false}))
+        );
+        assert_eq!(
+            req(Command::CreateWorktree { workspace_id: "w1".into(), branch: None }),
+            ("worktree.create", json!({"workspace_id": "w1", "focus": false}))
+        );
+        assert_eq!(
+            req(Command::CreateWorktree { workspace_id: "w1".into(), branch: Some("fix/login".into()) }),
+            ("worktree.create", json!({"workspace_id": "w1", "branch": "fix/login", "focus": false}))
         );
         assert_eq!(
             req(Command::RenameWorkspace { workspace_id: "w1".into(), label: "api".into() }),
