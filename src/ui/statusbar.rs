@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 pub const HEIGHT: f32 = 24.0;
 /// How old a directory's git state may get before a render asks git again.
 const GIT_TTL: Duration = Duration::from_secs(5);
+/// Claude's usage endpoint is polled as often as the dotfiles' statusbar does.
+const USAGE_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Git {
@@ -83,51 +85,94 @@ fn status_label(status: AgentStatus) -> &'static str {
     }
 }
 
-#[derive(Default)]
-struct GitCache(HashMap<String, GitEntry>);
+/// Background lookups by key, each asked again once older than its TTL.
+struct Cache<T>(HashMap<String, Entry<T>>);
 
-#[derive(Default)]
-struct GitEntry {
-    git: Option<Git>,
+struct Entry<T> {
+    value: Option<T>,
     fetched: Option<Instant>,
     busy: bool,
 }
 
-impl Global for GitCache {}
+impl<T> Default for Cache<T> {
+    fn default() -> Self {
+        Cache(HashMap::new())
+    }
+}
 
-// ponytail: one entry per directory ever shown, never evicted; prune if people cd through thousands of dirs.
-/// The cached git state of `dir`; asks git in the background when it is missing or stale.
-fn git_of(dir: &str, cx: &mut App) -> Option<Git> {
-    let entry = cx.default_global::<GitCache>().0.entry(dir.to_string()).or_default();
-    let git = entry.git.clone();
-    if entry.busy || entry.fetched.is_some_and(|t| t.elapsed() < GIT_TTL) {
-        return git;
+impl<T: 'static> Global for Cache<T> {}
+
+// ponytail: one entry per key ever shown, never evicted; prune if people cd through thousands of dirs.
+/// The cached `fetch(key)`; runs it on a background thread when missing or older than `ttl`. A failed fetch
+/// keeps the last value.
+fn cached<T: Clone + PartialEq + Send + 'static>(key: &str, ttl: Duration, fetch: fn(&str) -> Option<T>, cx: &mut App) -> Option<T> {
+    let entry = cx
+        .default_global::<Cache<T>>()
+        .0
+        .entry(key.to_string())
+        .or_insert(Entry { value: None, fetched: None, busy: false });
+    let value = entry.value.clone();
+    if entry.busy || entry.fetched.is_some_and(|t| t.elapsed() < ttl) {
+        return value;
     }
     entry.busy = true;
-    let dir = dir.to_string();
+    let key = key.to_string();
     cx.spawn(async move |cx| {
-        let path = dir.clone();
-        let fresh = cx
-            .background_spawn(async move {
-                // --no-optional-locks: never take index.lock from under the agents' own git.
-                let out = std::process::Command::new("git")
-                    .args(["--no-optional-locks", "-C", &path, "status", "--porcelain=v2", "--branch"])
-                    .output()
-                    .ok()?;
-                parse_git(&String::from_utf8_lossy(&out.stdout))
-            })
-            .await;
+        let k = key.clone();
+        let fresh = cx.background_spawn(async move { fetch(&k) }).await;
         let _ = cx.update(|cx| {
-            let entry = cx.default_global::<GitCache>().0.entry(dir).or_default();
-            let changed = entry.git != fresh;
-            *entry = GitEntry { git: fresh, fetched: Some(Instant::now()), busy: false };
-            if changed {
+            let Some(entry) = cx.default_global::<Cache<T>>().0.get_mut(&key) else { return };
+            (entry.fetched, entry.busy) = (Some(Instant::now()), false);
+            if fresh.is_some() && entry.value != fresh {
+                entry.value = fresh;
                 cx.refresh_windows();
             }
         });
     })
     .detach();
-    git
+    value
+}
+
+fn read_git(dir: &str) -> Option<Git> {
+    // --no-optional-locks: never take index.lock from under the agents' own git.
+    let out = std::process::Command::new("git")
+        .args(["--no-optional-locks", "-C", dir, "status", "--porcelain=v2", "--branch"])
+        .output()
+        .ok()?;
+    parse_git(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Claude's plan usage, in percent of each window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Usage {
+    pub five_hour: f64,
+    pub week: f64,
+}
+
+/// The body of `api/oauth/usage`.
+pub fn parse_usage(json: &str) -> Option<Usage> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let used = |window: &str| v[window]["utilization"].as_f64();
+    Some(Usage { five_hour: used("five_hour")?, week: used("seven_day")? })
+}
+
+/// The usage endpoint Claude Code itself reads, with the token Claude Code keeps (and refreshes) in the login
+/// keychain, as the dotfiles' statusbar does.
+fn read_usage(_: &str) -> Option<Usage> {
+    let creds = std::process::Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .output()
+        .ok()?;
+    let creds: serde_json::Value = serde_json::from_slice(&creds.stdout).ok()?;
+    let token = creds["claudeAiOauth"]["accessToken"].as_str()?;
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into();
+    let mut response = agent
+        .get("https://api.anthropic.com/api/oauth/usage")
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .call()
+        .ok()?;
+    parse_usage(&response.body_mut().read_to_string().ok()?)
 }
 
 fn label(theme: &Theme, icon: &'static str) -> gpui::Div {
@@ -138,6 +183,12 @@ fn label(theme: &Theme, icon: &'static str) -> gpui::Div {
         .gap(px(6.))
         .px(px(8.))
         .child(gpui::svg().path(icon).size(px(12.)).flex_none().text_color(theme.text_muted.opacity(0.7)))
+}
+
+/// A clickable label: a wash on hover.
+fn link(el: gpui::Stateful<gpui::Div>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let hover = theme.hover;
+    el.h(px(20.)).rounded(px(6.)).cursor_pointer().hover(move |s| s.bg(hover))
 }
 
 fn dot(theme: &Theme, status: AgentStatus) -> gpui::Div {
@@ -159,7 +210,8 @@ pub fn bar(
 ) -> gpui::AnyElement {
     let pane = snapshot.zip(pane_id).and_then(|(s, id)| s.panes.iter().find(|p| p.pane_id == id));
     let dir = pane.and_then(|p| p.foreground_cwd.clone().or_else(|| p.cwd.clone())).filter(|d| !d.is_empty());
-    let git = dir.as_deref().and_then(|d| git_of(d, cx));
+    let git = dir.as_deref().and_then(|d| cached(d, GIT_TTL, read_git, cx));
+    let usage = cached("", USAGE_TTL, read_usage, cx);
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let (working, waiting, done) = snapshot.map(agent_counts).unwrap_or_default();
     let muted = theme.text_muted.opacity(0.7);
@@ -185,7 +237,10 @@ pub fn bar(
                 .when(g.behind > 0, |el| el.child(div().flex_none().child(format!("↓{}", g.behind))))
         }))
         .children(dir.map(|d| {
-            label(theme, "icons/folder.svg").child(div().min_w_0().truncate().child(short_path(&d, home.as_deref())))
+            let short = short_path(&d, home.as_deref());
+            link(label(theme, "icons/folder.svg").id("statusbar-cwd"), theme)
+                .child(div().min_w_0().truncate().child(short))
+                .on_click(move |_, _, cx| cx.open_with_system(Path::new(&d)))
         }))
         .children(pane.map(|p| match &p.agent {
             Some(agent) => label(theme, "icons/bot.svg")
@@ -197,6 +252,17 @@ pub fn bar(
                 .child(div().min_w_0().truncate().child(p.terminal_title_stripped.clone().unwrap_or_default())),
         }))
         .child(div().flex_1())
+        .children(usage.map(|u| {
+            let pct = |window: &str, used: f64| {
+                let color = if used >= 90. { theme.danger } else if used >= 70. { theme.warning } else { muted };
+                div().flex_none().text_color(color).child(format!("{window} {}%", used.round()))
+            };
+            link(label(theme, "icons/claude-mark.svg").id("statusbar-usage"), theme)
+                .flex_shrink_0()
+                .child(pct("5h", u.five_hour))
+                .child(pct("7d", u.week))
+                .on_click(|_, _, cx| cx.open_url("https://claude.ai/settings/usage"))
+        }))
         .when(working + waiting + done > 0, |el| {
             let count = |status, n: usize, what: &str| {
                 (n > 0).then(|| div().flex().items_center().gap(px(5.)).child(dot(theme, status)).child(format!("{n} {what}")))
@@ -236,6 +302,14 @@ mod tests {
         let detached = "# branch.oid 7d9be72aaaa\n# branch.head (detached)\n? new.txt\n";
         assert_eq!(parse_git(detached), Some(Git { branch: "7d9be72".into(), dirty: true, ..Git::default() }));
         assert_eq!(parse_git(""), None);
+    }
+
+    #[test]
+    fn parses_claude_usage() {
+        let body = r#"{"five_hour":{"utilization":42.0,"resets_at":"2026-10-11T15:00:00.000Z"},"seven_day":{"utilization":18,"resets_at":null}}"#;
+        assert_eq!(parse_usage(body), Some(Usage { five_hour: 42.0, week: 18.0 }));
+        assert_eq!(parse_usage(r#"{"five_hour":{"utilization":null},"seven_day":{"utilization":1}}"#), None);
+        assert_eq!(parse_usage(r#"{"error":{"type":"authentication_error"}}"#), None);
     }
 
     #[test]
