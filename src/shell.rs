@@ -264,7 +264,7 @@ impl Shell {
     }
 
     /// cmd-k (commands) or the agents key: opens that panel over the window, or closes it when it is open.
-    fn toggle_command_panel(&mut self, kind: crate::ui::command_panel::Kind, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn toggle_command_panel(&mut self, kind: crate::ui::command_panel::Kind, window: &mut Window, cx: &mut Context<Self>) {
         use crate::ui::command_panel::{Kind, PanelEvent, Run};
         if self.command_panel.as_ref().is_some_and(|p| p.is_open() && p.value.0.read(cx).kind == kind) {
             self.close_command_panel(cx);
