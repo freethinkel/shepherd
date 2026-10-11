@@ -37,6 +37,8 @@ pub(super) struct TabBar {
     entries: Vec<Entry>,
     wash: Option<Wash>,
     drag: Rc<RefCell<Option<(String, gpui::Point<Pixels>)>>>,
+    /// The tab last scrolled into view; the bar follows a newly shown tab once, then leaves the scroll to you.
+    revealed: Option<String>,
 }
 
 /// One tab as drawn.
@@ -167,6 +169,19 @@ fn agent_tint(agent: Option<&str>, theme: &Theme) -> (Hsla, Hsla) {
 fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let l = |x: f32, y: f32| x + (y - x) * t;
     gpui::hsla(l(a.h, b.h), l(a.s, b.s), l(a.l, b.l), l(a.a, b.a))
+}
+
+/// The scroll (px scrolled from the left) that brings the slot `x..x + w` into a `view`-wide bar, with a
+/// fade's width to spare; `None` when it already shows.
+fn reveal(scrolled: f32, view: f32, x: f32, w: f32) -> Option<f32> {
+    const SPARE: f32 = 32.;
+    if x < scrolled {
+        Some((x - SPARE).max(0.))
+    } else if x + w > scrolled + view {
+        Some(x + w - view + SPARE)
+    } else {
+        None
+    }
 }
 
 fn tab_width(label_w: f32) -> f32 {
@@ -394,6 +409,20 @@ impl Shell {
 
         let layout = self.tab_bar.layout(now);
         let wash = self.tab_bar.wash(shown_tab.as_deref(), lifted_id.as_deref(), &layout, now);
+        // A newly shown tab scrolls into view, followed while it grows in (gpui clamps the offset to the content).
+        if let Some(i) = self.tab_bar.entries.iter().position(|e| Some(&e.tab.id) == shown_tab.as_ref() && e.exit.is_none()) {
+            let entry = &self.tab_bar.entries[i];
+            if self.tab_bar.revealed.as_ref() != shown_tab.as_ref() || entry.enter.is_some_and(|s| now.duration_since(s) < ENTER) {
+                let scroll = &self.tab_bar.scroll;
+                let view = f32::from(scroll.bounds().size.width);
+                if view > 0. {
+                    if let Some(to) = reveal(-f32::from(scroll.offset().x), view, layout[i].0, entry.tab.width) {
+                        scroll.set_offset(gpui::point(px(-to), scroll.offset().y));
+                    }
+                    self.tab_bar.revealed = shown_tab.clone();
+                }
+            }
+        }
         if self.tab_bar.entries.iter().any(|e| e.moving(now)) || self.tab_bar.sliding(now) {
             window.request_animation_frame();
         }
@@ -638,6 +667,14 @@ mod tests {
         assert_eq!(got, [("a", Gone), ("b", Gone), ("c", Stay)].map(|(id, p)| (id.to_string(), p)));
         // a reorder is herdr's new order
         assert_eq!(merge(&["a", "b"], &["b", "a"]), [("b", Stay), ("a", Stay)].map(|(id, p)| (id.to_string(), p)));
+    }
+
+    #[test]
+    fn the_shown_tab_scrolls_into_view() {
+        assert_eq!(reveal(0., 300., 100., 100.), None);
+        assert_eq!(reveal(0., 300., 400., 100.), Some(232.)); // off the right: its right edge plus a fade
+        assert_eq!(reveal(500., 300., 100., 100.), Some(68.)); // off the left
+        assert_eq!(reveal(50., 300., 10., 100.), Some(0.));
     }
 
     #[test]
