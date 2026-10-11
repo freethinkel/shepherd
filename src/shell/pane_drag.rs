@@ -202,7 +202,8 @@ impl Shell {
                 .border_color(theme.border)
                 .opacity(0.)
                 .group_hover(group.clone(), |s| s.opacity(1.))
-                .hover(move |s| s.bg(hover))
+                // occlude() unhovers the group under the grip, so its own hover keeps it shown
+                .hover(move |s| s.opacity(1.).bg(hover))
                 .cursor(CursorStyle::OpenHand)
                 .occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

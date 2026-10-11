@@ -1766,18 +1766,28 @@ impl Render for Shell {
             let on_branch = cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.toggle_command_panel(crate::ui::command_panel::Kind::Branches, window, cx)
             });
-            let on_spent = cx.listener(|this, _: &ClickEvent, window, cx| {
-                let at = gpui::point(window.mouse_position().x - px(12.), window.viewport_size().height - px(crate::ui::statusbar::HEIGHT + 4.));
+            // Popups sit on the label's edge, just above the bar.
+            let on_spent = cx.listener(|this, label: &Bounds<Pixels>, window, cx| {
+                let at = gpui::point(label.left(), window.viewport_size().height - px(crate::ui::statusbar::HEIGHT + 4.));
                 this.spent_menu = Some(crate::ui::Popup::new(at));
                 cx.notify();
             });
-            let on_usage = cx.listener(|this, _: &ClickEvent, window, cx| {
+            let on_usage = cx.listener(|this, label: &Bounds<Pixels>, window, cx| {
                 // anchored at its right edge: the limits sit at the bar's right end
-                let at = gpui::point(window.mouse_position().x + px(12.), window.viewport_size().height - px(crate::ui::statusbar::HEIGHT + 4.));
+                let at = gpui::point(label.right(), window.viewport_size().height - px(crate::ui::statusbar::HEIGHT + 4.));
                 this.usage_menu = Some(crate::ui::Popup::new(at));
                 cx.notify();
             });
-            crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, on_branch, on_spent, on_usage, cx)
+            use crate::ui::statusbar::Item;
+            let branches = self.command_panel.as_ref().is_some_and(|p| p.is_open() && p.value.0.read(cx).kind == crate::ui::command_panel::Kind::Branches);
+            let open = if branches {
+                Some(Item::Branch)
+            } else if self.spent_menu.as_ref().is_some_and(|m| m.is_open()) {
+                Some(Item::Spent)
+            } else {
+                self.usage_menu.as_ref().is_some_and(|m| m.is_open()).then_some(Item::Usage)
+            };
+            crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, open, on_branch, on_spent, on_usage, cx)
         });
         let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
         let on_page = settings_page.is_some();

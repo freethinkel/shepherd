@@ -488,21 +488,42 @@ fn donut(used: f64, track: gpui::Hsla, color: gpui::Hsla) -> impl IntoElement {
     .flex_none()
 }
 
-/// A clickable label: a wash on hover.
-fn link(el: gpui::Stateful<gpui::Div>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+/// A clickable label: a wash on hover, and kept while its popup is open.
+fn link(el: gpui::Stateful<gpui::Div>, theme: &Theme, open: bool) -> gpui::Stateful<gpui::Div> {
     let hover = theme.hover;
-    el.h(px(20.)).rounded(px(6.)).cursor_pointer().hover(move |s| s.bg(hover))
+    el.h(px(20.)).rounded(px(6.)).cursor_pointer().when(open, |el| el.bg(hover)).hover(move |s| s.bg(hover))
+}
+
+/// Runs `on_click` with the label's bounds from the last paint, so a popup can line up with its edge.
+fn on_click_at(
+    el: gpui::Stateful<gpui::Div>,
+    on_click: impl Fn(&gpui::Bounds<gpui::Pixels>, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default()));
+    let painted = bounds.clone();
+    el.relative()
+        .child(gpui::canvas(move |b, _, _| painted.set(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+        .on_click(move |_, window, cx| on_click(&bounds.get(), window, cx))
+}
+
+/// The bar's labels that open a popup.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Item {
+    Branch,
+    Spent,
+    Usage,
 }
 
 /// The bar for the pane `pane_id` of `snapshot`. `on_branch`, `on_spent` and `on_usage` run on a click on
-/// the branch, the spend and the limits.
+/// the branch, the spend and the limits (the last two with the label's bounds); `open` is the one whose popup is up.
 pub fn bar(
     snapshot: Option<&Snapshot>,
     pane_id: Option<&str>,
     theme: &Theme,
+    open: Option<Item>,
     on_branch: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_spent: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_usage: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_spent: impl Fn(&gpui::Bounds<gpui::Pixels>, &mut Window, &mut App) + 'static,
+    on_usage: impl Fn(&gpui::Bounds<gpui::Pixels>, &mut Window, &mut App) + 'static,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let pane = snapshot.zip(pane_id).and_then(|(s, id)| s.panes.iter().find(|p| p.pane_id == id));
@@ -524,7 +545,7 @@ pub fn bar(
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(muted)
         .children(git.map(|g| {
-            link(label(theme, "icons/git-branch.svg").id("statusbar-branch"), theme)
+            link(label(theme, "icons/git-branch.svg").id("statusbar-branch"), theme, open == Some(Item::Branch))
                 .flex_shrink_0()
                 .max_w(px(220.))
                 .child(div().min_w_0().truncate().child(g.branch))
@@ -535,23 +556,21 @@ pub fn bar(
         }))
         .children(dir.map(|d| {
             let short = short_path(&d, home.as_deref());
-            link(label(theme, "icons/folder.svg").id("statusbar-cwd"), theme)
+            link(label(theme, "icons/folder.svg").id("statusbar-cwd"), theme, false)
                 .child(div().min_w_0().truncate().child(short))
                 .on_click(move |_, _, cx| cx.open_with_system(Path::new(&d)))
         }))
         .children(pane.and_then(|p| spent_of(p, cx)).map(|s| {
-            link(div().id("statusbar-spent").flex_none().flex().items_center().px(px(6.)), theme)
+            on_click_at(link(div().id("statusbar-spent").flex_none().flex().items_center().px(px(6.)), theme, open == Some(Item::Spent)), on_spent)
                 .child(format!("{} tok", short_count(s.total())))
-                .on_click(on_spent)
         }))
         .child(div().flex_1())
         .children(usage.map(|u| {
             // the dotfiles' statusbar: the ring fills with the 5-hour window, colored by the worse of the two
             let color = usage_color(u.five_hour.max(u.week), theme);
-            link(div().id("statusbar-usage").flex_none().flex().items_center().gap(px(6.)).px(px(8.)), theme)
+            on_click_at(link(div().id("statusbar-usage").flex_none().flex().items_center().gap(px(6.)).px(px(8.)), theme, open == Some(Item::Usage)), on_usage)
                 .child(donut(u.five_hour, theme.text.opacity(0.2), color))
                 .child(format!("{}%", u.five_hour.round()))
-                .on_click(on_usage)
         }))
         .into_any_element()
 }
