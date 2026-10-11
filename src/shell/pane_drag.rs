@@ -8,6 +8,7 @@ use gpui::{
     Context, CursorStyle, Div, DragMoveEvent, Hsla, IntoElement, MouseButton, ParentElement, Render, SharedString,
     Stateful, Styled, Transformation, Window, div, prelude::*, px, radians, relative,
 };
+use std::time::{Duration, Instant};
 
 /// A pane being dragged, drawn under the pointer as a pill with its name.
 #[derive(Clone)]
@@ -101,10 +102,54 @@ pub(super) fn plan(source: &str, target: &str, tab_id: &str, zone: Zone) -> Vec<
     plan
 }
 
-/// A pane drag in progress: where it would land now.
+/// A pane drag in progress: where it would land now, and the placeholder's tween towards it.
 #[derive(Default)]
 pub(super) struct PaneDrop {
     target: Option<(String, Zone)>,
+    glide: Option<Glide>,
+}
+
+/// The placeholder's move between zones, and its fade in and out.
+const GLIDE: Duration = Duration::from_millis(140);
+
+#[derive(Clone, Copy)]
+struct Glide {
+    from: Frac,
+    from_alpha: f32,
+    to: Frac,
+    to_alpha: f32,
+    started: Instant,
+}
+
+impl Glide {
+    fn starting(from: (Frac, f32), to: Frac, to_alpha: f32) -> Self {
+        Glide { from: from.0, from_alpha: from.1, to, to_alpha, started: Instant::now() }
+    }
+
+    /// The placeholder's frame and opacity this frame.
+    fn now(&self) -> (Frac, f32) {
+        let t = super::ease_out(self.started.elapsed().as_secs_f32() / GLIDE.as_secs_f32());
+        let mix = |a: f32, b: f32| a + (b - a) * t;
+        let (a, b) = (self.from, self.to);
+        (Frac { x: mix(a.x, b.x), y: mix(a.y, b.y), w: mix(a.w, b.w), h: mix(a.h, b.h) }, mix(self.from_alpha, self.to_alpha))
+    }
+
+    /// Retargets the tween at `to` (`None`: fade out where it is), from wherever it is now.
+    fn retarget(glide: Option<Glide>, to: Option<Frac>) -> Option<Glide> {
+        let now = glide.map(|g| g.now()).filter(|(_, alpha)| *alpha > 0.);
+        match (to, glide) {
+            (Some(to), Some(g)) if g.to == to && g.to_alpha == 1. => glide,
+            // from nothing it grows in from a slightly smaller frame
+            (Some(to), _) => Some(Glide::starting(now.unwrap_or((inset(to, 0.04), 0.)), to, 1.)),
+            (None, Some(g)) if g.to_alpha > 0. => now.map(|(f, a)| Glide::starting((f, a), f, 0.)),
+            (None, _) => glide,
+        }
+    }
+}
+
+/// `f` shrunk by `by` of its size on each side.
+fn inset(f: Frac, by: f32) -> Frac {
+    Frac { x: f.x + f.w * by, y: f.y + f.h * by, w: f.w * (1. - 2. * by), h: f.h * (1. - 2. * by) }
 }
 
 impl Shell {
@@ -171,16 +216,24 @@ impl Shell {
         frames: &[PaneFrame],
         tab_id: &str,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
         if !cx.has_active_drag() {
             self.pane_drop = None;
         }
-        let drop = self.pane_drop.as_ref()?;
-        let landing = drop
+        let drop = self.pane_drop.as_mut()?;
+        let to = drop
             .target
             .as_ref()
             .and_then(|(id, zone)| Some(landing(frames.iter().find(|f| &f.pane_id == id)?.frame, *zone)));
+        drop.glide = Glide::retarget(drop.glide, to);
+        let placeholder = drop.glide.map(|g| {
+            if g.started.elapsed() < GLIDE {
+                window.request_animation_frame();
+            }
+            g.now()
+        });
         let (frames, tab_id, accent) = (frames.to_vec(), tab_id.to_string(), theme.accent);
         Some(
             div()
@@ -204,8 +257,9 @@ impl Shell {
                         this.send_all(plan(&d.pane_id, &target, &tab_id, zone), cx);
                     }
                 }))
-                .children(landing.map(|f| {
+                .children(placeholder.filter(|(_, alpha)| *alpha > 0.).map(|(f, alpha)| {
                     div()
+                        .opacity(alpha)
                         .absolute()
                         .left(relative(f.x))
                         .top(relative(f.y))
@@ -262,6 +316,18 @@ mod tests {
         assert_eq!(landing(f, Zone::Right), Frac { x: 0.75, y: 0., w: 0.25, h: 1. });
         assert_eq!(landing(f, Zone::Top), Frac { x: 0.5, y: 0., w: 0.5, h: 0.5 });
         assert_eq!(landing(f, Zone::Center), f);
+    }
+
+    #[test]
+    fn placeholder_grows_in_then_retargets_from_where_it_is() {
+        let (a, b) = (Frac { x: 0., y: 0., w: 0.5, h: 1. }, Frac { x: 0.5, y: 0., w: 0.5, h: 1. });
+        let shown = Glide::retarget(None, Some(a)).unwrap();
+        assert_eq!((shown.from, shown.from_alpha, shown.to, shown.to_alpha), (inset(a, 0.04), 0., a, 1.));
+        assert!(Glide::retarget(Some(shown), Some(a)).is_some_and(|g| g.started == shown.started));
+        let moved = Glide::retarget(Some(shown), Some(b)).unwrap();
+        assert_eq!((moved.to, moved.to_alpha), (b, 1.));
+        let gone = Glide::retarget(Some(moved), None).unwrap();
+        assert_eq!((gone.to_alpha, gone.to), (0., gone.from));
     }
 
     #[test]

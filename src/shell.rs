@@ -1541,7 +1541,7 @@ impl Render for Shell {
         let border = theme.border;
         let ring = theme.accent.opacity(0.5);
         let split = frames.len() > 1;
-        let pane_drop = self.pane_drop_overlay(&frames, &shown_tab_id, &theme, cx);
+        let pane_drop = self.pane_drop_overlay(&frames, &shown_tab_id, &theme, window, cx);
         let grid = div()
             .flex_1()
             .min_h_0()
