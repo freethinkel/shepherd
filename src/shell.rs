@@ -830,6 +830,14 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cl
             let alive = this.update(cx, |s, cx| {
                 match update {
                     Ok(snapshot) => {
+                        // a workspace's agent that starts or stops has likely edited its worktree
+                        for w in snapshot.workspaces.iter().filter(|w| {
+                            s.snapshot.as_ref().is_some_and(|old| old.workspaces.iter().any(|o| o.workspace_id == w.workspace_id && o.agent_status != w.agent_status))
+                        }) {
+                            if let Some(t) = &w.worktree {
+                                crate::ui::statusbar::refresh_changes(&t.checkout_path, cx);
+                            }
+                        }
                         s.agents_changed(&snapshot, cx);
                         s.snapshot = Some(snapshot);
                         s.error = None;
@@ -1490,6 +1498,7 @@ impl Render for Shell {
             .unwrap_or_default();
         let agent_workspaces: Vec<String> = agents.iter().map(|(p, _)| p.workspace_id.clone()).collect();
         let hover_bg = theme.hover;
+        let active = window.is_window_active();
         let sidebar_w = self.sidebar_now();
         let sliding = self.sidebar_motion.is_some_and(|m| m.animating());
         if sliding || self.sidebar_nudge().is_some() {
@@ -1548,6 +1557,23 @@ impl Render for Shell {
                                     Some(field) => el.child(field),
                                     None => el.child(div().flex_1().min_w_0().truncate().child(w.label.clone())),
                                 })
+                                .children(w.worktree.as_ref().filter(|t| nested && !t.checkout_path.is_empty()).map(|t| {
+                                    let (changes, pr) = crate::ui::statusbar::changes_of(&t.checkout_path, active, cx);
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .gap(px(4.))
+                                        .text_size(px(11.))
+                                        .text_color(theme.text_faint)
+                                        .children(changes.filter(|c| *c != (0, 0)).map(|(added, removed)| {
+                                            div()
+                                                .flex()
+                                                .gap(px(3.))
+                                                .when(added > 0, |el| el.child(div().text_color(theme.success.opacity(0.7)).child(format!("+{added}"))))
+                                                .when(removed > 0, |el| el.child(div().text_color(theme.danger.opacity(0.7)).child(format!("−{removed}"))))
+                                        }))
+                                        .children(pr)
+                                }))
                                 .map(|el| {
                                     if self.removing.contains(&w.workspace_id) {
                                         el.text_color(theme.text_faint).child(spinner(&theme, format!("ws-removing-{}", w.workspace_id)))
