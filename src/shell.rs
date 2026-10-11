@@ -22,6 +22,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 mod tab_bar;
+pub(crate) use tab_bar::agent_favicon;
 
 const TITLEBAR_HEIGHT: f32 = 38.0;
 /// The titlebar's left cluster: traffic lights, then the sidebar toggle at Zeron's `titlebar_cluster_start` (88).
@@ -94,6 +95,8 @@ pub struct Shell {
     tab_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// A pane's right-click menu: the pane and where it was clicked.
     pane_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
+    /// The status bar's spend popup, opened at this point (its bottom-left).
+    spent_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     agents_scroll: gpui::ScrollHandle,
     tab_bar: tab_bar::TabBar,
     /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
@@ -193,6 +196,7 @@ impl Shell {
                     agents_drag: None,
                     view_menu: None,
                     pane_menu: None,
+                    spent_menu: None,
                     tab_menu: None,
                     worktree_dialog: None,
                     removing: Default::default(),
@@ -631,7 +635,7 @@ pub(crate) fn status_color(status: AgentStatus, theme: &Theme) -> Option<Hsla> {
 }
 
 /// Collie's status dot: 8 px, filled for an agent state, a faint ring when idle.
-fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
+pub(crate) fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
     let dot = div().size(px(8.)).rounded_full().flex_none();
     match status_color(status, theme) {
         Some(c) => dot.bg(c),
@@ -842,7 +846,7 @@ fn save_from_sidebar(cx: &mut App, change: impl FnOnce(&mut crate::settings::Set
 }
 
 /// A popup menu's panel.
-fn menu_card(theme: &Theme, id: &'static str, min_w: f32) -> Stateful<Div> {
+pub(crate) fn menu_card(theme: &Theme, id: &'static str, min_w: f32) -> Stateful<Div> {
     div()
         .id(id)
         .occlude()
@@ -1024,6 +1028,7 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.view_menu, window);
         crate::ui::reap_popup(&mut self.ws_menu, window);
         crate::ui::reap_popup(&mut self.pane_menu, window);
+        crate::ui::reap_popup(&mut self.spent_menu, window);
         crate::ui::reap_popup(&mut self.tab_menu, window);
         crate::ui::reap_popup(&mut self.worktree_dialog, window);
         crate::ui::reap_popup(&mut self.remove_confirm, window);
@@ -1508,7 +1513,12 @@ impl Render for Shell {
                     cx.notify();
                 }
             });
-            crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, on_waiting, cx)
+            let on_spent = cx.listener(|this, _: &ClickEvent, window, cx| {
+                let at = gpui::point(window.mouse_position().x - px(12.), window.viewport_size().height - px(crate::ui::statusbar::HEIGHT + 4.));
+                this.spent_menu = Some(crate::ui::Popup::new(at));
+                cx.notify();
+            });
+            crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, on_waiting, on_spent, cx)
         });
         let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
         let on_page = settings_page.is_some();
@@ -1910,6 +1920,34 @@ impl Render for Shell {
                                     })),
                             ),
                     )),
+                )
+                .with_priority(1)
+            }))
+            .children(self.spent_menu.as_ref().map(|menu| {
+                let this = cx.entity().downgrade();
+                let pick = |tab: &str| {
+                    let (this, tab) = (this.clone(), tab.to_string());
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(m) = this.spent_menu.as_mut() { m.close() }
+                            this.selected_tab = Some(tab.clone());
+                            cx.notify();
+                        });
+                    }
+                };
+                let shown = self.active_pane(window, cx);
+                let card = crate::ui::statusbar::spent_card(snapshot.as_ref(), shown.as_deref(), &theme, pick, cx).on_mouse_down_out(
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(m) = this.spent_menu.as_mut() { m.close() }
+                        cx.notify();
+                    }),
+                );
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::BottomLeft)
+                        .position(menu.value)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(crate::ui::menu_motion("spent-menu-in", menu, card)),
                 )
                 .with_priority(1)
             }))

@@ -300,7 +300,15 @@ impl TabBar {
 
 /// The favicon: the mark on a filled tile of its color, the same size for every kind.
 fn favicon(t: &Shown) -> Div {
-    let (bg, fg) = t.tint;
+    tile(t.icon, t.tint)
+}
+
+/// A tab's favicon for `agent`, for lists of agents elsewhere.
+pub(crate) fn agent_favicon(agent: Option<&str>, theme: &Theme) -> Div {
+    tile(agent_icon(agent), agent_tint(agent, theme))
+}
+
+fn tile(icon: &'static str, (bg, fg): (Hsla, Hsla)) -> Div {
     div()
         .size(px(ICON))
         .flex_none()
@@ -311,7 +319,7 @@ fn favicon(t: &Shown) -> Div {
         .bg(bg)
         // a black tile would sink into a dark bar: a hairline keeps its edge
         .when(bg.l < 0.1, |el| el.border_1().border_color(gpui::white().opacity(0.14)))
-        .child(gpui::svg().path(t.icon).size(px(11.)).text_color(fg))
+        .child(gpui::svg().path(icon).size(px(11.)).text_color(fg))
 }
 
 /// A tab's face at full width: favicon, label, trailing slot.
