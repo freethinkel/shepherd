@@ -45,6 +45,8 @@ app_actions! {
     NextWorkspace: "Next workspace",
     ToggleSidebar: "Toggle sidebar",
     OpenSettings: "Settings",
+    CommandPanel: "Command panel",
+    AgentsPanel: "Agents",
     Quit: "Quit",
 }
 
@@ -75,6 +77,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("NextWorkspace", "cmd-down"),
     ("ToggleSidebar", "cmd-b"),
     ("OpenSettings", "cmd-,"),
+    ("CommandPanel", "cmd-k"),
+    ("CommandPanel", "cmd-shift-p"),
+    ("AgentsPanel", "cmd-shift-a"),
     ("Quit", "cmd-q"),
 ];
 

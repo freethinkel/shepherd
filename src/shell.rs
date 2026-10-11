@@ -103,6 +103,8 @@ pub struct Shell {
     settings: Option<(Entity<crate::ui::settings::SettingsView>, Subscription)>,
     /// A pane being dragged by its grip.
     pane_drop: Option<pane_drag::PaneDrop>,
+    /// The command panel (cmd-k), open over the window.
+    command_panel: Option<crate::ui::Popup<(Entity<crate::ui::command_panel::Panel>, Subscription)>>,
 }
 
 /// A tab being dragged along the tab bar, drawn under the pointer as a pill with its label.
@@ -235,6 +237,7 @@ impl Shell {
                     focus: cx.focus_handle(),
                     settings: None,
                     pane_drop: None,
+                    command_panel: None,
                 };
                 let client = shell.client.clone();
                 cx.set_global(PaneQueries(client.clone(), rt.clone()));
@@ -265,6 +268,51 @@ impl Shell {
         window.focus(&view.focus_handle(cx), cx);
         self.settings = Some((view, close));
         cx.notify();
+    }
+
+    /// cmd-k (commands) or the agents key: opens that panel over the window, or closes it when it is open.
+    pub fn toggle_command_panel(&mut self, kind: crate::ui::command_panel::Kind, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::command_panel::{Kind, PanelEvent, Run};
+        if self.command_panel.as_ref().is_some_and(|p| p.is_open() && p.value.0.read(cx).kind == kind) {
+            self.close_command_panel(cx);
+            return;
+        }
+        let items = match kind {
+            Kind::Commands => {
+                let bindings = cx.try_global::<ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
+                crate::ui::command_panel::items(self.snapshot.as_ref(), &bindings)
+            }
+            Kind::Agents => crate::ui::command_panel::agent_items(self.snapshot.as_ref(), self.agent_sort),
+        };
+        let panel = cx.new(|cx| crate::ui::command_panel::Panel::new(kind, items, window, cx));
+        let events = cx.subscribe_in(&panel, window, |this, _, event: &PanelEvent, window, cx| {
+            if !this.close_command_panel(cx) {
+                return;
+            }
+            match event {
+                // from the root, as the key binding would (focus goes back to herdr's pane on the next render)
+                PanelEvent::Run(Run::Action(name)) => {
+                    if let Ok(action) = cx.build_action(&format!("shepherd::{name}"), None) {
+                        window.focus(&this.focus, cx);
+                        window.dispatch_action(action, cx);
+                    }
+                }
+                PanelEvent::Run(Run::Tab(tab_id)) => this.selected_tab = Some(tab_id.clone()),
+                PanelEvent::Dismiss => {}
+            }
+        });
+        self.command_panel = Some(crate::ui::Popup::new((panel, events)));
+        cx.notify();
+    }
+
+    /// Fades the command panel out; false if it was not open.
+    fn close_command_panel(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(panel) = self.command_panel.as_mut().filter(|p| p.is_open()) else { return false };
+        panel.close();
+        // The panel's input held focus: give it back to herdr's focused pane on the next render.
+        self.focused = None;
+        cx.notify();
+        true
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -664,7 +712,7 @@ pub(crate) fn status_color(status: AgentStatus, theme: &Theme) -> Option<Hsla> {
 }
 
 /// Collie's status dot: 8 px, filled for an agent state, a faint ring when idle.
-fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
+pub(crate) fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
     let dot = div().size(px(8.)).rounded_full().flex_none();
     match status_color(status, theme) {
         Some(c) => dot.bg(c),
@@ -1079,6 +1127,7 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.tab_menu, window);
         crate::ui::reap_popup(&mut self.worktree_dialog, window);
         crate::ui::reap_popup(&mut self.remove_confirm, window);
+        crate::ui::reap_popup(&mut self.command_panel, window);
         if let Some(s) = &self.snapshot {
             self.removing.retain(|id| s.workspaces.iter().any(|w| &w.workspace_id == id));
         }
@@ -1724,6 +1773,8 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
+            .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
+            .on_action(cx.listener(|this, _: &AgentsPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Agents, w, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
                 this.drag_divider(e.position, cx);
                 this.drag_sidebar(e.position.x, cx);
@@ -2010,6 +2061,7 @@ impl Render for Shell {
                     );
                 modal("worktree-dialog", dialog, window, card)
             }))
+            .children(self.command_panel.as_ref().map(|panel| crate::ui::command_panel::overlay(panel, window)))
             .children(self.remove_confirm.as_ref().map(|confirm| {
                 let label = confirm.value.1.clone();
                 let card = dialog_card(&theme, "remove-dialog", "Remove worktree?")
