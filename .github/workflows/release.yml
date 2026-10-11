@@ -1,5 +1,5 @@
 # Every push to main builds and tests Shepherd.app. When Cargo.toml's version has no release yet, the run tags
-# v<version> and publishes Shepherd-<version>-arm64.zip: bump the version to release.
+# v<version> and publishes a universal (arm64 + x86_64) Shepherd as a zip and a dmg: bump the version to release.
 # With the signing secrets set the app is signed with the Developer ID and notarized; without them, ad hoc.
 name: release
 
@@ -24,6 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
 
       - name: Signing keychain
@@ -49,7 +51,7 @@ jobs:
 
       - run: make test
       - name: Build, sign, notarize
-        run: make ${{ env.MACOS_CERT_P12 != '' && 'notarize' || 'zip' }}
+        run: make ${{ env.MACOS_CERT_P12 != '' && 'notarize' || 'dist' }}
 
       - name: Release a new version
         run: |
@@ -57,10 +59,12 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "$tag is already released"
           else
-            gh release create "$tag" target/release/Shepherd-*.zip --target "$GITHUB_SHA" --title "$tag" --generate-notes
+            gh release create "$tag" target/universal/Shepherd-*.zip target/universal/Shepherd-*.dmg --target "$GITHUB_SHA" --title "$tag" --generate-notes
           fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: Shepherd
-          path: target/release/Shepherd-*.zip
+          path: |
+            target/universal/Shepherd-*.zip
+            target/universal/Shepherd-*.dmg

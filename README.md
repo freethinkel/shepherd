@@ -19,7 +19,7 @@ It's written in Rust on [GPUI](https://github.com/zeronsh/zui) and styled after 
 
 ## Install
 
-Download `Shepherd-<version>-arm64.zip` from [Releases](https://github.com/freethinkel/shepherd/releases), unzip it and drag `Shepherd.app` to Applications. Builds are signed and notarized, so Gatekeeper opens them without a prompt.
+Download `Shepherd-<version>-universal.dmg` from [Releases](https://github.com/freethinkel/shepherd/releases), open it and drag Shepherd to Applications. One build runs on Apple silicon and Intel Macs. It's signed and notarized, so Gatekeeper opens it without a prompt. The same app is also there as a zip.
 
 Shepherd needs macOS 14 or later and herdr. It talks to the herdr server over `~/.config/herdr/herdr.sock`, so herdr has to be installed and running. You can point it at another binary or socket in Settings.
 
@@ -50,6 +50,7 @@ make run      # debug build, run as Shepherd.app
 make test
 make app      # target/release/Shepherd.app
 make install  # copy it to /Applications
+make dist     # universal zip and dmg in target/universal
 make help     # everything else
 ```
 

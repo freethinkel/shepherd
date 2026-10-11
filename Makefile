@@ -1,8 +1,12 @@
 # Shepherd's local build. `make help` lists the targets.
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-ARCH    := $(shell uname -m)
 APP     := target/release/Shepherd.app
-ZIP     := target/release/Shepherd-$(VERSION)-$(ARCH).zip
+# Releases ship one universal (arm64 + x86_64) app, as a zip and a dmg.
+DIST    := target/universal
+DIST_APP := $(DIST)/Shepherd.app
+ZIP     := $(DIST)/Shepherd-$(VERSION)-universal.zip
+DMG     := $(DIST)/Shepherd-$(VERSION)-universal.dmg
+NOTARY   = xcrun notarytool submit --keychain-profile $(NOTARY_PROFILE) $(if $(NOTARY_KEYCHAIN),--keychain $(NOTARY_KEYCHAIN)) --wait
 
 # The keychain's Developer ID Application identity signs release apps (empty: ad hoc). Notarization uses the
 # notarytool profile NOTARY_PROFILE, made once with `xcrun notarytool store-credentials shepherd-notary`,
@@ -12,7 +16,7 @@ NOTARY_PROFILE ?= shepherd-notary
 NOTARY_KEYCHAIN ?=
 export SIGN_IDENTITY
 
-.PHONY: help build run test app app-debug open install zip notarize version clean
+.PHONY: help build run test app app-debug open install universal dist notarize version clean
 
 help: ## This list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
@@ -42,17 +46,42 @@ install: app ## Copy the release app to /Applications
 	ditto $(APP) /Applications/Shepherd.app
 	@echo /Applications/Shepherd.app
 
-zip: app ## Zip the release app for distribution
-	ditto -c -k --keepParent $(APP) $(ZIP)
-	@echo $(ZIP)
+universal: ## Universal (arm64 + x86_64) Shepherd.app in target/universal
+	cargo build --release --target aarch64-apple-darwin
+	cargo build --release --target x86_64-apple-darwin
+	mkdir -p $(DIST)
+	lipo -create -output $(DIST)/shepherd \
+		target/aarch64-apple-darwin/release/shepherd target/x86_64-apple-darwin/release/shepherd
+	scripts/bundle.sh $(DIST)/shepherd
 
-notarize: zip ## Notarize the zip with Apple, staple the ticket, re-zip
-	xcrun notarytool submit $(ZIP) --keychain-profile $(NOTARY_PROFILE) $(if $(NOTARY_KEYCHAIN),--keychain $(NOTARY_KEYCHAIN)) --wait
-	xcrun stapler staple $(APP)
+# The dmg: the app next to an Applications link, compressed, signed when an identity is around.
+define make-dmg
+	rm -rf $(DIST)/dmg $(DMG)
+	mkdir $(DIST)/dmg
+	ditto $(DIST_APP) $(DIST)/dmg/Shepherd.app
+	ln -s /Applications $(DIST)/dmg/Applications
+	hdiutil create -quiet -volname Shepherd -srcfolder $(DIST)/dmg -fs HFS+ -format UDZO $(DMG)
+	rm -rf $(DIST)/dmg
+	$(if $(SIGN_IDENTITY),codesign --force --timestamp --sign "$(SIGN_IDENTITY)" $(DMG))
+endef
+
+dist: universal ## Universal zip and dmg in target/universal
+	rm -f $(ZIP)
+	ditto -c -k --keepParent $(DIST_APP) $(ZIP)
+	$(make-dmg)
+	@echo $(ZIP) $(DMG)
+
+notarize: dist ## dist, notarized by Apple with the tickets stapled to the app and the dmg
+	$(NOTARY) $(ZIP)
+	xcrun stapler staple $(DIST_APP)
 	rm $(ZIP)
-	ditto -c -k --keepParent $(APP) $(ZIP)
-	spctl --assess --type execute -v $(APP)
-	@echo $(ZIP)
+	ditto -c -k --keepParent $(DIST_APP) $(ZIP)
+	$(make-dmg)
+	$(NOTARY) $(DMG)
+	xcrun stapler staple $(DMG)
+	spctl --assess --type execute -v $(DIST_APP)
+	spctl --assess --type open --context context:primary-signature -v $(DMG)
+	@echo $(ZIP) $(DMG)
 
 version: ## Cargo.toml's version
 	@echo $(VERSION)
