@@ -38,6 +38,8 @@ pub struct Shell {
     snapshot: Option<Snapshot>,
     error: Option<String>,
     panes: HashMap<String, Entity<PaneTerminal>>,
+    /// The panes shown last, most recent first: their views (and herdr sessions) outlive a tab switch.
+    recent_panes: Vec<String>,
     own_pane: Option<String>,
     /// herdr's focused pane we last moved keyboard focus to; refocusing on every render would undo clicks.
     focused: Option<String>,
@@ -193,6 +195,7 @@ impl Shell {
                     snapshot: None,
                     error: None,
                     panes: HashMap::new(),
+                    recent_panes: Vec::new(),
                     own_pane: std::env::var("HERDR_PANE_ID").ok(),
                     focused: None,
                     selected_tab: std::env::var("SHEPHERD_TAB").ok(),
@@ -693,12 +696,26 @@ impl Shell {
     }
 }
 
-/// Keep views of shown panes; focus is forgotten with its view so a recreated one gets keyboard focus again.
-fn prune<S>(surfaces: &mut HashMap<String, S>, focused: &mut Option<String>, shown: &[PaneFrame], exited: impl Fn(&S) -> bool) {
-    surfaces.retain(|id, s| shown.iter().any(|f| &f.pane_id == id) && !exited(s));
+/// Keep views of the `kept` panes; focus is forgotten with its view so a recreated one gets keyboard focus again.
+fn prune<S>(surfaces: &mut HashMap<String, S>, focused: &mut Option<String>, kept: &[String], exited: impl Fn(&S) -> bool) {
+    surfaces.retain(|id, s| kept.contains(id) && !exited(s));
     if focused.as_ref().is_some_and(|id| !surfaces.contains_key(id)) {
         *focused = None;
     }
+}
+
+/// How many panes keep their views once their tab is hidden: each holds a herdr session that keeps streaming.
+const KEPT_PANES: usize = 24;
+
+/// Puts the `shown` panes first in `recent`, drops panes herdr no longer has, and keeps the newest `KEPT_PANES`:
+/// switching back to a recent tab shows its panes at once instead of attaching to herdr again.
+fn remember_shown(recent: &mut Vec<String>, shown: &[PaneFrame], live: impl Fn(&str) -> bool) {
+    for f in shown.iter().rev() {
+        recent.retain(|id| id != &f.pane_id);
+        recent.insert(0, f.pane_id.clone());
+    }
+    recent.retain(|id| live(id));
+    recent.truncate(KEPT_PANES);
 }
 
 /// AppKit lays the traffic lights out again while the window is inactive (a screen recorder takes focus), and gpui
@@ -1310,7 +1327,10 @@ impl Render for Shell {
         }
         let own = self.own_pane.clone();
         let shown: Vec<PaneFrame> = frames.iter().filter(|f| attachable(&f.pane_id, own.as_deref())).cloned().collect();
-        prune(&mut self.panes, &mut self.focused, &shown, |_| false);
+        if let Some(snapshot) = &snapshot {
+            remember_shown(&mut self.recent_panes, &shown, |id| snapshot.panes.iter().any(|p| p.pane_id == id));
+        }
+        prune(&mut self.panes, &mut self.focused, &self.recent_panes, |_| false);
         for f in &shown {
             if !self.panes.contains_key(&f.pane_id) {
                 let id = f.pane_id.clone();
@@ -2278,7 +2298,7 @@ impl Render for Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::prune;
+    use super::{KEPT_PANES, prune, remember_shown};
     use crate::model::{Frac, PaneFrame};
     use std::collections::HashMap;
 
@@ -2293,10 +2313,26 @@ mod tests {
     }
 
     #[test]
+    fn recent_tabs_keep_their_panes() {
+        let mut recent = Vec::new();
+        let all = |_: &str| true;
+        remember_shown(&mut recent, &shown(&["w1:p1", "w1:p2"]), all);
+        remember_shown(&mut recent, &shown(&["w2:p1"]), all); // another tab
+        assert_eq!(recent, ["w2:p1", "w1:p1", "w1:p2"], "the hidden tab's panes stay");
+        remember_shown(&mut recent, &shown(&["w1:p1", "w1:p2"]), |id| id != "w2:p1"); // back, w2:p1 closed
+        assert_eq!(recent, ["w1:p1", "w1:p2"]);
+        for i in 0..KEPT_PANES {
+            remember_shown(&mut recent, &shown(&[&format!("w9:p{i}")]), all);
+        }
+        assert_eq!(recent.len(), KEPT_PANES);
+        assert!(!recent.contains(&"w1:p1".to_string()), "the oldest go first");
+    }
+
+    #[test]
     fn hidden_panes_lose_their_surface_and_focus() {
         let mut s = surfaces(&[("w1:p1", false), ("w1:p2", false)]);
         let mut focused = Some("w1:p2".to_string());
-        prune(&mut s, &mut focused, &shown(&["w1:p1"]), |exited| *exited);
+        prune(&mut s, &mut focused, &["w1:p1".to_string()], |exited| *exited);
         assert_eq!(s.keys().collect::<Vec<_>>(), ["w1:p1"]);
         assert_eq!(focused, None, "a recreated surface for w1:p2 must get focus again");
     }
@@ -2305,7 +2341,7 @@ mod tests {
     fn exited_surfaces_are_dropped_to_be_recreated() {
         let mut s = surfaces(&[("w1:p1", true)]);
         let mut focused = Some("w1:p1".to_string());
-        prune(&mut s, &mut focused, &shown(&["w1:p1"]), |exited| *exited);
+        prune(&mut s, &mut focused, &["w1:p1".to_string()], |exited| *exited);
         assert!(s.is_empty());
         assert_eq!(focused, None);
     }
@@ -2314,7 +2350,7 @@ mod tests {
     fn live_shown_surfaces_keep_focus() {
         let mut s = surfaces(&[("w1:p1", false)]);
         let mut focused = Some("w1:p1".to_string());
-        prune(&mut s, &mut focused, &shown(&["w1:p1"]), |exited| *exited);
+        prune(&mut s, &mut focused, &["w1:p1".to_string()], |exited| *exited);
         assert_eq!(s.len(), 1);
         assert_eq!(focused.as_deref(), Some("w1:p1"));
     }

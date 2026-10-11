@@ -275,3 +275,27 @@ fn live_mouse_capture() {
     }
     panic!("mouse capture went {seen:?}, expected on then off");
 }
+
+/// How long a pane takes to show up after Shepherd attaches to it, as on every tab switch (network: a live herdr;
+/// `SHEPHERD_PERF_PANE=w1:p1 HERDR_SOCKET_PATH=… cargo test --test session attach_timing -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn attach_timing() {
+    let pane = std::env::var("SHEPHERD_PERF_PANE").expect("SHEPHERD_PERF_PANE");
+    for _ in 0..5 {
+        let t0 = std::time::Instant::now();
+        let (session, mut rx) = Session::spawn(&pane, 120, 40, false).unwrap();
+        let spawned = t0.elapsed();
+        let (mut frames, mut bytes, mut first) = (0, 0, None);
+        while let Some(event) = recv(&mut rx, Duration::from_millis(300)) {
+            if let SessionEvent::Frame(data) = event {
+                first.get_or_insert(t0.elapsed());
+                frames += 1;
+                bytes += data.len();
+            }
+        }
+        println!("spawn {spawned:?}, first frame {first:?}, {frames} frames / {bytes} bytes in the first 300 ms of quiet");
+        drop(session);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}

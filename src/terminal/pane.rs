@@ -244,17 +244,38 @@ impl PaneTerminal {
         self.ended.as_deref()
     }
 
+    /// Connects off the main thread: herdr's handshake takes tens of milliseconds, and attaching happens while a
+    /// frame is laid out (a tab switch attaches every pane it shows).
     fn attach(&mut self, takeover: bool, cx: &mut Context<Self>) {
         let (cols, rows) = (self.emulator.cols() as u16, self.emulator.rows() as u16);
-        match Session::spawn(&self.pane_id, cols, rows, takeover) {
-            Ok((session, rx)) => {
-                self.session = Some(session);
-                self.mouse_capture = false;
-                self.ended = None;
-                self._pump = Some(cx.spawn(async move |this, cx| pump(this, rx, cx).await));
+        let pane_id = self.pane_id.clone();
+        let spawn = cx.background_executor().spawn(async move { Session::spawn(&pane_id, cols, rows, takeover) });
+        self._pump = Some(cx.spawn(async move |this, cx| {
+            let result = spawn.await;
+            let rx = this.update(cx, |pane, cx| {
+                cx.notify();
+                match result {
+                    Ok((session, rx)) => {
+                        // The grid may have changed size while connecting.
+                        let now = (pane.emulator.cols() as u16, pane.emulator.rows() as u16);
+                        if now != (cols, rows) {
+                            session.resize(now.0, now.1);
+                        }
+                        pane.session = Some(session);
+                        pane.mouse_capture = false;
+                        pane.ended = None;
+                        Some(rx)
+                    }
+                    Err(err) => {
+                        pane.ended = Some(format!("{err:#}"));
+                        None
+                    }
+                }
+            });
+            if let Ok(Some(rx)) = rx {
+                pump(this, rx, cx).await;
             }
-            Err(err) => self.ended = Some(format!("{err:#}")),
-        }
+        }));
     }
 
     /// `takeover` replaces another client that controls the pane.
@@ -883,6 +904,9 @@ mod tests {
             assert!(p.session.is_none() && p.ended.is_none(), "attached before its size: {:?}", p.ended);
         });
         pane.update(cx, |p, cx| p.on_grid_metrics(geometry(120, 40), cx));
+        // The frame that measured the grid does not wait for herdr: the attach runs in the background.
+        pane.read_with(cx, |p, _| assert!(p.session.is_none() && p.ended.is_none(), "attached on the main thread"));
+        cx.run_until_parked();
         pane.read_with(cx, |p, _| {
             assert_eq!((p.emulator.cols(), p.emulator.rows()), (120, 40));
             // The attach ran (at 120×40) and failed on the missing binary.
