@@ -4,7 +4,7 @@
 //! assets/NOTICE).
 use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement, cell_at};
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, Side};
-use super::find::{Link, find_all, link_at};
+use super::find::{Link, find_all, hyperlink, link_at};
 use super::keys::{keystroke_bytes, paste_bytes};
 use crate::herdr::{Client, Session, SessionEvent};
 use crate::theme::Theme;
@@ -523,6 +523,11 @@ impl PaneTerminal {
             return None;
         }
         let (row, col, _, _) = self.hit(position)?;
+        // An OSC 8 hyperlink wins over the text under it.
+        let osc8 = self.emulator.hyperlink_at(row as usize, col as usize);
+        if let Some((cells, link)) = osc8.and_then(|(cells, uri)| Some((cells, hyperlink(&uri)?))) {
+            return Some((row as usize, cells, link));
+        }
         let cells = self.emulator.line(row as usize);
         let (chars, cols) = row_chars(&cells);
         let at = cols.iter().rposition(|&c| c <= col as usize)?;
@@ -538,7 +543,7 @@ impl PaneTerminal {
         }
     }
 
-    /// URLs go to the browser; paths that exist (relative to the pane's shell) to the editor.
+    /// URLs go to the browser (`file://` ones to their default app); paths that exist (relative to the pane's shell) to the editor.
     fn open_link(&self, link: Link, cx: &mut Context<Self>) {
         let (path, line, col) = match link {
             Link::Url(url) => return cx.open_url(&url),
