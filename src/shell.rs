@@ -85,6 +85,10 @@ pub struct Shell {
     agents_drag: Option<(f32, f32)>,
     /// The sidebar's `…` menu, open where it was clicked.
     view_menu: Option<crate::ui::Popup<()>>,
+    /// The `…` menu's Sort submenu is out: the pointer went over its row and has not moved to another.
+    sort_submenu: bool,
+    /// Where the Sort submenu was painted: a press there is inside the `…` menu, though outside its card.
+    sort_submenu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Worktrees herdr is removing: their rows show a spinner until they leave the snapshot.
     removing: std::collections::HashSet<String>,
     /// Remove a worktree with changes anyway? The workspace and its label.
@@ -227,6 +231,8 @@ impl Shell {
                     agents_height: SettingsGlobal::of(cx).settings.agents_height,
                     agents_drag: None,
                     view_menu: None,
+                    sort_submenu: false,
+                    sort_submenu_bounds: Default::default(),
                     pane_menu: None,
                     spent_menu: None,
                     usage_menu: None,
@@ -857,7 +863,7 @@ fn edge_nudge(t: f32) -> f32 {
     5. * if t < out { smooth(t / out) } else { 1. - smooth((t - out) / (1. - out)) }
 }
 
-/// Zeron's resize seam (`Shell::resize_handle`): a 1 px `border_strong` line `at` px into the hit strip that
+/// Zeron's resize seam (`Shell::resize_handle`): a 1 px line (the accent) `at` px into the hit strip that
 /// fades out toward both ends. Shown while dragged; `hover` (hovered, flip count) fades it in and out like Zeron's
 /// `HOVER_FADE`, restarting on every flip.
 fn resize_seam(
@@ -901,28 +907,13 @@ const SEAM_FADE: Duration = Duration::from_millis(150);
 /// A pane divider's hit strip, centred on the panes' shared edge.
 const PANE_SEAM_HIT: f32 = 10.;
 
-/// A pane divider: a 1 px `rest` line always on the panes' shared edge (the strip's centre), lit `lit` while
-/// hovered (fading like `resize_seam`) or dragged.
+/// A pane divider: a 1 px `rest` line always on the panes' shared edge (the strip's centre), and over it the
+/// sidebar's `lit` seam (`resize_seam`, fading toward both ends) while hovered or dragged.
 fn pane_seam(id: SharedString, vertical: bool, rest: Hsla, lit: Hsla, dragging: bool, hover: Option<(bool, u64)>) -> Div {
-    let line = |color: Hsla| {
-        let line = div().absolute().bg(color);
-        let at = px((PANE_SEAM_HIT - 1.) / 2.);
-        if vertical { line.top_0().bottom_0().left(at).w(px(1.)) } else { line.left_0().right_0().top(at).h(px(1.)) }
-    };
-    let glow = match (dragging, hover) {
-        (true, _) => Some(line(lit).into_any_element()),
-        (false, Some((on, flips))) => Some(
-            line(lit)
-                .with_animation(
-                    SharedString::from(format!("{id}-lit-{flips}")),
-                    gpui::Animation::new(SEAM_FADE).with_easing(ease_out),
-                    move |el, t| el.opacity(if on { t } else { 1. - t }),
-                )
-                .into_any_element(),
-        ),
-        (false, None) => None,
-    };
-    div().absolute().inset_0().child(line(rest)).children(glow)
+    let at = (PANE_SEAM_HIT - 1.) / 2.;
+    let line = div().absolute().bg(rest);
+    let line = if vertical { line.top_0().bottom_0().left(px(at)).w(px(1.)) } else { line.left_0().right_0().top(px(at)).h(px(1.)) };
+    div().absolute().inset_0().child(line).child(resize_seam(id, vertical, at, lit, dragging, hover))
 }
 
 fn fold_animation() -> gpui::Animation {
@@ -1071,6 +1062,14 @@ impl Shell {
         cx.notify();
     }
 
+    /// The pointer reached another row of the `…` menu: the Sort submenu goes.
+    fn leave_sort_submenu(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && self.sort_submenu {
+            self.sort_submenu = false;
+            cx.notify();
+        }
+    }
+
     fn set_agent_sort(&mut self, sort: AgentSort, cx: &mut Context<Self>) {
         self.agent_sort = sort;
         if let Some(m) = self.view_menu.as_mut() { m.close() }
@@ -1183,6 +1182,28 @@ fn solid_button(id: &'static str, label: &'static str, fill: gpui::Hsla, text: g
         .hover(|s| s.opacity(0.9))
         .child(label)
 }
+
+/// The agents list's orders: the `…` menu's Sort submenu.
+const SORTS: [(AgentSort, &str, &str, &str); 2] = [
+    (AgentSort::Status, "sort-status", "icons/checklist.svg", "Status"),
+    (AgentSort::Grouped, "sort-grouped", "icons/folder.svg", "Grouped"),
+];
+
+/// Native context menus: the right press that opened one can be held, dragged onto an item and let go there.
+/// A release where the menu opened (`at`) is the press itself ending, not a pick.
+trait Pick: StatefulInteractiveElement + Sized {
+    fn on_pick(self, at: gpui::Point<Pixels>, pick: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        let pick = Rc::new(pick);
+        let on_release = pick.clone();
+        self.on_click(move |e, w, cx| pick(e, w, cx)).on_mouse_up(MouseButton::Right, move |e, w, cx| {
+            if (e.position - at).magnitude() > 4. {
+                on_release(&ClickEvent::Mouse(gpui::MouseClickEvent { up: e.clone(), ..Default::default() }), w, cx);
+            }
+        })
+    }
+}
+
+impl Pick for Stateful<Div> {}
 
 /// A row of the sidebar's `…` menu: icon, label, a check on the current choice.
 fn menu_choice(theme: &Theme, id: &'static str, icon: &'static str, label: &'static str, checked: bool) -> Stateful<Div> {
@@ -1536,7 +1557,7 @@ impl Render for Shell {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
             )
             .when(self.show_agents && !agents.is_empty(), |el| {
-                let seam = theme.border_strong;
+                let seam = theme.accent;
                 let dragging = self.agents_drag.is_some();
                 el.child(
                     div()
@@ -1892,7 +1913,7 @@ impl Render for Shell {
                             "sidebar-resize".into(),
                             true,
                             2.,
-                            theme.border_strong,
+                            theme.accent,
                             self.sidebar_drag,
                             self.seam_hover.get("sidebar-resize").copied(),
                         ))
@@ -1941,7 +1962,10 @@ impl Render for Shell {
                             cx.stop_propagation();
                             match this.view_menu.as_mut() {
                                 Some(menu) if menu.is_open() => menu.close(),
-                                _ => this.view_menu = Some(crate::ui::Popup::new(())),
+                                _ => {
+                                    this.view_menu = Some(crate::ui::Popup::new(()));
+                                    this.sort_submenu = false;
+                                }
                             }
                             cx.notify();
                         })),
@@ -1951,6 +1975,9 @@ impl Render for Shell {
                 // under the `…` button, its left edge on the button's
                 let at = gpui::point(px(sidebar_w - 8. - 24.), px(TRAFFIC_LIGHTS_CENTER + 12. + 4.));
                 let sort = self.agent_sort;
+                let sort_label = SORTS.iter().find(|s| s.0 == sort).map_or("", |s| s.3);
+                let sort_submenu = self.sort_submenu;
+                let submenu_bounds = self.sort_submenu_bounds.clone();
                 let show_agents = self.show_agents;
                 let show_status_bar = self.show_status_bar;
                 gpui::deferred(
@@ -1958,22 +1985,61 @@ impl Render for Shell {
                         "view-menu-in",
                         menu,
                         menu_card(&theme, "view-menu", 200.)
-                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            .on_mouse_down_out(cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                if this.sort_submenu && this.sort_submenu_bounds.get().is_some_and(|b| b.contains(&e.position)) {
+                                    return;
+                                }
                                 if let Some(m) = this.view_menu.as_mut() { m.close() }
                                 cx.notify();
                             }))
-                            .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child("Sort agents"))
-                            .children([
-                                (AgentSort::Status, "sort-status", "icons/checklist.svg", "Status"),
-                                (AgentSort::Grouped, "sort-grouped", "icons/folder.svg", "Grouped"),
-                            ]
-                            .map(|(choice, id, icon, label)| {
-                                menu_choice(&theme, id, icon, label, sort == choice)
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_agent_sort(choice, cx)))
-                            }))
+                            .child(
+                                // Zeron's submenu: the row shows the choice, the choices open beside it on hover.
+                                div()
+                                    .relative()
+                                    .child(
+                                        row(&theme, sort_submenu, "sort-agents")
+                                            .h(px(30.))
+                                            .rounded(px(6.))
+                                            .child(div().flex_1().child("Sort agents"))
+                                            .child(div().text_color(theme.text_faint).child(sort_label))
+                                            .child(gpui::svg().path("icons/alt-arrow-right.svg").size(px(12.)).flex_none().text_color(theme.text_faint))
+                                            .on_hover(cx.listener(|this, on: &bool, _, cx| {
+                                                if *on && !this.sort_submenu {
+                                                    this.sort_submenu = true;
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                                this.sort_submenu = !this.sort_submenu;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .when(sort_submenu, |el| {
+                                        el.child(
+                                            menu_card(&theme, "sort-submenu", 180.)
+                                                .absolute()
+                                                .top(px(-4.))
+                                                .left(gpui::relative(1.))
+                                                .ml(px(8.))
+                                                .child(
+                                                    canvas(move |b, _, _| submenu_bounds.set(Some(b)), |_, _, _, _| {})
+                                                        .absolute()
+                                                        .top_0()
+                                                        .left_0()
+                                                        .size_full(),
+                                                )
+                                                .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child("SORT"))
+                                                .children(SORTS.map(|(choice, id, icon, label)| {
+                                                    menu_choice(&theme, id, icon, label, sort == choice)
+                                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_agent_sort(choice, cx)))
+                                                })),
+                                        )
+                                    }),
+                            )
                             .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
                             .child(
                                 row(&theme, false, "show-agents")
+                                    .on_hover(cx.listener(|this, on: &bool, _, cx| this.leave_sort_submenu(*on, cx)))
                                     .h(px(30.))
                                     .rounded(px(6.))
                                     .child(div().flex_1().child("Show agents"))
@@ -1982,6 +2048,7 @@ impl Render for Shell {
                             )
                             .child(
                                 row(&theme, false, "show-status-bar")
+                                    .on_hover(cx.listener(|this, on: &bool, _, cx| this.leave_sort_submenu(*on, cx)))
                                     .h(px(30.))
                                     .rounded(px(6.))
                                     .child(div().flex_1().child("Show status bar"))
@@ -1989,7 +2056,9 @@ impl Render for Shell {
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_status_bar(cx))),
                             )
                             .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
-                            .child(menu_choice(&theme, "open-settings", "icons/settings.svg", "Settings", false).on_click(
+                            .child(menu_choice(&theme, "open-settings", "icons/settings.svg", "Settings", false)
+                                .on_hover(cx.listener(|this, on: &bool, _, cx| this.leave_sort_submenu(*on, cx)))
+                                .on_click(
                                 cx.listener(|this, _: &ClickEvent, window, cx| {
                                     if let Some(m) = this.view_menu.as_mut() {
                                         m.close()
@@ -2021,7 +2090,7 @@ impl Render for Shell {
                                 cx.notify();
                             }))
                             .when(has_repo, |el| {
-                                el.child(row(&theme, false, "ws-menu-worktree").h(px(28.)).rounded(px(6.)).child("New worktree").on_click(
+                                el.child(row(&theme, false, "ws-menu-worktree").h(px(28.)).rounded(px(6.)).child("New worktree").on_pick(at, 
                                     cx.listener({
                                         let id = id.clone();
                                         move |this, _: &ClickEvent, window, cx| {
@@ -2031,7 +2100,7 @@ impl Render for Shell {
                                     }),
                                 ))
                             })
-                            .child(row(&theme, false, "ws-menu-new-tab").h(px(28.)).rounded(px(6.)).child("New tab").on_click(
+                            .child(row(&theme, false, "ws-menu-new-tab").h(px(28.)).rounded(px(6.)).child("New tab").on_pick(at, 
                                 cx.listener({
                                     let id = id.clone();
                                     move |this, _: &ClickEvent, _, cx| {
@@ -2040,7 +2109,7 @@ impl Render for Shell {
                                     }
                                 }),
                             ))
-                            .child(row(&theme, false, "ws-menu-rename").h(px(28.)).rounded(px(6.)).child("Rename").on_click(
+                            .child(row(&theme, false, "ws-menu-rename").h(px(28.)).rounded(px(6.)).child("Rename").on_pick(at, 
                                 cx.listener({
                                     let id = id.clone();
                                     move |this, _: &ClickEvent, window, cx| {
@@ -2056,7 +2125,7 @@ impl Render for Shell {
                                 }),
                             ))
                             .when_some(checkout, |el, path| {
-                                el.child(row(&theme, false, "ws-menu-reveal").h(px(28.)).rounded(px(6.)).child("Reveal in Finder").on_click(
+                                el.child(row(&theme, false, "ws-menu-reveal").h(px(28.)).rounded(px(6.)).child("Reveal in Finder").on_pick(at, 
                                     cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         if let Some(m) = this.ws_menu.as_mut() { m.close() }
                                         cx.reveal_path(std::path::Path::new(&path));
@@ -2071,7 +2140,7 @@ impl Render for Shell {
                                     .rounded(px(6.))
                                     .text_color(theme.danger)
                                     .child("Close workspace")
-                                    .on_click(cx.listener({
+                                    .on_pick(at, cx.listener({
                                         let id = id.clone();
                                         move |this, _: &ClickEvent, _, cx| {
                                             if let Some(m) = this.ws_menu.as_mut() { m.close() }
@@ -2086,7 +2155,7 @@ impl Render for Shell {
                                         .rounded(px(6.))
                                         .text_color(theme.danger)
                                         .child("Remove worktree")
-                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
                                             if let Some(m) = this.ws_menu.as_mut() { m.close() }
                                             this.remove_worktree(id.clone(), false, cx);
                                         })),
@@ -2175,7 +2244,7 @@ impl Render for Shell {
                                 if let Some(m) = this.tab_menu.as_mut() { m.close() }
                                 cx.notify();
                             }))
-                            .child(row(&theme, false, "tab-menu-rename").h(px(28.)).rounded(px(6.)).child("Rename").on_click(
+                            .child(row(&theme, false, "tab-menu-rename").h(px(28.)).rounded(px(6.)).child("Rename").on_pick(at, 
                                 cx.listener({
                                     let id = id.clone();
                                     move |this, _: &ClickEvent, window, cx| {
@@ -2197,7 +2266,7 @@ impl Render for Shell {
                                     .rounded(px(6.))
                                     .text_color(theme.danger)
                                     .child("Close tab")
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         if let Some(m) = this.tab_menu.as_mut() { m.close() }
                                         this.send(Command::CloseTab { tab_id: id.clone() }, cx, |_, _, _| {});
                                     })),
@@ -2282,7 +2351,7 @@ impl Render for Shell {
                                     .when(close, |el| el.text_color(theme.danger))
                                     .child(div().flex_1().child(label))
                                     .when_some(chord, |el, chord| el.child(div().text_size(px(11.)).text_color(theme.text_faint).child(chord)))
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         if let Some(m) = this.pane_menu.as_mut() { m.close() }
                                         this.send(make(pane_id.clone()), cx, |_, _, _| {});
                                     }));
