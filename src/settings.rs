@@ -19,6 +19,8 @@ pub struct Settings {
     pub herdr_bin: Option<String>,
     /// herdr's API socket; `None` is herdr's own default.
     pub herdr_socket: Option<String>,
+    /// The command Cmd+click opens `path:line:col` with (`zed`, `code -g`); `None` finds Zed, Cursor or VS Code.
+    pub editor: Option<String>,
     /// Action name → keystroke (`cmd-shift-d`); an empty string unbinds the action.
     pub keys: BTreeMap<String, String>,
     /// The workspaces sidebar's width; dragging its edge sets it.
@@ -46,6 +48,7 @@ impl Default for Settings {
             appearance: AppearanceMode::System,
             herdr_bin: None,
             herdr_socket: None,
+            editor: None,
             keys: BTreeMap::new(),
             sidebar_width: SIDEBAR_WIDTH,
             agent_sort: AgentSort::default(),
