@@ -26,6 +26,8 @@ pub struct Settings {
     pub agent_sort: AgentSort,
     /// The sidebar's Agents section; the `…` menu's switch hides it.
     pub show_agents: bool,
+    /// The bottom status bar; the `…` menu's switch hides it.
+    pub show_status_bar: bool,
     /// The Agents list's height cap; dragging the section's top edge sets it, `None` is 40 % of the sidebar.
     pub agents_height: Option<f32>,
 }
@@ -50,6 +52,7 @@ impl Default for Settings {
             sidebar_width: SIDEBAR_WIDTH,
             agent_sort: AgentSort::default(),
             show_agents: true,
+            show_status_bar: true,
             agents_height: None,
         }
     }
