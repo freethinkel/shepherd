@@ -1,7 +1,7 @@
 //! The command panel (cmd-k, Zeron's command palette): every app action with its chord, then every workspace
 //! and tab of the snapshot, filtered as you type. The agents panel is the same list over the agents.
 use crate::bindings::{ACTIONS, ActiveBindings};
-use crate::model::{AgentSort, AgentStatus, Snapshot};
+use crate::model::{AgentSort, AgentStatus, Since, Snapshot, ago, waiting_since};
 use crate::theme::Theme;
 use crate::ui::Popup;
 use gpui::{
@@ -224,9 +224,10 @@ fn short_tab_label(label: &str) -> &str {
 }
 
 /// The sidebar's agents, in its order, by what they work on: each runs to its tab, as a click on its row does.
-pub fn agent_items(snapshot: Option<&Snapshot>, sort: AgentSort) -> Vec<Item> {
+/// A waiting one's hint leads with how long it has waited.
+pub fn agent_items(snapshot: Option<&Snapshot>, sort: AgentSort, since: &Since) -> Vec<Item> {
     let Some(s) = snapshot else { return Vec::new() };
-    s.agents_by(sort)
+    s.agents_by(sort, since)
         .into_iter()
         .map(|p| {
             let agent = p.agent.clone().unwrap_or_default();
@@ -235,7 +236,10 @@ pub fn agent_items(snapshot: Option<&Snapshot>, sort: AgentSort) -> Vec<Item> {
                 section: Section::Agents,
                 icon: agent_icon(&agent),
                 label: p.terminal_title_stripped.clone().filter(|t| !t.is_empty()).unwrap_or(agent),
-                hint: s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id).map(|w| w.label.clone()),
+                hint: s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id).map(|w| match waiting_since(since, p) {
+                    Some(at) => format!("{} · {}", ago(at.elapsed()), w.label),
+                    None => w.label.clone(),
+                }),
                 chord: None,
                 status: Some(p.agent_status),
                 run: Run::Tab(p.tab_id.clone()),

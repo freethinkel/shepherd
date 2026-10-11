@@ -1,7 +1,7 @@
 //! Agents that need you: a macOS notification when one starts waiting or finishes out of sight, and a Dock badge
 //! counting those not looked at yet.
 use crate::model::{AgentStatus, Pane, Snapshot};
-use gpui::{App, SystemNotification};
+use gpui::{App, SystemNotification, SystemNotificationAction};
 use objc2::MainThreadMarker;
 use objc2::AllocAnyThread;
 use objc2_app_kit::{NSApplication, NSImage};
@@ -23,8 +23,12 @@ pub fn arrivals<'a>(old: &'a Snapshot, new: &'a Snapshot) -> impl Iterator<Item 
     })
 }
 
-/// Posts a notification tagged with the pane, so a click can bring that pane up.
-pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool) {
+/// The id of a waiting agent's Approve button.
+pub const APPROVE: &str = "approve";
+
+/// Posts a notification tagged with the pane, so a click can bring that pane up; `approve` adds a button that
+/// answers the agent from the notification.
+pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool, approve: bool) {
     // ponytail: outside an .app UNUserNotificationCenter aborts (gpui makes it a no-op), so a bare binary shows none;
     // `cargo run` goes through scripts/run-bundled.sh, which runs it from inside Shepherd.app.
     if NSBundle::mainBundle().bundleIdentifier().is_some() {
@@ -32,7 +36,7 @@ pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool) {
             tag: pane_id.to_string().into(),
             title: title.into(),
             body: body.into(),
-            actions: Vec::new(),
+            actions: approve.then(|| SystemNotificationAction { id: APPROVE.into(), label: "Approve".into() }).into_iter().collect(),
         });
     }
     if sound {

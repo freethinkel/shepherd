@@ -131,6 +131,8 @@ pub struct Shell {
     /// The window's frame not saved yet, and the save it waits for: half a second after the last move, closing or quitting.
     frame: Option<WindowFrame>,
     frame_save: gpui::Task<()>,
+    /// Since when each agent has had its status: how long the waiting ones have waited.
+    since: crate::model::Since,
 }
 
 /// New worktree: the repo's workspace and the branch name being typed.
@@ -196,16 +198,23 @@ impl Shell {
                     cx.notify(); // the shown tab's agents count as seen once the window is active
                 })
                 .detach();
-                // A click on a notification brings its agent's tab up.
+                // A click on a notification brings its agent's tab up; Approve answers the agent and leaves Shepherd
+                // where it is.
                 let this = cx.entity().downgrade();
                 cx.on_system_notification_response(move |response, cx| {
+                    let approve = response.action_id.as_deref() == Some(crate::notify::APPROVE);
                     let _ = this.update(cx, |s, cx| {
                         let pane = s.snapshot.as_ref().and_then(|snap| snap.panes.iter().find(|p| p.pane_id == response.tag.as_ref()));
-                        if let Some((tab, pane)) = pane.map(|p| (p.tab_id.clone(), p.pane_id.clone())) {
-                            s.show_agent(tab, pane, cx);
+                        match pane.map(|p| (p.tab_id.clone(), p.pane_id.clone(), p.agent_status)) {
+                            // only while it still waits: a late press must not type Enter into an agent at work
+                            Some((_, pane_id, AgentStatus::Blocked)) if approve => s.send(Command::Approve { pane_id }, cx, |_, _, _| {}),
+                            Some((tab, pane, _)) if !approve => s.show_agent(tab, pane, cx),
+                            _ => {}
                         }
                     });
-                    cx.activate(true);
+                    if !approve {
+                        cx.activate(true);
+                    }
                 });
                 cx.observe_window_bounds(window, |s: &mut Shell, window, cx| {
                     let last = s.frame.clone().or_else(|| SettingsGlobal::of(cx).settings.window.clone());
@@ -286,10 +295,25 @@ impl Shell {
                     badge: 0,
                     frame: None,
                     frame_save: gpui::Task::ready(()),
+                    since: Default::default(),
                 };
                 let client = shell.client.clone();
                 cx.set_global(PaneQueries(client.clone(), rt.clone()));
                 cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await).detach();
+                // Waiting times move on between snapshots.
+                // ponytail: a minute from launch, not from each wait, so a label can lag by up to a minute.
+                cx.spawn(async move |this, cx| loop {
+                    cx.background_executor().timer(Duration::from_secs(60)).await;
+                    let alive = this.update(cx, |s, cx| {
+                        if s.since.values().any(|(status, _)| crate::notify::wants_attention(*status)) {
+                            cx.notify();
+                        }
+                    });
+                    if alive.is_err() {
+                        return; // window closed
+                    }
+                })
+                .detach();
                 shell
             })
         })
@@ -332,7 +356,7 @@ impl Shell {
                 let bindings = cx.try_global::<ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
                 crate::ui::command_panel::items(self.snapshot.as_ref(), &bindings)
             }
-            Kind::Agents => crate::ui::command_panel::agent_items(self.snapshot.as_ref(), self.agent_sort),
+            Kind::Agents => crate::ui::command_panel::agent_items(self.snapshot.as_ref(), self.agent_sort, &self.since),
             Kind::Branches => match dir.as_deref() {
                 Some(d) => crate::ui::command_panel::branch_items(&crate::ui::statusbar::read_branches(d), crate::ui::statusbar::branch_of(d, cx).as_deref()),
                 None => Vec::new(),
@@ -447,7 +471,7 @@ impl Shell {
                     Some(t) => format!("{status}: {t}"),
                     None => status.to_string(),
                 };
-                crate::notify::show(cx, &pane.pane_id, title, body, sound);
+                crate::notify::show(cx, &pane.pane_id, title, body, sound, pane.agent_status == AgentStatus::Blocked);
             }
         }
     }
@@ -831,6 +855,7 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cl
                 match update {
                     Ok(snapshot) => {
                         s.agents_changed(&snapshot, cx);
+                        snapshot.track(&mut s.since, Instant::now());
                         s.snapshot = Some(snapshot);
                         s.error = None;
                     }
@@ -1276,8 +1301,9 @@ fn solid_button(id: &'static str, label: &'static str, fill: gpui::Hsla, text: g
 }
 
 /// The agents list's orders: the `…` menu's Sort submenu.
-const SORTS: [(AgentSort, &str, &str, &str); 2] = [
+const SORTS: [(AgentSort, &str, &str, &str); 3] = [
     (AgentSort::Status, "sort-status", "icons/checklist.svg", "Status"),
+    (AgentSort::Waiting, "sort-waiting", "icons/clock-circle.svg", "Waiting longest"),
     (AgentSort::Grouped, "sort-grouped", "icons/folder.svg", "Grouped"),
 ];
 
@@ -1476,19 +1502,20 @@ impl Render for Shell {
                     .collect()
             })
             .unwrap_or_default();
-        let agents: Vec<(crate::model::Pane, String)> = snapshot
+        let agents: Vec<(crate::model::Pane, String, Option<String>)> = snapshot
             .as_ref()
             .map(|s| {
-                s.agents_by(self.agent_sort)
+                s.agents_by(self.agent_sort, &self.since)
                     .into_iter()
                     .map(|p| {
                         let ws = s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id);
-                        (p.clone(), ws.map(|w| w.label.clone()).unwrap_or_default())
+                        let waited = crate::model::waiting_since(&self.since, p).map(|at| crate::model::ago(at.elapsed()));
+                        (p.clone(), ws.map(|w| w.label.clone()).unwrap_or_default(), waited)
                     })
                     .collect()
             })
             .unwrap_or_default();
-        let agent_workspaces: Vec<String> = agents.iter().map(|(p, _)| p.workspace_id.clone()).collect();
+        let agent_workspaces: Vec<String> = agents.iter().map(|(p, _, _)| p.workspace_id.clone()).collect();
         let hover_bg = theme.hover;
         let sidebar_w = self.sidebar_now();
         let sliding = self.sidebar_motion.is_some_and(|m| m.animating());
@@ -1718,7 +1745,7 @@ impl Render for Shell {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .children(agents.into_iter().enumerate().flat_map(|(i, (pane, workspace))| {
+                            .children(agents.into_iter().enumerate().flat_map(|(i, (pane, workspace, waited))| {
                                 // Grouped: a heading where the workspace changes, which the rows then leave out.
                                 let grouped = self.agent_sort == AgentSort::Grouped;
                                 let heading = (grouped && (i == 0 || agent_workspaces[i - 1] != pane.workspace_id)).then(|| {
@@ -1758,7 +1785,10 @@ impl Render for Shell {
                                                                 .text_color(theme.text_faint)
                                                                 .child(workspace),
                                                         )
-                                                    }),
+                                                    })
+                                                    .children(waited.map(|w| {
+                                                        div().ml_auto().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(w)
+                                                    })),
                                             )
                                             .child(
                                                 div()

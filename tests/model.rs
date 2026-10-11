@@ -1,4 +1,4 @@
-use shepherd::model::{AgentSort, AgentStatus, Frac, Snapshot, attachable, split_path};
+use shepherd::model::{AgentSort, AgentStatus, Frac, Since, Snapshot, ago, attachable, split_path};
 
 fn fixture() -> Snapshot {
     let value: serde_json::Value = serde_json::from_str(include_str!("fixtures/snapshot.json")).unwrap();
@@ -238,8 +238,34 @@ fn grouped_agents_follow_workspace_order_ties_in_status_order() {
     let ids = |agents: Vec<&shepherd::model::Pane>| agents.iter().map(|p| p.pane_id.clone()).collect::<Vec<_>>();
     s.workspaces = vec![ws("w2", 1, None), ws("w1", 2, None)];
     s.panes[2].workspace_id = "w2".into();
-    assert_eq!(ids(s.agents_by(AgentSort::Grouped)), ["w1:p3", "w1:p2", "w1:p1"]);
-    assert_eq!(ids(s.agents_by(AgentSort::Status)), ["w1:p2", "w1:p1", "w1:p3"]);
+    assert_eq!(ids(s.agents_by(AgentSort::Grouped, &Since::new())), ["w1:p3", "w1:p2", "w1:p1"]);
+    assert_eq!(ids(s.agents_by(AgentSort::Status, &Since::new())), ["w1:p2", "w1:p1", "w1:p3"]);
+}
+
+#[test]
+fn waiting_agents_count_from_their_status_change_longest_first() {
+    use std::time::{Duration, Instant};
+    let mut s = fixture();
+    for p in &mut s.panes {
+        p.agent = Some("claude".into());
+    }
+    let (t0, mut since) = (Instant::now(), Since::new());
+    s.panes[0].agent_status = AgentStatus::Done;
+    s.track(&mut since, t0);
+    s.panes[1].agent_status = AgentStatus::Blocked;
+    s.track(&mut since, t0 + Duration::from_secs(90));
+    let ids = |agents: Vec<&shepherd::model::Pane>| agents.iter().map(|p| p.pane_id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(s.agents_by(AgentSort::Waiting, &since)), ["w1:p1", "w1:p2", "w1:p3"], "done since t0 waited longest");
+    s.track(&mut since, t0 + Duration::from_secs(600));
+    assert_eq!(since["w1:p1"].1, t0, "a status that stays keeps its clock");
+    s.panes[0].agent_status = AgentStatus::Blocked;
+    s.track(&mut since, t0 + Duration::from_secs(600));
+    assert_eq!(ids(s.agents_by(AgentSort::Waiting, &since)), ["w1:p2", "w1:p1", "w1:p3"], "done then blocked starts over");
+    s.panes.remove(2);
+    s.track(&mut since, t0);
+    assert!(!since.contains_key("w1:p3"), "a gone pane leaves");
+    let labels: Vec<_> = [0, 59, 60, 3599, 3600, 86_399, 86_400].map(|secs| ago(Duration::from_secs(secs))).into();
+    assert_eq!(labels, ["now", "now", "1m", "59m", "1h", "23h", "1d"]);
 }
 
 fn ws(id: &str, number: u32, repo: Option<(&str, bool)>) -> shepherd::model::Workspace {
