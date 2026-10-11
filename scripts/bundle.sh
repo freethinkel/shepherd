@@ -31,6 +31,7 @@ cat > "$app/Contents/Info.plist" <<EOF
 	<key>CFBundleShortVersionString</key><string>$version</string>
 	<key>LSMinimumSystemVersion</key><string>14.0</string>
 	<key>NSHighResolutionCapable</key><true/>
+	<key>NSUserNotificationAlertStyle</key><string>alert</string>
 </dict>
 </plist>
 EOF
