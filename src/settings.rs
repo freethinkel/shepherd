@@ -13,7 +13,7 @@ pub struct Settings {
     pub font_size: f32,
     /// Terminal row height as a multiple of the font size.
     pub line_height: f32,
-    /// The theme variant (`zeron-light`, `ghostty-…`) in light appearance, and in dark.
+    /// The theme variant (`ayu-light`, `ghostty-…`) in light appearance, and in dark.
     pub theme_light: String,
     pub theme_dark: String,
     /// Before the light and dark themes: one Zeron family for both. Read once, never written.
@@ -199,7 +199,7 @@ mod tests {
         assert!(err.is_none());
         assert_eq!(s.font_family, "Geist Mono");
         assert_eq!(s.font_size, 13.0);
-        assert_eq!(s.theme_dark, "zeron-dark");
+        assert_eq!(s.theme_dark, "ayu-dark");
     }
 
     #[test]
@@ -322,7 +322,7 @@ mod tests {
         let (_d, path) = tmp();
         std::fs::write(&path, r#"{"theme_family": "nord"}"#).unwrap();
         let (s, _) = Settings::load(&path);
-        assert_eq!((s.theme_light.as_str(), s.theme_dark.as_str()), ("zeron-light", "nord"));
+        assert_eq!((s.theme_light.as_str(), s.theme_dark.as_str()), ("ayu-light", "nord"));
         assert!(!serde_json::to_string(&s).unwrap().contains("theme_family"));
     }
 }

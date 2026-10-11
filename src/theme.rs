@@ -78,12 +78,12 @@ fn color(c: Color) -> Hsla {
     gpui::Rgba { r: channel(c.r), g: channel(c.g), b: channel(c.b), a: channel(c.a) }.into()
 }
 
-/// Every theme variant: Zeron's built-in ones, then Ghostty's (assets/themes/ghostty.conf) under names Zeron
-/// does not have.
+/// Every theme variant: the `zeron-theme` built-ins but Zeron's own family, then Ghostty's
+/// (assets/themes/ghostty.conf) under names the built-ins do not have.
 pub fn variants() -> &'static [ThemeVariant] {
     static VARIANTS: std::sync::OnceLock<Vec<ThemeVariant>> = std::sync::OnceLock::new();
     VARIANTS.get_or_init(|| {
-        let mut all: Vec<ThemeVariant> = ThemeRegistry::builtin().families.iter().flat_map(|f| f.variants.iter().cloned()).collect();
+        let mut all: Vec<ThemeVariant> = ThemeRegistry::builtin().families.iter().filter(|f| f.id != "zeron").flat_map(|f| f.variants.iter().cloned()).collect();
         for v in ghostty(include_str!("../assets/themes/ghostty.conf")) {
             if !all.iter().any(|b| b.name.eq_ignore_ascii_case(&v.name)) {
                 all.push(v);
@@ -93,15 +93,15 @@ pub fn variants() -> &'static [ThemeVariant] {
     })
 }
 
-/// The variants of one appearance as (id, name): Zeron's first, then Ghostty's by name.
+/// The variants of one appearance as (id, name): the built-ins first, then Ghostty's by name.
 pub fn variants_for(appearance: Appearance) -> Vec<(String, String)> {
     let dark = appearance == Appearance::Dark;
     variants().iter().filter(|v| v.appearance.is_dark() == dark).map(|v| (v.id.clone(), v.name.clone())).collect()
 }
 
 /// The default variant for each appearance.
-pub const DEFAULT_LIGHT: &str = "zeron-light";
-pub const DEFAULT_DARK: &str = "zeron-dark";
+pub const DEFAULT_LIGHT: &str = "ayu-light";
+pub const DEFAULT_DARK: &str = "ayu-dark";
 
 /// Ghostty theme files, each after a `[Name]` line: `palette = N=#rrggbb`, `background`, `foreground`,
 /// `selection-background`. A theme without a background or foreground is skipped.
@@ -199,13 +199,13 @@ fn ghostty_variant(name: &str, keys: &[(&str, &str)]) -> Option<ThemeVariant> {
 }
 
 impl Theme {
-    /// Zeron's own theme for this appearance, with the default font.
+    /// The default theme for this appearance, with the default font.
     pub fn for_appearance(appearance: WindowAppearance) -> Theme {
         Theme::resolve(DEFAULT_LIGHT, DEFAULT_DARK, AppearanceMode::System, appearance, &FontSettings::default())
     }
 
     /// The light or the dark variant, whichever the mode (or the system's appearance) asks for; an unknown id is
-    /// Zeron's variant of that appearance.
+    /// the default variant of that appearance.
     pub fn resolve(light: &str, dark: &str, mode: AppearanceMode, system: WindowAppearance, font: &FontSettings) -> Theme {
         let is_dark = match mode {
             AppearanceMode::Dark => true,
@@ -213,7 +213,7 @@ impl Theme {
             AppearanceMode::System => matches!(system, WindowAppearance::Dark | WindowAppearance::VibrantDark),
         };
         let (id, fallback) = if is_dark { (dark, DEFAULT_DARK) } else { (light, DEFAULT_LIGHT) };
-        Theme::variant(id, font).unwrap_or_else(|| Theme::variant(fallback, font).expect("Zeron's built-in variants"))
+        Theme::variant(id, font).unwrap_or_else(|| Theme::variant(fallback, font).expect("the default variants are built in"))
     }
 
     /// The variant `id`, if there is one.
@@ -307,11 +307,11 @@ mod tests {
     }
 
     #[test]
-    fn zeron_family_resolves_to_zeron_colors() {
+    fn default_resolves_to_ayu_colors() {
         let t = resolve(AppearanceMode::System, gpui::WindowAppearance::Dark);
-        assert_eq!(t.terminal.background, hex(0x090909));
-        assert_eq!(t.terminal.ansi[1], hex(0xf87171));
-        assert_eq!(t.surface, hex(0x0d0d0d));
+        assert_eq!(t.terminal.background, hex(0x0d1017));
+        assert_eq!(t.terminal.ansi[1], hex(0xf06b73));
+        assert_eq!(t.surface, hex(0x0d1017));
         assert_eq!(t.appearance, Appearance::Dark);
     }
 
@@ -333,7 +333,7 @@ mod tests {
         let t = Theme::variant("ghostty-catppuccin-frappe", &font()).unwrap();
         assert_eq!(t.terminal.background, hex(0x303446));
         assert_eq!(t.terminal.ansi[1], hex(0xe78284));
-        // Zeron's own Catppuccin wins over Ghostty's of the same name.
+        // The built-in Catppuccin wins over Ghostty's of the same name.
         assert_eq!(variants().iter().filter(|v| v.name == "Catppuccin Mocha").count(), 1);
     }
 
@@ -341,13 +341,14 @@ mod tests {
     fn an_explicit_mode_beats_the_system() {
         let t = resolve(AppearanceMode::Light, gpui::WindowAppearance::Dark);
         assert_eq!(t.appearance, Appearance::Light);
-        assert_eq!(t.terminal.background, hex(0xfafafa));
+        assert_eq!(t.terminal.background, hex(0xf8f9fa));
     }
 
     #[test]
-    fn unknown_variant_falls_back_to_zeron() {
-        let t = Theme::resolve("no-such-theme", "no-such-theme", AppearanceMode::Dark, gpui::WindowAppearance::Dark, &font());
-        assert_eq!(t.terminal.background, hex(0x090909));
+    fn unknown_variant_falls_back_to_the_default() {
+        // a saved Zeron theme is unknown now too
+        let t = Theme::resolve("zeron-light", "zeron-dark", AppearanceMode::Dark, gpui::WindowAppearance::Dark, &font());
+        assert_eq!(t.terminal.background, hex(0x0d1017));
     }
 
     #[test]
@@ -359,11 +360,11 @@ mod tests {
     }
 
     #[test]
-    fn dark_terminal_matches_zeron_dark() {
+    fn dark_terminal_matches_ayu_dark() {
         let t = Theme::for_appearance(gpui::WindowAppearance::Dark);
-        assert_eq!(t.terminal.background, hex(0x090909));
-        assert_eq!(t.terminal.ansi[1], hex(0xf87171));
-        assert_eq!(t.terminal.ansi[15], hex(0xfafafa));
+        assert_eq!(t.terminal.background, hex(0x0d1017));
+        assert_eq!(t.terminal.ansi[1], hex(0xf06b73));
+        assert_eq!(t.terminal.ansi[15], hex(0xffffff));
     }
 
     #[test]
@@ -373,10 +374,10 @@ mod tests {
     }
 
     #[test]
-    fn light_terminal_matches_zeron_light() {
+    fn light_terminal_matches_ayu_light() {
         let t = Theme::for_appearance(gpui::WindowAppearance::Light);
-        assert_eq!(t.terminal.background, hex(0xfafafa));
-        assert_eq!(t.terminal.ansi[1], hex(0xdc2626));
+        assert_eq!(t.terminal.background, hex(0xf8f9fa));
+        assert_eq!(t.terminal.ansi[1], hex(0xf06b6c));
         assert_eq!(t.appearance, Appearance::Light);
     }
 }
