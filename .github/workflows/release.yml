@@ -23,6 +23,8 @@ jobs:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the tags, for the release notes
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -59,7 +61,13 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "$tag is already released"
           else
-            gh release create "$tag" target/universal/Shepherd-*.zip target/universal/Shepherd-*.dmg --target "$GITHUB_SHA" --title "$tag" --generate-notes
+            # The notes are the commits since the last release, docs and the version bump left out.
+            prev="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+            {
+              git log --no-merges --format='- %s' ${prev:+"$prev"..}HEAD | grep -vE '^- (docs|release):' || true
+              [ -n "$prev" ] && printf '\n**Full Changelog**: %s/compare/%s...%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$prev" "$tag"
+            } > "$RUNNER_TEMP/notes.md"
+            gh release create "$tag" target/universal/Shepherd-*.zip target/universal/Shepherd-*.dmg --target "$GITHUB_SHA" --title "$tag" --notes-file "$RUNNER_TEMP/notes.md"
           fi
 
       - uses: actions/upload-artifact@v4
