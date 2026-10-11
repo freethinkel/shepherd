@@ -18,6 +18,8 @@ pub enum Run {
     Action(&'static str),
     /// Show this tab.
     Tab(String),
+    /// Check out this branch in the shown pane's repo.
+    Branch(String),
 }
 
 /// The heading an item sits under; also searched, so "tab" finds the tabs.
@@ -28,6 +30,7 @@ pub enum Section {
     Workspaces,
     Tabs,
     Agents,
+    Branches,
 }
 
 impl Section {
@@ -38,6 +41,7 @@ impl Section {
             Section::Workspaces => "Workspaces",
             Section::Tabs => "Tabs",
             Section::Agents => "Agents",
+            Section::Branches => "Branches",
         }
     }
 }
@@ -63,7 +67,7 @@ impl Item {
     /// comes first so match positions below its length are in the label.
     fn haystack(&self) -> String {
         match self.run {
-            Run::Action(_) => self.label.clone(),
+            Run::Action(_) | Run::Branch(_) => self.label.clone(),
             Run::Tab(_) => [Some(self.label.as_str()), self.hint.as_deref(), Some(self.section.title())].into_iter().flatten().collect::<Vec<_>>().join(" "),
         }
     }
@@ -74,6 +78,7 @@ impl Item {
 pub enum Kind {
     Commands,
     Agents,
+    Branches,
 }
 
 impl Kind {
@@ -81,6 +86,7 @@ impl Kind {
         match self {
             Kind::Commands => "CommandPanel",
             Kind::Agents => "AgentsPanel",
+            Kind::Branches => "", // opened from the status bar, no chord
         }
     }
 }
@@ -238,6 +244,25 @@ pub fn agent_items(snapshot: Option<&Snapshot>, sort: AgentSort) -> Vec<Item> {
         .collect()
 }
 
+/// `git for-each-ref` over local branches, newest commit first; `current` is marked and listed first.
+pub fn branch_items(refs: &str, current: Option<&str>) -> Vec<Item> {
+    let mut names: Vec<&str> = refs.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    names.sort_by_key(|n| Some(*n) != current); // stable: the rest keep git's order
+    names
+        .into_iter()
+        .map(|name| Item {
+            key: format!("branch:{name}"),
+            section: Section::Branches,
+            icon: "icons/git-branch.svg",
+            label: name.to_string(),
+            hint: (Some(name) == current).then(|| "current".into()),
+            chord: None,
+            status: None,
+            run: Run::Branch(name.to_string()),
+        })
+        .collect()
+}
+
 /// How well `query` matches `text`, ignoring case, and which chars of `text` it matched; None if it does not:
 /// `text` starting with it ranks first, then it starting a word, then anywhere, then its letters in order (more
 /// of them on word starts, fewer gaps, higher).
@@ -387,12 +412,13 @@ impl Panel {
     pub fn new(kind: Kind, items: Vec<Item>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let items = match kind {
             Kind::Commands => with_recent(items, &crate::settings::SettingsGlobal::of(cx).settings.recent_commands),
-            Kind::Agents => items,
+            Kind::Agents | Kind::Branches => items,
         };
         let theme = Theme::of(cx).clone();
         let placeholder = match kind {
             Kind::Commands => "Search commands, workspaces and tabs",
             Kind::Agents => "Search agents",
+            Kind::Branches => "Switch branch",
         };
         let input = cx.new(|cx| {
             let mut input = InputState::new(window, cx).placeholder(placeholder);
@@ -527,6 +553,8 @@ impl Render for Panel {
                 Kind::Commands => ("No results", "Try a command, a workspace or a tab."),
                 Kind::Agents if self.items.is_empty() => ("No agents", "Agents herdr finds in your panes show up here."),
                 Kind::Agents => ("No results", "Try an agent's task or its workspace."),
+                Kind::Branches if self.items.is_empty() => ("No branches", "The shown pane is not in a git repo."),
+                Kind::Branches => ("No results", "Try a branch name."),
             };
             div().py(px(24.)).flex().flex_col().items_center().gap(px(6.)).child(title).child(div().text_color(theme.text_muted).child(hint))
         });
@@ -855,5 +883,13 @@ mod tests {
             ],
             "a workspace without tabs has nothing to show; idle ones show no dot"
         );
+    }
+
+    #[test]
+    fn branches_list_the_current_one_first() {
+        let items = branch_items("feature\nmain\n\nfix\n", Some("main"));
+        let rows: Vec<_> = items.iter().map(|i| (i.label.as_str(), i.hint.as_deref())).collect();
+        assert_eq!(rows, [("main", Some("current")), ("feature", None), ("fix", None)]);
+        assert_eq!(items[1].run, Run::Branch("feature".into()));
     }
 }

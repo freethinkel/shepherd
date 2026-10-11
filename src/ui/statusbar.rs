@@ -1,6 +1,6 @@
-//! The window's bottom bar (Zeron's footer labels): the shown pane's branch, directory and agent, and how many
-//! agents across the workspaces work or wait for you. Git runs off the main thread and is cached per directory.
-use crate::model::{AgentStatus, Pane, Snapshot};
+//! The window's bottom bar (Zeron's footer labels): the shown pane's branch, directory and token spend, and
+//! Claude's plan limits. Git runs off the main thread and is cached per directory.
+use crate::model::{Pane, Snapshot};
 use crate::theme::Theme;
 use gpui::{App, ClickEvent, Global, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
 use std::collections::HashMap;
@@ -62,31 +62,6 @@ pub fn short_path(path: &str, home: Option<&Path>) -> String {
     }
 }
 
-/// Agents working, blocked (waiting for input) and done, across every workspace.
-pub fn agent_counts(snapshot: &Snapshot) -> (usize, usize, usize) {
-    let count = |s| snapshot.panes.iter().filter(|p| p.agent.is_some() && p.agent_status == s).count();
-    (count(AgentStatus::Working), count(AgentStatus::Blocked), count(AgentStatus::Done))
-}
-
-/// The tab of the blocked agent after `current` (cycling), or the first blocked one.
-pub fn next_waiting<'a>(snapshot: &'a Snapshot, current: Option<&str>) -> Option<&'a str> {
-    let waiting: Vec<_> = snapshot.agents().into_iter().filter(|p| p.agent_status == AgentStatus::Blocked).collect();
-    let next = match waiting.iter().position(|p| Some(p.pane_id.as_str()) == current) {
-        Some(i) => waiting.get((i + 1) % waiting.len()),
-        None => waiting.first(),
-    };
-    next.map(|p| p.tab_id.as_str())
-}
-
-fn status_label(status: AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::Working => "working",
-        AgentStatus::Blocked => "needs input",
-        AgentStatus::Done => "done",
-        AgentStatus::Idle | AgentStatus::Unknown => "idle",
-    }
-}
-
 /// Background lookups by key, each asked again once older than its TTL.
 struct Cache<T>(HashMap<String, Entry<T>>);
 
@@ -135,6 +110,43 @@ fn cached<T: Clone + PartialEq + Send + 'static>(key: &str, ttl: Duration, fetch
     value
 }
 
+/// The directory `pane_id` of `snapshot` shows: its foreground process's, else its shell's.
+pub fn pane_dir(snapshot: Option<&Snapshot>, pane_id: Option<&str>) -> Option<String> {
+    let pane = snapshot?.panes.iter().find(|p| Some(p.pane_id.as_str()) == pane_id)?;
+    pane.foreground_cwd.clone().or_else(|| pane.cwd.clone()).filter(|d| !d.is_empty())
+}
+
+/// `dir`'s cached branch, if git has been asked already.
+pub fn branch_of(dir: &str, cx: &mut App) -> Option<String> {
+    cached(dir, GIT_TTL, read_git, cx).map(|g| g.branch)
+}
+
+/// Asks git about `dir` again on the next render, as after a checkout.
+pub fn refresh_git(dir: &str, cx: &mut App) {
+    if let Some(entry) = cx.default_global::<Cache<Git>>().0.get_mut(dir) {
+        entry.fetched = None;
+    }
+    cx.refresh_windows();
+}
+
+/// `dir`'s local branches, newest commit first.
+pub fn read_branches(dir: &str) -> String {
+    std::process::Command::new("git")
+        .args(["-C", dir, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// `git switch branch` in `dir`; git's complaint on failure.
+pub fn switch_branch(dir: &str, branch: &str) -> Result<(), String> {
+    let out = std::process::Command::new("git").args(["-C", dir, "switch", branch]).output().map_err(|e| e.to_string())?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
+}
+
 fn read_git(dir: &str) -> Option<Git> {
     // --no-optional-locks: never take index.lock from under the agents' own git.
     let out = std::process::Command::new("git")
@@ -144,18 +156,102 @@ fn read_git(dir: &str) -> Option<Git> {
     parse_git(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Claude's plan usage, in percent of each window.
+/// Claude's plan usage, in percent of each window, and when each resets (unix seconds).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Usage {
     pub five_hour: f64,
     pub week: f64,
+    pub five_hour_resets: Option<i64>,
+    pub week_resets: Option<i64>,
 }
 
 /// The body of `api/oauth/usage`.
 pub fn parse_usage(json: &str) -> Option<Usage> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let used = |window: &str| v[window]["utilization"].as_f64();
-    Some(Usage { five_hour: used("five_hour")?, week: used("seven_day")? })
+    let resets = |window: &str| v[window]["resets_at"].as_str().and_then(unix_secs);
+    Some(Usage { five_hour: used("five_hour")?, week: used("seven_day")?, five_hour_resets: resets("five_hour"), week_resets: resets("seven_day") })
+}
+
+/// An RFC 3339 time (`2026-10-11T15:00:00.123Z`, `…+03:00`) as unix seconds.
+pub fn unix_secs(t: &str) -> Option<i64> {
+    let n = |r: std::ops::Range<usize>| t.get(r)?.parse::<i64>().ok();
+    let (y, m, d, hh, mm, ss) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
+    // days from civil (Howard Hinnant's), 1970-01-01 = 0
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + (153 * m + 2) / 5 + d - 1;
+    let days = era * 146_097 + doe - 719_468;
+    let zone = t[19..].trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let offset = match zone.as_bytes().first() {
+        Some(b'+' | b'-') => {
+            let sign = if zone.starts_with('-') { -1 } else { 1 };
+            sign * (zone.get(1..3)?.parse::<i64>().ok()? * 3600 + zone.get(4..6)?.parse::<i64>().ok()? * 60)
+        }
+        _ => 0,
+    };
+    Some(days * 86_400 + hh * 3600 + mm * 60 + ss - offset)
+}
+
+/// `secs` from now as `resets in 2h 13m`, `resets in 3d 4h`, `resets in 12m`.
+pub fn resets_in(secs: i64) -> String {
+    let m = secs.max(0) / 60;
+    let (d, h, m) = (m / 1440, m / 60 % 24, m % 60);
+    match (d, h) {
+        (0, 0) => format!("resets in {m}m"),
+        (0, _) => format!("resets in {h}h {m}m"),
+        _ => format!("resets in {d}d {h}h"),
+    }
+}
+
+/// The ring's color: the accent, then warning from 70 %, danger from 90 %.
+fn usage_color(used: f64, theme: &Theme) -> gpui::Hsla {
+    if used >= 90. { theme.danger } else if used >= 70. { theme.warning } else { theme.accent }
+}
+
+/// The limits popup's card: the 5-hour and weekly windows, each with its ring and when it resets.
+pub fn usage_card(theme: &Theme, cx: &mut App) -> gpui::Stateful<gpui::Div> {
+    let usage = cached("", USAGE_TTL, read_usage, cx);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let faint = theme.text_faint;
+    let window = |name: &'static str, used: f64, resets: Option<i64>| {
+        div()
+            .h(px(40.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .child(div().size(px(16.)).flex().items_center().justify_center().child(donut(used, theme.text.opacity(0.2), usage_color(used, theme))))
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .child(name)
+                    .child(div().text_size(px(11.)).text_color(faint).child(resets.map(|r| resets_in(r - now)).unwrap_or_default())),
+            )
+            .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("{}%", used.round())))
+    };
+    let hover = theme.hover;
+    crate::shell::menu_card(theme, "usage-menu", 240.)
+        .text_size(px(12.))
+        .text_color(theme.text)
+        .children(usage.map(|u| [window("5-hour limit", u.five_hour, u.five_hour_resets), window("Weekly limit", u.week, u.week_resets)]).into_iter().flatten())
+        .child(
+            div()
+                .id("usage-open")
+                .h(px(28.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .text_color(faint)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child("Open usage settings")
+                .on_click(|_, _, cx| cx.open_url("https://claude.ai/settings/usage")),
+        )
 }
 
 /// The usage endpoint Claude Code itself reads, with the token Claude Code keeps (and refreshes) in the login
@@ -374,30 +470,22 @@ fn link(el: gpui::Stateful<gpui::Div>, theme: &Theme) -> gpui::Stateful<gpui::Di
     el.h(px(20.)).rounded(px(6.)).cursor_pointer().hover(move |s| s.bg(hover))
 }
 
-fn dot(theme: &Theme, status: AgentStatus) -> gpui::Div {
-    let dot = div().size(px(6.)).rounded_full().flex_none();
-    match crate::shell::status_color(status, theme) {
-        Some(c) => dot.bg(c),
-        None => dot.border_1().border_color(theme.text_faint.opacity(0.6)),
-    }
-}
-
-/// The bar for the pane `pane_id` of `snapshot`. `on_waiting` runs on a click on the agents summary while
-/// some agent waits for input.
+/// The bar for the pane `pane_id` of `snapshot`. `on_branch`, `on_spent` and `on_usage` run on a click on
+/// the branch, the spend and the limits.
 pub fn bar(
     snapshot: Option<&Snapshot>,
     pane_id: Option<&str>,
     theme: &Theme,
-    on_waiting: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_branch: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_spent: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_usage: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let pane = snapshot.zip(pane_id).and_then(|(s, id)| s.panes.iter().find(|p| p.pane_id == id));
-    let dir = pane.and_then(|p| p.foreground_cwd.clone().or_else(|| p.cwd.clone())).filter(|d| !d.is_empty());
+    let dir = pane_dir(snapshot, pane_id);
     let git = dir.as_deref().and_then(|d| cached(d, GIT_TTL, read_git, cx));
     let usage = cached("", USAGE_TTL, read_usage, cx);
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let (working, waiting, done) = snapshot.map(agent_counts).unwrap_or_default();
     let muted = theme.text_muted.opacity(0.7);
     div()
         .flex_none()
@@ -412,28 +500,20 @@ pub fn bar(
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(muted)
         .children(git.map(|g| {
-            label(theme, "icons/git-branch.svg")
+            link(label(theme, "icons/git-branch.svg").id("statusbar-branch"), theme)
                 .flex_shrink_0()
                 .max_w(px(220.))
                 .child(div().min_w_0().truncate().child(g.branch))
                 .when(g.dirty, |el| el.child(div().flex_none().text_color(theme.warning).child("●")))
                 .when(g.ahead > 0, |el| el.child(div().flex_none().child(format!("↑{}", g.ahead))))
                 .when(g.behind > 0, |el| el.child(div().flex_none().child(format!("↓{}", g.behind))))
+                .on_click(on_branch)
         }))
         .children(dir.map(|d| {
             let short = short_path(&d, home.as_deref());
             link(label(theme, "icons/folder.svg").id("statusbar-cwd"), theme)
                 .child(div().min_w_0().truncate().child(short))
                 .on_click(move |_, _, cx| cx.open_with_system(Path::new(&d)))
-        }))
-        .children(pane.map(|p| match &p.agent {
-            Some(agent) => label(theme, "icons/bot.svg")
-                .flex_shrink_0()
-                .child(agent.clone())
-                .child(dot(theme, p.agent_status))
-                .child(status_label(p.agent_status)),
-            None => label(theme, "icons/terminal.svg")
-                .child(div().min_w_0().truncate().child(p.terminal_title_stripped.clone().unwrap_or_default())),
         }))
         .children(pane.and_then(|p| spent_of(p, cx)).map(|s| {
             link(div().id("statusbar-spent").flex_none().flex().items_center().px(px(6.)), theme)
@@ -443,36 +523,12 @@ pub fn bar(
         .child(div().flex_1())
         .children(usage.map(|u| {
             // the dotfiles' statusbar: the ring fills with the 5-hour window, colored by the worse of the two
-            let worst = u.five_hour.max(u.week);
-            let color = if worst >= 90. { theme.danger } else if worst >= 70. { theme.warning } else { theme.accent };
+            let color = usage_color(u.five_hour.max(u.week), theme);
             link(div().id("statusbar-usage").flex_none().flex().items_center().gap(px(6.)).px(px(8.)), theme)
                 .child(donut(u.five_hour, theme.text.opacity(0.2), color))
                 .child(format!("{}%", u.five_hour.round()))
-                .on_click(|_, _, cx| cx.open_url("https://claude.ai/settings/usage"))
+                .on_click(on_usage)
         }))
-        .when(working + waiting + done > 0, |el| {
-            let count = |status, n: usize, what: &str| {
-                (n > 0).then(|| div().flex().items_center().gap(px(5.)).child(dot(theme, status)).child(format!("{n} {what}")))
-            };
-            let hover = theme.hover;
-            el.child(
-                div()
-                    .id("statusbar-agents")
-                    .flex_none()
-                    .h(px(20.))
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .rounded(px(6.))
-                    .children(count(AgentStatus::Blocked, waiting, "waiting"))
-                    .children(count(AgentStatus::Working, working, "working"))
-                    .children(count(AgentStatus::Done, done, "done"))
-                    .when(waiting > 0, |el| {
-                        el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(on_waiting)
-                    }),
-            )
-        })
         .into_any_element()
 }
 
@@ -494,7 +550,12 @@ mod tests {
     #[test]
     fn parses_claude_usage() {
         let body = r#"{"five_hour":{"utilization":42.0,"resets_at":"2026-10-11T15:00:00.000Z"},"seven_day":{"utilization":18,"resets_at":null}}"#;
-        assert_eq!(parse_usage(body), Some(Usage { five_hour: 42.0, week: 18.0 }));
+        let five_hour_resets = Some(1_791_730_800);
+        assert_eq!(parse_usage(body), Some(Usage { five_hour: 42.0, week: 18.0, five_hour_resets, week_resets: None }));
+        assert_eq!(unix_secs("2026-10-11T18:00:00.5+03:00"), five_hour_resets);
+        assert_eq!(unix_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(unix_secs("soon"), None);
+        assert_eq!((resets_in(12 * 60), resets_in(2 * 3600 + 13 * 60), resets_in(3 * 86_400 + 4 * 3600 + 59)), ("resets in 12m".into(), "resets in 2h 13m".into(), "resets in 3d 4h".into()));
         assert_eq!(parse_usage(r#"{"five_hour":{"utilization":null},"seven_day":{"utilization":1}}"#), None);
         assert_eq!(parse_usage(r#"{"error":{"type":"authentication_error"}}"#), None);
     }
@@ -524,25 +585,5 @@ mod tests {
         assert_eq!(short_path("/Users/meow/x", home), "/Users/meow/x");
         assert_eq!(short_path("/opt/a/b/c/d", home), "/…/c/d");
         assert_eq!(short_path("/", None), "/");
-    }
-
-    #[test]
-    fn counts_agents_and_cycles_through_the_waiting_ones() {
-        let pane = |id: &str, tab: &str, status: &str, agent: bool| {
-            serde_json::json!({"pane_id": id, "tab_id": tab, "workspace_id": "w", "terminal_id": "t",
-                "agent_status": status, "agent": if agent { Some("claude") } else { None }})
-        };
-        let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
-            "focused_workspace_id": null, "focused_tab_id": null, "focused_pane_id": null,
-            "workspaces": [], "tabs": [], "layouts": [],
-            "panes": [pane("p1", "t1", "blocked", true), pane("p2", "t2", "working", true),
-                      pane("p3", "t3", "blocked", true), pane("p4", "t4", "blocked", false)],
-        }))
-        .unwrap();
-        assert_eq!(agent_counts(&snapshot), (1, 2, 0));
-        assert_eq!(next_waiting(&snapshot, None), Some("t1"));
-        assert_eq!(next_waiting(&snapshot, Some("p2")), Some("t1"));
-        assert_eq!(next_waiting(&snapshot, Some("p1")), Some("t3"));
-        assert_eq!(next_waiting(&snapshot, Some("p3")), Some("t1"));
     }
 }
