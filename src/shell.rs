@@ -95,8 +95,8 @@ pub struct Shell {
     sort_submenu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Worktrees herdr is removing: their rows show a spinner until they leave the snapshot.
     removing: std::collections::HashSet<String>,
-    /// Remove a worktree with changes anyway? The workspace and its label.
-    remove_confirm: Option<crate::ui::Popup<(String, String)>>,
+    /// Remove a worktree? The workspace, its label, and whether herdr found changes (then removal is forced).
+    remove_confirm: Option<crate::ui::Popup<(String, String, bool)>>,
     /// The New worktree dialog, open over the window.
     worktree_dialog: Option<crate::ui::Popup<WorktreeDialog>>,
     /// Worktrees herdr is still creating, as (workspace the dialog was opened on, branch): herdr answers
@@ -611,7 +611,14 @@ impl Shell {
         cx.notify();
     }
 
-    /// herdr deletes the checkout and closes the workspace; one with changes asks first, then goes with `force`.
+    /// Asks before a worktree is removed.
+    fn confirm_remove_worktree(&mut self, workspace_id: String, dirty: bool, cx: &mut Context<Self>) {
+        let label = self.snapshot.as_ref().and_then(|s| s.workspaces.iter().find(|w| w.workspace_id == workspace_id)).map(|w| w.label.clone()).unwrap_or_default();
+        self.remove_confirm = Some(crate::ui::Popup::new((workspace_id, label, dirty)));
+        cx.notify();
+    }
+
+    /// herdr deletes the checkout and closes the workspace; one with changes asks again, then goes with `force`.
     fn remove_worktree(&mut self, workspace_id: String, force: bool, cx: &mut Context<Self>) {
         self.removing.insert(workspace_id.clone());
         cx.notify();
@@ -622,8 +629,7 @@ impl Shell {
                 shell.removing.remove(&id);
                 let message = format!("{err:#}");
                 if message.starts_with("dirty_worktree_requires_force") {
-                    let label = shell.snapshot.as_ref().and_then(|s| s.workspaces.iter().find(|w| w.workspace_id == id)).map(|w| w.label.clone()).unwrap_or_default();
-                    shell.remove_confirm = Some(crate::ui::Popup::new((id.clone(), label)));
+                    shell.confirm_remove_worktree(id.clone(), true, cx);
                 } else {
                     crate::ui::toast::error(cx, message);
                 }
@@ -635,9 +641,9 @@ impl Shell {
     fn finish_remove_confirm(&mut self, remove: bool, cx: &mut Context<Self>) {
         let Some(confirm) = self.remove_confirm.as_mut().filter(|c| c.is_open()) else { return };
         confirm.close();
-        let workspace_id = confirm.value.0.clone();
+        let (workspace_id, _, dirty) = confirm.value.clone();
         if remove {
-            self.remove_worktree(workspace_id, true, cx);
+            self.remove_worktree(workspace_id, dirty, cx);
         }
         cx.notify();
     }
@@ -2311,7 +2317,7 @@ impl Render for Shell {
                                         .child("Remove worktree")
                                         .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
                                             if let Some(m) = this.ws_menu.as_mut() { m.close() }
-                                            this.remove_worktree(id.clone(), false, cx);
+                                            this.confirm_remove_worktree(id.clone(), false, cx);
                                         })),
                                 )
                             }),
@@ -2360,7 +2366,12 @@ impl Render for Shell {
             }))
             .children(self.command_panel.as_ref().map(|panel| crate::ui::command_panel::overlay(panel, window)))
             .children(self.remove_confirm.as_ref().map(|confirm| {
-                let label = confirm.value.1.clone();
+                let (_, label, dirty) = confirm.value.clone();
+                let text = if dirty {
+                    format!("{label} has uncommitted changes. Removing it deletes them; its branch stays.")
+                } else {
+                    format!("{label}'s checkout is deleted and its workspace closed; its branch stays.")
+                };
                 let card = dialog_card(&theme, "remove-dialog", "Remove worktree?")
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_remove_confirm(false, cx)))
                     .child(
@@ -2368,7 +2379,7 @@ impl Render for Shell {
                             .mt(px(8.))
                             .line_height(px(19.))
                             .text_color(theme.text_muted)
-                            .child(format!("{label} has uncommitted changes. Removing it deletes them; its branch stays.")),
+                            .child(text),
                     )
                     .child(
                         div()
@@ -2381,7 +2392,7 @@ impl Render for Shell {
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_remove_confirm(false, cx))),
                             )
                             .child(
-                                solid_button("remove-force", "Remove anyway", theme.danger, gpui::white())
+                                solid_button("remove-force", if dirty { "Remove anyway" } else { "Remove" }, theme.danger, gpui::white())
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_remove_confirm(true, cx))),
                             ),
                     );
