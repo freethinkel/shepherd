@@ -1,7 +1,7 @@
 //! Shepherd's settings: a JSON file every field of which has a default, so old, partial or future files load.
 use crate::model::AgentSort;
 use crate::theme::{AppearanceMode, FontSettings, Theme};
-use gpui::{App, Global, WindowAppearance};
+use gpui::{App, Bounds, Global, Pixels, Size, WindowAppearance, point, px, size};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -48,6 +48,34 @@ pub struct Settings {
     pub dock_badge: bool,
     /// A finished selection in a pane goes to the clipboard and clears, as in herdr.
     pub copy_on_select: bool,
+    /// Where the window was last; `None` opens it centered.
+    pub window: Option<WindowFrame>,
+}
+
+/// The window's frame on its display, top-left origin, as moving or resizing it leaves it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowFrame {
+    /// The display's UUID: the frame is relative to it, and goes with it.
+    pub display: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub fullscreen: bool,
+}
+
+impl WindowFrame {
+    /// The frame on a display of `display` size, or `None` when it is bogus or less than 64 px of it is on screen.
+    pub fn bounds_on(&self, display: Size<Pixels>) -> Option<Bounds<Pixels>> {
+        let finite = [self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite());
+        if !finite || self.width <= 0.0 || self.height <= 0.0 {
+            return None;
+        }
+        let bounds = Bounds::new(point(px(self.x), px(self.y)), size(px(self.width), px(self.height)));
+        let seen = bounds.intersect(&Bounds::new(point(px(0.), px(0.)), display)).size;
+        (seen.width >= px(64.) && seen.height >= px(64.)).then_some(bounds)
+    }
 }
 
 /// Zeron's sidebar: 256 px by default, its edge drags it between 224 and 400.
@@ -80,6 +108,7 @@ impl Default for Settings {
             notify_sound: true,
             dock_badge: true,
             copy_on_select: true,
+            window: None,
         }
     }
 }
@@ -304,6 +333,22 @@ mod tests {
         let (_d, path) = tmp();
         std::fs::write(&path, r#"{"sidebar_width": 10}"#).unwrap();
         assert_eq!(Settings::load(&path).0.sidebar_width, SIDEBAR_MIN);
+    }
+
+    #[test]
+    fn a_window_frame_off_the_display_or_bogus_opens_centered() {
+        let display = size(px(1512.), px(982.));
+        let frame = WindowFrame { display: "d".into(), x: 100., y: 50., width: 1180., height: 760., fullscreen: false };
+        assert!(frame.bounds_on(display).is_some());
+        assert!(WindowFrame { x: 3000., ..frame.clone() }.bounds_on(display).is_none(), "on a display now gone");
+        assert!(WindowFrame { x: 1490., ..frame.clone() }.bounds_on(display).is_none(), "a sliver on screen");
+        assert!(WindowFrame { width: 0., ..frame.clone() }.bounds_on(display).is_none());
+        assert!(WindowFrame { height: f32::INFINITY, ..frame }.bounds_on(display).is_none());
+        let (_d, path) = tmp();
+        std::fs::write(&path, r#"{"window": {"x": 10}, "font_size": 15}"#).unwrap();
+        let (s, err) = Settings::load(&path);
+        assert!(err.is_none());
+        assert_eq!((s.window.unwrap().bounds_on(display), s.font_size), (None, 15.0));
     }
 
     #[test]

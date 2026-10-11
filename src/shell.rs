@@ -8,7 +8,7 @@ use crate::ui::divider::{Throttle, drag_ratio};
 use gpui_base::input::{Input, InputEvent, InputState};
 use crate::model::{AgentSort, AgentStatus, PaneFrame, Snapshot, SplitFrame, attachable};
 use crate::terminal::PaneTerminal;
-use crate::settings::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_WIDTH, SettingsGlobal};
+use crate::settings::{SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_WIDTH, SettingsGlobal, WindowFrame};
 use crate::theme::Theme;
 use gpui::{
     linear_color_stop, linear_gradient, AnimationExt, App, Bounds, ClickEvent, Context, Div, Entity, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
@@ -125,6 +125,8 @@ pub struct Shell {
     unseen: std::collections::HashSet<String>,
     /// The count on the Dock icon now.
     badge: usize,
+    /// Saves the window's frame once it stops moving; a newer move drops it.
+    frame_save: gpui::Task<()>,
 }
 
 /// New worktree: the repo's workspace and the branch name being typed.
@@ -158,8 +160,13 @@ struct DividerDrag {
 
 impl Shell {
     pub fn open(rt: tokio::runtime::Handle, cx: &mut gpui::App) {
+        let (display_id, window_bounds) = saved_window(cx).map_or_else(
+            || (None, gpui::WindowBounds::Windowed(Bounds::centered(None, size(px(1180.), px(760.)), cx))),
+            |(display, bounds)| (Some(display), bounds),
+        );
         let options = WindowOptions {
-            window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::centered(None, size(px(1180.), px(760.)), cx))),
+            window_bounds: Some(window_bounds),
+            display_id,
             window_min_size: Some(size(px(820.), px(560.))),
             titlebar: Some(TitlebarOptions {
                 title: None,
@@ -196,6 +203,15 @@ impl Shell {
                     });
                     cx.activate(true);
                 });
+                // ponytail: saved half a second after the last move, so a quit within it loses that move
+                cx.observe_window_bounds(window, |s: &mut Shell, window, cx| {
+                    let Some(frame) = window_frame(window, cx) else { return };
+                    s.frame_save = cx.spawn(async move |_, cx| {
+                        cx.background_executor().timer(Duration::from_millis(500)).await;
+                        let _ = cx.update(|cx| save_from_sidebar(cx, |s| s.window = Some(frame)));
+                    });
+                })
+                .detach();
                 let shell = Shell {
                     snapshot: None,
                     error: None,
@@ -252,6 +268,7 @@ impl Shell {
                     command_panel: None,
                     unseen: Default::default(),
                     badge: 0,
+                    frame_save: gpui::Task::ready(()),
                 };
                 let client = shell.client.clone();
                 cx.set_global(PaneQueries(client.clone(), rt.clone()));
@@ -1087,7 +1104,28 @@ impl Shell {
     }
 }
 
-/// Saves a choice made in the sidebar. A settings file that failed to load is the user's to fix: the sidebar must
+/// The window's last frame and its display, while that display is plugged in and the frame on it.
+fn saved_window(cx: &App) -> Option<(gpui::DisplayId, gpui::WindowBounds)> {
+    let frame = SettingsGlobal::of(cx).settings.window.clone()?;
+    let display = cx.displays().into_iter().find(|d| d.uuid().is_ok_and(|u| u.to_string() == frame.display))?;
+    let bounds = frame.bounds_on(display.bounds().size)?;
+    let bounds = if frame.fullscreen { gpui::WindowBounds::Fullscreen(bounds) } else { gpui::WindowBounds::Windowed(bounds) };
+    Some((display.id(), bounds))
+}
+
+/// The window's frame to save: in full screen, the one it leaves full screen to. ponytail: a zoomed window saves its
+/// zoomed frame as a plain one; restore `Maximized` if un-zooming after a relaunch matters.
+fn window_frame(window: &Window, cx: &App) -> Option<WindowFrame> {
+    let display = window.display(cx)?.uuid().ok()?.to_string();
+    let (bounds, fullscreen) = match window.window_bounds() {
+        gpui::WindowBounds::Fullscreen(b) => (b, true),
+        b => (b.get_bounds(), false),
+    };
+    let (x, y, width, height) = (bounds.origin.x.into(), bounds.origin.y.into(), bounds.size.width.into(), bounds.size.height.into());
+    Some(WindowFrame { display, x, y, width, height, fullscreen })
+}
+
+/// Saves a choice made in the sidebar, or where the window was moved. A settings file that failed to load is the user's to fix: the sidebar must
 /// not overwrite it with defaults.
 fn save_from_sidebar(cx: &mut App, change: impl FnOnce(&mut crate::settings::Settings)) {
     if SettingsGlobal::of(cx).error.is_none() {
