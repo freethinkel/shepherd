@@ -6,7 +6,7 @@ use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, Side};
 use super::find::{Link, find_all, hyperlink, link_at};
 use super::keys::{keystroke_bytes, paste_bytes};
-use crate::herdr::{Client, Session, SessionEvent};
+use crate::herdr::{Client, Mode, Session, SessionEvent};
 use crate::theme::Theme;
 use alacritty_terminal::index::Point as GridPoint;
 use alacritty_terminal::selection::SelectionType;
@@ -47,6 +47,23 @@ pub struct GridHold(pub bool);
 const HELD_RESIZE: std::time::Duration = std::time::Duration::from_millis(80);
 
 impl gpui::Global for GridHold {}
+
+/// While true, Shepherd only observes its panes and leaves their size to herdr's other clients (its TUI in a
+/// terminal or over ssh). herdr gives one client a pane's size; the one used last takes it.
+pub struct Yielded(pub bool);
+
+impl gpui::Global for Yielded {}
+
+fn yielded(cx: &App) -> bool {
+    cx.try_global::<Yielded>().is_some_and(|y| y.0)
+}
+
+/// Shepherd is used again: it takes its panes' size back.
+pub fn claim(cx: &mut App) {
+    if yielded(cx) {
+        cx.set_global(Yielded(false));
+    }
+}
 
 /// herdr's socket for per-pane queries (scroll position); absent in tests.
 pub struct PaneQueries(pub Client, pub tokio::runtime::Handle);
@@ -161,6 +178,10 @@ pub struct PaneTerminal {
     pane_id: String,
     emulator: Emulator,
     session: Option<Session>,
+    /// The session (or the one connecting) only observes: see [`Yielded`].
+    observing: bool,
+    /// Typed while the pane was observed or connecting; sent once it is controlled.
+    held: Vec<u8>,
     ended: Option<String>,
     geometry: Option<GridGeometry>,
     /// The last grid resize, to pace them under `GridHold`.
@@ -212,6 +233,8 @@ impl PaneTerminal {
             pane_id,
             emulator: Emulator::new(80, 24),
             session: None,
+            observing: false,
+            held: Vec::new(),
             ended: None,
             geometry: None,
             resized_at: None,
@@ -253,7 +276,13 @@ impl PaneTerminal {
     fn attach(&mut self, takeover: bool, cx: &mut Context<Self>) {
         let (cols, rows) = (self.emulator.cols() as u16, self.emulator.rows() as u16);
         let pane_id = self.pane_id.clone();
-        let spawn = cx.background_executor().spawn(async move { Session::spawn(&pane_id, cols, rows, takeover) });
+        let mode = match (takeover, yielded(cx)) {
+            (true, _) => Mode::Takeover,
+            (false, true) => Mode::Observe,
+            (false, false) => Mode::Control,
+        };
+        self.observing = mode == Mode::Observe;
+        let spawn = cx.background_executor().spawn(async move { Session::spawn(&pane_id, cols, rows, mode) });
         self._pump = Some(cx.spawn(async move |this, cx| {
             let result = spawn.await;
             let rx = this.update(cx, |pane, cx| {
@@ -265,12 +294,16 @@ impl PaneTerminal {
                         if now != (cols, rows) {
                             session.resize(now.0, now.1);
                         }
+                        if !pane.observing && !pane.held.is_empty() {
+                            session.input(&std::mem::take(&mut pane.held));
+                        }
                         pane.session = Some(session);
                         pane.mouse_capture = false;
                         pane.ended = None;
                         Some(rx)
                     }
                     Err(err) => {
+                        pane.held.clear();
                         pane.ended = Some(format!("{err:#}"));
                         None
                     }
@@ -287,6 +320,13 @@ impl PaneTerminal {
         self.session = None;
         self.attach(takeover, cx);
         cx.notify();
+    }
+
+    /// Re-attaches as [`Yielded`] now asks: observing, or controlling again.
+    pub fn follow_yield(&mut self, cx: &mut Context<Self>) {
+        if self.geometry.is_some() && self.ended.is_none() && self.observing != yielded(cx) {
+            self.reattach(false, cx);
+        }
     }
 
     /// Element hook: this frame's grid placement. A size change resizes the emulator and herdr's view.
@@ -575,9 +615,14 @@ impl PaneTerminal {
         });
     }
 
-    fn input(&self, bytes: &[u8]) {
-        if let Some(session) = &self.session {
-            session.input(bytes);
+    fn input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        match &self.session {
+            Some(session) if !self.observing => session.input(bytes),
+            _ if self.ended.is_none() => {
+                self.held.extend_from_slice(bytes);
+                claim(cx);
+            }
+            _ => {}
         }
     }
 
@@ -598,9 +643,14 @@ impl PaneTerminal {
             return;
         }
         if ks.key == "v" && mods.platform {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            match cx.read_from_clipboard() {
                 // ponytail: always bracketed; herdr's frames do not tell us whether the app asked for it.
-                self.input(&paste_bytes(&text, true));
+                Some(item) => match item.text() {
+                    Some(text) => self.input(&paste_bytes(&text, true), cx),
+                    // an image: ctrl-v, the key agent TUIs (Claude Code, Codex) read the clipboard's image on
+                    None => self.input(b"\x16", cx),
+                },
+                None => {}
             }
             cx.stop_propagation();
             return;
@@ -613,7 +663,7 @@ impl PaneTerminal {
             return;
         }
         if let Some(bytes) = keystroke_bytes(&ks.key, ks.key_char.as_deref(), mods, false) {
-            self.input(&bytes);
+            self.input(&bytes, cx);
             cx.stop_propagation();
         }
     }
@@ -624,6 +674,7 @@ impl PaneTerminal {
             ScrollDelta::Pixels(d) => f32::from(d.y),
             ScrollDelta::Lines(d) => d.y * line_h,
         };
+        claim(cx);
         let n = wheel_lines(&mut self.wheel_acc, px * WHEEL_SPEED, line_h);
         self.scroll_by(n as i64, cx);
     }
@@ -651,6 +702,7 @@ impl PaneTerminal {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        claim(cx);
         if let Some((_, _, link)) = self.link_under(event.position).filter(|_| event.modifiers.platform) {
             self.open_link(link, cx);
             return;

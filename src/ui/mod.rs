@@ -1,5 +1,6 @@
 pub mod command_panel;
 pub mod divider;
+pub mod project_icon;
 pub mod settings;
 pub mod statusbar;
 pub mod toast;

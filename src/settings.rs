@@ -32,10 +32,16 @@ pub struct Settings {
     /// The workspaces sidebar's width; dragging its edge sets it.
     pub sidebar_width: f32,
     pub agent_sort: AgentSort,
-    /// The sidebar's Agents section; the `…` menu's switch hides it.
+    /// The sidebar's Agents section; General settings hide it.
     pub show_agents: bool,
-    /// The bottom status bar; the `…` menu's switch hides it.
+    /// The bottom status bar; General settings hide it.
     pub show_status_bar: bool,
+    /// What a workspace row shows besides its name: the sidebar `…` menu's Show.
+    pub workspace_show: WorkspaceShow,
+    /// Shorter workspace rows.
+    pub compact_workspaces: bool,
+    /// One-line agent rows, without the task under the name.
+    pub compact_agents: bool,
     /// The Agents list's height cap; dragging the section's top edge sets it, `None` is 40 % of the sidebar.
     pub agents_height: Option<f32>,
     /// What the command panel ran last, newest first: an action's name, `workspace:<id>` or `tab:<id>`.
@@ -50,6 +56,28 @@ pub struct Settings {
     pub copy_on_select: bool,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
+}
+
+/// The parts of a workspace row that can be hidden; all shown by default.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceShow {
+    /// The folder, or a worktree's branch, before the name.
+    pub icon: bool,
+    /// The checked-out branch, on a line under the name (not when compact).
+    pub branch: bool,
+    /// A worktree's lines added and removed.
+    pub changes: bool,
+    /// A worktree's pull request state.
+    pub pull_request: bool,
+    /// The dot for the workspace's agents.
+    pub status: bool,
+}
+
+impl Default for WorkspaceShow {
+    fn default() -> Self {
+        WorkspaceShow { icon: true, branch: true, changes: true, pull_request: true, status: true }
+    }
 }
 
 /// The window's frame on its display, top-left origin, as moving or resizing it leaves it.
@@ -110,6 +138,9 @@ impl Default for Settings {
             agent_sort: AgentSort::default(),
             show_agents: true,
             show_status_bar: true,
+            workspace_show: WorkspaceShow::default(),
+            compact_workspaces: false,
+            compact_agents: false,
             agents_height: None,
             recent_commands: Vec::new(),
             notify_agents: true,

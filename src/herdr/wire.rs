@@ -29,7 +29,7 @@ pub enum ClientMessage {
         row: Option<u16>,
         modifiers: u8,
     },
-    ObserveTerminal,
+    ObserveTerminal { target: String },
     ControlTerminal { target: String, takeover: bool },
     GraphicsTransmissionResult,
     GraphicsTransmissionStarted,

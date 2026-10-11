@@ -29,6 +29,7 @@ const PAGE_MAX_WIDTH: f32 = 760.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
+    General,
     Terminal,
     Appearance,
     Notifications,
@@ -39,7 +40,8 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 7] = [
+    const ALL: [Section; 8] = [
+        Section::General,
         Section::Terminal,
         Section::Appearance,
         Section::Notifications,
@@ -51,6 +53,7 @@ impl Section {
 
     fn label(self) -> &'static str {
         match self {
+            Section::General => "General",
             Section::Terminal => "Terminal",
             Section::Appearance => "Appearance",
             Section::Notifications => "Notifications",
@@ -63,6 +66,7 @@ impl Section {
 
     fn icon(self) -> &'static str {
         match self {
+            Section::General => "icons/settings.svg",
             Section::Terminal => "icons/terminal.svg",
             Section::Appearance => "icons/tuning.svg",
             Section::Notifications => "icons/bell.svg",
@@ -229,7 +233,7 @@ impl SettingsView {
         let section = std::env::var("SHEPHERD_SETTINGS")
             .ok()
             .and_then(|name| Section::ALL.into_iter().find(|s| s.label().eq_ignore_ascii_case(&name)))
-            .unwrap_or(Section::Terminal);
+            .unwrap_or(Section::General);
         let mut view = SettingsView {
             section,
             font,
@@ -767,6 +771,30 @@ impl Render for SettingsView {
             )));
 
         let body = match self.section {
+            Section::General => div().child(page_header(&theme, "General", "The window and what it shows.")).child(
+                card(&theme)
+                    .child(
+                        card_row(&theme, true)
+                            .child(row_text(&theme, "Agents", "Every agent herdr finds, at the bottom of the sidebar."))
+                            .child(toggle(&theme, "show-agents", settings.show_agents).on_click(cx.listener(
+                                |_, _: &ClickEvent, _, cx| update(cx, |s| s.show_agents = !s.show_agents),
+                            ))),
+                    )
+                    .child(
+                        card_row(&theme, false)
+                            .child(row_text(&theme, "Status bar", "The branch, folder, focused agent and Claude usage along the bottom."))
+                            .child(toggle(&theme, "show-status-bar", settings.show_status_bar).on_click(cx.listener(
+                                |_, _: &ClickEvent, _, cx| update(cx, |s| s.show_status_bar = !s.show_status_bar),
+                            ))),
+                    )
+                    .child(
+                        card_row(&theme, false)
+                            .child(row_text(&theme, "Copy on select", "A finished selection goes to the clipboard, then clears."))
+                            .child(toggle(&theme, "copy-on-select", settings.copy_on_select).on_click(cx.listener(
+                                |_, _: &ClickEvent, _, cx| update(cx, |s| s.copy_on_select = !s.copy_on_select),
+                            ))),
+                    ),
+            ),
             Section::Terminal => div()
                 .child(page_header(&theme, "Terminal", "The font every pane draws with."))
                 .child(
@@ -822,13 +850,6 @@ impl Render for SettingsView {
                                     "Cmd+click on file:line opens it in this editor."
                                 }))
                                 .child(self.editor_select(&theme, settings.editor.as_deref(), cx)),
-                        )
-                        .child(
-                            card_row(&theme, false)
-                                .child(row_text(&theme, "Copy on select", "A finished selection goes to the clipboard, then clears."))
-                                .child(toggle(&theme, "copy-on-select", settings.copy_on_select).on_click(cx.listener(
-                                    |_, _: &ClickEvent, _, cx| update(cx, |s| s.copy_on_select = !s.copy_on_select),
-                                ))),
                         ),
                 ),
             Section::Appearance => {

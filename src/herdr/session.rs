@@ -122,22 +122,31 @@ pub struct Session {
     transport: Transport,
 }
 
+/// How a session holds its pane. herdr allows one controller, which types into the pane and sets its size;
+/// observers only watch, so herdr's other clients size the pane.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Control,
+    /// Control, replacing another controller.
+    Takeover,
+    Observe,
+}
+
 enum Transport {
     Socket(Mutex<UnixStream>),
     Cli { child: Option<Child>, stdin: Mutex<Option<ChildStdin>> },
 }
 
 impl Session {
-    /// `takeover` replaces another client's control of the pane (herdr allows one controller).
-    pub fn spawn(pane: &str, cols: u16, rows: u16, takeover: bool) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
-        match Self::spawn_socket(pane, cols, rows, takeover) {
+    pub fn spawn(pane: &str, cols: u16, rows: u16, mode: Mode) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
+        match Self::spawn_socket(pane, cols, rows, mode) {
             Some(session) => Ok(session),
-            None => Self::spawn_cli(pane, cols, rows, takeover),
+            None => Self::spawn_cli(pane, cols, rows, mode),
         }
     }
 
     /// `None` when the socket is not there or speaks another protocol version.
-    fn spawn_socket(pane: &str, cols: u16, rows: u16, takeover: bool) -> Option<(Session, UnboundedReceiver<SessionEvent>)> {
+    fn spawn_socket(pane: &str, cols: u16, rows: u16, mode: Mode) -> Option<(Session, UnboundedReceiver<SessionEvent>)> {
         let mut stream = UnixStream::connect(client_socket()).ok()?;
         stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
         let hello = ClientMessage::TerminalHello {
@@ -154,20 +163,24 @@ impl Session {
             _ => return None,
         }
         stream.set_read_timeout(None).ok()?;
-        wire::write_message(&mut stream, &ClientMessage::ControlTerminal { target: pane.into(), takeover }).ok()?;
+        let hold = match mode {
+            Mode::Observe => ClientMessage::ObserveTerminal { target: pane.into() },
+            _ => ClientMessage::ControlTerminal { target: pane.into(), takeover: mode == Mode::Takeover },
+        };
+        wire::write_message(&mut stream, &hold).ok()?;
         let reader = stream.try_clone().ok()?;
         let (tx, rx) = unbounded();
         std::thread::spawn(move || read_socket(reader, tx));
         Some((Session { transport: Transport::Socket(Mutex::new(stream)) }, rx))
     }
 
-    fn spawn_cli(pane: &str, cols: u16, rows: u16, takeover: bool) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
+    fn spawn_cli(pane: &str, cols: u16, rows: u16, mode: Mode) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
         let herdr = binary();
         let mut child = Command::new(&herdr)
             .envs(SOCKET.read().unwrap().clone().map(|p| ("HERDR_SOCKET_PATH", p)))
-            .args(["terminal", "session", "control", pane])
+            .args(["terminal", "session", if mode == Mode::Observe { "observe" } else { "control" }, pane])
             .args(["--cols", &cols.to_string(), "--rows", &rows.to_string()])
-            .args(takeover.then_some("--takeover"))
+            .args((mode == Mode::Takeover).then_some("--takeover"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

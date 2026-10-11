@@ -86,7 +86,7 @@ impl<T: 'static> Global for Cache<T> {}
 // ponytail: one entry per key ever shown, never evicted; prune if people cd through thousands of dirs.
 /// The cached `fetch(key)`; runs it on a background thread when missing or older than `ttl`. A failed fetch
 /// keeps the last value.
-fn cached<T: Clone + PartialEq + Send + 'static>(key: &str, ttl: Duration, fetch: fn(&str) -> Option<T>, cx: &mut App) -> Option<T> {
+pub(crate) fn cached<T: Clone + PartialEq + Send + 'static>(key: &str, ttl: Duration, fetch: fn(&str) -> Option<T>, cx: &mut App) -> Option<T> {
     let entry = cx
         .default_global::<Cache<T>>()
         .0

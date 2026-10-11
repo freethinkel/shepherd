@@ -43,6 +43,8 @@ pub struct Shell {
     own_pane: Option<String>,
     /// herdr's focused pane we last moved keyboard focus to; refocusing on every render would undo clicks.
     focused: Option<String>,
+    /// The last key or click in Shepherd: herdr pane focus changes soon after one are Shepherd's own.
+    touched: Instant,
     /// The tab Shepherd shows. Local on purpose: herdr's focus is shared with its TUI clients.
     selected_tab: Option<String>,
     /// Titlebar drag: armed by a press in the strip, consumed by the first move (Collie's `drag_strip`).
@@ -77,8 +79,6 @@ pub struct Shell {
     /// The drag hit a width limit (-1 min, +1 max) at this instant: the edge nudges past it and springs back.
     sidebar_edge: Option<(f32, Instant)>,
     agent_sort: AgentSort,
-    show_agents: bool,
-    show_status_bar: bool,
     /// Saved in the settings when a drag ends.
     agents_height: Option<f32>,
     /// The Agents section's top edge is being dragged: the pointer's y and the list's height at the press.
@@ -89,10 +89,12 @@ pub struct Shell {
     marked_seen: Option<String>,
     /// An agent's pane to give the keyboard once it is shown, over herdr's focused pane of its tab.
     focus_next: Option<String>,
-    /// The `…` menu's Sort submenu is out: the pointer went over its row and has not moved to another.
-    sort_submenu: bool,
-    /// Where the Sort submenu was painted: a press there is inside the `…` menu, though outside its card.
-    sort_submenu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The `…` menu's Show submenu is out: the pointer went over its row.
+    show_submenu: bool,
+    /// Where the Show submenu was painted: a press there is inside the `…` menu, though outside its card.
+    show_submenu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The Agents section's `…` menu, open under its button.
+    agents_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// Worktrees herdr is removing: their rows show a spinner until they leave the snapshot.
     removing: std::collections::HashSet<String>,
     /// Remove a worktree? The workspace, its label, and whether herdr found changes (then removal is forced).
@@ -193,9 +195,21 @@ impl Shell {
                 })
                 .detach();
             cx.new(|cx| {
-                cx.observe_window_activation(window, |_: &mut Shell, window: &mut Window, cx: &mut Context<Shell>| {
+                cx.observe_window_activation(window, |s: &mut Shell, window: &mut Window, cx: &mut Context<Shell>| {
                     reapply_traffic_lights(window);
+                    // in the background Shepherd leaves panes' size to herdr's other clients; back, it takes it again
+                    let active = window.is_window_active();
+                    if active {
+                        s.touched = Instant::now();
+                    }
+                    cx.set_global(crate::terminal::pane::Yielded(!active));
                     cx.notify(); // the shown tab's agents count as seen once the window is active
+                })
+                .detach();
+                cx.observe_global::<crate::terminal::pane::Yielded>(|s: &mut Shell, cx| {
+                    for pane in s.panes.values() {
+                        pane.update(cx, |p, cx| p.follow_yield(cx));
+                    }
                 })
                 .detach();
                 // A click on a notification brings its agent's tab up; Approve answers the agent and leaves Shepherd
@@ -242,6 +256,7 @@ impl Shell {
                     recent_panes: Vec::new(),
                     own_pane: std::env::var("HERDR_PANE_ID").ok(),
                     focused: None,
+                    touched: Instant::now(),
                     selected_tab: std::env::var("SHEPHERD_TAB").ok(),
                     should_move: Rc::new(Cell::new(false)),
                     client: SettingsGlobal::of(cx)
@@ -266,15 +281,14 @@ impl Shell {
                     sidebar_drag: false,
                     sidebar_edge: None,
                     agent_sort: SettingsGlobal::of(cx).settings.agent_sort,
-                    show_agents: SettingsGlobal::of(cx).settings.show_agents,
-                    show_status_bar: SettingsGlobal::of(cx).settings.show_status_bar,
                     agents_height: SettingsGlobal::of(cx).settings.agents_height,
                     agents_drag: None,
                     view_menu: None,
                     focus_next: None,
                     marked_seen: None,
-                    sort_submenu: false,
-                    sort_submenu_bounds: Default::default(),
+                    show_submenu: false,
+                    show_submenu_bounds: Default::default(),
+                    agents_menu: None,
                     pane_menu: None,
                     spent_menu: None,
                     usage_menu: None,
@@ -393,6 +407,12 @@ impl Shell {
         });
         self.command_panel = Some(crate::ui::Popup::new((panel, events)));
         cx.notify();
+    }
+
+    /// A key or click in Shepherd: it is the client in use, so it takes its panes' size back.
+    fn touch(&mut self, cx: &mut Context<Self>) {
+        self.touched = Instant::now();
+        crate::terminal::pane::claim(cx);
     }
 
     /// Fades the command panel out; false if it was not open.
@@ -881,11 +901,23 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cl
                 return; // window closed
             }
             // ponytail: refetch the whole snapshot per event burst; incremental apply only if this shows up in profiles.
-            if rx.recv().await.is_none() {
+            let Some(event) = rx.recv().await else {
                 break; // server gone or events_lost: resubscribe
-            }
+            };
             cx.background_executor().timer(Duration::from_millis(30)).await;
-            while rx.try_recv().is_ok() {}
+            let mut focused = event["event"] == "pane.focused";
+            while let Ok(event) = rx.try_recv() {
+                focused |= event["event"] == "pane.focused";
+            }
+            // ponytail: herdr's events do not name the client; a focus change Shepherd did not just cause is
+            // another client's (its TUI in a terminal, over ssh), and the client used last sizes the panes
+            if focused {
+                let _ = this.update(cx, |s, cx| {
+                    if s.touched.elapsed() > Duration::from_secs(2) {
+                        cx.set_global(crate::terminal::pane::Yielded(true));
+                    }
+                });
+            }
         }
     }
 }
@@ -1147,28 +1179,6 @@ impl Shell {
         }
     }
 
-    fn toggle_agents(&mut self, cx: &mut Context<Self>) {
-        self.show_agents = !self.show_agents;
-        let show = self.show_agents;
-        save_from_sidebar(cx, |s| s.show_agents = show);
-        cx.notify();
-    }
-
-    fn toggle_status_bar(&mut self, cx: &mut Context<Self>) {
-        self.show_status_bar = !self.show_status_bar;
-        let show = self.show_status_bar;
-        save_from_sidebar(cx, |s| s.show_status_bar = show);
-        cx.notify();
-    }
-
-    /// The pointer reached another row of the `…` menu: the Sort submenu goes.
-    fn leave_sort_submenu(&mut self, on: bool, cx: &mut Context<Self>) {
-        if on && self.sort_submenu {
-            self.sort_submenu = false;
-            cx.notify();
-        }
-    }
-
     /// Brings the agent's tab up and its pane to the keyboard.
     fn show_agent(&mut self, tab_id: String, pane_id: String, cx: &mut Context<Self>) {
         self.selected_tab = Some(tab_id);
@@ -1178,7 +1188,7 @@ impl Shell {
 
     fn set_agent_sort(&mut self, sort: AgentSort, cx: &mut Context<Self>) {
         self.agent_sort = sort;
-        if let Some(m) = self.view_menu.as_mut() { m.close() }
+        if let Some(m) = self.agents_menu.as_mut() { m.close() }
         save_from_sidebar(cx, |s| s.agent_sort = sort);
         cx.notify();
     }
@@ -1314,7 +1324,27 @@ fn solid_button(id: &'static str, label: &'static str, fill: gpui::Hsla, text: g
         .child(label)
 }
 
-/// The agents list's orders: the `…` menu's Sort submenu.
+/// Zeron's folded-section count: a muted badge with monospace digits, here the worktrees a folded repo holds.
+fn count_badge(theme: &Theme, count: usize) -> Div {
+    div()
+        .flex_none()
+        .h(px(16.))
+        .px(px(4.))
+        .flex()
+        .items_center()
+        .rounded(px(4.))
+        .bg(theme.wash(0.06))
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .font_family("Geist Mono")
+        .text_color(theme.text_muted.opacity(0.7))
+        .child(count.to_string())
+}
+
+/// A workspace row with its branch line under the name.
+const WS_TWO_LINES: f32 = 46.;
+
+/// The agents list's orders: the Agents section's `…` menu.
 const SORTS: [(AgentSort, &str, &str, &str); 3] = [
     (AgentSort::Status, "sort-status", "icons/checklist.svg", "Status"),
     (AgentSort::Waiting, "sort-waiting", "icons/clock-circle.svg", "Waiting longest"),
@@ -1447,6 +1477,7 @@ impl Render for Shell {
         self.sync_badge(window, cx);
         self.mark_seen(window, cx);
         crate::ui::reap_popup(&mut self.view_menu, window);
+        crate::ui::reap_popup(&mut self.agents_menu, window);
         crate::ui::reap_popup(&mut self.ws_menu, window);
         crate::ui::reap_popup(&mut self.pane_menu, window);
         crate::ui::reap_popup(&mut self.spent_menu, window);
@@ -1485,12 +1516,14 @@ impl Render for Shell {
             remember_shown(&mut self.recent_panes, &shown, |id| snapshot.panes.iter().any(|p| p.pane_id == id));
         }
         prune(&mut self.panes, &mut self.focused, &self.recent_panes, |_| false);
+        let overlaid = self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open());
         for f in &shown {
             if !self.panes.contains_key(&f.pane_id) {
                 let id = f.pane_id.clone();
                 self.panes.insert(id.clone(), cx.new(|cx| PaneTerminal::new(id, cx)));
             }
-            if f.focused && self.settings.is_none() && self.focused.as_deref() != Some(f.pane_id.as_str()) {
+            // an open panel keeps its input's focus; a panel run from the command panel opens before this render
+            if f.focused && !overlaid && self.focused.as_deref() != Some(f.pane_id.as_str()) {
                 let handle = self.panes[&f.pane_id].read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
                 self.focused = Some(f.pane_id.clone());
@@ -1507,6 +1540,9 @@ impl Render for Shell {
         }
         let shown_ws = tab.as_ref().map(|t| t.workspace_id.clone());
         let shown_tab = tab.as_ref().map(|t| t.tab_id.clone());
+        // a workspace row's height, one line; a worktree's, which always has a branch line unless compact
+        // a workspace row's height, one line; a worktree's, which always has a branch line unless compact
+        let (ws_h, kid_h) = if SettingsGlobal::of(cx).settings.compact_workspaces { (26., 26.) } else { (32., WS_TWO_LINES) };
         let groups: Vec<(crate::model::Workspace, Vec<crate::model::Workspace>)> = snapshot
             .as_ref()
             .map(|s| {
@@ -1568,7 +1604,9 @@ impl Render for Shell {
                     .flex_col()
                     .gap(px(2.))
                     .children({
-                        let ws_row = |w: &crate::model::Workspace, nested: bool, chevron: Option<gpui::AnyElement>, cx: &mut Context<Self>| {
+                        let ws_row = |w: &crate::model::Workspace, nested: bool, chevron: Option<gpui::AnyElement>, folded: Option<usize>, cx: &mut Context<Self>| {
+                            let show = SettingsGlobal::of(cx).settings.workspace_show;
+                            let compact = SettingsGlobal::of(cx).settings.compact_workspaces;
                             let selected = shown_ws.as_deref() == Some(w.workspace_id.as_str());
                             let first_tab =
                                 snapshot.as_ref().and_then(|s| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
@@ -1576,42 +1614,88 @@ impl Render for Shell {
                             let rename_target = RenameTarget::Workspace(w.workspace_id.clone());
                             let editing = self.rename_field(&rename_target, cx);
                             let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
+                            let dir = w.worktree.as_ref().map(|t| t.checkout_path.clone()).filter(|d| !d.is_empty());
+                            let branch = dir.as_deref().filter(|_| show.branch && !compact).and_then(|d| crate::ui::statusbar::branch_of(d, cx));
+                            let (changes, pr) = match dir.as_deref().filter(|_| nested) {
+                                Some(d) => crate::ui::statusbar::changes_of(d, active, cx),
+                                None => (None, None),
+                            };
+                            let changes = changes.filter(|c| show.changes && *c != (0, 0)).map(|(added, removed)| {
+                                div()
+                                    .flex()
+                                    .gap(px(3.))
+                                    .when(added > 0, |el| el.child(div().text_color(theme.success.opacity(0.7)).child(format!("+{added}"))))
+                                    .when(removed > 0, |el| el.child(div().text_color(theme.danger.opacity(0.7)).child(format!("−{removed}"))))
+                            });
+                            let pr = pr.filter(|_| show.pull_request);
+                            let extras = (changes.is_some() || pr.is_some()).then(|| {
+                                div().flex_none().flex().gap(px(4.)).text_size(px(11.)).text_color(theme.text_faint).children(changes).children(pr)
+                            });
+                            // Zeron's card: the name, and under it the branch with what it changed; one line when compact
+                            // a worktree always has its branch line, so a folding group knows its height
+                            let two = !compact && (nested || branch.is_some() || extras.is_some());
+                            let (inline, below) = if two { (None, extras) } else { (extras, None) };
+                            // a repo's own artwork or its monogram; its worktrees, indented under its name, go without
+                            let icon = (show.icon && !nested).then(|| {
+                                let seed = w.worktree.as_ref().map_or(w.label.as_str(), |t| t.repo_key.as_str());
+                                crate::ui::project_icon::project_icon(&w.label, seed, dir.as_deref(), 14., selected, &theme, cx)
+                            });
+                            let name = match editing {
+                                Some(field) => field.into_any_element(),
+                                None => div().min_w_0().truncate().child(w.label.clone()).into_any_element(),
+                            };
                             row(&theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
+                                .h(px(if two { WS_TWO_LINES } else { ws_h }))
                                 .map(|el| pane_drag::accept_pane_in_workspace(el, &w.workspace_id, theme.accent.opacity(0.15), cx))
-                                .when(nested, |el| el.pl(px(30.)))
+                                .when(nested, |el| el.pl(px(if show.icon { 30. } else { 20. })))
                                 .child(
-                                    gpui::svg()
-                                        .path(if nested { "icons/git-branch.svg" } else { "icons/folder.svg" })
-                                        .size(px(14.))
-                                        .flex_none()
-                                        .text_color(if nested { theme.text_faint } else { theme.text_muted }),
-                                )
-                                .map(|el| match editing {
-                                    Some(field) => el.child(field),
-                                    None => el.child(div().flex_1().min_w_0().truncate().child(w.label.clone())),
-                                })
-                                .children(w.worktree.as_ref().filter(|t| nested && !t.checkout_path.is_empty()).map(|t| {
-                                    let (changes, pr) = crate::ui::statusbar::changes_of(&t.checkout_path, active, cx);
                                     div()
-                                        .flex_none()
+                                        .flex_1()
+                                        .min_w_0()
                                         .flex()
-                                        .gap(px(4.))
-                                        .text_size(px(11.))
-                                        .text_color(theme.text_faint)
-                                        .children(changes.filter(|c| *c != (0, 0)).map(|(added, removed)| {
+                                        .flex_col()
+                                        .gap(px(2.))
+                                        .child(
                                             div()
+                                                .min_w_0()
                                                 .flex()
-                                                .gap(px(3.))
-                                                .when(added > 0, |el| el.child(div().text_color(theme.success.opacity(0.7)).child(format!("+{added}"))))
-                                                .when(removed > 0, |el| el.child(div().text_color(theme.danger.opacity(0.7)).child(format!("−{removed}"))))
-                                        }))
-                                        .children(pr)
-                                }))
+                                                .items_center()
+                                                .gap(px(8.))
+                                                .children(icon)
+                                                .child(name)
+                                                .children(folded.map(|n| count_badge(&theme, n)))
+                                                .child(div().flex_1())
+                                                .children(inline),
+                                        )
+                                        .when(two, |el| {
+                                            el.child(
+                                                div()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(6.))
+                                                    .text_size(px(11.))
+                                                    .text_color(theme.text_muted)
+                                                    .when(show.icon && !nested, |el| el.pl(px(22.)))
+                                                    .children(branch.map(|b| {
+                                                        div()
+                                                            .min_w_0()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap(px(4.))
+                                                            .child(gpui::svg().path("icons/git-branch.svg").size(px(11.)).flex_none().text_color(theme.text_muted))
+                                                            .child(div().min_w_0().truncate().child(b))
+                                                    }))
+                                                    .child(div().flex_1())
+                                                    .children(below),
+                                            )
+                                        }),
+                                )
                                 .map(|el| {
                                     if self.removing.contains(&w.workspace_id) {
                                         el.text_color(theme.text_faint).child(spinner(&theme, format!("ws-removing-{}", w.workspace_id)))
                                     } else {
-                                        el.child(status_dot(w.agent_status, &theme))
+                                        el.when(show.status, |el| el.child(status_dot(w.agent_status, &theme)))
                                     }
                                 })
                                 .children(chevron)
@@ -1651,11 +1735,11 @@ impl Render for Shell {
                                 .map(|(_, branch)| branch.clone())
                                 .collect();
                             if kids.is_empty() && pending.is_empty() {
-                                return ws_row(&w, false, None, cx).into_any_element();
+                                return ws_row(&w, false, None, None, cx).into_any_element();
                             }
                             // A folded group opens while one of its worktrees is being created.
                             let open = !self.folded.contains(&w.workspace_id) || !pending.is_empty();
-                            let full = (kids.len() + pending.len()) as f32 * 34.;
+                            let full = (kids.len() + pending.len()) as f32 * (kid_h + 2.);
                             let tween = self.fold_motion.get(&w.workspace_id).copied().filter(|m| m.animating());
                             let chevron = fold_chevron(&theme, &w.workspace_id, open, full, tween).on_click(cx.listener({
                                 let id = w.workspace_id.clone();
@@ -1665,7 +1749,7 @@ impl Render for Shell {
                                     cx.notify();
                                 }
                             }));
-                            let header = ws_row(&w, false, Some(chevron.into_any_element()), cx);
+                            let header = ws_row(&w, false, Some(chevron.into_any_element()), (!open).then_some(kids.len()), cx);
                             let body = div()
                                 .w_full()
                                 .flex_none()
@@ -1674,8 +1758,8 @@ impl Render for Shell {
                                 .flex_col()
                                 .pt(px(2.))
                                 .gap(px(2.))
-                                .children(kids.iter().map(|k| ws_row(k, true, None, cx).into_any_element()).collect::<Vec<_>>())
-                                .children(pending.iter().map(|b| pending_worktree_row(&theme, b).into_any_element()));
+                                .children(kids.iter().map(|k| ws_row(k, true, None, None, cx).into_any_element()).collect::<Vec<_>>())
+                                .children(pending.iter().map(|b| pending_worktree_row(&theme, b).h(px(kid_h)).into_any_element()));
                             let body = match tween {
                                 None => body.h(px(if open { full } else { 0. })).into_any_element(),
                                 // Zeron's disclosure: the height tweens, the rows fade up from 35 % and slide 3 px.
@@ -1696,10 +1780,10 @@ impl Render for Shell {
                     }),
             )
             .child(
+                div().flex_none().m(px(8.)).flex().gap(px(4.)).child(
                 div()
                     .id("new-workspace")
-                    .flex_none()
-                    .m(px(8.))
+                    .flex_1()
                     .h(px(32.))
                     .px(px(8.))
                     .flex()
@@ -1712,8 +1796,24 @@ impl Render for Shell {
                     .child(div().text_size(px(15.)).child("+"))
                     .child("New workspace")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
+                )
+                .child(
+                    div()
+                        .id("open-settings")
+                        .flex_none()
+                        .size(px(32.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(8.))
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover_bg))
+                        .child(gpui::svg().path("icons/settings.svg").size(px(16.)).text_color(theme.text_muted))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_settings_here(window, cx))),
+                ),
             )
-            .when(self.show_agents && !agents.is_empty(), |el| {
+            .when(SettingsGlobal::of(cx).settings.show_agents && !agents.is_empty(), |el| {
                 let seam = theme.accent;
                 let dragging = self.agents_drag.is_some();
                 el.child(
@@ -1726,7 +1826,26 @@ impl Render for Shell {
                         .border_color(theme.border)
                         .text_size(px(11.))
                         .text_color(theme.text_faint)
+                        .flex()
+                        .items_center()
+                        .justify_between()
                         .child("Agents")
+                        .child(
+                            icon_button(&theme, "agents-view", "")
+                                .size(px(20.))
+                                .my(px(-4.))
+                                .child(gpui::svg().path("icons/more-horizontal.svg").size(px(14.)).text_color(theme.text_faint))
+                                .when(self.agents_menu.as_ref().is_some_and(|m| m.is_open()), |el| el.bg(theme.hover))
+                                // capture, like the sidebar's `…`: a press on the open menu's trigger closes it
+                                .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    match this.agents_menu.as_mut() {
+                                        Some(menu) if menu.is_open() => menu.close(),
+                                        _ => this.agents_menu = Some(crate::ui::Popup::new(e.position)),
+                                    }
+                                    cx.notify();
+                                })),
+                        )
                         // The section's top edge: drag to resize the list, double-click for the default height.
                         .child(
                             div()
@@ -1795,10 +1914,18 @@ impl Render for Shell {
                                 let selected = shown_tab.as_deref() == Some(pane.tab_id.as_str());
                                 let (tab_id, pane_id) = (pane.tab_id.clone(), pane.pane_id.clone());
                                 let title = pane.terminal_title_stripped.clone().unwrap_or_default();
+                                let compact = SettingsGlobal::of(cx).settings.compact_agents;
+                                let mark = crate::ui::command_panel::agent_icon(pane.agent.as_deref().unwrap_or_default());
+                                let mark = || gpui::svg().path(mark).size(px(14.)).flex_none().text_color(crate::ui::command_panel::icon_ink(mark, theme.text_muted));
                                 let agent = row(&theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
-                                    .h(px(44.))
+                                    .h(px(if compact { 30. } else { 44. }))
                                     .child(status_dot(pane.agent_status, &theme))
-                                    .child(
+                                    .when(compact, |el| {
+                                        el.child(mark())
+                                            .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme.text_muted).child(title.clone()))
+                                            .children(waited.clone().map(|w| div().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(w)))
+                                    })
+                                    .when(!compact, |el| el.child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
@@ -1808,7 +1935,8 @@ impl Render for Shell {
                                                 div()
                                                     .flex()
                                                     .gap(px(6.))
-                                                    .child(pane.agent.clone().unwrap_or_default())
+                                                    .items_center()
+                                                    .child(mark())
                                                     .when(!grouped, |el| {
                                                         el.child(
                                                             div()
@@ -1829,7 +1957,7 @@ impl Render for Shell {
                                                     .text_color(theme.text_muted)
                                                     .child(title),
                                             ),
-                                    )
+                                    ))
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         this.show_agent(tab_id.clone(), pane_id.clone(), cx)
                                     }));
@@ -1945,7 +2073,7 @@ impl Render for Shell {
             }))
             .children(pane_drop);
 
-        let statusbar = self.show_status_bar.then(|| {
+        let statusbar = SettingsGlobal::of(cx).settings.show_status_bar.then(|| {
             let pane = self.active_pane(window, cx);
             let on_branch = cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.toggle_command_panel(crate::ui::command_panel::Kind::Branches, window, cx)
@@ -1979,6 +2107,8 @@ impl Render for Shell {
         div()
             .id("root")
             .track_focus(&self.focus)
+            .capture_key_down(cx.listener(|s, _: &gpui::KeyDownEvent, _, cx| s.touch(cx)))
+            .capture_any_mouse_down(cx.listener(|s, _: &MouseDownEvent, _, cx| s.touch(cx)))
             .relative()
             .size_full()
             .flex()
@@ -2124,7 +2254,7 @@ impl Render for Shell {
                                 Some(menu) if menu.is_open() => menu.close(),
                                 _ => {
                                     this.view_menu = Some(crate::ui::Popup::new(()));
-                                    this.sort_submenu = false;
+                                    this.show_submenu = false;
                                 }
                             }
                             cx.notify();
@@ -2134,49 +2264,53 @@ impl Render for Shell {
             .children(self.view_menu.as_ref().map(|menu| {
                 // under the `…` button, its left edge on the button's
                 let at = gpui::point(px(sidebar_w - 8. - 24.), px(TRAFFIC_LIGHTS_CENTER + 12. + 4.));
-                let sort = self.agent_sort;
-                let sort_label = SORTS.iter().find(|s| s.0 == sort).map_or("", |s| s.3);
-                let sort_submenu = self.sort_submenu;
-                let submenu_bounds = self.sort_submenu_bounds.clone();
-                let show_agents = self.show_agents;
-                let show_status_bar = self.show_status_bar;
+                let settings = &SettingsGlobal::of(cx).settings;
+                let (show, compact) = (settings.workspace_show, settings.compact_workspaces);
+                let show_submenu = self.show_submenu;
+                let submenu_bounds = self.show_submenu_bounds.clone();
+                let parts: [(&'static str, &'static str, &'static str, fn(&mut crate::settings::WorkspaceShow) -> &mut bool); 5] = [
+                    ("show-icon", "icons/folder.svg", "Project icon", |s| &mut s.icon),
+                    ("show-branch", "icons/git-branch.svg", "Branch", |s| &mut s.branch),
+                    ("show-changes", "icons/split-columns.svg", "Changes", |s| &mut s.changes),
+                    ("show-pr", "icons/arrow-up.svg", "Pull request", |s| &mut s.pull_request),
+                    ("show-status", "icons/bot.svg", "Agent status", |s| &mut s.status),
+                ];
                 gpui::deferred(
                     gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
                         "view-menu-in",
                         menu,
                         menu_card(&theme, "view-menu", 200.)
                             .on_mouse_down_out(cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                                if this.sort_submenu && this.sort_submenu_bounds.get().is_some_and(|b| b.contains(&e.position)) {
+                                if this.show_submenu && this.show_submenu_bounds.get().is_some_and(|b| b.contains(&e.position)) {
                                     return;
                                 }
                                 if let Some(m) = this.view_menu.as_mut() { m.close() }
                                 cx.notify();
                             }))
                             .child(
-                                // Zeron's submenu: the row shows the choice, the choices open beside it on hover.
+                                // Zeron's submenu: the row opens the choices beside it on hover.
                                 div()
                                     .relative()
                                     .child(
-                                        row(&theme, sort_submenu, "sort-agents")
+                                        row(&theme, show_submenu, "workspace-show")
                                             .h(px(30.))
                                             .rounded(px(6.))
-                                            .child(div().flex_1().child("Sort agents"))
-                                            .child(div().text_color(theme.text_faint).child(sort_label))
+                                            .child(div().flex_1().child("Show"))
                                             .child(gpui::svg().path("icons/alt-arrow-right.svg").size(px(12.)).flex_none().text_color(theme.text_faint))
                                             .on_hover(cx.listener(|this, on: &bool, _, cx| {
-                                                if *on && !this.sort_submenu {
-                                                    this.sort_submenu = true;
+                                                if *on && !this.show_submenu {
+                                                    this.show_submenu = true;
                                                     cx.notify();
                                                 }
                                             }))
                                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                                this.sort_submenu = !this.sort_submenu;
+                                                this.show_submenu = !this.show_submenu;
                                                 cx.notify();
                                             })),
                                     )
-                                    .when(sort_submenu, |el| {
+                                    .when(show_submenu, |el| {
                                         el.child(
-                                            menu_card(&theme, "sort-submenu", 180.)
+                                            menu_card(&theme, "show-submenu", 180.)
                                                 .absolute()
                                                 .top(px(-4.))
                                                 .left(gpui::relative(1.))
@@ -2188,44 +2322,69 @@ impl Render for Shell {
                                                         .left_0()
                                                         .size_full(),
                                                 )
-                                                .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child("SORT"))
-                                                .children(SORTS.map(|(choice, id, icon, label)| {
-                                                    menu_choice(&theme, id, icon, label, sort == choice)
-                                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_agent_sort(choice, cx)))
+                                                .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child("SHOW"))
+                                                .children(parts.map(|(id, icon, label, part)| {
+                                                    let mut shown = show;
+                                                    menu_choice(&theme, id, icon, label, *part(&mut shown)).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                                        save_from_sidebar(cx, |s| {
+                                                            let on = part(&mut s.workspace_show);
+                                                            *on = !*on;
+                                                        })
+                                                    }))
                                                 })),
                                         )
                                     }),
                             )
                             .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
                             .child(
-                                row(&theme, false, "show-agents")
-                                    .on_hover(cx.listener(|this, on: &bool, _, cx| this.leave_sort_submenu(*on, cx)))
+                                row(&theme, false, "compact-workspaces")
+                                    .on_hover(cx.listener(|this, on: &bool, _, cx| {
+                                        if *on && this.show_submenu {
+                                            this.show_submenu = false;
+                                            cx.notify();
+                                        }
+                                    }))
                                     .h(px(30.))
                                     .rounded(px(6.))
-                                    .child(div().flex_1().child("Show agents"))
-                                    .child(crate::ui::switch(&theme, show_agents, "show-agents"))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_agents(cx))),
-                            )
-                            .child(
-                                row(&theme, false, "show-status-bar")
-                                    .on_hover(cx.listener(|this, on: &bool, _, cx| this.leave_sort_submenu(*on, cx)))
-                                    .h(px(30.))
-                                    .rounded(px(6.))
-                                    .child(div().flex_1().child("Show status bar"))
-                                    .child(crate::ui::switch(&theme, show_status_bar, "show-status-bar"))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_status_bar(cx))),
-                            )
+                                    .child(div().flex_1().child("Compact"))
+                                    .child(crate::ui::switch(&theme, compact, "compact-workspaces"))
+                                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                                        save_from_sidebar(cx, |s| s.compact_workspaces = !s.compact_workspaces)
+                                    })),
+                            ),
+                    )),
+                )
+                .with_priority(1)
+            }))
+            .children(self.agents_menu.as_ref().map(|menu| {
+                let at = menu.value;
+                let sort = self.agent_sort;
+                let compact = SettingsGlobal::of(cx).settings.compact_agents;
+                gpui::deferred(
+                    gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
+                        "agents-menu-in",
+                        menu,
+                        menu_card(&theme, "agents-menu", 200.)
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                if let Some(m) = this.agents_menu.as_mut() { m.close() }
+                                cx.notify();
+                            }))
+                            .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child("SORT"))
+                            .children(SORTS.map(|(choice, id, icon, label)| {
+                                menu_choice(&theme, id, icon, label, sort == choice)
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_agent_sort(choice, cx)))
+                            }))
                             .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
-                            .child(menu_choice(&theme, "open-settings", "icons/settings.svg", "Settings", false)
-                                .on_hover(cx.listener(|this, on: &bool, _, cx| this.leave_sort_submenu(*on, cx)))
-                                .on_click(
-                                cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    if let Some(m) = this.view_menu.as_mut() {
-                                        m.close()
-                                    }
-                                    this.toggle_settings_here(window, cx);
-                                }),
-                            )),
+                            .child(
+                                row(&theme, false, "compact-agents")
+                                    .h(px(30.))
+                                    .rounded(px(6.))
+                                    .child(div().flex_1().child("Compact"))
+                                    .child(crate::ui::switch(&theme, compact, "compact-agents"))
+                                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                                        save_from_sidebar(cx, |s| s.compact_agents = !s.compact_agents)
+                                    })),
+                            ),
                     )),
                 )
                 .with_priority(1)

@@ -124,8 +124,13 @@ fn action_icon(name: &str) -> &'static str {
     }
 }
 
+/// Zeron's one brand-colored mark keeps its color; every other icon takes `ink`.
+pub(crate) fn icon_ink(icon: &str, ink: gpui::Hsla) -> gpui::Hsla {
+    if icon == "icons/claude-mark.svg" { gpui::rgb(0xD97757).into() } else { ink }
+}
+
 /// The harness's mark for an agent herdr detected (its `agent start --kind` names), else a robot.
-fn agent_icon(agent: &str) -> &'static str {
+pub(crate) fn agent_icon(agent: &str) -> &'static str {
     match agent {
         "claude" => "icons/claude-mark.svg",
         "codex" => "icons/openai-mark.svg",
@@ -487,11 +492,7 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        // glass over the blurred window, as Zeron's palette
-        let card = theme.card.opacity(match theme.appearance {
-            crate::theme::Appearance::Light => 0.9,
-            crate::theme::Appearance::Dark => 0.84,
-        });
+        let card = theme.card;
         let mut children: Vec<gpui::AnyElement> = Vec::new();
         for (row, &i) in self.matches.iter().enumerate() {
             let item = &self.items[i];
@@ -530,12 +531,10 @@ impl Render for Panel {
                         }
                     }))
                     .on_click(cx.listener(move |panel, _, _, cx| panel.run(row, cx)))
-                    .child(gpui::svg().path(item.icon).size(px(16.)).flex_none().text_color(match item.icon {
-                        // Zeron's one brand-colored mark; the others take the surface's ink
-                        "icons/claude-mark.svg" => gpui::rgb(0xD97757).into(),
-                        _ if selected => theme.text,
-                        _ => theme.text_muted,
-                    }))
+                    .child(gpui::svg().path(item.icon).size(px(16.)).flex_none().text_color(icon_ink(
+                        item.icon,
+                        if selected { theme.text } else { theme.text_muted },
+                    )))
                     .child(div().flex_1().min_w_0().truncate().child(highlighted(&item.label, &self.query, &theme)))
                     .children(item.hint.clone().map(|hint| div().flex_none().max_w(px(160.)).truncate().text_size(px(12.)).text_color(theme.text_faint).child(hint)))
                     .children(item.status.map(|status| crate::shell::status_dot(status, &theme)))
@@ -665,73 +664,10 @@ fn key_hint(theme: &Theme, keys: &[&str], label: &'static str) -> gpui::Div {
 
 const CARD_RADIUS: f32 = 16.;
 
-/// Zeron's frost (`frost::frosted`): the card paints in a scene layer of its own over a backdrop blur of what is
-/// under it, so the blur stays beneath every row and border it draws.
-struct Frosted(gpui::AnyElement);
-
-impl gpui::Element for Frosted {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<gpui::ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (gpui::LayoutId, ()) {
-        (self.0.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        _: gpui::Bounds<gpui::Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.0.prepaint(window, cx);
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        bounds: gpui::Bounds<gpui::Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        window.paint_layer(bounds, |window| {
-            window.paint_backdrop_blur(bounds, gpui::Corners::all(px(CARD_RADIUS)), px(16.));
-            self.0.paint(window, cx);
-        });
-    }
-}
-
-impl IntoElement for Frosted {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 /// The panel over a 35 % scrim, a fifth of the way down the window; both fade in and out with the popup.
 pub fn overlay<T>(popup: &Popup<(Entity<Panel>, T)>, window: &Window) -> impl IntoElement + use<T> {
     let viewport = window.viewport_size();
-    let card = div().id("command-panel-motion").child(Frosted(popup.value.0.clone().into_any_element()));
+    let card = div().id("command-panel-motion").child(popup.value.0.clone());
     let scrim = div()
         .id("command-panel-scrim")
         .occlude()

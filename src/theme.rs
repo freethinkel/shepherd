@@ -237,7 +237,8 @@ impl Theme {
             success: color(c.success),
             danger: color(c.danger),
             hover: color(c.hover),
-            selected: color(c.active),
+            // Zeron's `glass_selected_bg`: a neutral wash, so the selected row reads on any theme's accent
+            selected: if v.appearance.is_dark() { hsla(0., 0., 0.92, 0.11) } else { hsla(0., 0., 0.10, 0.06) },
             border: color(c.border),
             border_strong: color(c.border_strong),
             // The theme's accent, opaque like Ghostty's: the cell under the block takes the background color.
