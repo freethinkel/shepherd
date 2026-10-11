@@ -1,8 +1,8 @@
 //! The window's bottom bar (Zeron's footer labels): the shown pane's branch, directory and agent, and how many
 //! agents across the workspaces work or wait for you. Git runs off the main thread and is cached per directory.
-use crate::model::{AgentStatus, Snapshot};
+use crate::model::{AgentStatus, Pane, Snapshot};
 use crate::theme::Theme;
-use gpui::{App, ClickEvent, Global, IntoElement, ParentElement, Styled, Window, div, prelude::*, px};
+use gpui::{App, ClickEvent, Global, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -12,6 +12,8 @@ pub const HEIGHT: f32 = 24.0;
 const GIT_TTL: Duration = Duration::from_secs(5);
 /// Claude's usage endpoint is polled as often as the dotfiles' statusbar does.
 const USAGE_TTL: Duration = Duration::from_secs(300);
+/// How often the shown agent's transcript is summed again.
+const SPENT_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Git {
@@ -175,6 +177,144 @@ fn read_usage(_: &str) -> Option<Usage> {
     parse_usage(&response.body_mut().read_to_string().ok()?)
 }
 
+/// Tokens a Claude Code session spent, by kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Spent {
+    pub answers: u64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+}
+
+impl Spent {
+    pub fn total(&self) -> u64 {
+        self.input + self.output + self.cache_write + self.cache_read
+    }
+}
+
+/// A Claude Code transcript's usage, summed. Each answer is written once per content block with the same
+/// usage, so it counts once by its message id.
+pub fn parse_spent(jsonl: &str) -> Spent {
+    let mut seen = std::collections::HashSet::new();
+    let mut spent = Spent::default();
+    let lines = jsonl.lines().filter(|l| l.contains("\"usage\"")).filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
+    for v in lines.filter(|v| seen.insert(v["message"]["id"].as_str().unwrap_or_default().to_string())) {
+        let n = |k: &str| v["message"]["usage"][k].as_u64().unwrap_or(0);
+        spent.answers += 1;
+        spent.input += n("input_tokens");
+        spent.output += n("output_tokens");
+        spent.cache_write += n("cache_creation_input_tokens");
+        spent.cache_read += n("cache_read_input_tokens");
+    }
+    spent
+}
+
+/// `1234` as `1.2k`, `5600000` as `5.6M`.
+pub fn short_count(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
+}
+
+// ponytail: rereads the whole transcript each SPENT_TTL; read on from the last offset if transcripts get huge.
+// Subagents' own transcripts (`<session>/subagents/`) aren't counted.
+/// What Claude session `id` spent, from its transcript in any of Claude Code's project folders.
+fn read_spent(id: &str) -> Option<Spent> {
+    let projects = Path::new(&std::env::var_os("HOME")?).join(".claude/projects");
+    let file = std::fs::read_dir(projects).ok()?.flatten().map(|d| d.path().join(format!("{id}.jsonl"))).find(|f| f.is_file())?;
+    Some(parse_spent(&std::fs::read_to_string(file).ok()?))
+}
+
+/// What `pane`'s agent session spent so far, refreshed in the background.
+fn spent_of(pane: &Pane, cx: &mut App) -> Option<Spent> {
+    pane.agent_session.as_ref().and_then(|s| cached(&s.value, SPENT_TTL, read_spent, cx))
+}
+
+/// The spend popup's card: every agent with a session, what it spent by kind, and the sum. `pick` makes a
+/// row's click handler from its tab.
+pub fn spent_card<L: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(
+    snapshot: Option<&Snapshot>,
+    shown_pane: Option<&str>,
+    theme: &Theme,
+    pick: impl Fn(&str) -> L,
+    cx: &mut App,
+) -> gpui::Stateful<gpui::Div> {
+    let agents: Vec<(&Pane, String, Option<Spent>)> = snapshot
+        .map(|s| {
+            s.agents()
+                .into_iter()
+                .filter(|p| p.agent_session.is_some())
+                .map(|p| {
+                    let ws = s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id).map(|w| w.label.clone());
+                    (p, ws.unwrap_or_default(), spent_of(p, cx))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let sum = agents.iter().filter_map(|(_, _, s)| s.as_ref()).map(Spent::total).sum::<u64>();
+    let faint = theme.text_faint;
+    crate::shell::menu_card(theme, "spent-menu", 420.)
+        .w(px(420.))
+        .text_size(px(12.))
+        .text_color(theme.text)
+        .child(
+            div()
+                .h(px(28.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .text_size(px(11.))
+                .text_color(faint)
+                .child(div().flex_1().child("Tokens by agent"))
+                .child(format!("{} total", short_count(sum))),
+        )
+        .when(agents.is_empty(), |el| el.child(div().px(px(8.)).pb(px(6.)).text_color(faint).child("No agent sessions")))
+        .child(div().id("spent-list").max_h(px(460.)).overflow_y_scroll().flex().flex_col().children(agents.into_iter().map(|(p, ws, spent)| {
+            let detail = match spent {
+                Some(s) => format!(
+                    "out {} · in {} · cache w {} r {} · {} replies",
+                    short_count(s.output),
+                    short_count(s.input),
+                    short_count(s.cache_write),
+                    short_count(s.cache_read),
+                    s.answers
+                ),
+                None => "no transcript yet".into(),
+            };
+            let title = p.terminal_title_stripped.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| p.agent.clone().unwrap_or_default());
+            crate::shell::row(theme, shown_pane == Some(p.pane_id.as_str()), SharedString::from(format!("spent-{}", p.pane_id)))
+                .h_auto()
+                .py(px(6.))
+                .items_start()
+                .child(crate::shell::agent_favicon(p.agent.as_deref(), theme).mt(px(1.)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(div().flex().gap(px(6.)).child(div().flex_none().child(ws)).child(div().min_w_0().truncate().text_color(faint).child(title)))
+                        .child(div().text_size(px(11.)).text_color(faint).truncate().child(detail)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(20.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(spent.map(|s| short_count(s.total())).unwrap_or_else(|| "…".into()))
+                        .child(crate::shell::status_dot(p.agent_status, theme)),
+                )
+                .on_click(pick(&p.tab_id))
+        })))
+}
+
 fn label(theme: &Theme, icon: &'static str) -> gpui::Div {
     div()
         .min_w_0()
@@ -249,6 +389,7 @@ pub fn bar(
     pane_id: Option<&str>,
     theme: &Theme,
     on_waiting: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_spent: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let pane = snapshot.zip(pane_id).and_then(|(s, id)| s.panes.iter().find(|p| p.pane_id == id));
@@ -293,6 +434,11 @@ pub fn bar(
                 .child(status_label(p.agent_status)),
             None => label(theme, "icons/terminal.svg")
                 .child(div().min_w_0().truncate().child(p.terminal_title_stripped.clone().unwrap_or_default())),
+        }))
+        .children(pane.and_then(|p| spent_of(p, cx)).map(|s| {
+            link(div().id("statusbar-spent").flex_none().flex().items_center().px(px(6.)), theme)
+                .child(format!("{} tok", short_count(s.total())))
+                .on_click(on_spent)
         }))
         .child(div().flex_1())
         .children(usage.map(|u| {
@@ -351,6 +497,21 @@ mod tests {
         assert_eq!(parse_usage(body), Some(Usage { five_hour: 42.0, week: 18.0 }));
         assert_eq!(parse_usage(r#"{"five_hour":{"utilization":null},"seven_day":{"utilization":1}}"#), None);
         assert_eq!(parse_usage(r#"{"error":{"type":"authentication_error"}}"#), None);
+    }
+
+    #[test]
+    fn sums_transcript_tokens_once_per_answer() {
+        let line = |id: &str, out: u64| {
+            format!(r#"{{"type":"assistant","message":{{"id":"{id}","usage":{{"input_tokens":2,"output_tokens":{out},"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"service_tier":"standard"}}}}}}"#)
+        };
+        let jsonl = [line("a", 10), line("a", 10), r#"{"type":"user","message":{"content":"hi"}}"#.into(), line("b", 5)].join("\n");
+        let spent = parse_spent(&jsonl);
+        assert_eq!(spent, Spent { answers: 2, input: 4, output: 15, cache_write: 200, cache_read: 2000 });
+        assert_eq!(spent.total(), 2219);
+        assert_eq!(parse_spent(""), Spent::default());
+        assert_eq!(short_count(999), "999");
+        assert_eq!(short_count(1234), "1.2k");
+        assert_eq!(short_count(5_600_000), "5.6M");
     }
 
     #[test]

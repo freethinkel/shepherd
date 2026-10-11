@@ -16,7 +16,7 @@ pub fn register_fonts(cx: &App) {
     }
 }
 
-/// Zeron's sidebar and settings icons, served at `icons/<name>.svg`.
+/// Zeron's sidebar, settings and tab icons (agent marks included), served at `icons/<name>.svg`.
 pub struct Assets;
 
 macro_rules! icons {
@@ -44,6 +44,7 @@ impl gpui::AssetSource for Assets {
             "arrow-right",
             "arrow-up",
             "bot",
+            "bot-filled",
             "check",
             "checklist",
             "claude-mark",
@@ -65,6 +66,7 @@ impl gpui::AssetSource for Assets {
             "palette-search",
             "pi-mark",
             "plus",
+            "prompt",
             "remote-server",
             "settings",
             "sidebar-minimalistic-left",
