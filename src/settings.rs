@@ -19,7 +19,8 @@ pub struct Settings {
     pub herdr_bin: Option<String>,
     /// herdr's API socket; `None` is herdr's own default.
     pub herdr_socket: Option<String>,
-    /// The command Cmd+click opens `path:line:col` with (`zed`, `code -g`); `None` finds Zed, Cursor or VS Code.
+    /// The command Cmd+click opens `path:line:col` with (`zed`, `code -g`, `nvim` in a pane to the right); `None`
+    /// finds Zed, Cursor or VS Code.
     pub editor: Option<String>,
     /// Action name → keystroke (`cmd-shift-d`); an empty string unbinds the action.
     pub keys: BTreeMap<String, String>,

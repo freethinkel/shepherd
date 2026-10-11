@@ -84,6 +84,10 @@ struct Integration {
     state: String,
 }
 
+/// The Editor select's options: the command saved and its label. `None` finds Zed, Cursor or VS Code.
+const EDITORS: [(Option<&str>, &str); 5] =
+    [(None, "Auto"), (Some("zed"), "Zed"), (Some("cursor -g"), "Cursor"), (Some("code -g"), "VS Code"), (Some("nvim"), "Neovim")];
+
 /// herdr's text settings shown as fields: the config key and what an empty field means.
 const HERDR_FIELDS: [(&str, &str); 3] =
     [("terminal.default_shell", "$SHELL"), ("terminal.new_cwd", "follow"), ("worktrees.directory", "~/.herdr/worktrees")];
@@ -93,7 +97,8 @@ pub struct SettingsView {
     font: Entity<InputState>,
     herdr_bin: Entity<InputState>,
     herdr_socket: Entity<InputState>,
-    editor: Entity<InputState>,
+    /// The Editor select's open list.
+    editor_menu: Option<crate::ui::Popup<()>>,
     /// herdr's `config.toml` as last read or written, or why it could not be.
     herdr_config: Result<HerdrConfig, String>,
     /// Fields for `HERDR_FIELDS`, in order.
@@ -148,7 +153,6 @@ impl SettingsView {
         let font = field(Some(settings.font_family.clone()), "Geist Mono", window, cx);
         let herdr_bin = field(settings.herdr_bin.clone(), "herdr on PATH", window, cx);
         let herdr_socket = field(settings.herdr_socket.clone(), "~/.config/herdr/herdr.sock", window, cx);
-        let editor = field(settings.editor.clone(), "Zed, Cursor or VS Code", window, cx);
         let herdr_config = HerdrConfig::load(&config_path()).map_err(|e| format!("{e:#}"));
         let herdr_fields: Vec<_> = HERDR_FIELDS
             .iter()
@@ -163,7 +167,6 @@ impl SettingsView {
             (&font, (|s: &mut Settings, v: String| if !v.is_empty() { s.font_family = v }) as fn(&mut Settings, String)),
             (&herdr_bin, |s: &mut Settings, v: String| s.herdr_bin = (!v.is_empty()).then_some(v)),
             (&herdr_socket, |s: &mut Settings, v: String| s.herdr_socket = (!v.is_empty()).then_some(v)),
-            (&editor, |s: &mut Settings, v: String| s.editor = (!v.is_empty()).then_some(v)),
         ] {
             subscriptions.push(cx.subscribe_in(input, window, move |_, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
@@ -220,7 +223,7 @@ impl SettingsView {
             font,
             herdr_bin,
             herdr_socket,
-            editor,
+            editor_menu: None,
             herdr_config,
             herdr_fields,
             herdr_note: None,
@@ -323,6 +326,53 @@ impl SettingsView {
         })
         .detach();
         cx.notify();
+    }
+}
+
+impl SettingsView {
+    /// A pill naming the editor; a click drops the list of `EDITORS` under it.
+    fn editor_select(&self, theme: &Theme, current: Option<&str>, cx: &mut Context<Self>) -> Div {
+        // A command typed into settings.json by hand shows as itself.
+        let label = EDITORS.iter().find(|(cmd, _)| *cmd == current).map_or_else(|| current.unwrap_or_default().to_string(), |(_, l)| l.to_string());
+        let hover = theme.wash(0.10);
+        let trigger = div()
+            .id("editor-select")
+            .w(px(240.))
+            .h(px(32.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .rounded(px(8.))
+            .bg(theme.wash(0.06))
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .child(div().flex_1().child(label))
+            .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(14.)).text_color(theme.text_muted))
+            .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
+                v.editor_menu = Some(crate::ui::Popup::new(()));
+                cx.notify();
+            }));
+        let menu = self.editor_menu.as_ref().map(|menu| {
+            let card = crate::shell::menu_card(theme, "editor-menu", 240.)
+                .mt(px(4.))
+                .on_mouse_down_out(cx.listener(|v, _, _, cx| {
+                    if let Some(m) = v.editor_menu.as_mut() { m.close() }
+                    cx.notify();
+                }))
+                .children(EDITORS.into_iter().enumerate().map(|(i, (cmd, label))| {
+                    crate::shell::row(theme, false, ("editor-option", i))
+                        .h(px(28.))
+                        .rounded(px(6.))
+                        .child(div().flex_1().child(label))
+                        .when(cmd == current, |el| el.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(theme.text_muted)))
+                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
+                            if let Some(m) = v.editor_menu.as_mut() { m.close() }
+                            update(cx, |s| s.editor = cmd.map(String::from));
+                        }))
+                }));
+            gpui::deferred(gpui::anchored().snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion("editor-menu-in", menu, card))).with_priority(1)
+        });
+        div().flex_none().flex().flex_col().child(trigger).children(menu)
     }
 }
 
@@ -459,6 +509,7 @@ pub(crate) fn display_chord(chord: &str) -> String {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::ui::reap_popup(&mut self.editor_menu, window);
         let theme = Theme::of(cx).clone();
         let global = SettingsGlobal::of(cx);
         let settings = global.settings.clone();
@@ -562,8 +613,8 @@ impl Render for SettingsView {
                         )
                         .child(
                             card_row(&theme, false)
-                                .child(row_text(&theme, "Editor", "Cmd+click on file:line opens it here: a command like zed or code -g."))
-                                .child(field(&theme, &self.editor)),
+                                .child(row_text(&theme, "Editor", "Cmd+click on file:line opens it here. Neovim opens in a pane to the right."))
+                                .child(self.editor_select(&theme, settings.editor.as_deref(), cx)),
                         ),
                 ),
             Section::Appearance => {

@@ -519,6 +519,18 @@ impl PaneTerminal {
             let pane = client.call("pane.get", serde_json::json!({"pane_id": pane_id})).await.map(|r| r["pane"].clone()).unwrap_or_default();
             let cwd = pane["foreground_cwd"].as_str().or(pane["cwd"].as_str()).unwrap_or("/");
             let Some(path) = resolve(&path, Path::new(cwd)) else { return };
+            if editor.as_deref().and_then(|e| e.split_whitespace().next()).is_some_and(|w| w.rsplit('/').next() == Some("nvim")) {
+                // A terminal editor gets a pane to the right; its shell drops typeahead until the prompt is drawn.
+                let params = serde_json::json!({"target_pane_id": pane_id, "direction": "right", "focus": true, "cwd": cwd});
+                let Ok(r) = client.call("pane.split", params).await else { return };
+                let Some(new_pane) = r["pane"]["pane_id"].as_str() else { return };
+                let prompt = serde_json::json!({"type": "regex", "value": "\\S"});
+                let wait = serde_json::json!({"pane_id": new_pane, "source": "recent", "match": prompt, "timeout_ms": 5000});
+                let _ = client.call("pane.wait_for_output", wait).await;
+                let text = nvim_command(editor.as_deref().unwrap_or("nvim"), &path, line, col);
+                let _ = client.call("pane.send_input", serde_json::json!({"pane_id": new_pane, "text": text, "keys": ["enter"]})).await;
+                return;
+            }
             let argv = editor_argv(editor.as_deref(), &path, line, col);
             if let Ok(mut child) = tokio::process::Command::new(&argv[0]).args(&argv[1..]).spawn() {
                 let _ = child.wait().await;
@@ -695,6 +707,17 @@ pub fn editor_argv(editor: Option<&str>, path: &Path, line: Option<u32>, col: Op
         return vec![code, "-g".into(), target];
     }
     vec!["open".into(), path.display().to_string()]
+}
+
+/// The shell line opening `path` at its line and column in nvim; `exec`, so quitting nvim closes its pane.
+pub fn nvim_command(editor: &str, path: &Path, line: Option<u32>, col: Option<u32>) -> String {
+    let quoted = format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+    let jump = match (line, col) {
+        (Some(l), Some(c)) => format!(" '+call cursor({l},{c})'"),
+        (Some(l), None) => format!(" +{l}"),
+        _ => String::new(),
+    };
+    format!("exec {editor}{jump} {quoted}")
 }
 
 /// herdr allows one controller per terminal; its refusal names the flag that replaces the other one.
@@ -909,6 +932,13 @@ mod tests {
         let path = Path::new("/tmp/a.rs");
         assert_eq!(editor_argv(Some("/bin/ed -g"), path, Some(3), Some(4)), ["/bin/ed", "-g", "/tmp/a.rs:3:4"]);
         assert_eq!(editor_argv(Some("/bin/ed"), path, Some(3), None), ["/bin/ed", "/tmp/a.rs:3"]);
+    }
+
+    #[test]
+    fn nvim_gets_the_line_and_column() {
+        assert_eq!(nvim_command("nvim", Path::new("/tmp/a b.rs"), Some(3), Some(4)), "exec nvim '+call cursor(3,4)' '/tmp/a b.rs'");
+        assert_eq!(nvim_command("nvim", Path::new("/tmp/it's"), Some(3), None), "exec nvim +3 '/tmp/it'\\''s'");
+        assert_eq!(nvim_command("nvim", Path::new("/tmp/a"), None, None), "exec nvim '/tmp/a'");
     }
 
     #[test]
