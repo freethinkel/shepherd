@@ -100,6 +100,8 @@ pub struct Shell {
     pane_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// The status bar's spend popup, opened at this point (its bottom-left).
     spent_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
+    /// The spend popup lists the most tokens first.
+    spent_by_tokens: bool,
     /// The status bar's limits popup, at its anchor.
     usage_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     agents_scroll: gpui::ScrollHandle,
@@ -228,6 +230,7 @@ impl Shell {
                     pane_menu: None,
                     spent_menu: None,
                     usage_menu: None,
+                    spent_by_tokens: false,
                     tab_menu: None,
                     worktree_dialog: None,
                     removing: Default::default(),
@@ -2178,7 +2181,11 @@ impl Render for Shell {
                     }
                 };
                 let shown = self.active_pane(window, cx);
-                let card = crate::ui::statusbar::spent_card(snapshot.as_ref(), shown.as_deref(), &theme, pick, cx).on_mouse_down_out(
+                let on_sort = cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.spent_by_tokens = !this.spent_by_tokens;
+                    cx.notify();
+                });
+                let card = crate::ui::statusbar::spent_card(snapshot.as_ref(), shown.as_deref(), &theme, self.spent_by_tokens, on_sort, pick, cx).on_mouse_down_out(
                     cx.listener(|this, _, _, cx| {
                         if let Some(m) = this.spent_menu.as_mut() { m.close() }
                         cx.notify();

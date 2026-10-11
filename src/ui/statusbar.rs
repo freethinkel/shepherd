@@ -329,16 +329,19 @@ fn spent_of(pane: &Pane, cx: &mut App) -> Option<Spent> {
     pane.agent_session.as_ref().and_then(|s| cached(&s.value, SPENT_TTL, read_spent, cx))
 }
 
-/// The spend popup's card: every agent with a session, what it spent by kind, and the sum. `pick` makes a
-/// row's click handler from its tab.
+/// The spend popup's card: every agent with a session, what it spent by kind, and the sum; in the sidebar's
+/// order, or most tokens first when `by_tokens`. `on_sort` flips that; `pick` makes a row's click handler from
+/// its tab.
 pub fn spent_card<L: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(
     snapshot: Option<&Snapshot>,
     shown_pane: Option<&str>,
     theme: &Theme,
+    by_tokens: bool,
+    on_sort: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     pick: impl Fn(&str) -> L,
     cx: &mut App,
 ) -> gpui::Stateful<gpui::Div> {
-    let agents: Vec<(&Pane, String, Option<Spent>)> = snapshot
+    let mut agents: Vec<(&Pane, String, Option<Spent>)> = snapshot
         .map(|s| {
             s.agents()
                 .into_iter()
@@ -350,8 +353,12 @@ pub fn spent_card<L: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(
                 .collect()
         })
         .unwrap_or_default();
+    if by_tokens {
+        agents.sort_by_key(|(_, _, s)| std::cmp::Reverse(s.as_ref().map_or(0, Spent::total)));
+    }
     let sum = agents.iter().filter_map(|(_, _, s)| s.as_ref()).map(Spent::total).sum::<u64>();
     let faint = theme.text_faint;
+    let (hover, selected, ink) = (theme.hover, theme.selected, theme.text);
     crate::shell::menu_card(theme, "spent-menu", 420.)
         .w(px(420.))
         .text_size(px(12.))
@@ -364,7 +371,24 @@ pub fn spent_card<L: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(
                 .items_center()
                 .text_size(px(11.))
                 .text_color(faint)
+                .gap(px(8.))
                 .child(div().flex_1().child("Tokens by agent"))
+                .child(
+                    div()
+                        .id("spent-sort")
+                        .h(px(20.))
+                        .px(px(6.))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .when(by_tokens, |el| el.bg(selected).text_color(ink))
+                        .hover(move |s| s.bg(hover))
+                        .child(gpui::svg().path("icons/arrow-down.svg").size(px(10.)).text_color(if by_tokens { ink } else { faint }))
+                        .child("Most tokens")
+                        .on_click(on_sort),
+                )
                 .child(format!("{} total", short_count(sum))),
         )
         .when(agents.is_empty(), |el| el.child(div().px(px(8.)).pb(px(6.)).text_color(faint).child("No agent sessions")))
