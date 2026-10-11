@@ -14,6 +14,7 @@ fn main() {
         shepherd::bindings::rebind(cx, &settings.keys);
         cx.set_global(shepherd::settings::SettingsGlobal { settings, error, path });
         cx.on_action(|_: &shepherd::bindings::Quit, cx| cx.quit());
+        shepherd::bindings::init_menu_actions(cx);
         cx.on_action(|_: &shepherd::bindings::OpenSettings, cx| shepherd::shell::Shell::toggle_settings(cx));
         cx.set_global(shepherd::ui::settings::Tokio(handle.clone()));
 

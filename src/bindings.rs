@@ -136,11 +136,75 @@ pub fn rebind(cx: &mut App, user: &BTreeMap<String, String>) {
     apply(cx, &previous, &next);
     cx.set_global(ActiveBindings(next));
     // macOS copies menu shortcuts when the menu is set: set it again so it shows (and only fires) the new ones.
-    cx.set_menus(vec![gpui::Menu::new("Shepherd").items([
-        gpui::MenuItem::action("Settings…", OpenSettings),
-        gpui::MenuItem::separator(),
-        gpui::MenuItem::action("Quit Shepherd", Quit),
-    ])]);
+    cx.set_menus(menus());
+}
+
+// Window-management items macOS apps carry; not rebindable, so outside `app_actions!`.
+gpui::actions!(shepherd, [Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
+
+fn menus() -> Vec<gpui::Menu> {
+    use gpui::{Menu, MenuItem as I, SystemMenuType};
+    vec![
+        Menu::new("Shepherd").items([
+            I::action("Settings…", OpenSettings),
+            I::separator(),
+            I::os_submenu("Services", SystemMenuType::Services),
+            I::separator(),
+            I::action("Hide Shepherd", Hide),
+            I::action("Hide Others", HideOthers),
+            I::action("Show All", ShowAll),
+            I::separator(),
+            I::action("Quit Shepherd", Quit),
+        ]),
+        Menu::new("Shell").items([
+            I::action("New Tab", NewTab),
+            I::action("New Workspace", NewWorkspace),
+            I::separator(),
+            I::action("Split Right", SplitRight),
+            I::action("Split Down", SplitDown),
+            I::separator(),
+            I::action("Close Pane", ClosePane),
+            I::action("Close Tab", CloseTab),
+        ]),
+        Menu::new("View").items([
+            I::action("Toggle Sidebar", ToggleSidebar),
+            I::action("Zoom Pane", ToggleZoom),
+            I::separator(),
+            I::action("Command Panel", CommandPanel),
+            I::action("Agents", AgentsPanel),
+            I::separator(),
+            I::action("Enter Full Screen", ToggleFullScreen),
+        ]),
+        Menu::new("Window").items([
+            I::action("Minimize", Minimize),
+            I::action("Zoom", Zoom),
+            I::separator(),
+            I::action("Previous Tab", PreviousTab),
+            I::action("Next Tab", NextTab),
+            I::action("Previous Workspace", PreviousWorkspace),
+            I::action("Next Workspace", NextWorkspace),
+            I::separator(),
+            I::action("Focus Pane Left", FocusLeft),
+            I::action("Focus Pane Right", FocusRight),
+            I::action("Focus Pane Up", FocusUp),
+            I::action("Focus Pane Down", FocusDown),
+        ]),
+    ]
+}
+
+/// Handlers for the window-management menu items.
+pub fn init_menu_actions(cx: &mut App) {
+    fn window(cx: &mut App, f: fn(&mut gpui::Window)) {
+        if let Some(w) = cx.active_window() {
+            let _ = w.update(cx, |_, window, _| f(window));
+        }
+    }
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.on_action(|_: &Minimize, cx| window(cx, |w| w.minimize_window()));
+    cx.on_action(|_: &Zoom, cx| window(cx, |w| w.zoom_window()));
+    cx.on_action(|_: &ToggleFullScreen, cx| window(cx, |w| w.toggle_fullscreen()));
 }
 
 /// Binds `next`; chords of `previous` that `next` no longer uses are bound to `NoAction` (a later binding

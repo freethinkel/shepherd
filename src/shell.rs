@@ -1389,7 +1389,6 @@ impl Render for Shell {
                                         el.text_color(theme.text_faint).child(spinner(&theme, format!("ws-removing-{}", w.workspace_id)))
                                     } else {
                                         el.child(status_dot(w.agent_status, &theme))
-                                            .child(div().text_size(px(11.)).text_color(theme.text_faint).child(w.number.to_string()))
                                     }
                                 })
                                 .children(chevron)
