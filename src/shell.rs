@@ -121,6 +121,7 @@ pub struct Shell {
     settings: Option<(Entity<crate::ui::settings::SettingsView>, Subscription)>,
     /// A pane being dragged by its grip.
     pane_drop: Option<pane_drag::PaneDrop>,
+    pane_spring_back: Option<pane_drag::SpringBack>,
     /// The command panel (cmd-k), open over the window.
     command_panel: Option<crate::ui::Popup<(Entity<crate::ui::command_panel::Panel>, Subscription)>>,
     /// Agents that started waiting or finished out of sight and have not been looked at since: the Dock badge.
@@ -252,6 +253,7 @@ impl Shell {
                     focus: cx.focus_handle(),
                     settings: None,
                     pane_drop: None,
+                    pane_spring_back: None,
                     command_panel: None,
                     unseen: Default::default(),
                     badge: 0,
@@ -1849,6 +1851,7 @@ impl Render for Shell {
             };
             crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, open, on_branch, on_spent, on_usage, cx)
         });
+        let spring_back = self.pane_spring_back(window);
         let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
         let on_page = settings_page.is_some();
         div()
@@ -2396,6 +2399,7 @@ impl Render for Shell {
                 )
                 .with_priority(1)
             }))
+            .children(spring_back)
             .child(toasts)
     }
 }

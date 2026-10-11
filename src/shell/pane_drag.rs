@@ -200,6 +200,37 @@ pub(super) struct PaneDrop {
     glide: Option<Glide>,
     /// The tab under the pointer, opened if the pane rests there for `OPEN_TAB`.
     over_tab: Option<String>,
+    /// The picture under the pointer, to fly back home if the drop moves nothing.
+    lifted: Option<Lifted>,
+}
+
+#[derive(Clone)]
+struct Lifted {
+    view: Entity<DraggedPane>,
+    /// Where the pointer took hold of the grip, in it; gpui draws the picture at the pointer minus this.
+    grab: Point<Pixels>,
+    /// The pointer at the pickup.
+    home: Point<Pixels>,
+}
+
+/// A dropped pane's picture flying back to where it was picked up, when the drop moved nothing.
+pub(super) struct SpringBack {
+    lifted: Lifted,
+    /// The pointer at the release.
+    from: Point<Pixels>,
+    started: Instant,
+}
+
+const SPRING_BACK: Duration = Duration::from_millis(240);
+
+impl SpringBack {
+    /// The picture's origin and opacity this frame, `None` once it is home.
+    fn now(&self) -> Option<(Point<Pixels>, f32)> {
+        let x = self.started.elapsed().as_secs_f32() / SPRING_BACK.as_secs_f32();
+        let t = super::ease_out(x);
+        let Lifted { grab, home, .. } = self.lifted;
+        (x < 1.).then(|| (self.from + (home - self.from) * t - grab, 1. - t.powi(4)))
+    }
 }
 
 /// How long a dragged pane rests on a tab before that tab opens to take it.
@@ -249,6 +280,17 @@ fn inset(f: Frac, by: f32) -> Frac {
 }
 
 impl Shell {
+    /// The picture of a pane flying back after a drop that moved nothing, over everything.
+    pub(super) fn pane_spring_back(&mut self, window: &mut Window) -> Option<Div> {
+        let Some((at, alpha)) = self.pane_spring_back.as_ref().and_then(SpringBack::now) else {
+            self.pane_spring_back = None;
+            return None;
+        };
+        window.request_animation_frame();
+        let view = self.pane_spring_back.as_ref()?.lifted.view.clone();
+        Some(div().absolute().left(at.x).top(at.y).opacity(alpha).child(view))
+    }
+
     /// Shows the tab a moved pane landed in.
     fn follow_moved_pane(&mut self, result: &serde_json::Value, cx: &mut Context<Self>) {
         if let Some(tab) = crate::commands::moved_tab_id(result) {
@@ -298,13 +340,15 @@ impl Shell {
                 .cursor(CursorStyle::OpenHand)
                 .occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_drag(dragged, move |d, grab, _, cx| {
+                .on_drag(dragged, move |d, grab, window, cx| {
+                    let preview = terminal.as_ref().and_then(|t| Preview::take(t, grab, cx));
+                    let view = cx.new(|_| DraggedPane { preview, ..d.clone() });
+                    let lifted = Lifted { view: view.clone(), grab, home: window.mouse_position() };
                     let _ = shell.update(cx, |shell, cx| {
-                        shell.pane_drop = Some(PaneDrop::default());
+                        shell.pane_drop = Some(PaneDrop { lifted: Some(lifted), ..Default::default() });
                         cx.notify();
                     });
-                    let preview = terminal.as_ref().and_then(|t| Preview::take(t, grab, cx));
-                    cx.new(|_| DraggedPane { preview, ..d.clone() })
+                    view
                 })
                 .child(
                     gpui::svg()
@@ -326,8 +370,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        if !cx.has_active_drag() {
-            self.pane_drop = None;
+        // released where nothing took it: the picture flies back
+        if !cx.has_active_drag() && let Some(lifted) = self.pane_drop.take().and_then(|d| d.lifted) {
+            self.pane_spring_back = Some(SpringBack { lifted, from: window.mouse_position(), started: Instant::now() });
         }
         let drop = self.pane_drop.as_mut()?;
         let to = drop
@@ -362,8 +407,10 @@ impl Shell {
                         cx.notify();
                     }
                 }))
+                // no target: `pane_drop` stays, so the picture flies back
                 .on_drop(cx.listener(move |this, d: &DraggedPane, _, cx| {
-                    if let Some((target, zone)) = this.pane_drop.take().and_then(|drop| drop.target) {
+                    if let Some((target, zone)) = this.pane_drop.as_ref().and_then(|drop| drop.target.clone()) {
+                        this.pane_drop = None;
                         this.send_all(plan(&d.pane_id, &d.tab_id, &target, &tab_id, zone), cx);
                     }
                 }))
@@ -409,8 +456,8 @@ pub(super) fn accept_pane(el: Stateful<Div>, tab_id: &str, drop_bg: Hsla, cx: &C
     .drag_over::<DraggedPane>(move |s, d, _, _| if d.tab_id == over { s } else { s.bg(drop_bg) })
     .on_drop(cx.listener(
         move |this, d: &DraggedPane, _, cx| {
-            this.pane_drop = None;
             if d.tab_id != dropped {
+                this.pane_drop = None;
                 let command = Command::MovePane { pane_id: d.pane_id.clone(), tab_id: dropped.clone(), down: false, target: None };
                 this.send(command, cx, Shell::follow_moved_pane);
             }
