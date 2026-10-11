@@ -213,6 +213,8 @@ fn takeover_is_passed_to_herdr() {
     fake(dir.path(), "cat > /dev/null");
     unsafe {
         std::env::set_var("SHEPHERD_HERDR", dir.path().join("herdr"));
+        // otherwise the real herdr's client socket answers and the fake never runs
+        std::env::set_var("HERDR_CLIENT_SOCKET_PATH", dir.path().join("no-client.sock"));
         std::env::set_var("REC", dir.path());
     }
     let (session, _rx) = Session::spawn("w1:p1", 100, 30, true).unwrap();
@@ -234,6 +236,7 @@ fn the_configured_binary_is_used_without_the_env_override() {
     fake(dir.path(), "cat > /dev/null");
     unsafe {
         std::env::remove_var("SHEPHERD_HERDR");
+        std::env::set_var("HERDR_CLIENT_SOCKET_PATH", dir.path().join("no-client.sock"));
         std::env::set_var("REC", dir.path());
     }
     shepherd::herdr::set_binary(Some(dir.path().join("herdr").display().to_string()));

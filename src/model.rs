@@ -75,6 +75,11 @@ pub struct Pane {
     pub agent: Option<String>,
     #[serde(default)]
     pub terminal_title_stripped: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// The directory of the pane's foreground process (a shell's `cd` moves it).
+    #[serde(default)]
+    pub foreground_cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
