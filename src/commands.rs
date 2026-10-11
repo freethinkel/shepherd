@@ -40,6 +40,13 @@ pub enum Command {
     ClosePane { pane_id: String },
     FocusPane { pane_id: String, direction: Direction },
     Zoom { pane_id: String },
+    /// Swaps two panes of one tab (herdr refuses `cross_tab`); the processes keep running.
+    SwapPanes { source: String, target: String },
+    /// Moves a pane, process and all, into a tab: split right (or down) of `target`, or of the whole tab when
+    /// `None`. herdr does nothing (`same_tab`) when the pane is already in that tab.
+    MovePane { pane_id: String, tab_id: String, down: bool, target: Option<String> },
+    /// Moves a pane into a new tab of its workspace.
+    MovePaneToNewTab { pane_id: String },
     SetSplitRatio { tab_id: String, path: Vec<bool>, ratio: f32 },
 }
 
@@ -86,6 +93,20 @@ impl Command {
                 ("pane.focus_direction", json!({"pane_id": pane_id, "direction": direction.name()}))
             }
             Command::Zoom { pane_id } => ("pane.zoom", json!({"pane_id": pane_id, "mode": "toggle"})),
+            Command::SwapPanes { source, target } => {
+                ("pane.swap", json!({"source_pane_id": source, "target_pane_id": target}))
+            }
+            Command::MovePane { pane_id, tab_id, down, target } => {
+                let split = if *down { "down" } else { "right" };
+                let mut destination = json!({"type": "tab", "tab_id": tab_id, "split": split});
+                if let Some(target) = target {
+                    destination["target_pane_id"] = json!(target);
+                }
+                ("pane.move", json!({"pane_id": pane_id, "destination": destination, "focus": false}))
+            }
+            Command::MovePaneToNewTab { pane_id } => {
+                ("pane.move", json!({"pane_id": pane_id, "destination": {"type": "new_tab"}, "focus": false}))
+            }
             Command::SetSplitRatio { tab_id, path, ratio } => {
                 ("layout.set_split_ratio", json!({"tab_id": tab_id, "path": path, "ratio": ratio}))
             }
@@ -200,6 +221,27 @@ mod tests {
             ("pane.focus_direction", json!({"pane_id": "w1:p1", "direction": "left"}))
         );
         assert_eq!(req(Command::Zoom { pane_id: "w1:p1".into() }), ("pane.zoom", json!({"pane_id": "w1:p1", "mode": "toggle"})));
+    }
+
+    #[test]
+    fn moving_panes() {
+        assert_eq!(
+            req(Command::SwapPanes { source: "w1:p1".into(), target: "w1:p2".into() }),
+            ("pane.swap", json!({"source_pane_id": "w1:p1", "target_pane_id": "w1:p2"}))
+        );
+        assert_eq!(
+            req(Command::MovePane { pane_id: "w1:p1".into(), tab_id: "w1:t2".into(), down: true, target: Some("w1:p4".into()) }),
+            ("pane.move", json!({"pane_id": "w1:p1", "focus": false,
+                "destination": {"type": "tab", "tab_id": "w1:t2", "split": "down", "target_pane_id": "w1:p4"}}))
+        );
+        assert_eq!(
+            req(Command::MovePane { pane_id: "w1:p1".into(), tab_id: "w1:t2".into(), down: false, target: None }),
+            ("pane.move", json!({"pane_id": "w1:p1", "focus": false, "destination": {"type": "tab", "tab_id": "w1:t2", "split": "right"}}))
+        );
+        assert_eq!(
+            req(Command::MovePaneToNewTab { pane_id: "w1:p1".into() }),
+            ("pane.move", json!({"pane_id": "w1:p1", "focus": false, "destination": {"type": "new_tab"}}))
+        );
     }
 
     #[test]
