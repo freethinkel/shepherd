@@ -1,12 +1,13 @@
 //! The command panel (cmd-k, Zeron's command palette): every app action with its chord, then every workspace
 //! and tab of the snapshot, filtered as you type. The agents panel is the same list over the agents.
-use crate::bindings::ACTIONS;
+use crate::bindings::{ACTIONS, ActiveBindings};
 use crate::model::{AgentSort, AgentStatus, Snapshot};
 use crate::theme::Theme;
 use crate::ui::Popup;
 use gpui::{
-    AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, SharedString,
-    App, KeyBinding, StatefulInteractiveElement, Styled, Subscription, Window, div, point, prelude::FluentBuilder, px,
+    App, AppContext, Context, Entity, EventEmitter, HighlightStyle, InteractiveElement, IntoElement, KeyBinding, Keystroke,
+    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, StyledText, Subscription, Window,
+    div, linear_color_stop, linear_gradient, point, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 
@@ -19,24 +20,47 @@ pub enum Run {
     Tab(String),
 }
 
+/// The heading an item sits under; also searched, so "tab" finds the tabs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Section {
+    Commands,
+    Workspaces,
+    Tabs,
+    Agents,
+}
+
+impl Section {
+    fn title(self) -> &'static str {
+        match self {
+            Section::Commands => "Commands",
+            Section::Workspaces => "Workspaces",
+            Section::Tabs => "Tabs",
+            Section::Agents => "Agents",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Item {
+    pub section: Section,
+    pub icon: &'static str,
     pub label: String,
-    /// The action's chord, or the workspace of a tab or agent.
+    /// Faint text on the right: the workspace of a tab or agent.
     pub hint: Option<String>,
-    /// A second line: an agent's terminal title.
-    pub detail: Option<String>,
-    /// An agent's status, shown as the sidebar's dot.
+    /// An action's chord in GPUI's spelling, drawn as key caps.
+    pub chord: Option<String>,
+    /// The sidebar's status dot, for agents and for tabs and workspaces with an agent at work.
     pub status: Option<AgentStatus>,
     pub run: Run,
 }
 
 impl Item {
-    /// What the query matches: an action's label (its chord would match every "cmd"), else every text shown.
+    /// What the query matches: an action's label, else the label, its workspace and its section. The label
+    /// comes first so match positions below its length are in the label.
     fn haystack(&self) -> String {
         match self.run {
             Run::Action(_) => self.label.clone(),
-            Run::Tab(_) => [Some(&self.label), self.hint.as_ref(), self.detail.as_ref()].into_iter().flatten().cloned().collect::<Vec<_>>().join(" "),
+            Run::Tab(_) => [Some(self.label.as_str()), self.hint.as_deref(), Some(self.section.title())].into_iter().flatten().collect::<Vec<_>>().join(" "),
         }
     }
 }
@@ -48,6 +72,15 @@ pub enum Kind {
     Agents,
 }
 
+impl Kind {
+    fn action(self) -> &'static str {
+        match self {
+            Kind::Commands => "CommandPanel",
+            Kind::Agents => "AgentsPanel",
+        }
+    }
+}
+
 const CONTEXT: &str = "CommandPanel";
 
 /// Emacs's ctrl-p and ctrl-n move the highlight like Up and Down.
@@ -55,17 +88,63 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("ctrl-p", MoveUp, Some(CONTEXT)), KeyBinding::new("ctrl-n", MoveDown, Some(CONTEXT))]);
 }
 
-/// Every action but the panel's own (with its chord in `bindings`), then a "Go to workspace" per workspace
-/// with a tab to show and a "Go to tab" per tab, in the sidebar's order.
+/// Zeron's icon for an action.
+fn action_icon(name: &str) -> &'static str {
+    match name {
+        "NewTab" => "icons/plus.svg",
+        "CloseTab" => "icons/close-circle.svg",
+        "NewWorkspace" => "icons/add-circle.svg",
+        "SplitRight" => "icons/split-columns.svg",
+        "SplitDown" => "icons/split-rows.svg",
+        "ClosePane" => "icons/close.svg",
+        "FocusLeft" => "icons/arrow-left.svg",
+        "FocusRight" => "icons/arrow-right.svg",
+        "FocusUp" => "icons/arrow-up.svg",
+        "FocusDown" => "icons/arrow-down.svg",
+        "ToggleZoom" => "icons/expand-arrows.svg",
+        "PreviousTab" => "icons/alt-arrow-left.svg",
+        "NextTab" => "icons/alt-arrow-right.svg",
+        "PreviousWorkspace" => "icons/alt-arrow-up.svg",
+        "NextWorkspace" => "icons/alt-arrow-down.svg",
+        "ToggleSidebar" => "icons/sidebar-minimalistic-left.svg",
+        "OpenSettings" => "icons/settings.svg",
+        "AgentsPanel" => "icons/bot.svg",
+        "Quit" => "icons/logout-2.svg",
+        _ => "icons/terminal.svg",
+    }
+}
+
+/// The harness's mark for an agent herdr detected, else a robot.
+fn agent_icon(agent: &str) -> &'static str {
+    match agent {
+        "claude" => "icons/claude-mark.svg",
+        "codex" => "icons/openai-mark.svg",
+        "cursor" | "cursor-agent" => "icons/cursor-mark.svg",
+        "opencode" => "icons/opencode-mark.svg",
+        "grok" => "icons/grok-mark.svg",
+        "devin" => "icons/devin-mark.svg",
+        "pi" => "icons/pi-mark.svg",
+        "hermes" => "icons/hermes-mark.svg",
+        _ => "icons/bot.svg",
+    }
+}
+
+/// Every action but the panel's own (with its chord in `bindings`), then every workspace with a tab to show
+/// and every tab, in the sidebar's order.
 pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<Item> {
-    let chord = |name: &str| {
-        let (_, keys) = bindings.iter().find(|(action, _)| action == name)?;
-        Some(keys.split_whitespace().map(crate::ui::settings::display_chord).collect::<Vec<_>>().join(" "))
-    };
+    let busy = |status: AgentStatus| (!matches!(status, AgentStatus::Idle | AgentStatus::Unknown)).then_some(status);
     let mut out: Vec<Item> = ACTIONS
         .iter()
         .filter(|(name, _)| *name != "CommandPanel")
-        .map(|(name, label)| Item { label: label.to_string(), hint: chord(name), detail: None, status: None, run: Run::Action(name) })
+        .map(|(name, label)| Item {
+            section: Section::Commands,
+            icon: action_icon(name),
+            label: label.to_string(),
+            hint: None,
+            chord: bindings.iter().find(|(action, _)| action == name).map(|(_, keys)| keys.clone()),
+            status: None,
+            run: Run::Action(name),
+        })
         .collect();
     let Some(s) = snapshot else { return out };
     let workspaces: Vec<_> = s.workspace_tree().into_iter().map(|(w, _)| w).collect();
@@ -73,16 +152,27 @@ pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<
         // the tab a click on its sidebar row shows
         let tab = w.active_tab_id.clone().or_else(|| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
         if let Some(tab) = tab {
-            out.push(Item { label: format!("Go to workspace {}", w.label), hint: None, detail: None, status: None, run: Run::Tab(tab) });
+            let linked = w.worktree.as_ref().is_some_and(|t| t.is_linked_worktree);
+            out.push(Item {
+                section: Section::Workspaces,
+                icon: if linked { "icons/git-branch.svg" } else { "icons/folder.svg" },
+                label: w.label.clone(),
+                hint: None,
+                chord: None,
+                status: busy(w.agent_status),
+                run: Run::Tab(tab),
+            });
         }
     }
     for w in &workspaces {
         for t in s.tabs_of(&w.workspace_id) {
             out.push(Item {
-                label: format!("Go to tab {}", t.label),
+                section: Section::Tabs,
+                icon: "icons/terminal.svg",
+                label: t.label.clone(),
                 hint: Some(w.label.clone()),
-                detail: None,
-                status: None,
+                chord: None,
+                status: busy(t.agent_status),
                 run: Run::Tab(t.tab_id.clone()),
             });
         }
@@ -90,55 +180,112 @@ pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<
     out
 }
 
-/// The sidebar's agents, in its order: each runs to its tab, as a click on its row does.
+/// The sidebar's agents, in its order, by what they work on: each runs to its tab, as a click on its row does.
 pub fn agent_items(snapshot: Option<&Snapshot>, sort: AgentSort) -> Vec<Item> {
     let Some(s) = snapshot else { return Vec::new() };
     s.agents_by(sort)
         .into_iter()
-        .map(|p| Item {
-            label: p.agent.clone().unwrap_or_else(|| "agent".into()),
-            hint: s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id).map(|w| w.label.clone()),
-            detail: p.terminal_title_stripped.clone().filter(|t| !t.is_empty()),
-            status: Some(p.agent_status),
-            run: Run::Tab(p.tab_id.clone()),
+        .map(|p| {
+            let agent = p.agent.clone().unwrap_or_default();
+            Item {
+                section: Section::Agents,
+                icon: agent_icon(&agent),
+                label: p.terminal_title_stripped.clone().filter(|t| !t.is_empty()).unwrap_or(agent),
+                hint: s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id).map(|w| w.label.clone()),
+                chord: None,
+                status: Some(p.agent_status),
+                run: Run::Tab(p.tab_id.clone()),
+            }
         })
         .collect()
 }
 
-/// How well `query` matches `text`, ignoring case, or None: `text` starting with it ranks first, then it
-/// starting a word, then anywhere, then its letters in order (more of them on word starts, fewer gaps, higher).
-pub fn score(query: &str, text: &str) -> Option<i32> {
+/// How well `query` matches `text`, ignoring case, and which chars of `text` it matched; None if it does not:
+/// `text` starting with it ranks first, then it starting a word, then anywhere, then its letters in order (more
+/// of them on word starts, fewer gaps, higher).
+pub fn matched(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
     let q: Vec<char> = query.trim().to_lowercase().chars().collect();
     if q.is_empty() {
-        return Some(0);
+        return Some((0, Vec::new()));
     }
     let t: Vec<char> = text.to_lowercase().chars().collect();
     let word_start = |i: usize| i == 0 || !t[i - 1].is_alphanumeric();
     let hits: Vec<usize> = (0..t.len()).filter(|&i| t[i..].starts_with(&q)).collect();
+    let run = |at: usize| (at..at + q.len()).collect();
     if hits.first() == Some(&0) {
-        return Some(3000);
+        return Some((3000, run(0)));
     }
-    if hits.iter().any(|&i| word_start(i)) {
-        return Some(2000);
+    if let Some(&at) = hits.iter().find(|&&i| word_start(i)) {
+        return Some((2000, run(at)));
     }
-    if !hits.is_empty() {
-        return Some(1000);
+    if let Some(&at) = hits.first() {
+        return Some((1000, run(at)));
     }
     // ponytail: greedy leftmost letters; "nt" scores Next tab's t in "Next", not "tab". Best alignment (fzf's DP) if it matters.
-    let (mut score, mut next) = (0, 0);
+    let (mut score, mut next, mut at) = (0, 0, Vec::new());
     for c in q.into_iter().filter(|c| !c.is_whitespace()) {
         let i = (next..t.len()).find(|&i| t[i] == c)?;
         score += if word_start(i) { 10 } else { 0 } - (i - next) as i32;
+        at.push(i);
         next = i + 1;
     }
-    Some(score.min(999))
+    Some((score.min(999), at))
 }
 
-/// Indices of the `labels` matching `query`, best first; ties keep their order.
-pub fn rank<'a>(query: &str, labels: impl IntoIterator<Item = &'a str>) -> Vec<usize> {
-    let mut hits: Vec<(usize, i32)> = labels.into_iter().enumerate().filter_map(|(i, l)| Some((i, score(query, l)?))).collect();
+pub fn score(query: &str, text: &str) -> Option<i32> {
+    matched(query, text).map(|(score, _)| score)
+}
+
+/// Indices of the `items` matching `query`, by section, best match first in each; a section with a better best
+/// match comes first, and ties keep their order.
+pub fn rank(query: &str, items: &[Item]) -> Vec<usize> {
+    let mut hits: Vec<(usize, i32)> = items.iter().enumerate().filter_map(|(i, item)| Some((i, score(query, &item.haystack())?))).collect();
     hits.sort_by_key(|&(_, s)| std::cmp::Reverse(s));
-    hits.into_iter().map(|(i, _)| i).collect()
+    let mut sections: Vec<Section> = Vec::new();
+    for &(i, _) in &hits {
+        if !sections.contains(&items[i].section) {
+            sections.push(items[i].section);
+        }
+    }
+    sections.into_iter().flat_map(|section| hits.iter().filter(move |&&(i, _)| items[i].section == section).map(|&(i, _)| i)).collect()
+}
+
+/// `text` with the chars the query matched in bold accent.
+fn highlighted(text: &str, query: &str, theme: &Theme) -> StyledText {
+    let mut chars: Vec<usize> = matched(query, text).map(|(_, at)| at).unwrap_or_default();
+    // lowercasing that changes the char count (İ) would misplace the indices: leave such labels plain
+    if text.to_lowercase().chars().count() != text.chars().count() {
+        chars.clear();
+    }
+    let bytes: Vec<(usize, char)> = text.char_indices().collect();
+    let style = HighlightStyle { color: Some(theme.accent), font_weight: Some(gpui::FontWeight::SEMIBOLD), ..Default::default() };
+    let ranges: Vec<_> = chars.into_iter().filter_map(|i| bytes.get(i).map(|&(b, c)| (b..b + c.len_utf8(), style))).collect();
+    StyledText::new(text.to_string()).with_highlights(ranges)
+}
+
+/// A keystroke the way the macOS menus write it: ⌃⌥⇧⌘ then the key.
+fn glyphs(keystroke: &str) -> String {
+    let Ok(k) = Keystroke::parse(keystroke) else { return keystroke.to_string() };
+    let m = k.modifiers;
+    let key = match k.key.as_str() {
+        "left" => "←".into(),
+        "right" => "→".into(),
+        "up" => "↑".into(),
+        "down" => "↓".into(),
+        "enter" => "↵".into(),
+        "escape" => "esc".into(),
+        "backspace" => "⌫".into(),
+        "delete" => "⌦".into(),
+        "tab" => "⇥".into(),
+        "space" => "Space".into(),
+        key if key.chars().count() == 1 => key.to_uppercase(),
+        key => key[..1].to_uppercase() + &key[1..],
+    };
+    [(m.control, "⌃"), (m.alt, "⌥"), (m.shift, "⇧"), (m.platform, "⌘"), (m.function, "fn")]
+        .into_iter()
+        .filter_map(|(on, glyph)| on.then_some(glyph))
+        .chain([key.as_str()])
+        .collect()
 }
 
 pub enum PanelEvent {
@@ -150,10 +297,13 @@ pub struct Panel {
     pub kind: Kind,
     input: Entity<InputState>,
     items: Vec<Item>,
-    /// Indices into `items` of the rows shown, best match first.
+    query: String,
+    /// Indices into `items` of the rows shown, in order.
     matches: Vec<usize>,
     /// Index into `matches`.
     selected: usize,
+    /// The panel's own chord, shown by the search field.
+    chord: Option<String>,
     scroll: ScrollHandle,
     _events: Subscription,
 }
@@ -164,7 +314,7 @@ impl Panel {
     pub fn new(kind: Kind, items: Vec<Item>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let theme = Theme::of(cx).clone();
         let placeholder = match kind {
-            Kind::Commands => "Type a command, workspace or tab",
+            Kind::Commands => "Search commands, workspaces and tabs",
             Kind::Agents => "Search agents",
         };
         let input = cx.new(|cx| {
@@ -178,26 +328,43 @@ impl Panel {
             InputEvent::PressEnter { .. } => panel.run(panel.selected, cx),
             _ => {}
         });
-        let matches = (0..items.len()).collect();
-        Panel { kind, input, items, matches, selected: 0, scroll: ScrollHandle::new(), _events: events }
+        let chord = cx.try_global::<ActiveBindings>().and_then(|b| b.0.iter().find(|(a, _)| a == kind.action()).map(|(_, k)| k.clone()));
+        let matches = rank("", &items);
+        Panel { kind, input, items, query: String::new(), matches, selected: 0, chord, scroll: ScrollHandle::new(), _events: events }
     }
 
     fn refilter(&mut self, cx: &mut Context<Self>) {
-        let query = self.input.read(cx).value();
-        let haystacks: Vec<String> = self.items.iter().map(Item::haystack).collect();
-        self.matches = rank(&query, haystacks.iter().map(String::as_str));
+        self.query = self.input.read(cx).value().to_string();
+        self.matches = rank(&self.query, &self.items);
         self.selected = 0;
         self.scroll.scroll_to_item(0);
         cx.notify();
     }
 
+    /// Headings show in the command panel; the agents panel is one section.
+    fn headings(&self) -> bool {
+        self.kind == Kind::Commands
+    }
+
+    /// Whether `row` starts its section, so a heading goes before it.
+    fn starts_section(&self, row: usize) -> bool {
+        row == 0 || self.items[self.matches[row - 1]].section != self.items[self.matches[row]].section
+    }
+
     fn step(&mut self, by: isize, cx: &mut Context<Self>) {
         let n = self.matches.len() as isize;
-        if n > 0 {
-            self.selected = (self.selected as isize + by).rem_euclid(n) as usize;
-            self.scroll.scroll_to_item(self.selected);
-            cx.notify();
+        if n == 0 {
+            return;
         }
+        self.selected = (self.selected as isize + by).rem_euclid(n) as usize;
+        // the list's children are the rows with a heading before each section; a section's first row brings its
+        // heading into view too
+        let child = match self.headings() {
+            true => self.selected + (0..=self.selected).filter(|&r| self.starts_section(r)).count() - self.starts_section(self.selected) as usize,
+            false => self.selected,
+        };
+        self.scroll.scroll_to_item(child);
+        cx.notify();
     }
 
     fn run(&mut self, row: usize, cx: &mut Context<Self>) {
@@ -210,47 +377,73 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let rows = self.matches.iter().enumerate().map(|(row, &i)| {
+        let mut children: Vec<gpui::AnyElement> = Vec::new();
+        for (row, &i) in self.matches.iter().enumerate() {
             let item = &self.items[i];
-            let selected = row == self.selected;
-            let chord = matches!(item.run, Run::Action(_));
-            div()
-                .id(("command-item", row))
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(10.))
-                .min_h(px(30.))
-                .px(px(8.))
-                .py(px(4.))
-                .rounded(px(10.))
-                .cursor_pointer()
-                .when(selected, |el| el.bg(theme.selected))
-                // the pointer moves the highlight, so hover and keyboard never light two rows
-                .on_mouse_move(cx.listener(move |panel, _, _, cx| {
-                    if panel.selected != row {
-                        panel.selected = row;
-                        cx.notify();
-                    }
-                }))
-                .on_click(cx.listener(move |panel, _, _, cx| panel.run(row, cx)))
-                .children(item.status.map(|status| crate::shell::status_dot(status, &theme)))
-                .child(
+            if self.headings() && self.starts_section(row) {
+                children.push(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(div().truncate().child(item.label.clone()))
-                        .children(item.detail.clone().map(|d| div().truncate().text_size(px(11.)).text_color(theme.text_muted).child(d))),
-                )
-                .children(item.hint.clone().map(|hint| {
-                    if chord {
-                        kbd(&theme, hint)
-                    } else {
-                        div().flex_none().max_w(px(180.)).truncate().text_size(px(12.)).text_color(theme.text_faint).child(hint)
-                    }
-                }))
+                        .flex_none()
+                        .px(px(8.))
+                        .pt(px(if row == 0 { 2. } else { 10. }))
+                        .pb(px(4.))
+                        .text_size(px(11.))
+                        .text_color(theme.text_faint)
+                        .child(item.section.title())
+                        .into_any_element(),
+                );
+            }
+            let selected = row == self.selected;
+            children.push(
+                div()
+                    .id(("command-item", row))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(10.))
+                    .min_h(px(30.))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(10.))
+                    .cursor_pointer()
+                    .when(selected, |el| el.bg(theme.selected))
+                    // the pointer moves the highlight, so hover and keyboard never light two rows
+                    .on_mouse_move(cx.listener(move |panel, _, _, cx| {
+                        if panel.selected != row {
+                            panel.selected = row;
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |panel, _, _, cx| panel.run(row, cx)))
+                    .child(gpui::svg().path(item.icon).size(px(16.)).flex_none().text_color(match item.icon {
+                        // Zeron's one brand-colored mark; the others take the surface's ink
+                        "icons/claude-mark.svg" => gpui::rgb(0xD97757).into(),
+                        _ if selected => theme.text,
+                        _ => theme.text_muted,
+                    }))
+                    .child(div().flex_1().min_w_0().truncate().child(highlighted(&item.label, &self.query, &theme)))
+                    .children(item.hint.clone().map(|hint| div().flex_none().max_w(px(160.)).truncate().text_size(px(12.)).text_color(theme.text_faint).child(hint)))
+                    .children(item.status.map(|status| crate::shell::status_dot(status, &theme)))
+                    .children(item.chord.as_ref().map(|chord| div().flex().flex_none().gap(px(4.)).children(chord.split_whitespace().map(|k| kbd(&theme, glyphs(k))))))
+                    .into_any_element(),
+            );
+        }
+        let (offset, max) = (-f32::from(self.scroll.offset().y), f32::from(self.scroll.max_offset().y));
+        // ponytail: gpui has no alpha mask, so the fades are gradients of the card's own color over the rows
+        let fade = |angle: f32| {
+            div().absolute().left_0().right_0().h(px(24.)).bg(linear_gradient(
+                angle,
+                linear_color_stop(theme.card, 0.),
+                linear_color_stop(theme.card.opacity(0.), 1.),
+            ))
+        };
+        let empty = self.matches.is_empty().then(|| {
+            let (title, hint) = match self.kind {
+                Kind::Commands => ("No results", "Try a command, a workspace or a tab."),
+                Kind::Agents if self.items.is_empty() => ("No agents", "Agents herdr finds in your panes show up here."),
+                Kind::Agents => ("No results", "Try an agent's task or its workspace."),
+            };
+            div().py(px(24.)).flex().flex_col().items_center().gap(px(6.)).child(title).child(div().text_color(theme.text_muted).child(hint))
         });
         div()
             .id("command-panel")
@@ -291,26 +484,42 @@ impl Render for Panel {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(gpui::svg().path("icons/palette-search.svg").size(px(16.)).flex_none().text_color(theme.text_muted))
-                    .child(div().flex_1().min_w_0().text_size(px(14.)).child(Input::new(&self.input))),
+                    .child(div().flex_1().min_w_0().text_size(px(14.)).child(Input::new(&self.input)))
+                    .children(self.chord.as_deref().and_then(|c| c.split_whitespace().next()).map(|k| kbd(&theme, glyphs(k)))),
             )
             .child(
                 div()
-                    .id("command-items")
-                    .max_h(px(360.))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .p(px(8.))
+                    .relative()
+                    .child(
+                        div()
+                            .id("command-items")
+                            .max_h(px(360.))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            // re-render so the edge fades follow the scroll position
+                            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                            .p(px(8.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .children(children)
+                            .children(empty),
+                    )
+                    .when(offset > 0.5, |el| el.child(fade(180.).top_0()))
+                    .when(offset < max - 0.5, |el| el.child(fade(0.).bottom_0())),
+            )
+            .child(
+                div()
+                    .px(px(16.))
+                    .py(px(7.))
                     .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .children(rows)
-                    .when(self.matches.is_empty(), |el| {
-                        el.child(div().py(px(20.)).flex().justify_center().text_color(theme.text_muted).child(match self.kind {
-                            Kind::Commands => "No results",
-                            Kind::Agents if self.items.is_empty() => "No agents",
-                            Kind::Agents => "No matching agents",
-                        }))
-                    }),
+                    .items_center()
+                    .gap(px(12.))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(key_hint(&theme, &["↑", "↓"], "Navigate"))
+                    .child(key_hint(&theme, &["↵"], "Open"))
+                    .child(key_hint(&theme, &["esc"], "Close")),
             )
     }
 }
@@ -322,11 +531,20 @@ fn kbd(theme: &Theme, keys: String) -> gpui::Div {
         .px(px(5.))
         .py(px(1.))
         .rounded(px(5.))
-        .bg(theme.wash(0.05))
-        .text_size(px(10.))
-        .font_family("Geist Mono")
+        .bg(theme.wash(0.06))
+        .text_size(px(11.))
         .text_color(theme.text_muted)
         .child(SharedString::from(keys))
+}
+
+/// A footer legend: key caps and the verb after them.
+fn key_hint(theme: &Theme, keys: &[&str], label: &'static str) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .children(keys.iter().map(|k| kbd(theme, k.to_string())))
+        .child(div().ml(px(2.)).text_size(px(11.)).text_color(theme.text_muted).child(label))
 }
 
 /// The panel over a 35 % scrim, a fifth of the way down the window; both fade in and out with the popup.
@@ -352,14 +570,23 @@ pub fn overlay<T>(popup: &Popup<(Entity<Panel>, T)>, window: &Window) -> impl In
 mod tests {
     use super::*;
 
-    fn ranked<'a>(query: &str, labels: &[&'a str]) -> Vec<&'a str> {
-        rank(query, labels.iter().copied()).into_iter().map(|i| labels[i]).collect()
+    fn item(section: Section, label: &str) -> Item {
+        let run = if section == Section::Commands { Run::Action("NewTab") } else { Run::Tab("t".into()) };
+        Item { section, icon: "", label: label.into(), hint: None, chord: None, status: None, run }
+    }
+
+    fn ranked(query: &str, items: &[Item]) -> Vec<String> {
+        rank(query, items).into_iter().map(|i| items[i].label.clone()).collect()
+    }
+
+    fn commands(labels: &[&str]) -> Vec<Item> {
+        labels.iter().map(|l| item(Section::Commands, l)).collect()
     }
 
     #[test]
     fn prefix_then_word_start_then_substring_then_letters() {
-        let labels = ["Close tab", "Split right", "Focus pane right", "Righteous", "Bright", "Go right"];
-        assert_eq!(ranked("right", &labels), ["Righteous", "Split right", "Focus pane right", "Go right", "Bright"]);
+        let items = commands(&["Close tab", "Split right", "Focus pane right", "Righteous", "Bright", "Go right"]);
+        assert_eq!(ranked("right", &items), ["Righteous", "Split right", "Focus pane right", "Go right", "Bright"]);
     }
 
     #[test]
@@ -377,23 +604,46 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_query_keeps_every_item_in_order() {
-        assert_eq!(ranked("  ", &["b", "a"]), ["b", "a"]);
+    fn matched_chars_are_the_ones_highlighted() {
+        assert_eq!(matched("spl", "Split right").map(|m| m.1), Some(vec![0, 1, 2]));
+        assert_eq!(matched("right", "Split right").map(|m| m.1), Some(vec![6, 7, 8, 9, 10]));
+        assert_eq!(matched("sr", "Split right").map(|m| m.1), Some(vec![0, 6]));
     }
 
     #[test]
-    fn agents_match_on_their_workspace_and_title_too() {
-        let agent = Item {
-            label: "claude".into(),
-            hint: Some("shepherd".into()),
-            detail: Some("fix the tab bar".into()),
-            status: None,
-            run: Run::Tab("t1".into()),
-        };
-        assert!(score("shep", &agent.haystack()).is_some());
-        assert!(score("tab bar", &agent.haystack()).is_some());
-        let action = Item { label: "New tab".into(), hint: Some("Cmd+T".into()), detail: None, status: None, run: Run::Action("NewTab") };
+    fn an_empty_query_keeps_every_item_in_order() {
+        assert_eq!(ranked("  ", &commands(&["b", "a"])), ["b", "a"]);
+    }
+
+    #[test]
+    fn sections_stay_together_and_the_best_section_leads() {
+        let items = vec![
+            item(Section::Commands, "New tab"),
+            item(Section::Commands, "Flush"),
+            item(Section::Workspaces, "shepherd"),
+            item(Section::Tabs, "shell"),
+            item(Section::Tabs, "zsh"),
+        ];
+        assert_eq!(ranked("", &items), ["New tab", "Flush", "shepherd", "shell", "zsh"]);
+        // "sh" starts a workspace and a tab, and only sits inside "zsh" and "Flush"
+        assert_eq!(ranked("sh", &items), ["shepherd", "shell", "zsh", "Flush"]);
+    }
+
+    #[test]
+    fn tabs_match_on_their_workspace_and_section_but_actions_only_on_their_label() {
+        let tab = Item { hint: Some("shepherd".into()), ..item(Section::Tabs, "claude") };
+        assert!(score("shep", &tab.haystack()).is_some());
+        assert!(score("tabs", &tab.haystack()).is_some());
+        let action = Item { chord: Some("cmd-t".into()), ..item(Section::Commands, "New tab") };
         assert_eq!(score("cmd", &action.haystack()), None, "a chord is not searched");
+    }
+
+    #[test]
+    fn chords_read_as_macos_writes_them() {
+        assert_eq!(glyphs("cmd-shift-d"), "⇧⌘D");
+        assert_eq!(glyphs("alt-cmd-left"), "⌥⌘←");
+        assert_eq!(glyphs("cmd-,"), "⌘,");
+        assert_eq!(glyphs("shift-cmd-enter"), "⇧⌘↵");
     }
 
     #[test]
@@ -401,12 +651,12 @@ mod tests {
         let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
             "focused_workspace_id": null, "focused_tab_id": null, "focused_pane_id": null,
             "workspaces": [
-                {"workspace_id": "w1", "label": "shepherd", "number": 1, "active_tab_id": "t2", "agent_status": "idle"},
+                {"workspace_id": "w1", "label": "shepherd", "number": 1, "active_tab_id": "t2", "agent_status": "working"},
                 {"workspace_id": "w2", "label": "empty", "number": 2, "active_tab_id": null, "agent_status": "idle"}
             ],
             "tabs": [
                 {"tab_id": "t1", "workspace_id": "w1", "label": "zsh", "number": 1, "agent_status": "idle"},
-                {"tab_id": "t2", "workspace_id": "w1", "label": "claude", "number": 2, "agent_status": "idle"}
+                {"tab_id": "t2", "workspace_id": "w1", "label": "claude", "number": 2, "agent_status": "working"}
             ],
             "panes": [], "layouts": []
         }))
@@ -414,17 +664,17 @@ mod tests {
         let bindings = vec![("NewTab".to_string(), "cmd-t".to_string()), ("CommandPanel".to_string(), "cmd-k".to_string())];
         let items = items(Some(&snapshot), &bindings);
         let new_tab = items.iter().find(|i| i.label == "New tab").unwrap();
-        assert_eq!((new_tab.hint.as_deref(), &new_tab.run), (Some("Cmd+T"), &Run::Action("NewTab")));
+        assert_eq!((new_tab.chord.as_deref(), &new_tab.run), (Some("cmd-t"), &Run::Action("NewTab")));
         assert!(items.iter().all(|i| i.run != Run::Action("CommandPanel")), "the panel does not list itself");
-        let rest: Vec<_> = items.iter().filter(|i| matches!(i.run, Run::Tab(_))).map(|i| (i.label.as_str(), i.run.clone())).collect();
+        let rest: Vec<_> = items.iter().filter(|i| i.section != Section::Commands).map(|i| (i.label.as_str(), i.run.clone(), i.status)).collect();
         assert_eq!(
             rest,
             [
-                ("Go to workspace shepherd", Run::Tab("t2".into())),
-                ("Go to tab zsh", Run::Tab("t1".into())),
-                ("Go to tab claude", Run::Tab("t2".into())),
+                ("shepherd", Run::Tab("t2".into()), Some(AgentStatus::Working)),
+                ("zsh", Run::Tab("t1".into()), None),
+                ("claude", Run::Tab("t2".into()), Some(AgentStatus::Working)),
             ],
-            "a workspace without tabs has nothing to show"
+            "a workspace without tabs has nothing to show; idle ones show no dot"
         );
     }
 }
