@@ -114,12 +114,13 @@ fn action_icon(name: &str) -> &'static str {
     }
 }
 
-/// The harness's mark for an agent herdr detected, else a robot.
+/// The harness's mark for an agent herdr detected (its `agent start --kind` names), else a robot.
 fn agent_icon(agent: &str) -> &'static str {
     match agent {
         "claude" => "icons/claude-mark.svg",
         "codex" => "icons/openai-mark.svg",
-        "cursor" | "cursor-agent" => "icons/cursor-mark.svg",
+        "cursor" => "icons/cursor-mark.svg",
+        "agy" => "icons/antigravity-mark.svg",
         "opencode" => "icons/opencode-mark.svg",
         "grok" => "icons/grok-mark.svg",
         "devin" => "icons/devin-mark.svg",
@@ -169,7 +170,7 @@ pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<
             out.push(Item {
                 section: Section::Tabs,
                 icon: "icons/terminal.svg",
-                label: t.label.clone(),
+                label: short_tab_label(&t.label).to_string(),
                 hint: Some(w.label.clone()),
                 chord: None,
                 status: busy(t.agent_status),
@@ -178,6 +179,13 @@ pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<
         }
     }
     out
+}
+
+/// herdr's tab label without its number and path: "2 · main › claude › Fix tabs" reads "Fix tabs" (the
+/// workspace shows beside it).
+fn short_tab_label(label: &str) -> &str {
+    let rest = label.split_once(" · ").filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit())).map_or(label, |(_, rest)| rest);
+    rest.rsplit(" › ").next().unwrap_or(rest)
 }
 
 /// The sidebar's agents, in its order, by what they work on: each runs to its tab, as a click on its row does.
@@ -221,14 +229,42 @@ pub fn matched(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
     if let Some(&at) = hits.first() {
         return Some((1000, run(at)));
     }
-    // ponytail: greedy leftmost letters; "nt" scores Next tab's t in "Next", not "tab". Best alignment (fzf's DP) if it matters.
-    let (mut score, mut next, mut at) = (0, 0, Vec::new());
-    for c in q.into_iter().filter(|c| !c.is_whitespace()) {
-        let i = (next..t.len()).find(|&i| t[i] == c)?;
-        score += if word_start(i) { 10 } else { 0 } - (i - next) as i32;
-        at.push(i);
-        next = i + 1;
+    // The best placement of the letters: +10 for each on a word start, -1 for each char skipped before it.
+    // best[k][i] scores q[..=k] with q[k] at t[i]; a running max over the previous row keeps it O(q·t).
+    let q: Vec<char> = q.into_iter().filter(|c| !c.is_whitespace()).collect();
+    if q.is_empty() {
+        return None;
     }
+    let bonus = |i: usize| if word_start(i) { 10 } else { 0 };
+    let mut best: Vec<Vec<Option<(i32, usize)>>> = Vec::with_capacity(q.len());
+    for (k, &c) in q.iter().enumerate() {
+        let mut row = vec![None; t.len()];
+        // the best (score + j, j) among the previous letter's places before i
+        let mut prev: Option<(i32, usize)> = None;
+        for i in 0..t.len() {
+            if t[i] == c {
+                row[i] = match k {
+                    0 => Some((bonus(i) - i as i32, 0)),
+                    _ => prev.map(|(s, j)| (s + bonus(i) - i as i32 + 1, j)),
+                };
+            }
+            if k > 0 {
+                if let Some((s, _)) = best[k - 1][i] {
+                    if prev.is_none_or(|(p, _)| s + i as i32 > p) {
+                        prev = Some((s + i as i32, i));
+                    }
+                }
+            }
+        }
+        best.push(row);
+    }
+    let (mut i, score) = best[q.len() - 1].iter().enumerate().filter_map(|(i, c)| c.map(|(s, _)| (i, s))).max_by_key(|&(i, s)| (s, std::cmp::Reverse(i)))?;
+    let mut at = vec![i];
+    for k in (1..q.len()).rev() {
+        i = best[k][i]?.1;
+        at.push(i);
+    }
+    at.reverse();
     Some((score.min(999), at))
 }
 
@@ -377,6 +413,11 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        // glass over the blurred window, as Zeron's palette
+        let card = theme.card.opacity(match theme.appearance {
+            crate::theme::Appearance::Light => 0.9,
+            crate::theme::Appearance::Dark => 0.84,
+        });
         let mut children: Vec<gpui::AnyElement> = Vec::new();
         for (row, &i) in self.matches.iter().enumerate() {
             let item = &self.items[i];
@@ -433,8 +474,8 @@ impl Render for Panel {
         let fade = |angle: f32| {
             div().absolute().left_0().right_0().h(px(24.)).bg(linear_gradient(
                 angle,
-                linear_color_stop(theme.card, 0.),
-                linear_color_stop(theme.card.opacity(0.), 1.),
+                linear_color_stop(card, 0.),
+                linear_color_stop(card.opacity(0.), 1.),
             ))
         };
         let empty = self.matches.is_empty().then(|| {
@@ -452,11 +493,10 @@ impl Render for Panel {
             .w(px(560.))
             .flex()
             .flex_col()
-            .rounded(px(16.))
-            .bg(theme.card)
+            .rounded(px(CARD_RADIUS))
+            .bg(card)
             .border_1()
             .border_color(theme.border)
-            .shadow_lg()
             .text_color(theme.text)
             .text_size(px(13.))
             // before the input's own Up, Down and Escape
@@ -547,10 +587,75 @@ fn key_hint(theme: &Theme, keys: &[&str], label: &'static str) -> gpui::Div {
         .child(div().ml(px(2.)).text_size(px(11.)).text_color(theme.text_muted).child(label))
 }
 
+const CARD_RADIUS: f32 = 16.;
+
+/// Zeron's frost (`frost::frosted`): the card paints in a scene layer of its own over a backdrop blur of what is
+/// under it, so the blur stays beneath every row and border it draws.
+struct Frosted(gpui::AnyElement);
+
+impl gpui::Element for Frosted {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.0.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<gpui::Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.0.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.paint_layer(bounds, |window| {
+            window.paint_backdrop_blur(bounds, gpui::Corners::all(px(CARD_RADIUS)), px(16.));
+            self.0.paint(window, cx);
+        });
+    }
+}
+
+impl IntoElement for Frosted {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
 /// The panel over a 35 % scrim, a fifth of the way down the window; both fade in and out with the popup.
 pub fn overlay<T>(popup: &Popup<(Entity<Panel>, T)>, window: &Window) -> impl IntoElement + use<T> {
     let viewport = window.viewport_size();
-    let card = div().id("command-panel-motion").child(popup.value.0.clone());
+    let card = div().id("command-panel-motion").child(Frosted(popup.value.0.clone().into_any_element()));
     let scrim = div()
         .id("command-panel-scrim")
         .occlude()
@@ -601,6 +706,19 @@ mod tests {
     fn word_start_letters_beat_scattered_ones() {
         assert!(score("sr", "Split right") > score("sr", "Toggle sidebar"));
         assert!(score("nt", "New tab") > score("nt", "Focus pane left"));
+    }
+
+    #[test]
+    fn letters_land_on_word_starts_when_they_can() {
+        assert_eq!(matched("nt", "Next tab").map(|m| m.1), Some(vec![0, 5]), "the t of tab, not of Next");
+    }
+
+    #[test]
+    fn tab_labels_lose_their_number_and_path() {
+        assert_eq!(short_tab_label("1 · main › claude › IP и root-доступ"), "IP и root-доступ");
+        assert_eq!(short_tab_label("2 · mono"), "mono");
+        assert_eq!(short_tab_label("v1 · build"), "v1 · build");
+        assert_eq!(short_tab_label("zsh"), "zsh");
     }
 
     #[test]

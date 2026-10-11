@@ -38,6 +38,7 @@ impl gpui::AssetSource for Assets {
             "alt-arrow-left",
             "alt-arrow-right",
             "alt-arrow-up",
+            "antigravity-mark",
             "arrow-down",
             "arrow-left",
             "arrow-right",
