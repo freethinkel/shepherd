@@ -25,6 +25,7 @@ const INNER_GAP: f32 = 6.;
 const ICON: f32 = 18.;
 /// The trailing slot: the status dot, swapped in place for `×` while the tab is hovered.
 const SLOT: f32 = 20.;
+const ZOOM_MARK: f32 = 12.;
 const MIN_W: f32 = 96.;
 const MAX_W: f32 = 220.;
 const FONT_SIZE: f32 = 12.5;
@@ -51,6 +52,8 @@ struct Shown {
     icon: &'static str,
     /// The favicon's tile and mark colors.
     tint: (Hsla, Hsla),
+    /// One of its panes is zoomed to fill it: the other panes are hidden.
+    zoomed: bool,
     /// The full width: label measured, clamped.
     width: f32,
 }
@@ -192,8 +195,14 @@ fn reveal(scrolled: f32, view: f32, x: f32, w: f32) -> Option<f32> {
     }
 }
 
-fn tab_width(label_w: f32) -> f32 {
-    (PAD_L + ICON + INNER_GAP + label_w + INNER_GAP + SLOT + PAD_R).clamp(MIN_W, MAX_W).ceil()
+fn tab_width(label_w: f32, zoomed: bool) -> f32 {
+    let mark = if zoomed { ZOOM_MARK + INNER_GAP } else { 0. };
+    (PAD_L + ICON + INNER_GAP + label_w + mark + INNER_GAP + SLOT + PAD_R).clamp(MIN_W, MAX_W).ceil()
+}
+
+/// After the label of a tab with a zoomed pane, the zoom action's icon.
+fn zoom_mark(theme: &Theme) -> gpui::Svg {
+    gpui::svg().path("icons/expand-arrows.svg").size(px(ZOOM_MARK)).flex_none().text_color(theme.text_muted)
 }
 
 impl TabBar {
@@ -367,6 +376,7 @@ impl Render for DraggedTab {
             .border_color(theme.border)
             .shadow_lg()
             .child(div().flex_1().min_w_0().truncate().child(self.tab.label.clone()))
+            .when(self.tab.zoomed, |el| el.child(zoom_mark(theme)))
             .child(dot_slot(theme, self.tab.status))
     }
 }
@@ -399,13 +409,15 @@ impl Shell {
                         };
                         let label_w = window.text_system().shape_line(t.label.clone().into(), px(FONT_SIZE), &[run], None).width;
                         let agent = agents.iter().find(|p| p.tab_id == t.tab_id).and_then(|p| p.agent.as_deref());
+                        let zoomed = s.layouts.iter().any(|l| l.tab_id == t.tab_id && l.zoomed);
                         Shown {
                             id: t.tab_id.clone(),
                             label: t.label.clone(),
                             status: t.agent_status,
                             icon: agent_icon(agent),
                             tint: agent_tint(agent, theme),
-                            width: tab_width(f32::from(label_w)),
+                            zoomed,
+                            width: tab_width(f32::from(label_w), zoomed),
                         }
                     })
                     .collect()
@@ -469,6 +481,7 @@ impl Shell {
                                 .border_1()
                                 .border_color(theme.border.opacity(1. - t_land))
                                 .child(div().flex_1().min_w_0().truncate().child(t.label.clone()))
+                                .when(t.zoomed, |el| el.child(zoom_mark(theme)))
                                 .child(dot_slot(theme, t.status)),
                         ),
                     )
@@ -483,6 +496,7 @@ impl Shell {
                     Some(field) => el.child(field),
                     None => el.child(div().flex_1().min_w_0().truncate().child(t.label.clone())),
                 })
+                .when(t.zoomed && draggable, |el| el.child(zoom_mark(theme)))
                 .child(
                     div()
                         .id(SharedString::from(format!("tab-x-{}", t.id)))
@@ -672,7 +686,7 @@ mod tests {
     use super::*;
 
     fn tab(id: &str) -> Shown {
-        Shown { id: id.into(), label: id.into(), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), width: 100. }
+        Shown { id: id.into(), label: id.into(), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), zoomed: false, width: 100. }
     }
 
     #[test]
