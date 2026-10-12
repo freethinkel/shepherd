@@ -3,9 +3,13 @@ Third-party assets and code in Shepherd
 Geist and Geist Mono (assets/fonts/*.ttf)
   SIL Open Font License 1.1; the full license is in assets/fonts/Geist-OFL.txt.
 
+Solar icon set, Linear style (assets/solar-linear.json)
+  By 480 Design (https://www.figma.com/community/file/1166831539721848736), Creative Commons Attribution 4.0
+  International (https://creativecommons.org/licenses/by/4.0/); taken as published at https://iconify.design.
+
 Zeron
   The theme families (the zeron-theme crate), the theme tokens in src/theme.rs (via Collie) the terminal code
-  in src/terminal/, the sidebar, settings and tab icons (agent marks) in assets/icons/, the settings page layout, the sidebar fold motion and the project icon (src/ui/project_icon.rs) are from or adapted from Zeron
+  in src/terminal/, the sidebar, settings and tab icons (agent marks) in assets/icons/, the settings page layout, the sidebar fold motion, the project icon (src/ui/project_icon.rs) the scroll-edge fade (src/ui/edge_fade.rs) and the loaders (src/ui/loader.rs) are from or adapted from Zeron
   (https://github.com/zeronsh/zeron), MIT License, Copyright (c) 2026 Wing:
 
   MIT License

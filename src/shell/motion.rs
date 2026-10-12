@@ -18,6 +18,23 @@ pub(super) fn ease_out(x: f32) -> f32 {
     bezier(1., (lo + hi) / 2.).clamp(0., 1.)
 }
 
+/// A damped spring (ζ 0.7) over its duration: a quick rise, about 5 % past the end, then home.
+pub(super) fn spring(t: f32) -> f32 {
+    damped_spring(0.7, t)
+}
+
+/// A spring damped by `zeta` over its duration: the closer to 1, the less it goes past the end.
+pub(super) fn damped_spring(zeta: f32, t: f32) -> f32 {
+    if t >= 1. {
+        return 1.;
+    }
+    let omega = 14f32;
+    let damped = omega * (1. - zeta * zeta).sqrt();
+    1. - (-zeta * omega * t).exp() * ((damped * t).cos() + zeta * omega / damped * (damped * t).sin())
+}
+
+pub(super) const SPRING_DURATION: Duration = Duration::from_millis(240);
+
 /// Zeron's resize-edge spring (`motion::resize_bounce_offset`): 5 px out over the first 32 % of 220 ms, then
 /// home over the rest, smoothstep both ways.
 pub(super) const EDGE_SPRING: Duration = Duration::from_millis(220);
@@ -112,6 +129,14 @@ impl FoldMotion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_spring_overshoots_and_settles() {
+        assert_eq!(spring(0.), 0.);
+        let peak = (0..100).map(|i| spring(i as f32 / 100.)).fold(0f32, f32::max);
+        assert!(peak > 1.02 && peak < 1.08, "{peak}");
+        assert!((spring(0.99) - 1.).abs() < 0.001);
+    }
 
     #[test]
     fn edge_nudge_springs_out_and_home() {

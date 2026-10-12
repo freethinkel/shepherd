@@ -47,7 +47,7 @@ fn api_socket() -> PathBuf {
     })
 }
 
-fn binary() -> String {
+pub(super) fn binary() -> String {
     std::env::var("SHEPHERD_HERDR").ok().or_else(|| BINARY.read().unwrap().clone()).unwrap_or_else(find_herdr)
 }
 
@@ -106,6 +106,77 @@ pub fn start_server() -> std::io::Result<()> {
     }
     let mut child = command.spawn()?;
     std::thread::spawn(move || child.wait()); // reaped whenever it exits
+    Ok(())
+}
+
+/// One of herdr's sessions, as `herdr session list --json` lists it.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct SessionInfo {
+    pub name: String,
+    pub running: bool,
+    pub socket_path: String,
+    #[serde(default)]
+    pub default: bool,
+}
+
+/// herdr's sessions, from `herdr session list --json`.
+pub fn sessions() -> anyhow::Result<Vec<SessionInfo>> {
+    let out = Command::new(binary()).args(["session", "list", "--json"]).stdin(Stdio::null()).output()?;
+    anyhow::ensure!(out.status.success(), "herdr session list: {}", String::from_utf8_lossy(&out.stderr).trim());
+    parse_sessions(&out.stdout)
+}
+
+fn parse_sessions(json: &[u8]) -> anyhow::Result<Vec<SessionInfo>> {
+    #[derive(serde::Deserialize)]
+    struct List {
+        sessions: Vec<SessionInfo>,
+    }
+    Ok(serde_json::from_slice::<List>(json)?.sessions)
+}
+
+/// The name of the herdr session Shepherd talks to: `default`, a named one, or `None` for a socket of its own.
+pub fn current_session() -> Option<String> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    session_of(&api_socket(), &home).map(|name| name.unwrap_or_else(|| "default".into()))
+}
+
+/// herdr's rule for a session's name: ASCII letters, digits, `.`, `_` and `-`.
+pub fn valid_session_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// The session `name` where herdr keeps it. herdr has no command to make one: its server makes it on first start,
+/// which Shepherd does when nothing answers on the socket.
+pub fn new_session(name: &str) -> SessionInfo {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let socket = home.join(".config/herdr/sessions").join(name).join("herdr.sock");
+    SessionInfo { name: name.into(), running: false, socket_path: socket.to_string_lossy().into_owned(), default: false }
+}
+
+/// Stops `name`'s server when it runs, then deletes the session with its workspaces.
+pub fn delete_session(name: &str, running: bool) -> anyhow::Result<()> {
+    if running {
+        session_command(&["stop", name])?;
+    }
+    // ponytail: the server may take a moment to let go of its socket after stop answers; ten tries, 200 ms apart
+    let mut tries = 0;
+    loop {
+        match session_command(&["delete", name]) {
+            Err(e) if tries < 10 && format!("{e:#}").contains("is running") => tries += 1,
+            done => return done,
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// `herdr session <args> --json`: its error message when it answers with one.
+fn session_command(args: &[&str]) -> anyhow::Result<()> {
+    let out = Command::new(binary()).arg("session").args(args).arg("--json").stdin(Stdio::null()).output()?;
+    let answer: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    if let Some(message) = answer["error"]["message"].as_str() {
+        anyhow::bail!("{message}");
+    }
+    anyhow::ensure!(out.status.success(), "herdr session {}: {}", args[0], String::from_utf8_lossy(&out.stderr).trim());
     Ok(())
 }
 
@@ -349,5 +420,20 @@ mod tests {
         assert_eq!(at("/Users/me/.config/herdr/sessions/pets/other.sock"), None);
         assert_eq!(at("/Users/me/.config/herdr/sessions/a/b/herdr.sock"), None);
         assert_eq!(at("/tmp/herdr.sock"), None);
+    }
+
+    #[test]
+    fn session_names_herdr_takes() {
+        assert!(valid_session_name("pets") && valid_session_name("client.v2_old-1"));
+        assert!(!valid_session_name("") && !valid_session_name("Bad Name") && !valid_session_name("a/b") && !valid_session_name("пэт"));
+    }
+
+    #[test]
+    fn sessions_from_herdrs_list() {
+        let json = br#"{"sessions":[{"default":true,"name":"default","running":true,"session_dir":"/h","socket_path":"/h/herdr.sock"},
+            {"default":false,"name":"pets","running":false,"session_dir":"/h/s/pets","socket_path":"/h/s/pets/herdr.sock"}]}"#;
+        let list = parse_sessions(json).unwrap();
+        assert_eq!(list.iter().map(|s| (s.name.as_str(), s.running, s.default)).collect::<Vec<_>>(), [("default", true, true), ("pets", false, false)]);
+        assert_eq!(list[1].socket_path, "/h/s/pets/herdr.sock");
     }
 }
