@@ -33,7 +33,7 @@ mod widgets;
 mod workspaces;
 use motion::*;
 use sync::sync_loop;
-pub(crate) use widgets::{menu_card, row, status_dot, status_icon};
+pub(crate) use widgets::{menu_card, modal, row, status_dot, status_icon};
 use widgets::*;
 pub(crate) use tab_bar::agent_favicon;
 

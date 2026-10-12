@@ -23,6 +23,7 @@ block2 = "0.6"
 image = { version = "0.25", default-features = false }
 gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["font-kit", "runtime_shaders"] }
 serde = { version = "1", features = ["derive"] }
+percent-encoding = "2"
 serde_json = "1"
 bincode = { version = "2", features = ["serde"] }
 tiny-skia = "0.11"

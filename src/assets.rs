@@ -67,6 +67,7 @@ impl gpui::AssetSource for Assets {
             "info-circle",
             "keyboard",
             "logout-2",
+            "minus",
             "monitor",
             "moon",
             "more-horizontal",

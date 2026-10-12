@@ -171,6 +171,11 @@ impl<T> Popup<T> {
     pub fn close(&mut self) {
         self.closing.get_or_insert_with(std::time::Instant::now);
     }
+
+    /// How long its exit has played, while it plays.
+    pub fn closed_for(&self) -> Option<std::time::Duration> {
+        self.closing.map(|c| c.elapsed())
+    }
 }
 
 /// Call once per frame: drops a popup whose exit has played, else asks for the next frame while it plays.

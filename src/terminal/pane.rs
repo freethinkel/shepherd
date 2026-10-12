@@ -8,6 +8,7 @@ use super::find::{Link, find_all, hyperlink, link_at};
 use super::keys::{dropped_paths, keystroke_bytes, paste_bytes};
 use crate::herdr::{Client, Mode, Session, SessionEvent};
 use crate::theme::Theme;
+use crate::ui::Popup;
 use alacritty_terminal::index::Point as GridPoint;
 use alacritty_terminal::selection::SelectionType;
 use gpui::{
@@ -212,6 +213,8 @@ pub struct PaneTerminal {
     /// The pointer, and the link under it while Cmd is held: (row, cells).
     pointer: Option<gpui::Point<Pixels>>,
     hover: Option<(usize, Range<usize>)>,
+    /// The image a Cmd+click opened, in a dialog over the window until Esc, Space or a click outside it.
+    preview: Option<Popup<Preview>>,
 }
 
 impl PaneTerminal {
@@ -259,6 +262,7 @@ impl PaneTerminal {
             search: None,
             pointer: None,
             hover: None,
+            preview: None,
         }
         // Attaching waits for the first measured grid (`on_grid_metrics`): herdr resizes the real PTY to
         // whatever size the attach names.
@@ -411,7 +415,8 @@ impl PaneTerminal {
     pub fn active_grid_snapshot(&self, cx: &App) -> Option<GridSnapshot> {
         let mut lines = self.emulator.lines();
         if let Some((row, cells)) = &self.hover {
-            for cell in lines.get_mut(*row).into_iter().flat_map(|l| l[cells.clone()].iter_mut()) {
+            // The hover was found on an older grid; output or a resize since may have shortened the row.
+            for cell in lines.get_mut(*row).and_then(|l| l.get_mut(cells.clone())).into_iter().flatten() {
                 cell.underline = true;
             }
         }
@@ -582,43 +587,233 @@ impl PaneTerminal {
     }
 
     fn update_hover(&mut self, cmd: bool, cx: &mut Context<Self>) {
-        let hover = self.pointer.filter(|_| cmd).and_then(|p| self.link_under(p)).map(|(row, cells, _)| (row, cells));
+        // No links under the image dialog: Cmd, still held from the click that opened it, would point at them.
+        let hover = self.pointer.filter(|_| cmd && self.preview.is_none()).and_then(|p| self.link_under(p)).map(|(row, cells, _)| (row, cells));
         if hover != self.hover {
             self.hover = hover;
             cx.notify();
         }
     }
 
-    /// URLs go to the browser (`file://` ones to their default app); paths that exist (relative to the pane's shell) to the editor.
-    fn open_link(&self, link: Link, cx: &mut Context<Self>) {
+    /// URLs go to the browser (`file://` ones to their default app); paths that exist (relative to the pane's shell) to the editor;
+    /// images, either way, to the viewer over the pane.
+    fn open_link(&mut self, link: Link, cx: &mut Context<Self>) {
         let (path, line, col) = match link {
-            Link::Url(url) => return cx.open_url(&url),
+            // `ls --hyperlink` percent-encodes the path (a space is `%20`).
+            Link::Url(url) => match url.strip_prefix("file://").map(|p| PathBuf::from(percent_encoding::percent_decode_str(p).decode_utf8_lossy().as_ref())).filter(|p| is_image(p)) {
+                Some(path) => return self.show_preview(path, cx),
+                None => return cx.open_url(&url),
+            },
             Link::File { path, line, col } => (path, line, col),
         };
         let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>() else { return };
         let editor = cx.try_global::<crate::settings::SettingsGlobal>().and_then(|s| s.settings.editor.clone());
         let (client, pane_id) = (client.clone(), self.pane_id.clone());
-        rt.spawn(async move {
+        let opened = rt.spawn(async move {
             let pane = client.call("pane.get", serde_json::json!({"pane_id": pane_id})).await.map(|r| r["pane"].clone()).unwrap_or_default();
             let cwd = pane["foreground_cwd"].as_str().or(pane["cwd"].as_str()).unwrap_or("/");
-            let Some(path) = resolve(&path, Path::new(cwd)) else { return };
+            let path = resolve(&path, Path::new(cwd))?;
+            if is_image(&path) {
+                return Some(path);
+            }
             if is_nvim(editor.as_deref()) {
                 // A terminal editor gets a pane to the right; its shell drops typeahead until the prompt is drawn.
                 let params = serde_json::json!({"target_pane_id": pane_id, "direction": "right", "focus": true, "cwd": cwd});
-                let Ok(r) = client.call("pane.split", params).await else { return };
-                let Some(new_pane) = r["pane"]["pane_id"].as_str() else { return };
+                let r = client.call("pane.split", params).await.ok()?;
+                let new_pane = r["pane"]["pane_id"].as_str()?;
                 let prompt = serde_json::json!({"type": "regex", "value": "\\S"});
                 let wait = serde_json::json!({"pane_id": new_pane, "source": "recent", "match": prompt, "timeout_ms": 5000});
                 let _ = client.call("pane.wait_for_output", wait).await;
                 let text = nvim_command(editor.as_deref().unwrap_or("nvim"), &path, line, col);
                 let _ = client.call("pane.send_input", serde_json::json!({"pane_id": new_pane, "text": text, "keys": ["enter"]})).await;
-                return;
+                return None;
             }
             let argv = editor_argv(editor.as_deref(), &path, line, col);
             if let Ok(mut child) = tokio::process::Command::new(&argv[0]).args(&argv[1..]).spawn() {
                 let _ = child.wait().await;
             }
+            None
         });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(path)) = opened.await {
+                let _ = this.update(cx, |pane, cx| pane.show_preview(path, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn show_preview(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // Only the header: the image itself loads as the dialog draws it.
+        let size = image::image_dimensions(&path).ok();
+        self.preview = Some(Popup::new(Preview { path, size, zoom: 1., pan: (0., 0.), drag: None, opened: std::time::Instant::now() }));
+        self.hover = None;
+        cx.notify();
+    }
+
+    fn close_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(preview) = &mut self.preview {
+            preview.close();
+            cx.notify();
+        }
+    }
+
+    fn zoom_key(&mut self, factor: f32, window: &Window, cx: &mut Context<Self>) {
+        if self.preview.as_ref().is_some_and(Popup::is_open) {
+            self.zoom_preview(factor, None, window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    fn end_preview_drag(&mut self, cx: &mut Context<Self>) {
+        if let Some(preview) = self.preview.as_mut().filter(|p| p.value.drag.is_some()) {
+            preview.value.drag = None;
+            cx.notify();
+        }
+    }
+
+    /// Scales the open image by `factor` (0: back to the fit), keeping the point under `at` (window coordinates; none: the middle) in place.
+    fn zoom_preview(&mut self, factor: f32, at: Option<gpui::Point<Pixels>>, window: &Window, cx: &mut Context<Self>) {
+        let Some(preview) = self.preview.as_mut().filter(|p| p.is_open()) else { return };
+        let frame = PreviewFrame::of(window, 1.);
+        let p = &mut preview.value;
+        if factor == 0. {
+            (p.zoom, p.pan) = (1., (0., 0.));
+        } else {
+            p.zoom_about(p.zoom * factor, at.map_or((0., 0.), |at| frame.at(at)), &frame);
+        }
+        cx.notify();
+    }
+
+    /// The image dialog, about the window's size: the image fit inside it, scaled by a pinch, Cmd+scroll, Cmd+=/-/0
+    /// or the header's buttons, and moved by scrolling or dragging. Zed's image viewer: no bounds, no glides.
+    fn preview(&self, preview: &Popup<Preview>, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = &preview.value;
+        // Quick Look's entrance and exit: the card grows into place as it fades in, and shrinks a little leaving.
+        let opening = (preview.value.opened.elapsed().as_secs_f32() / PREVIEW_IN.as_secs_f32()).min(1.);
+        let closing = preview.closed_for().map_or(0., |d| (d.as_secs_f32() / 0.1).min(1.));
+        let grown = 0.9 + 0.1 * (1. - (1. - opening).powi(3)) - 0.04 * closing;
+        if opening < 1. {
+            window.request_animation_frame();
+        }
+        let frame = PreviewFrame::of(window, grown);
+        let name = p.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let (w, h) = p.shown(&frame);
+        let percent = format!("{:.0}%", p.scale(&frame) * 100.);
+        let button = |id: &'static str, icon: &'static str| {
+            div()
+                .id(id)
+                .flex_none()
+                .size(px(28.))
+                .rounded(px(8.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.hover))
+                .child(gpui::svg().path(icon).size(px(16.)).text_color(theme.text_muted))
+        };
+        let card = div()
+            .id("image-preview")
+            .w(px(frame.card.0))
+            .h(px(frame.card.1))
+            .p(px(PREVIEW_PAD))
+            .rounded(px(16.))
+            .bg(theme.card)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap(px(PREVIEW_GAP))
+            .text_color(theme.text)
+            .on_mouse_down_out(cx.listener(|pane, _, _, cx| pane.close_preview(cx)))
+            .child(
+                div()
+                    .h(px(PREVIEW_HEADER))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .pl(px(6.))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(theme.text_muted).child(name))
+                    .child(button("image-zoom-out", "icons/minus.svg").on_click(cx.listener(|pane, _, window, cx| pane.zoom_preview(1. / ZOOM_STEP, None, window, cx))))
+                    .child(
+                        div()
+                            .id("image-zoom-fit")
+                            .flex_none()
+                            .w(px(48.))
+                            .text_center()
+                            .text_size(px(12.))
+                            .text_color(theme.text_muted)
+                            .cursor_pointer()
+                            .child(percent)
+                            .on_click(cx.listener(|pane, _, window, cx| pane.zoom_preview(0., None, window, cx))),
+                    )
+                    .child(button("image-zoom-in", "icons/plus.svg").on_click(cx.listener(|pane, _, window, cx| pane.zoom_preview(ZOOM_STEP, None, window, cx))))
+                    .child(div().w(px(1.)).h(px(16.)).mx(px(6.)).bg(theme.border))
+                    .child(button("image-preview-close", "icons/close.svg").on_click(cx.listener(|pane, _, _, cx| pane.close_preview(cx)))),
+            )
+            .child(
+                div()
+                    .id("image-preview-frame")
+                    .relative()
+                    .flex_1()
+                    .overflow_hidden()
+                    .rounded(px(8.))
+                    .when(p.drag.is_some(), |el| el.cursor(gpui::CursorStyle::ClosedHand))
+                    .on_pinch(cx.listener(|pane, e: &gpui::PinchEvent, window, cx| pane.zoom_preview(1. + e.delta, Some(e.position), window, cx)))
+                    .on_scroll_wheel(cx.listener(|pane, e: &ScrollWheelEvent, window, cx| {
+                        let d = e.delta.pixel_delta(px(20.));
+                        if e.modifiers.platform || e.modifiers.control {
+                            let dy = f32::from(d.y);
+                            let factor = if dy > 0. { 1. + dy.abs() * 0.01 } else { 1. / (1. + dy.abs() * 0.01) };
+                            return pane.zoom_preview(factor, Some(e.position), window, cx);
+                        }
+                        let Some(preview) = pane.preview.as_mut().filter(|p| p.is_open()) else { return };
+                        preview.value.pan_by((f32::from(d.x), f32::from(d.y)), &PreviewFrame::of(window, 1.));
+                        cx.notify();
+                    }))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|pane, e: &MouseDownEvent, _, cx| {
+                        if let Some(preview) = pane.preview.as_mut() {
+                            preview.value.drag = Some(e.position);
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_move(cx.listener(|pane, e: &MouseMoveEvent, window, cx| {
+                        let Some(p) = pane.preview.as_mut().map(|p| &mut p.value) else { return };
+                        // The button's own state, not the mouse up, which can go missing (seen after a Cmd+click).
+                        if e.pressed_button != Some(MouseButton::Left) {
+                            if p.drag.take().is_some() {
+                                cx.notify();
+                            }
+                            return;
+                        }
+                        let Some(from) = p.drag.replace(e.position) else { return };
+                        p.pan_by((f32::from(e.position.x - from.x), f32::from(e.position.y - from.y)), &PreviewFrame::of(window, 1.));
+                        cx.notify();
+                    }))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|pane, _, _, cx| pane.end_preview_drag(cx)))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(|pane, _, _, cx| pane.end_preview_drag(cx)))
+                    // A double click goes between the fit and twice it, about the pointer.
+                    .on_click(cx.listener(|pane, e: &gpui::ClickEvent, window, cx| {
+                        if e.click_count() == 2 {
+                            let zoomed = pane.preview.as_ref().is_some_and(|p| p.value.zoom != 1. || p.value.pan != (0., 0.));
+                            pane.zoom_preview(if zoomed { 0. } else { 2. }, Some(e.position()), window, cx);
+                        }
+                    }))
+                    .child(
+                        gpui::img(p.path.clone())
+                            .absolute()
+                            .left(px((frame.area.0 - w) / 2. + p.pan.0))
+                            .top(px((frame.area.1 - h) / 2. + p.pan.1))
+                            .w(px(w))
+                            .h(px(h))
+                            .object_fit(gpui::ObjectFit::Contain)
+                            .with_fallback(|| div().size_full().flex().items_center().justify_center().child("Can't show this image").into_any_element()),
+                    ),
+            );
+        crate::shell::modal("image-preview", preview, window, card)
     }
 
     fn input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
@@ -637,6 +832,13 @@ impl PaneTerminal {
             return; // typing in the search bar
         }
         let ks = &event.keystroke;
+        // The dialog takes the keys: Esc and Space (Quick Look's) close it, the rest go nowhere.
+        if self.preview.as_ref().is_some_and(Popup::is_open) {
+            if ks.key == "escape" || ks.key == "space" {
+                self.close_preview(cx);
+            }
+            return;
+        }
         let mods = &ks.modifiers;
         if ks.key == "f" && mods.platform {
             self.open_search(window, cx);
@@ -777,6 +979,98 @@ impl PaneTerminal {
             crate::ui::toast::info(cx, "Copied to clipboard", None);
         }
     }
+}
+
+pub struct Preview {
+    path: PathBuf,
+    /// In pixels, from the file's header; none for an SVG or a file that does not decode.
+    size: Option<(u32, u32)>,
+    /// Times the fit.
+    zoom: f32,
+    /// The image's middle from the frame's, in px.
+    pan: (f32, f32),
+    /// Where the pointer was, while a drag moves the image.
+    drag: Option<gpui::Point<Pixels>>,
+    opened: std::time::Instant,
+}
+
+const MIN_ZOOM: f32 = 0.1;
+const MAX_ZOOM: f32 = 20.;
+const ZOOM_STEP: f32 = 1.25;
+const PREVIEW_IN: std::time::Duration = std::time::Duration::from_millis(220);
+const PREVIEW_PAD: f32 = 12.;
+const PREVIEW_HEADER: f32 = 28.;
+const PREVIEW_GAP: f32 = 10.;
+
+/// The dialog's geometry in a window: the card's size, its image frame's, and the frame's middle on the window.
+struct PreviewFrame {
+    card: (f32, f32),
+    area: (f32, f32),
+    center: (f32, f32),
+}
+
+impl PreviewFrame {
+    /// The geometry `grown` (1: in place) of the way in.
+    fn of(window: &Window, grown: f32) -> Self {
+        let v = window.viewport_size();
+        let (vw, vh) = (f32::from(v.width), f32::from(v.height));
+        let card = ((vw * 0.85).max(320.) * grown, (vh * 0.85).max(240.) * grown);
+        // the card's border is 1 px a side
+        let area = (card.0 - 2. * PREVIEW_PAD - 2., card.1 - 2. * PREVIEW_PAD - 2. - PREVIEW_HEADER - PREVIEW_GAP);
+        let center = (vw / 2., (vh - card.1) / 2. + 1. + PREVIEW_PAD + PREVIEW_HEADER + PREVIEW_GAP + area.1 / 2.);
+        PreviewFrame { card, area, center }
+    }
+
+    /// A window point from the frame's middle.
+    fn at(&self, p: gpui::Point<Pixels>) -> (f32, f32) {
+        (f32::from(p.x) - self.center.0, f32::from(p.y) - self.center.1)
+    }
+}
+
+impl Preview {
+    /// The fit: inside the frame, never past the image's own pixels. An SVG fills the frame.
+    fn fit(&self, f: &PreviewFrame) -> (f32, f32) {
+        match self.size {
+            Some((w, h)) => {
+                let k = (f.area.0 / w as f32).min(f.area.1 / h as f32).min(1.);
+                (w as f32 * k, h as f32 * k)
+            }
+            None => f.area,
+        }
+    }
+
+    fn shown(&self, f: &PreviewFrame) -> (f32, f32) {
+        let (w, h) = self.fit(f);
+        (w * self.zoom, h * self.zoom)
+    }
+
+    /// Shown px per image pixel (per the fit, for an SVG).
+    fn scale(&self, f: &PreviewFrame) -> f32 {
+        self.size.map_or(self.zoom, |(w, _)| self.shown(f).0 / w as f32)
+    }
+
+    /// Scales to `zoom` keeping the image's point under `at` (from the frame's middle) in place, as far as
+    /// the frame lets it.
+    fn zoom_about(&mut self, zoom: f32, at: (f32, f32), f: &PreviewFrame) {
+        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        let k = zoom / self.zoom;
+        let pan = (at.0 - (at.0 - self.pan.0) * k, at.1 - (at.1 - self.pan.1) * k);
+        (self.zoom, self.pan) = (zoom, (0., 0.));
+        self.pan_by(pan, f);
+    }
+
+    /// Moves the image by `d`, Preview's way: a larger one keeps the frame covered, a smaller one stays inside it.
+    fn pan_by(&mut self, d: (f32, f32), f: &PreviewFrame) {
+        let (w, h) = self.shown(f);
+        let (mx, my) = ((w - f.area.0).abs() / 2., (h - f.area.1).abs() / 2.);
+        self.pan = ((self.pan.0 + d.0).clamp(-mx, mx), (self.pan.1 + d.1).clamp(-my, my));
+    }
+}
+
+/// Whether the viewer can show the file: the formats gpui decodes.
+fn is_image(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "svg" | "ico"))
 }
 
 /// A clicked path as a file that exists: `~` is home, a relative path is the pane's shell's.
@@ -924,6 +1218,7 @@ impl Render for PaneTerminal {
                 )
                 .into_any_element();
         }
+        crate::ui::reap_popup(&mut self.preview, window);
         let focused = self.focus.is_focused(window);
         let search_bar = self.search.as_ref().map(|search| self.search_bar(search, &theme, cx));
         let loader = (self.session.is_none() && crate::ui::loader::due(self.attaching, window)).then(|| {
@@ -951,12 +1246,17 @@ impl Render for PaneTerminal {
                 window.focus(&pane.focus, cx);
                 pane.input(&paste_bytes(&dropped_paths(paths.paths()), true), cx);
             }))
+            // The text size keys scale the open image instead.
+            .on_action(cx.listener(|pane, _: &crate::bindings::FontSizeUp, window, cx| pane.zoom_key(ZOOM_STEP, window, cx)))
+            .on_action(cx.listener(|pane, _: &crate::bindings::FontSizeDown, window, cx| pane.zoom_key(1. / ZOOM_STEP, window, cx)))
+            .on_action(cx.listener(|pane, _: &crate::bindings::FontSizeReset, window, cx| pane.zoom_key(0., window, cx)))
             .on_modifiers_changed(cx.listener(|pane, e: &ModifiersChangedEvent, _, cx| pane.update_hover(e.modifiers.platform, cx)))
             .when(self.hover.is_some(), |el| el.cursor_pointer())
             .child(TerminalElement::new(cx.entity(), focused))
             .child(crate::ui::scrollbar(SharedString::from(format!("scrollbar-{}", self.pane_id)), &self.scrollbar, &theme))
             .children(search_bar)
             .children(loader)
+            .children(self.preview.as_ref().map(|preview| self.preview(preview, &theme, window, cx)))
             .into_any_element()
     }
 }
@@ -964,6 +1264,35 @@ impl Render for PaneTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_fits_and_zooms_about_the_pointer() {
+        let frame = PreviewFrame { card: (0., 0.), area: (400., 300.), center: (0., 0.) };
+        let mut p = Preview {
+            path: "a.png".into(),
+            size: Some((800, 400)),
+            zoom: 1.,
+            pan: (0., 0.),
+            drag: None,
+            opened: std::time::Instant::now(),
+        };
+        assert_eq!(p.fit(&frame), (400., 200.));
+        // The point under the pointer stays: 100 px right of the middle, zoomed 2×, the image moves 100 px left.
+        p.zoom_about(2., (100., 0.), &frame);
+        assert_eq!((p.zoom, p.pan), (2., (-100., 0.)));
+        assert_eq!(p.scale(&frame), 1.);
+        // Dragged, it keeps the frame covered: 800×400 over 400×300 overhangs 200 and 50.
+        p.pan_by((1000., 1000.), &frame);
+        assert_eq!(p.pan, (200., 50.));
+        // Smaller than the frame, it stays inside it: at 400×200 it fits exactly across, 50 px of room down.
+        p.zoom_about(1., (0., 0.), &frame);
+        p.pan_by((-1000., -1000.), &frame);
+        assert_eq!(p.pan, (0., -50.));
+        p.zoom_about(1000., (0., 0.), &frame);
+        assert_eq!(p.zoom, MAX_ZOOM);
+        // a small one is not blown up
+        assert_eq!(Preview { size: Some((40, 20)), ..p }.fit(&frame), (40., 20.));
+    }
 
     fn geometry(cols: u16, rows: u16) -> GridGeometry {
         GridGeometry {

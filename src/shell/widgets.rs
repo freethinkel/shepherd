@@ -109,7 +109,7 @@ pub(crate) fn menu_card(theme: &Theme, id: &'static str, min_w: f32) -> Stateful
 }
 
 /// Zeron's modal: a 35 % scrim over the window, the 360 px dialog card centred on it; both fade with the popup.
-pub(super) fn modal<T>(name: &'static str, popup: &crate::ui::Popup<T>, window: &Window, card: Stateful<Div>) -> impl IntoElement {
+pub(crate) fn modal<T>(name: &'static str, popup: &crate::ui::Popup<T>, window: &Window, card: Stateful<Div>) -> impl IntoElement {
     let viewport = window.viewport_size();
     let scrim = div()
         .id(SharedString::from(format!("{name}-scrim")))
