@@ -89,7 +89,7 @@ pub(super) fn icon_rows(query: &str) -> Vec<Vec<IconTile>> {
     tiles.chunks(EMOJI_PER_ROW).map(<[IconTile]>::to_vec).collect()
 }
 
-/// Emoji per row of the picker's grid: its 32 px tiles and their gaps fill the dialog.
+/// Columns of the picker's grid; its tiles stretch to share the dialog's width.
 pub(super) const EMOJI_PER_ROW: usize = 8;
 
 /// A row of the emoji grid: a group's heading, or up to [`EMOJI_PER_ROW`] emoji.
@@ -117,6 +117,40 @@ pub(super) fn emoji_rows(query: &str) -> Vec<EmojiRow> {
         rows.extend(found.chunks(EMOJI_PER_ROW).map(|chunk| EmojiRow::Emoji(chunk.to_vec())));
     }
     rows
+}
+
+/// A group's heading in the emoji grid, one row tall, its name on the row's floor.
+pub(super) fn emoji_heading(name: &'static str, color: gpui::Hsla) -> gpui::Div {
+    div().h(px(36.)).flex().items_end().pb(px(4.)).text_size(px(11.)).text_color(color).child(name)
+}
+
+/// The emoji grid's sticky heading: the top row's group stays at the list's top on the dialog's card, and the next
+/// group's heading pushes it up as it arrives.
+pub(super) struct StickyEmojiHeading {
+    pub(super) headings: Vec<(usize, &'static str)>,
+    pub(super) bg: gpui::Hsla,
+    pub(super) color: gpui::Hsla,
+}
+
+impl gpui::UniformListDecoration for StickyEmojiHeading {
+    fn compute(
+        &self,
+        visible: std::ops::Range<usize>,
+        _: gpui::Bounds<Pixels>,
+        scroll: gpui::Point<Pixels>,
+        row: Pixels,
+        _: usize,
+        _: &mut Window,
+        _: &mut App,
+    ) -> gpui::AnyElement {
+        let Some(&(_, name)) = self.headings.iter().rev().find(|(i, _)| *i <= visible.start) else {
+            return div().into_any_element();
+        };
+        // the next heading's top within the view, once it's under this one
+        let push = self.headings.iter().find(|(i, _)| *i > visible.start).map_or(px(0.), |(i, _)| (row * *i as f32 + scroll.y - row).min(px(0.)));
+        // laid out from the content's top (as a root, where a margin is dropped): undo the scroll to stay put
+        div().w_full().pt(-scroll.y + push).child(emoji_heading(name, self.color).bg(self.bg)).into_any_element()
+    }
 }
 
 fn group_name(group: emojis::Group) -> &'static str {

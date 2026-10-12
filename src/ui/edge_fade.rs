@@ -6,19 +6,28 @@ use gpui::{AnyElement, App, Bounds, EdgeFade, Element, GlobalElementId, Inspecto
 /// Fades `child` within `band` px of its top and bottom edges, each only while `scroll` hides rows past it. The
 /// handle is read at paint time, after this frame's scroll offset is clamped.
 pub fn edge_faded(band: f32, scroll: &ScrollHandle, child: impl IntoElement) -> EdgeFaded {
-    EdgeFaded { band, scroll: scroll.clone(), across: false, child: child.into_any_element() }
+    EdgeFaded { band, scroll: scroll.clone(), across: false, top: true, child: child.into_any_element() }
 }
 
 /// [`edge_faded`] for a strip that scrolls sideways: its left and right edges.
 pub fn edge_faded_x(band: f32, scroll: &ScrollHandle, child: impl IntoElement) -> EdgeFaded {
-    EdgeFaded { band, scroll: scroll.clone(), across: true, child: child.into_any_element() }
+    EdgeFaded { band, scroll: scroll.clone(), across: true, top: true, child: child.into_any_element() }
 }
 
 pub struct EdgeFaded {
     band: f32,
     scroll: ScrollHandle,
     across: bool,
+    top: bool,
     child: AnyElement,
+}
+
+impl EdgeFaded {
+    /// Fades only the bottom edge (or the right): for a list whose top holds a sticky heading of its own.
+    pub fn bottom_only(mut self) -> Self {
+        self.top = false;
+        self
+    }
 }
 
 impl IntoElement for EdgeFaded {
@@ -56,7 +65,7 @@ impl Element for EdgeFaded {
             (self.scroll.offset().y, self.scroll.max_offset().y)
         };
         let scrolled = -f32::from(offset);
-        let (start, end) = (scrolled > 1., scrolled < f32::from(max) - 1.);
+        let (start, end) = (self.top && scrolled > 1., scrolled < f32::from(max) - 1.);
         let fade = (start || end).then(|| EdgeFade {
             bounds,
             band: px(self.band),

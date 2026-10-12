@@ -236,17 +236,11 @@ impl Shell {
                         let list = gpui::uniform_list("place-emoji", rows.len(), move |range, _, _| {
                             range
                                 .map(|i| match &rows_[i] {
-                                    sessions::EmojiRow::Heading(name) => div()
-                                        .h(px(36.))
-                                        .flex()
-                                        .items_end()
-                                        .pb(px(4.))
-                                        .text_size(px(11.))
-                                        .text_color(faint)
-                                        .child(*name)
-                                        .into_any_element(),
+                                    sessions::EmojiRow::Heading(name) => sessions::emoji_heading(name, faint).into_any_element(),
                                     sessions::EmojiRow::Emoji(emoji) => div()
                                         .h(px(36.))
+                                        .w_full()
+                                        .pr(px(12.))
                                         .flex()
                                         .gap(px(4.))
                                         .children(emoji.iter().map(|e| {
@@ -254,7 +248,8 @@ impl Shell {
                                             let on = picked_.as_deref() == Some(e.as_str());
                                             div()
                                                 .id(SharedString::from(format!("place-emoji-{e}")))
-                                                .size(px(32.))
+                                                .flex_1()
+                                                .h(px(32.))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
@@ -268,11 +263,18 @@ impl Shell {
                                                     let _ = weak.update(cx, |s, cx| s.pick_place_icon(Some(e.clone()), cx));
                                                 })
                                         }))
+                                        .children((emoji.len()..sessions::EMOJI_PER_ROW).map(|_| div().flex_1()))
                                         .into_any_element(),
                                 })
                                 .collect()
                         })
+                        .with_decoration(sessions::StickyEmojiHeading {
+                            headings: rows.iter().enumerate().filter_map(|(i, r)| match r { sessions::EmojiRow::Heading(n) => Some((i, *n)), _ => None }).collect(),
+                            bg: theme.card,
+                            color: faint,
+                        })
                         .track_scroll(&edit.value.emoji_scroll)
+                        .w_full()
                         .h(px(252.));
                         let scroll = edit.value.emoji_scroll.0.borrow().base_handle.clone();
                         div()
@@ -282,7 +284,11 @@ impl Shell {
                             .child(field(&edit.value.search))
                             .child(match rows.is_empty() {
                                 true => div().h(px(252.)).pt(px(8.)).text_color(theme.text_faint).child("No emoji by that name").into_any_element(),
-                                false => crate::ui::edge_fade::edge_faded(12., &scroll, list).into_any_element(),
+                                false => div()
+                                    .relative()
+                                    .child(crate::ui::edge_fade::edge_faded(12., &scroll, list).bottom_only())
+                                    .child(crate::ui::scrollbar("place-icons-scrollbar", &edit.value.emoji_scroll, theme))
+                                    .into_any_element(),
                             })
                             .into_any_element()
                     } else {
@@ -294,7 +300,7 @@ impl Shell {
                         let list = gpui::uniform_list("place-icons", rows.len(), move |range, _, _| {
                             range
                                 .map(|i| {
-                                    div().h(px(36.)).flex().gap(px(4.)).children(rows_[i].iter().map(|tile| {
+                                    div().w_full().h(px(36.)).pr(px(12.)).flex().gap(px(4.)).children(rows_[i].iter().map(|tile| {
                                         let (icon, id) = match tile {
                                             sessions::IconTile::Letter => (None, "place-icon-letter".to_string()),
                                             sessions::IconTile::Solar(name) => (Some(format!("icon:{name}")), format!("place-icon-{name}")),
@@ -307,7 +313,8 @@ impl Shell {
                                         };
                                         div()
                                             .id(SharedString::from(id))
-                                            .size(px(32.))
+                                            .flex_1()
+                                            .h(px(32.))
                                             .flex()
                                             .items_center()
                                             .justify_center()
@@ -320,10 +327,12 @@ impl Shell {
                                                 let _ = weak.update(cx, |s, cx| s.pick_place_icon(icon.clone(), cx));
                                             })
                                     }))
+                                    .children((rows_[i].len()..sessions::EMOJI_PER_ROW).map(|_| div().flex_1()))
                                 })
                                 .collect()
                         })
                         .track_scroll(&edit.value.emoji_scroll)
+                        .w_full()
                         .h(px(252.));
                         let scroll = edit.value.emoji_scroll.0.borrow().base_handle.clone();
                         div()
@@ -333,7 +342,11 @@ impl Shell {
                             .child(field(&edit.value.search))
                             .child(match rows.is_empty() {
                                 true => div().h(px(252.)).pt(px(8.)).text_color(theme.text_faint).child("No icon by that name").into_any_element(),
-                                false => crate::ui::edge_fade::edge_faded(12., &scroll, list).into_any_element(),
+                                false => div()
+                                    .relative()
+                                    .child(crate::ui::edge_fade::edge_faded(12., &scroll, list))
+                                    .child(crate::ui::scrollbar("place-icons-scrollbar", &edit.value.emoji_scroll, theme))
+                                    .into_any_element(),
                             })
                             .into_any_element()
                     };
