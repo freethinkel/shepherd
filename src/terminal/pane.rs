@@ -224,7 +224,7 @@ impl PaneTerminal {
         let scrollbar_drag = cx.spawn(async move |this, cx| {
             while let Some(target) = drags.next().await {
                 let moved = this.update(cx, |pane, cx| {
-                    pane.scroll_by(target as i64 - pane.scroll.offset_from_bottom as i64, cx)
+                    pane.scroll_by(target as i64 - pane.scroll.offset_from_bottom as i64, None, cx)
                 });
                 if moved.is_err() {
                     break;
@@ -396,12 +396,13 @@ impl PaneTerminal {
     }
 
     /// Scroll herdr by `delta` lines (positive = up, into history) and move the thumb now, not a round trip later.
-    fn scroll_by(&mut self, delta: i64, cx: &mut Context<Self>) {
+    /// `at` is the wheel's (col, row): an app reading the mouse (vim) gets the wheel there, herdr's default is 0,0.
+    fn scroll_by(&mut self, delta: i64, at: Option<(u16, u16)>, cx: &mut Context<Self>) {
         let Some(session) = &self.session else { return };
         if delta == 0 {
             return;
         }
-        session.scroll(delta > 0, delta.unsigned_abs().min(u16::MAX as u64) as u16);
+        session.scroll(delta > 0, delta.unsigned_abs().min(u16::MAX as u64) as u16, at);
         let max = self.scroll.max_offset_from_bottom as i64;
         self.scroll.offset_from_bottom = (self.scroll.offset_from_bottom as i64 + delta).clamp(0, max) as u32;
         self.scroll_local_until = Some(std::time::Instant::now() + SCROLL_SETTLE);
@@ -522,7 +523,7 @@ impl PaneTerminal {
     fn reveal(&mut self, cx: &mut Context<Self>) {
         let line = self.search.as_ref().and_then(|s| s.current.and_then(|i| s.hits.get(i))).map(|(line, _)| *line);
         match line.and_then(|line| reveal_offset(self.scroll, line, self.emulator.rows())) {
-            Some(offset) => self.scroll_by(offset as i64 - self.scroll.offset_from_bottom as i64, cx),
+            Some(offset) => self.scroll_by(offset as i64 - self.scroll.offset_from_bottom as i64, None, cx),
             None => cx.notify(),
         }
     }
@@ -890,7 +891,8 @@ impl PaneTerminal {
         claim(cx);
         let speed = if event.modifiers.alt { WHEEL_SPEED * FAST_WHEEL } else { WHEEL_SPEED };
         let n = wheel_lines(&mut self.wheel_acc, px * speed, line_h);
-        self.scroll_by(n as i64, cx);
+        let at = self.hit(event.position).map(|(row, col, _, _)| (col, row));
+        self.scroll_by(n as i64, at, cx);
     }
 
     /// Window position → (viewport row, col) and the grid point/side for selections.

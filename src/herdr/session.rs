@@ -289,11 +289,13 @@ impl Session {
         );
     }
 
-    pub fn scroll(&self, up: bool, lines: u16) {
+    pub fn scroll(&self, up: bool, lines: u16, at: Option<(u16, u16)>) {
         let direction = if up { AttachScrollDirection::Up } else { AttachScrollDirection::Down };
+        let (column, row) = (at.map(|a| a.0), at.map(|a| a.1));
         self.send(
-            ClientMessage::AttachScroll { source: AttachScrollSource::Wheel, direction, lines, column: None, row: None, modifiers: 0 },
-            || json!({"type": "terminal.scroll", "direction": if up { "up" } else { "down" }, "lines": lines, "source": "wheel"}),
+            ClientMessage::AttachScroll { source: AttachScrollSource::Wheel, direction, lines, column, row, modifiers: 0 },
+            || json!({"type": "terminal.scroll", "direction": if up { "up" } else { "down" }, "lines": lines, "source": "wheel",
+                      "column": column, "row": row}),
         );
     }
 
