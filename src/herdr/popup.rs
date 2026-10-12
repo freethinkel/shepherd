@@ -51,8 +51,8 @@ pub fn watch(cols: u16, rows: u16) -> anyhow::Result<UnboundedReceiver<Event>> {
         let mut last = None;
         loop {
             let event = match wire::read_message(&mut stream) {
-                Ok(Some(ServerMessage::PaneSurface(frame))) if frame.popup != last => {
-                    last = frame.popup;
+                Ok(Some(ServerMessage::PaneSurface(frame))) if frame.popup.as_ref().map(PopupSurface::from) != last => {
+                    last = frame.popup.as_ref().map(PopupSurface::from);
                     Event::Popup(last.clone())
                 }
                 Ok(Some(ServerMessage::EndpointControl { kind, data })) if kind == "shell.snapshot.v1" => {

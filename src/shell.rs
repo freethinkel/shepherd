@@ -158,7 +158,7 @@ pub struct Shell {
     /// herdr's popup over the panes, and the client shell that hears of it.
     floating: Option<floating::Floating>,
     popup_watch: gpui::Task<()>,
-    /// PoC: the window as one herdr client shell (`SHEPHERD_CLIENT_SHELL=1`).
+    /// PoC: the window's herdr client shell for theme, popup and commands (`SHEPHERD_CLIENT_SHELL=1`).
     client_shell: Option<client_shell::ShellView>,
     /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.
     herdr_commands: Vec<(String, Vec<String>)>,
@@ -862,14 +862,11 @@ impl Render for Shell {
         let toasts = crate::ui::toast::stack(&theme, TITLEBAR_HEIGHT + 8., window, cx);
         let tab = self.shown_tab();
         self.shown_workspace = tab.as_ref().map(|t| t.workspace_id.clone());
-        self.sync_client_shell(tab.as_ref().map(|t| t.tab_id.as_str()), window, cx);
+        self.sync_client_shell(window, cx);
         let (mut frames, mut splits) = match (&snapshot, &tab) {
             (Some(s), Some(t)) => (s.pane_frames(&t.tab_id), s.split_frames(&t.tab_id)),
             _ => (Vec::new(), Vec::new()),
         };
-        if let Some(laid_out) = self.client_shell_frames(&frames) {
-            frames = laid_out;
-        }
         // herdr caught up with a released divider: its snapshot is the layout again.
         if let Some((path, ratio)) = &self.settling {
             if splits.iter().any(|s| &s.path == path && (s.ratio - ratio).abs() < 0.02) {

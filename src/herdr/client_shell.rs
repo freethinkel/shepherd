@@ -1,67 +1,38 @@
-//! PoC (`SHEPHERD_CLIENT_SHELL=1`): Shepherd as one herdr client shell instead of one attach per shown pane.
+//! PoC (`SHEPHERD_CLIENT_SHELL=1`), the hybrid: Shepherd's panes stay on their attach connections, and one lasting
+//! herdr client shell per window does what an attach cannot: tell herdr Shepherd's colors (`ClientShellHostTheme`,
+//! which herdr takes only from the client shell in front), show herdr's popup (no pane: it reaches client shells
+//! only, in their `PaneSurface`) and hear the `[[keys.command]]` list (the shell snapshot).
 //!
-//! herdr lays the shown tab out in the shell's surface and sends its cells (`PaneSurface`, then `PaneSurfacePatch`
-//! against the last one). Each pane's `inner_rect` is cut out of that grid and replayed as ANSI into the pane's own
-//! emulator ([`super::SessionEvent`]), so the pane view, its selection, search and links work as they do over an
-//! attach. Input goes back as herdr's semantic pane input (`ClientShellPaneInput`), the size as one
-//! `ClientShellResize` for the whole grid, the shown tab as a `tab.focus` on the shell's own view.
-use super::popup::{Event as PopupEvent, PopupSurface};
+//! The shell's surface is the window's pane grid, so herdr fits the popup to it; the surface itself is not drawn.
+//! The popup's cells are replayed as ANSI into the popup view's emulator ([`super::SessionEvent`]); its input goes
+//! back as `ClientShellPopupInput`.
+use super::popup::Event as PopupEvent;
 use super::session::{SessionEvent, client_socket};
-use super::wire::{
-    self, CellData, ClientMessage, CursorState, FrameData, KeyCode, KeyKind, PaneInput,
-    PaneSurfaceFrame, PaneSurfacePane, ServerMessage, SurfaceRect, SurfaceSize,
-};
+use super::wire::{self, CellData, ClientMessage, CursorState, FrameData, KeyCode, KeyKind, PaneInput, PopupFrame, PopupSurface, ServerMessage, SurfaceRect, SurfaceSize};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use std::collections::HashMap;
 use std::io::Write as _;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
-pub use super::wire::{DefaultColorKind, HostAppearance, HostColor, HostThemeUpdate};
+pub use super::wire::{DefaultColorKind, HostAppearance, HostThemeUpdate, Rgb};
 
 /// The PoC runs only when asked for.
 pub fn enabled() -> bool {
     std::env::var_os("SHEPHERD_CLIENT_SHELL").is_some_and(|v| v == "1")
 }
 
-/// One pane of the shown tab as herdr laid it out, in surface cells.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PaneRect {
-    pub pane_id: String,
-    /// (x, y, width, height), the pane with its border.
-    pub rect: (u16, u16, u16, u16),
-    /// Its terminal's cells.
-    pub inner: (u16, u16, u16, u16),
-    pub focused: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Layout {
-    pub cols: u16,
-    pub rows: u16,
-    pub panes: Vec<PaneRect>,
-}
-
-/// What the UI hears: the layout as it changes, herdr's popup and its `[[keys.command]]`.
-#[derive(Debug)]
-pub enum Event {
-    Layout(Layout),
-    Popup(PopupEvent),
-}
-
 #[derive(Default)]
 struct State {
-    boot_id: String,
-    surface: Option<PaneSurfaceFrame>,
-    /// The panes' views, each fed its cut of the surface.
-    panes: HashMap<String, UnboundedSender<SessionEvent>>,
-    /// The size each pane was last sent, to send `Size` only on a change.
-    sizes: HashMap<String, (u16, u16)>,
-    next_request: u64,
-    /// The host's default fg/bg as herdr packs them: herdr resolves "default" to these RGBs in the surface, and
-    /// the pane gets them back as default, so its view paints them with the theme (translucent background too).
+    /// The popup view's frames: (its terminal id, the channel).
+    popup_view: Option<(String, UnboundedSender<SessionEvent>)>,
+    /// herdr's popup as last sent, to replay it to a view that subscribes late.
+    popup: Option<PopupFrame>,
+    /// The popup size last sent to the view.
+    popup_size: Option<(u16, u16)>,
+    /// The host's default fg/bg as herdr packs them: herdr resolves "default" to these RGBs in the popup's cells, and
+    /// the view gets them back as default, so it paints them with the theme.
     defaults: (u32, u32),
 }
 
@@ -71,8 +42,9 @@ pub struct ClientShell {
 }
 
 impl ClientShell {
-    /// Handshakes on herdr's client socket and starts reading. `cols`×`rows` is the pane grid.
-    pub fn connect(cols: u16, rows: u16) -> anyhow::Result<(Arc<ClientShell>, UnboundedReceiver<Event>)> {
+    /// Handshakes on herdr's client socket and starts reading. `cols`×`rows` is the pane grid. The shell is active:
+    /// herdr sends popups and takes a theme only from an active client shell, and makes it the one in front.
+    pub fn connect(cols: u16, rows: u16) -> anyhow::Result<(Arc<ClientShell>, UnboundedReceiver<PopupEvent>)> {
         let mut stream = UnixStream::connect(client_socket())?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         let hello = serde_json::json!({
@@ -111,29 +83,29 @@ impl ClientShell {
         let _ = wire::write_message(&mut *self.stream.lock().unwrap(), message);
     }
 
-    /// The frames of `pane_id` from now on, the current one first.
-    pub fn subscribe(&self, pane_id: &str) -> UnboundedReceiver<SessionEvent> {
+    /// The popup `terminal_id`'s frames from now on, the current one first.
+    pub fn subscribe_popup(&self, terminal_id: &str) -> UnboundedReceiver<SessionEvent> {
         let (tx, rx) = unbounded();
         let mut state = self.state.lock().unwrap();
-        state.sizes.remove(pane_id);
-        if let Some(surface) = state.surface.take() {
-            if let Some(pane) = surface.panes.iter().find(|p| p.pane_id == pane_id) {
-                let defaults = state.defaults;
-                send_pane(&mut state.sizes, &tx, &surface.frame, pane, surface.frame.cursor.as_ref(), defaults);
+        state.popup_size = None;
+        let defaults = state.defaults;
+        if let Some(popup) = state.popup.take() {
+            if popup.terminal_id == terminal_id {
+                send_popup(&mut state.popup_size, &tx, &popup, defaults);
             }
-            state.surface = Some(surface);
+            state.popup = Some(popup);
         }
-        state.panes.insert(pane_id.into(), tx);
+        state.popup_view = Some((terminal_id.into(), tx));
         rx
     }
 
-    pub fn unsubscribe(&self, pane_id: &str) {
-        let mut state = self.state.lock().unwrap();
-        state.panes.remove(pane_id);
-        state.sizes.remove(pane_id);
+    pub fn unsubscribe_popup(&self) {
+        self.state.lock().unwrap().popup_view = None;
     }
 
-    /// The whole pane grid, in cells.
+    /// The pane grid, in cells: herdr fits its popup to it.
+    // ponytail: also lays herdr's hidden tabs out at this size while no other client shell is attached (the same as
+    // the popup watch in main)
     pub fn resize(&self, cols: u16, rows: u16) {
         self.send(&ClientMessage::ClientShellResize {
             cell_width_px: 0,
@@ -143,12 +115,13 @@ impl ClientShell {
         });
     }
 
-    pub fn input(&self, pane_id: &str, events: Vec<PaneInput>) {
-        self.send(&ClientMessage::ClientShellPaneInput { pane_id: pane_id.into(), events });
+    pub fn popup_input(&self, terminal_id: &str, events: Vec<PaneInput>) {
+        self.send(&ClientMessage::ClientShellPopupInput { terminal_id: terminal_id.into(), events });
     }
 
+    /// Shepherd's colors for herdr's host theme. Sending also makes this shell the one in front again.
     pub fn theme(&self, updates: Vec<HostThemeUpdate>) {
-        let packed = |c: &HostColor| 0x02_00_00_00 | (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32;
+        let packed = |c: &Rgb| 0x02_00_00_00 | (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32;
         {
             let mut state = self.state.lock().unwrap();
             for update in &updates {
@@ -163,27 +136,6 @@ impl ClientShell {
             self.send(&ClientMessage::ClientShellHostTheme { update });
         }
     }
-
-    pub fn focused(&self, focused: bool) {
-        self.send(&ClientMessage::ClientShellFocus { focused });
-    }
-
-    /// Shows `tab_id` in this shell only: herdr keeps a view per client shell, other clients stay where they are.
-    pub fn focus_tab(&self, tab_id: &str) {
-        self.request("tab.focus", serde_json::json!({"tab_id": tab_id}));
-    }
-
-    /// One API call over the shell's command lane. herdr takes one at a time (`endpoint_busy` otherwise).
-    // ponytail: fire and forget; the answer arrives as a ClientShellEndpointResponseChunk and is dropped
-    fn request(&self, method: &str, params: serde_json::Value) {
-        let (boot_id, id) = {
-            let mut state = self.state.lock().unwrap();
-            state.next_request += 1;
-            (state.boot_id.clone(), format!("shepherd-{}", state.next_request))
-        };
-        let request = serde_json::json!({"id": id, "method": method, "params": params}).to_string();
-        self.send(&ClientMessage::ClientShellEndpointRequest { boot_id, request });
-    }
 }
 
 impl Drop for ClientShell {
@@ -194,102 +146,52 @@ impl Drop for ClientShell {
     }
 }
 
-fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<Event>) {
-    let mut layout = Layout::default();
-    let mut popup: Option<PopupSurface> = None;
+fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<PopupEvent>) {
+    let mut shown: Option<PopupSurface> = None;
     loop {
         let message = match wire::read_message(&mut stream) {
             Ok(Some(message)) => message,
             Ok(None) => continue,
             Err(_) => break,
         };
-        let mut state = state.lock().unwrap();
-        let state = &mut *state;
         match message {
-            ServerMessage::PaneSurface(mut surface) => {
-                state.boot_id = surface.boot_id.clone();
-                for pane in &surface.panes {
-                    if let Some(tx) = state.panes.get(&pane.pane_id) {
-                        send_pane(&mut state.sizes, tx, &surface.frame, pane, surface.frame.cursor.as_ref(), state.defaults);
+            // ponytail: the whole surface is decoded for its popup; the panes' cells are dropped unread by Shepherd
+            ServerMessage::PaneSurface(surface) => {
+                let mut state = state.lock().unwrap();
+                let state = &mut *state;
+                let surface_popup = surface.popup.as_ref().map(PopupSurface::from);
+                if surface_popup != shown {
+                    shown = surface_popup;
+                    let _ = tx.unbounded_send(PopupEvent::Popup(shown.clone()));
+                }
+                if let (Some(popup), Some((id, view))) = (&surface.popup, &state.popup_view) {
+                    if &popup.terminal_id == id {
+                        send_popup(&mut state.popup_size, view, popup, state.defaults);
                     }
                 }
-                let next = layout_of(&surface);
-                if next != layout {
-                    layout = next;
-                    let _ = tx.unbounded_send(Event::Layout(layout.clone()));
-                }
-                if surface.popup != popup {
-                    popup = surface.popup.take();
-                    let _ = tx.unbounded_send(Event::Popup(PopupEvent::Popup(popup.clone())));
-                }
-                state.surface = Some(surface);
-            }
-            ServerMessage::PaneSurfacePatch(patch) => {
-                let Some(surface) = state.surface.as_mut() else { continue };
-                if patch.base_surface_revision != surface.surface_revision || patch.boot_id != surface.boot_id {
-                    continue; // ponytail: a full surface follows a lost baseline
-                }
-                let width = surface.frame.width as usize;
-                for row in patch.rows {
-                    let start = row.y as usize * width + row.x as usize;
-                    if let Some(cells) = surface.frame.cells.get_mut(start..start + row.cells.len()) {
-                        cells.clone_from_slice(&row.cells);
-                    }
-                }
-                for updated in &patch.panes {
-                    if let Some(pane) = surface.panes.iter_mut().find(|p| p.pane_id == updated.pane_id) {
-                        *pane = updated.clone();
-                    }
-                }
-                surface.frame.cursor = patch.cursor;
-                surface.surface_revision = patch.surface_revision;
-                // the panes whose content changed, and the focused one for the cursor
-                for pane in surface.panes.iter().filter(|p| p.focused || patch.panes.iter().any(|u| u.pane_id == p.pane_id)) {
-                    if let Some(tx) = state.panes.get(&pane.pane_id) {
-                        send_pane(&mut state.sizes, tx, &surface.frame, pane, surface.frame.cursor.as_ref(), state.defaults);
-                    }
-                }
+                state.popup = surface.popup;
             }
             ServerMessage::EndpointControl { kind, data } if kind == "shell.snapshot.v1" => {
-                let _ = tx.unbounded_send(Event::Popup(PopupEvent::Commands(super::popup::commands(&data))));
+                let _ = tx.unbounded_send(PopupEvent::Commands(super::popup::commands(&data)));
             }
             ServerMessage::ServerShutdown { .. } => break,
             _ => {}
         }
     }
-    for pane in state.lock().unwrap().panes.values() {
-        let _ = pane.unbounded_send(SessionEvent::Ended("herdr closed the client shell".into()));
+    if let Some((_, view)) = &state.lock().unwrap().popup_view {
+        let _ = view.unbounded_send(SessionEvent::Ended("herdr closed the client shell".into()));
     }
 }
 
-fn layout_of(surface: &PaneSurfaceFrame) -> Layout {
-    let r = |r: &SurfaceRect| (r.x, r.y, r.width, r.height);
-    Layout {
-        cols: surface.frame.width,
-        rows: surface.frame.height,
-        panes: surface
-            .panes
-            .iter()
-            .map(|p| PaneRect { pane_id: p.pane_id.clone(), rect: r(&p.rect), inner: r(&p.inner_rect), focused: p.focused })
-            .collect(),
+fn send_popup(size: &mut Option<(u16, u16)>, tx: &UnboundedSender<SessionEvent>, popup: &PopupFrame, defaults: (u32, u32)) {
+    let frame = &popup.frame;
+    if *size != Some((frame.width, frame.height)) {
+        *size = Some((frame.width, frame.height));
+        let _ = tx.unbounded_send(SessionEvent::Size(frame.width, frame.height));
     }
-}
-
-fn send_pane(
-    sizes: &mut HashMap<String, (u16, u16)>,
-    tx: &UnboundedSender<SessionEvent>,
-    frame: &FrameData,
-    pane: &PaneSurfacePane,
-    cursor: Option<&CursorState>,
-    defaults: (u32, u32),
-) {
-    let size = (pane.inner_rect.width, pane.inner_rect.height);
-    if sizes.insert(pane.pane_id.clone(), size) != Some(size) {
-        let _ = tx.unbounded_send(SessionEvent::Size(size.0, size.1));
-    }
-    let cursor = cursor.filter(|_| pane.focused);
-    let _ = tx.unbounded_send(SessionEvent::MouseCapture(pane.mouse_reporting));
-    let _ = tx.unbounded_send(SessionEvent::Frame(pane_ansi(frame, &pane.inner_rect, cursor, defaults)));
+    let _ = tx.unbounded_send(SessionEvent::MouseCapture(popup.mouse_reporting));
+    let area = SurfaceRect { x: 0, y: 0, width: frame.width, height: frame.height };
+    let _ = tx.unbounded_send(SessionEvent::Frame(pane_ansi(frame, &area, frame.cursor.as_ref(), defaults)));
 }
 
 /// `area` of `frame` as a full repaint for an emulator of exactly its size: every row from its first column, the
@@ -452,203 +354,172 @@ mod tests {
         assert!(matches!(key_event("b", Some("∫"), &alt), Some(PaneInput::TextCommit(t)) if t == "∫"));
         assert!(key_event("q", Some("q"), &gpui::Modifiers { platform: true, ..Default::default() }).is_none());
     }
+}
 
-    /// Live, against a running herdr: `cargo test client_shell::tests::live -- --ignored --nocapture`.
-    /// Prints the layout, then the round trip of a typed char over the client shell and over an attach.
+/// Live probe for the hybrid's side effects: `cargo test --lib client_shell::probe -- --ignored --nocapture` with
+/// `ACTIVE=0|1 COLS ROWS SECS` (hello), `RESIZE=c,r` / `FOCUS=0|1` / `THEME=1` sent after a second. Prints what
+/// herdr sent, per message kind, each second.
+#[cfg(test)]
+mod probe {
+    use super::*;
+    use std::io::Read;
+
+    fn env(name: &str, default: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| default.into())
+    }
+
     #[test]
     #[ignore]
-    fn live() {
-        let (shell, rx) = ClientShell::connect(120, 40).unwrap();
-        let mut rx = futures::executor::block_on_stream(rx);
-        let layout = loop {
-            if let Some(Event::Layout(l)) = rx.next() {
-                break l;
+    fn probe() {
+        let active = env("ACTIVE", "1") == "1";
+        let (cols, rows): (u16, u16) = (env("COLS", "80").parse().unwrap(), env("ROWS", "24").parse().unwrap());
+        let mut stream = UnixStream::connect(client_socket()).unwrap();
+        let hello = serde_json::json!({
+            "generation": 1, "cell_width_px": 0, "cell_height_px": 0, "surface_size": {"cols": cols, "rows": rows},
+            "pixel_mouse": false, "direct_graphics": false, "endpoint_keybindings": false, "mouse_capture": false,
+            "surface_active": active, "snapshot_codecs": ["shell.snapshot.v1"], "surface_codecs": ["shell.surface.v1"],
+            "input_codecs": ["shell.input.semantic.v1"], "blob_codecs": ["shell.blob.v1"],
+        });
+        wire::write_message(&mut stream, &ClientMessage::EndpointControl { kind: "endpoint.hello.v1".into(), data: hello.to_string() }).unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let boot_id = Arc::new(Mutex::new(String::new()));
+        let boot = boot_id.clone();
+        let secs: u64 = env("SECS", "5").parse().unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            if let Ok(size) = std::env::var("RESIZE") {
+                let (c, r) = size.split_once(',').unwrap();
+                let surface_size = SurfaceSize { cols: c.parse().unwrap(), rows: r.parse().unwrap() };
+                wire::write_message(&mut writer, &ClientMessage::ClientShellResize { cell_width_px: 0, cell_height_px: 0, surface_size, pixel_mouse: false }).unwrap();
+                println!("sent resize {size}");
             }
-        };
-        println!("{layout:#?}");
-        let pane = std::env::var("PANE").unwrap_or_else(|_| layout.panes.iter().find(|p| p.focused).unwrap_or(&layout.panes[0]).pane_id.clone());
-        for _ in 0..2 {
-            bench("client shell", shell.subscribe(&pane), |c| shell.input(&pane, vec![PaneInput::TextCommit(c.into())]));
-            shell.unsubscribe(&pane);
-            let (session, frames) = super::super::Session::spawn(&pane, 57, 38, super::super::Mode::Control).unwrap();
-            bench("attach", frames, |c| session.input(c.as_bytes()));
+            if let Ok(f) = std::env::var("FOCUS") {
+                wire::write_message(&mut writer, &ClientMessage::ClientShellFocus { focused: f == "1" }).unwrap();
+                println!("sent focus {f}");
+            }
+            // PULSE=1: switch the surface on, send the theme, switch it off again
+            let surface = |w: &mut UnixStream, active: bool, id: &str| {
+                let request = serde_json::json!({"id": id, "method": "client_shell.surface.set", "params": {"active": active}}).to_string();
+                wire::write_message(w, &ClientMessage::ClientShellEndpointRequest { boot_id: boot.lock().unwrap().clone(), request }).unwrap();
+            };
+            let pulse = std::env::var("PULSE").is_ok();
+            if pulse {
+                surface(&mut writer, true, "on");
+                println!("sent surface on");
+            }
+            if std::env::var("THEME").is_ok() || pulse {
+                let red = Rgb { r: 0x40, g: 0x00, b: 0x00 };
+                let update = HostThemeUpdate::DefaultColor { kind: DefaultColorKind::Background, color: red };
+                wire::write_message(&mut writer, &ClientMessage::ClientShellHostTheme { update }).unwrap();
+                println!("sent theme bg #400000");
+            }
+            if pulse {
+                surface(&mut writer, false, "off");
+                println!("sent surface off");
+            }
+        });
+        const NAMES: [&str; 21] = [
+            "Welcome", "Terminal", "Graphics", "ServerShutdown", "Notify", "Clipboard", "WindowTitle", "ReloadSoundConfig",
+            "MouseCapture", "TerminalBell", "GraphicsFile", "GraphicsTransmissionRetired", "ClientShellSnapshot", "PaneSurface",
+            "SemanticNotification", "ClientShellError", "DirectTerminalKeyboardProtocol", "ClientShellKeyboardReportAll",
+            "ClientShellEndpointResponseChunk", "PaneSurfacePatch", "EndpointControl",
+        ];
+        stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        let start = std::time::Instant::now();
+        let mut second = 0;
+        let mut tally: std::collections::BTreeMap<String, (u32, usize)> = Default::default();
+        while start.elapsed() < Duration::from_secs(secs) {
+            let mut len = [0u8; 4];
+            if stream.read_exact(&mut len).is_ok() {
+                let mut payload = vec![0; u32::from_le_bytes(len) as usize];
+                stream.read_exact(&mut payload).unwrap();
+                let mut name = NAMES.get(payload[0] as usize).copied().unwrap_or("?").to_string();
+                if let Ok((ServerMessage::EndpointControl { kind, data }, _)) = bincode::serde::decode_from_slice::<ServerMessage, _>(&payload, bincode::config::standard()) {
+                    if kind == "shell.snapshot.v1" {
+                        let snapshot: serde_json::Value = serde_json::from_str(&data).unwrap();
+                        *boot_id.lock().unwrap() = snapshot["boot_id"].as_str().unwrap_or_default().into();
+                    }
+                    name = format!("EndpointControl {kind}");
+                }
+                if let Ok((ServerMessage::PaneSurface(s), _)) = bincode::serde::decode_from_slice::<ServerMessage, _>(&payload, bincode::config::standard()) {
+                    let panes: Vec<_> = s.panes.iter().map(|p| format!("{} {}x{}", p.pane_id, p.inner_rect.width, p.inner_rect.height)).collect();
+                    name = format!("PaneSurface {}x{} {panes:?} popup={:?}", s.frame.width, s.frame.height, s.popup.as_ref().map(|p| &p.terminal_id));
+                }
+                if let Ok((ServerMessage::ClientShellEndpointResponseChunk { data, .. }, _)) = bincode::serde::decode_from_slice::<ServerMessage, _>(&payload, bincode::config::standard()) {
+                    name = format!("response {}", String::from_utf8_lossy(&data));
+                }
+                let entry = tally.entry(name).or_default();
+                entry.0 += 1;
+                entry.1 += 4 + payload.len();
+            }
+            if start.elapsed().as_secs() > second {
+                for (name, (n, bytes)) in std::mem::take(&mut tally) {
+                    println!("t={second}s {n:>4} × {name}: {bytes} B");
+                }
+                second = start.elapsed().as_secs();
+            }
+        }
+        for (name, (n, bytes)) in tally {
+            println!("t={second}s {n:>4} × {name}: {bytes} B");
         }
     }
 
-    fn bench(name: &str, mut frames: UnboundedReceiver<SessionEvent>, send: impl Fn(&str)) {
-        use futures::StreamExt;
-        let mut emu = crate::terminal::emulator::Emulator::new(120, 40);
-        let apply = |emu: &mut crate::terminal::emulator::Emulator, event| match event {
-            SessionEvent::Frame(bytes) => drop(emu.feed(&bytes)),
-            SessionEvent::Size(c, r) => emu.resize(c, r),
-            _ => {}
-        };
-        let screen = |emu: &crate::terminal::emulator::Emulator| (0..emu.rows()).map(|r| emu.row_text(r)).collect::<Vec<_>>();
-        let mut took = Vec::new();
-        for i in 0..40 {
-            std::thread::sleep(Duration::from_millis(30));
-            while let Ok(event) = frames.try_recv() {
-                apply(&mut emu, event);
-            }
-            let before = screen(&emu);
-            let start = std::time::Instant::now();
-            send(["q", "w", "e", "r"][i % 4]);
-            while screen(&emu) == before {
-                let Some(event) = futures::executor::block_on(frames.next()) else { return };
-                apply(&mut emu, event);
-            }
-            took.push(start.elapsed().as_secs_f64() * 1000.0);
+    /// Holds attach controllers like Shepherd's shown panes: `HOLD=w1:p1=70x30,w1:p2=50x30 SECS=60`.
+    #[test]
+    #[ignore]
+    fn hold() {
+        let mut held = Vec::new();
+        for spec in env("HOLD", "").split(',').filter(|s| !s.is_empty()) {
+            let (pane, size) = spec.split_once('=').unwrap();
+            let (c, r) = size.split_once('x').unwrap();
+            let (session, rx) = crate::herdr::Session::spawn(pane, c.parse().unwrap(), r.parse().unwrap(), crate::herdr::Mode::Control).unwrap();
+            held.push((session, rx));
+            println!("holding {pane} at {size}");
         }
-        send("\x15"); // Ctrl+U: clear the typed line
-        took.sort_by(f64::total_cmp);
-        println!("{name}: keystroke → changed screen, ms: p50 {:.2}, p90 {:.2}, max {:.2}", took[took.len() / 2], took[took.len() * 9 / 10], took[took.len() - 1]);
+        std::thread::sleep(Duration::from_secs(env("SECS", "60").parse().unwrap()));
     }
 }
 
+/// Live: the popup's frames reach its view and `ClientShellPopupInput` types into it. Open a popup first (an editor):
+/// types `ihello` + Esc, prints the popup, then `:q!` + Enter.
 #[cfg(test)]
-mod live_keys {
+mod live_popup {
     use super::*;
 
-    /// Live: types `echo hi`, Enter, then `sleep 9`, Enter, Ctrl+C as semantic keys, and prints the pane.
     #[test]
     #[ignore]
-    fn semantic_keys_reach_the_shell() {
-        let (shell, _rx) = ClientShell::connect(120, 40).unwrap();
-        let pane = std::env::var("PANE").unwrap();
-        let mut frames = shell.subscribe(&pane);
+    fn popup_frames_and_input() {
+        let (shell, rx) = ClientShell::connect(100, 35).unwrap();
+        let mut rx = futures::executor::block_on_stream(rx);
+        let popup = loop {
+            if let Some(PopupEvent::Popup(Some(p))) = rx.next() {
+                break p;
+            }
+        };
+        println!("popup {:?} {:?}x{:?} {}", popup.terminal_id, popup.width, popup.height, popup.title);
+        let mut frames = shell.subscribe_popup(&popup.terminal_id);
         let none = gpui::Modifiers::default();
-        let ctrl = gpui::Modifiers { control: true, ..Default::default() };
-        let mut keys: Vec<PaneInput> = "echo hi".chars().map(|c| key_event(&c.to_string(), Some(&c.to_string()), &none).unwrap()).collect();
-        keys.push(key_event("enter", None, &none).unwrap());
-        keys.extend("sleep 9".chars().map(|c| key_event(&c.to_string(), Some(&c.to_string()), &none).unwrap()));
-        keys.push(key_event("enter", None, &none).unwrap());
-        shell.input(&pane, keys);
-        std::thread::sleep(Duration::from_millis(500));
-        shell.input(&pane, vec![key_event("c", Some("c"), &ctrl).unwrap()]);
-        std::thread::sleep(Duration::from_millis(500));
-        let mut emu = crate::terminal::emulator::Emulator::new(120, 40);
+        let mut keys: Vec<PaneInput> = "ihello".chars().map(|c| key_event(&c.to_string(), Some(&c.to_string()), &none).unwrap()).collect();
+        keys.push(key_event("escape", None, &none).unwrap());
+        shell.popup_input(&popup.terminal_id, keys);
+        std::thread::sleep(Duration::from_millis(800));
+        let mut emu = crate::terminal::emulator::Emulator::new(10, 10);
         while let Ok(event) = frames.try_recv() {
             match event {
-                SessionEvent::Frame(bytes) => drop(emu.feed(&bytes)),
-                SessionEvent::Size(c, r) => emu.resize(c, r),
+                SessionEvent::Frame(b) => drop(emu.feed(&b)),
+                SessionEvent::Size(c, r) => {
+                    println!("size {c}x{r}");
+                    emu.resize(c, r)
+                }
                 _ => {}
             }
         }
-        for r in 0..12 {
+        for r in 0..emu.rows().min(6) {
             println!("|{}", emu.row_text(r).trim_end());
         }
-    }
-}
-
-#[cfg(test)]
-mod live_tabs {
-    use super::*;
-
-    /// Live: the shell's view follows `tab.focus`; herdr's own focus (the API's) stays.
-    #[test]
-    #[ignore]
-    fn the_shell_shows_the_tab_it_focuses() {
-        let (shell, rx) = ClientShell::connect(120, 40).unwrap();
-        let mut rx = futures::executor::block_on_stream(rx);
-        let mut next_layout = || loop {
-            if let Some(Event::Layout(l)) = rx.next() {
-                break l.panes.iter().map(|p| (p.pane_id.clone(), p.rect, p.inner)).collect::<Vec<_>>();
-            }
-        };
-        println!("first: {:?}", next_layout());
-        shell.focus_tab(&std::env::var("TAB").unwrap());
-        println!("after tab.focus: {:?}", next_layout());
-    }
-}
-
-#[cfg(test)]
-mod live_cells {
-    use super::*;
-
-    /// Live: the packed fg/bg herdr sends for a few cells of each pane.
-    #[test]
-    #[ignore]
-    fn dump_cell_colors() {
-        let mut stream = UnixStream::connect(client_socket()).unwrap();
-        let hello = r#"{"generation":1,"cell_width_px":0,"cell_height_px":0,"surface_size":{"cols":120,"rows":40},"pixel_mouse":false,"direct_graphics":false,"endpoint_keybindings":false,"mouse_capture":false,"surface_active":true,"snapshot_codecs":["shell.snapshot.v1"],"surface_codecs":["shell.surface.v1"],"input_codecs":["shell.input.semantic.v1"],"blob_codecs":["shell.blob.v1"]}"#;
-        wire::write_message(&mut stream, &ClientMessage::EndpointControl { kind: "endpoint.hello.v1".into(), data: hello.into() }).unwrap();
-        loop {
-            if let Ok(Some(ServerMessage::PaneSurface(s))) = wire::read_message(&mut stream) {
-                for p in &s.panes {
-                    let r = &p.inner_rect;
-                    let at = |x: u16, y: u16| &s.frame.cells[(r.y + y) as usize * s.frame.width as usize + (r.x + x) as usize];
-                    let cells: Vec<_> = [(0, 0), (1, 1), (r.width - 1, 3)].iter().map(|&(x, y)| { let c = at(x, y); (c.symbol.clone(), format!("{:08x}", c.fg), format!("{:08x}", c.bg)) }).collect();
-                    println!("{} {:?} rect {:?} inner {:?} {cells:?}", p.pane_id, p.alternate_screen_active, (p.rect.x, p.rect.y, p.rect.width, p.rect.height), (r.x, r.y, r.width, r.height));
-                }
-                let border = &s.frame.cells[0];
-                println!("surface cell 0,0 {:?} fg {:08x} bg {:08x}", border.symbol, border.fg, border.bg);
-                return;
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod live_attach_colors {
-    /// Live: what an attach (observe) gives for the same cells, to compare with `dump_cell_colors`.
-    #[test]
-    #[ignore]
-    fn attach_cell_colors() {
-        let pane = std::env::var("PANE").unwrap();
-        let (_s, rx) = crate::herdr::Session::spawn(&pane, 56, 38, crate::herdr::Mode::Observe).unwrap();
-        let mut emu = crate::terminal::emulator::Emulator::new(56, 38);
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let mut rx = rx;
-        while let Ok(crate::herdr::SessionEvent::Frame(b)) = rx.try_recv() {
-            emu.feed(&b);
-        }
-        println!("{:?} {:?}", emu.line(1)[1].fg, emu.line(1)[1].bg);
-    }
-}
-
-#[cfg(test)]
-mod live_resize_scroll {
-    use super::*;
-
-    /// Live: `ClientShellResize` re-lays the tab out; a wheel event scrolls the pane's history.
-    #[test]
-    #[ignore]
-    fn resize_and_wheel() {
-        let (shell, rx) = ClientShell::connect(120, 40).unwrap();
-        let mut rx = futures::executor::block_on_stream(rx);
-        let mut next_layout = || loop {
-            if let Some(Event::Layout(l)) = rx.next() {
-                break l;
-            }
-        };
-        let first = next_layout();
-        shell.resize(100, 30);
-        let resized = next_layout();
-        println!("{}x{} → {}x{}, panes {:?}", first.cols, first.rows, resized.cols, resized.rows, resized.panes.iter().map(|p| p.inner).collect::<Vec<_>>());
-        let pane = std::env::var("PANE").unwrap();
-        let frames = shell.subscribe(&pane);
-        std::thread::sleep(Duration::from_millis(200));
-        let screen = |frames: &mut UnboundedReceiver<SessionEvent>, emu: &mut crate::terminal::emulator::Emulator| {
-            while let Ok(e) = frames.try_recv() {
-                match e {
-                    SessionEvent::Frame(b) => drop(emu.feed(&b)),
-                    SessionEvent::Size(c, r) => emu.resize(c, r),
-                    _ => {}
-                }
-            }
-            emu.row_text(0)
-        };
-        let (mut frames, mut emu) = (frames, crate::terminal::emulator::Emulator::new(10, 10));
-        std::thread::sleep(Duration::from_millis(300));
-        let before = screen(&mut frames, &mut emu);
-        let wheel = PaneInput::Mouse { kind: wire::MouseKind::ScrollUp, position: wire::MousePosition::Cell { column: 2, row: 2 }, geometry: None, modifiers: 0, lines: 10 };
-        shell.input(&pane, vec![wheel]);
-        std::thread::sleep(Duration::from_millis(200));
-        let after = screen(&mut frames, &mut emu);
-        println!("row 0 before: {before:?}\nrow 0 after wheel up: {after:?}");
-        let down = PaneInput::Mouse { kind: wire::MouseKind::ScrollDown, position: wire::MousePosition::Cell { column: 2, row: 2 }, geometry: None, modifiers: 0, lines: 10 };
-        shell.input(&pane, vec![down]);
-        std::thread::sleep(Duration::from_millis(200));
-        println!("row 0 after wheel down: {:?}", screen(&mut frames, &mut emu));
+        let mut quit: Vec<PaneInput> = ":q!".chars().map(|c| key_event(&c.to_string(), Some(&c.to_string()), &none).unwrap()).collect();
+        quit.push(key_event("enter", None, &none).unwrap());
+        shell.popup_input(&popup.terminal_id, quit);
+        std::thread::sleep(Duration::from_millis(500));
     }
 }

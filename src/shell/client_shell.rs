@@ -1,9 +1,8 @@
-//! PoC (`SHEPHERD_CLIENT_SHELL=1`): the window as one herdr client shell. herdr shows it the tab Shepherd shows,
-//! sized to the pane grid, and its panes take their cut of the shell's surface (see `crate::herdr::client_shell`).
+//! PoC (`SHEPHERD_CLIENT_SHELL=1`): the window's one herdr client shell, next to its panes' attaches. It carries
+//! Shepherd's theme to herdr, herdr's popup and `[[keys.command]]` to Shepherd (see `crate::herdr::client_shell`).
 use super::*;
-use crate::herdr::client_shell::{ClientShell, Event, HostThemeUpdate as Update, Layout};
+use crate::herdr::client_shell::{ClientShell, HostThemeUpdate as Update};
 use crate::herdr::popup::Event as PopupEvent;
-use crate::model::Frac;
 use crate::terminal::pane::ShellConnection;
 use futures::StreamExt;
 use std::sync::Arc;
@@ -11,14 +10,12 @@ use std::sync::Arc;
 /// The connection and what it was last told, so a render tells herdr only what changed.
 pub(super) struct ShellView {
     conn: Arc<ClientShell>,
-    layout: Layout,
-    tab: Option<String>,
     size: Option<(u16, u16)>,
     theme: Option<Hsla>,
-    active: Option<bool>,
+    active: bool,
 }
 
-/// Connects, hands the panes over to the shell, and follows it; reconnects while the window lives.
+/// Connects and follows the shell; reconnects while the window lives.
 pub(super) async fn shell_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::AsyncApp) {
     loop {
         let Ok((cols, rows)) = this.update(cx, |s, cx| s.grid_cells(cx).unwrap_or((120, 40))) else { return };
@@ -26,27 +23,21 @@ pub(super) async fn shell_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
         if let Ok((conn, mut rx)) = connect.await {
             let started = this.update(cx, |s, cx| {
                 cx.set_global(ShellConnection(conn.clone()));
-                s.client_shell = Some(ShellView { conn, layout: Layout::default(), tab: None, size: None, theme: None, active: None });
-                // the panes shown so far attached on their own: over to the shell
-                for pane in s.panes.values() {
-                    pane.update(cx, |p, cx| p.reattach(false, cx));
-                }
+                // at once, not at the next render: a shell in front without a theme blanks herdr's, and a window
+                // that is not drawn (screen locked, another Space) has no render to send it from
+                let theme = Theme::of(cx);
+                conn.theme(host_theme(theme));
+                let theme = Some(theme.terminal.background);
+                s.client_shell = Some(ShellView { conn, size: Some((cols, rows)), theme, active: true });
+                cx.notify();
             });
             if started.is_err() {
                 return;
             }
             while let Some(event) = rx.next().await {
-                let alive = this.update(cx, |s, cx| {
-                    match event {
-                        Event::Layout(layout) => {
-                            if let Some(view) = &mut s.client_shell {
-                                view.layout = layout;
-                            }
-                        }
-                        Event::Popup(PopupEvent::Popup(surface)) => s.show_popup(surface, cx),
-                        Event::Popup(PopupEvent::Commands(commands)) => s.herdr_commands = commands,
-                    }
-                    cx.notify();
+                let alive = this.update(cx, |s, cx| match event {
+                    PopupEvent::Popup(surface) => s.show_popup(surface, cx),
+                    PopupEvent::Commands(commands) => s.herdr_commands = commands,
                 });
                 if alive.is_err() {
                     return;
@@ -69,15 +60,18 @@ pub(super) async fn shell_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
 }
 
 impl Shell {
-    /// Tells herdr what changed since the last render: the shown tab, the grid's size, the theme, the window's focus.
-    pub(super) fn sync_client_shell(&mut self, tab: Option<&str>, window: &Window, cx: &App) {
+    /// Tells herdr what changed since the last render: the grid's size and the theme. Coming back to the window
+    /// makes the shell herdr's client in front again, so herdr takes Shepherd's theme back from its TUI.
+    /// Not sent on purpose: `tab.focus` (it moves herdr's own focus too) and `ClientShellFocus` (the client in front's
+    /// focus marks herdr's active tab seen and mutes its notifications).
+    pub(super) fn sync_client_shell(&mut self, window: &Window, cx: &App) {
         let cells = self.grid_cells(cx);
         let Some(view) = &mut self.client_shell else { return };
-        if let Some(tab) = tab.filter(|t| view.tab.as_deref() != Some(*t)) {
-            view.conn.focus_tab(tab);
-            view.tab = Some(tab.into());
-        }
-        if let Some((cols, rows)) = cells.filter(|c| view.size != Some(*c)) {
+        let active = window.is_window_active();
+        let came_back = active && !view.active;
+        view.active = active;
+        if let Some((cols, rows)) = cells.filter(|c| came_back || view.size != Some(*c)) {
+            // a resize, even to the same size, puts the shell in front
             view.conn.resize(cols, rows);
             view.size = Some((cols, rows));
         }
@@ -86,41 +80,15 @@ impl Shell {
             view.conn.theme(host_theme(theme));
             view.theme = Some(theme.terminal.background);
         }
-        let active = window.is_window_active();
-        if view.active != Some(active) {
-            view.conn.focused(active);
-            view.active = Some(active);
-        }
-    }
-
-    /// The shown tab's panes where herdr laid them out for this shell, once its surface is of that tab.
-    pub(super) fn client_shell_frames(&self, snapshot_frames: &[PaneFrame]) -> Option<Vec<PaneFrame>> {
-        let layout = &self.client_shell.as_ref()?.layout;
-        let ours = !layout.panes.is_empty() && layout.panes.iter().all(|p| snapshot_frames.iter().any(|f| f.pane_id == p.pane_id));
-        if !ours || layout.cols == 0 || layout.rows == 0 {
-            return None;
-        }
-        let (cols, rows) = (layout.cols as f32, layout.rows as f32);
-        Some(
-            layout
-                .panes
-                .iter()
-                .map(|p| {
-                    let (x, y, w, h) = p.rect;
-                    let frame = Frac { x: x as f32 / cols, y: y as f32 / rows, w: w as f32 / cols, h: h as f32 / rows };
-                    PaneFrame { pane_id: p.pane_id.clone(), frame, focused: p.focused }
-                })
-                .collect(),
-        )
     }
 }
 
 fn host_theme(theme: &Theme) -> Vec<Update> {
-    use crate::herdr::client_shell::{DefaultColorKind as Kind, HostAppearance as Appearance, HostColor as Color};
+    use crate::herdr::client_shell::{DefaultColorKind as Kind, HostAppearance as Appearance, Rgb};
     let rgb = |c: Hsla| {
         let c = gpui::Rgba::from(c);
         let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-        Color { r: b(c.r), g: b(c.g), b: b(c.b) }
+        Rgb { r: b(c.r), g: b(c.g), b: b(c.b) }
     };
     vec![
         Update::DefaultColor { kind: Kind::Foreground, color: rgb(theme.terminal.foreground) },

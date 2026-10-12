@@ -37,7 +37,8 @@ pub enum ClientMessage {
     /// The client shell's whole pane grid in cells; herdr lays the shown tab's panes out in it.
     ClientShellResize { cell_width_px: u32, cell_height_px: u32, surface_size: SurfaceSize, pixel_mouse: bool },
     ClientShellPaneInput { pane_id: String, events: Vec<PaneInput> },
-    ClientShellPopupInput,
+    /// Input for herdr's popup, which only client shells see.
+    ClientShellPopupInput { terminal_id: String, events: Vec<PaneInput> },
     /// One API call (JSON `{id, method, params}`) on behalf of this client shell, e.g. `tab.focus` for its own view.
     ClientShellEndpointRequest { boot_id: String, request: String },
     AttachMouse {
@@ -163,7 +164,7 @@ pub enum KeyKind {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
-pub struct HostColor {
+pub struct Rgb {
     pub r: u8,
     pub g: u8,
     pub b: u8,
@@ -184,8 +185,8 @@ pub enum HostAppearance {
 /// The colors herdr answers the panes' OSC 10/11/4 queries with.
 #[derive(Debug, Clone, Serialize)]
 pub enum HostThemeUpdate {
-    DefaultColor { kind: DefaultColorKind, color: HostColor },
-    PaletteColors(Vec<(u8, HostColor)>),
+    DefaultColor { kind: DefaultColorKind, color: Rgb },
+    PaletteColors(Vec<(u8, Rgb)>),
     Appearance(HostAppearance),
 }
 
@@ -219,7 +220,7 @@ pub enum ServerMessage {
     DirectTerminalKeyboardProtocol,
     ClientShellKeyboardReportAll,
     ClientShellEndpointResponseChunk { boot_id: String, request_id: String, final_chunk: bool, data: Vec<u8> },
-    PaneSurfacePatch(PaneSurfacePatch),
+    PaneSurfacePatch,
     EndpointControl { kind: String, data: String },
 }
 
@@ -233,27 +234,7 @@ pub struct PaneSurfaceFrame {
     pub frame: FrameData,
     pub panes: Vec<PaneSurfacePane>,
     pub splits: Vec<PaneSurfaceSplit>,
-    pub popup: Option<PopupSurface>,
-}
-
-/// Cell changes against the last surface (`base_surface_revision`), plus the panes whose content changed.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct PaneSurfacePatch {
-    pub boot_id: String,
-    pub projection_revision: u64,
-    pub base_surface_revision: u64,
-    pub surface_revision: u64,
-    pub rows: Vec<PatchRow>,
-    pub panes: Vec<PaneSurfacePane>,
-    pub cursor: Option<CursorState>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PatchRow {
-    pub x: u16,
-    pub y: u16,
-    pub cells: Vec<CellData>,
+    pub popup: Option<PopupFrame>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,14 +311,31 @@ pub struct PaneSurfaceSplit {
     pub path: Vec<bool>,
 }
 
-/// herdr's `ClientShellPopupSurface` up to its size; its rendered frame is left unread (the popup's terminal is
-/// controlled directly instead).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// herdr's `ClientShellPopupSurface`: the popup's terminal, its size as asked, and its cells.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PopupFrame {
+    pub terminal_id: String,
+    pub title: String,
+    pub width: Option<PopupSize>,
+    pub height: Option<PopupSize>,
+    pub frame: FrameData,
+    pub mouse_reporting: bool,
+}
+
+/// What Shepherd keeps of herdr's popup to lay it out.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PopupSurface {
     pub terminal_id: String,
     pub title: String,
     pub width: Option<PopupSize>,
     pub height: Option<PopupSize>,
+}
+
+impl From<&PopupFrame> for PopupSurface {
+    fn from(p: &PopupFrame) -> Self {
+        PopupSurface { terminal_id: p.terminal_id.clone(), title: p.title.clone(), width: p.width, height: p.height }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
