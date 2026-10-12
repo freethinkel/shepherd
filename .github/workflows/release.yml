@@ -17,7 +17,8 @@ concurrency:
 
 jobs:
   macos:
-    runs-on: macos-15
+    # the SDK it links against picks the window chrome: built with an SDK before 26, the app keeps the old traffic lights
+    runs-on: macos-26
     env:
       GH_TOKEN: ${{ github.token }}
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
