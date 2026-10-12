@@ -265,10 +265,24 @@ impl Shell {
                             let two = !compact && (nested || branch.is_some() || extras.is_some());
                             let (inline, below) = if two { (None, extras) } else { (extras, None) };
                             // a repo's own artwork or its monogram; its worktrees, indented under its name, go without
-                            let icon = (show.icon && !nested).then(|| {
-                                let seed = w.worktree.as_ref().map_or(w.label.as_str(), |t| t.repo_key.as_str());
-                                crate::ui::project_icon::project_icon(&w.label, seed, dir.as_deref(), 14., selected, theme, cx)
-                            });
+                            // compact, a worktree has no branch line: a branch mark in front of its name tells it apart
+                            let icon = if nested {
+                                compact.then(|| {
+                                    div()
+                                        .size(px(14.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(gpui::svg().path("icons/git-branch.svg").size(px(12.)).text_color(theme.text_muted))
+                                        .into_any_element()
+                                })
+                            } else {
+                                show.icon.then(|| {
+                                    let seed = w.worktree.as_ref().map_or(w.label.as_str(), |t| t.repo_key.as_str());
+                                    crate::ui::project_icon::project_icon(&w.label, seed, dir.as_deref(), 14., selected, theme, cx)
+                                })
+                            };
                             let name = match editing {
                                 Some(field) => field.into_any_element(),
                                 None => div().min_w_0().truncate().child(w.label.clone()).into_any_element(),
