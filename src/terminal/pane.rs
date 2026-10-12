@@ -159,6 +159,8 @@ fn cell_range(cells: &[CellSnapshot], cols: &[usize], chars: Range<usize>) -> Ra
 
 /// Lines per line-height of wheel/trackpad travel.
 const WHEEL_SPEED: f32 = 1.5;
+/// How much faster the wheel scrolls with Option held (iTerm's and VS Code's fast scroll).
+const FAST_WHEEL: f32 = 5.0;
 
 /// After our own scroll, herdr's reported offset lags behind it: the thumb keeps ours this long, then re-syncs.
 const SCROLL_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -675,7 +677,8 @@ impl PaneTerminal {
             ScrollDelta::Lines(d) => d.y * line_h,
         };
         claim(cx);
-        let n = wheel_lines(&mut self.wheel_acc, px * WHEEL_SPEED, line_h);
+        let speed = if event.modifiers.alt { WHEEL_SPEED * FAST_WHEEL } else { WHEEL_SPEED };
+        let n = wheel_lines(&mut self.wheel_acc, px * speed, line_h);
         self.scroll_by(n as i64, cx);
     }
 

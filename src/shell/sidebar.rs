@@ -557,7 +557,9 @@ impl Shell {
                                         this.show_agent(tab_id.clone(), pane_id.clone(), cx)
                                     }));
                                 heading.into_iter().chain([agent.into_any_element()])
-                            })),
+                            }))
+                            // the last row scrolls clear of the window's edge
+                            .child(div().flex_none().h(px(8.))),
                     )
                     .child(crate::ui::scrollbar("agents-scrollbar", &self.agents_scroll, theme)),
                 )
