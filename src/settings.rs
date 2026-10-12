@@ -153,7 +153,11 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// `SHEPHERD_SETTINGS_FILE` runs a second Shepherd with its own settings (a demo session, say).
     pub fn path() -> PathBuf {
+        if let Some(file) = std::env::var_os("SHEPHERD_SETTINGS_FILE") {
+            return file.into();
+        }
         PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Application Support/Shepherd/settings.json")
     }
 

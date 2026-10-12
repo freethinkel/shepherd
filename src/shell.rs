@@ -1623,7 +1623,10 @@ impl Render for Shell {
                             let rename_target = RenameTarget::Workspace(w.workspace_id.clone());
                             let editing = self.rename_field(&rename_target, cx);
                             let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
-                            let dir = w.worktree.as_ref().map(|t| t.checkout_path.clone()).filter(|d| !d.is_empty());
+                            // a workspace herdr knows no worktree of lives where its panes were opened
+                            let dir = w.worktree.as_ref().map(|t| t.checkout_path.clone()).filter(|d| !d.is_empty()).or_else(|| {
+                                snapshot.as_ref()?.panes.iter().find(|p| p.workspace_id == w.workspace_id)?.cwd.clone()
+                            });
                             let branch = dir.as_deref().filter(|_| show.branch && !compact).and_then(|d| crate::ui::statusbar::branch_of(d, cx));
                             let (changes, pr) = match dir.as_deref().filter(|_| nested) {
                                 Some(d) => crate::ui::statusbar::changes_of(d, active, cx),
