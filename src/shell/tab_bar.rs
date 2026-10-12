@@ -5,10 +5,11 @@
 use super::*;
 use std::cell::RefCell;
 
-/// Zeron's `motion::COLLAPSE` for a tab growing in or shrinking out, `TAB_SLIDE` for the wash and a reorder.
+/// Zeron's `motion::COLLAPSE` for a tab growing in or shrinking out; the wash and a reorder slide a bit quicker
+/// than its `TAB_SLIDE`.
 const ENTER: Duration = Duration::from_millis(180);
 const EXIT: Duration = Duration::from_millis(150);
-const SLIDE: Duration = Duration::from_millis(150);
+const SLIDE: Duration = Duration::from_millis(110);
 /// A dropped tab's flight home.
 const LAND: Duration = Duration::from_millis(220);
 
