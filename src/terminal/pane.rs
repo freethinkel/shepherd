@@ -616,6 +616,11 @@ impl PaneTerminal {
             if is_image(&path) {
                 return Some(path);
             }
+            // a folder goes to Finder, not the editor
+            if path.is_dir() {
+                let _ = tokio::process::Command::new("open").arg(&path).status().await;
+                return None;
+            }
             if is_nvim(editor.as_deref()) {
                 // A terminal editor gets a pane to the right; its shell drops typeahead until the prompt is drawn.
                 let params = serde_json::json!({"target_pane_id": pane_id, "direction": "right", "focus": true, "cwd": cwd});
