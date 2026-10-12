@@ -23,6 +23,14 @@ pub fn arrivals<'a>(old: &'a Snapshot, new: &'a Snapshot) -> impl Iterator<Item 
     })
 }
 
+/// Between the pane and the post's time in a notification's tag.
+const TAG_SEP: char = '#';
+
+/// The pane a notification's tag names.
+pub fn tag_pane(tag: &str) -> &str {
+    tag.split(TAG_SEP).next().unwrap_or(tag)
+}
+
 /// The id of a waiting agent's Approve button.
 pub const APPROVE: &str = "approve";
 
@@ -33,7 +41,8 @@ pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool, a
     // `cargo run` goes through scripts/run-bundled.sh, which runs it from inside Shepherd.app.
     if NSBundle::mainBundle().bundleIdentifier().is_some() {
         cx.show_system_notification(SystemNotification {
-            tag: pane_id.to_string().into(),
+            // macOS replaces a delivered notification with the same tag without a banner: one tag per post
+            tag: format!("{pane_id}{TAG_SEP}{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()).into(),
             title: title.into(),
             body: body.into(),
             actions: approve.then(|| SystemNotificationAction { id: APPROVE.into(), label: "Approve".into() }).into_iter().collect(),
@@ -125,6 +134,12 @@ mod tests {
 
     fn ids(old: &Snapshot, new: &Snapshot) -> Vec<String> {
         arrivals(old, new).map(|p| p.pane_id.clone()).collect()
+    }
+
+    #[test]
+    fn a_tag_names_its_pane() {
+        assert_eq!(tag_pane("w2:p1#1791794600123"), "w2:p1");
+        assert_eq!(tag_pane("w2:p1"), "w2:p1");
     }
 
     #[test]
