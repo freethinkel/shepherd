@@ -63,6 +63,8 @@ pub struct Theme {
     pub font_terminal: SharedString,
     pub terminal_font_size: f32,
     pub terminal_line_height: f32,
+    /// Agent status drawn as glyphs rather than dots (the settings' Status icons).
+    pub status_symbols: bool,
     pub terminal: TerminalPalette,
 }
 
@@ -247,6 +249,7 @@ impl Theme {
             font_terminal: font.family.clone().into(),
             terminal_font_size: font.size,
             terminal_line_height: font.line_height,
+            status_symbols: false,
             terminal: TerminalPalette {
                 background: color(v.terminal.background),
                 foreground: color(v.terminal.foreground),

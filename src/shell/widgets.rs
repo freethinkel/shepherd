@@ -10,13 +10,27 @@ pub(crate) fn status_color(status: AgentStatus, theme: &Theme) -> Option<Hsla> {
     }
 }
 
-/// Collie's status dot: 8 px, filled for an agent state, a faint ring when idle.
+/// An agent's status in the theme's style (the settings' Status icons).
 pub(crate) fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
-    let dot = div().size(px(8.)).rounded_full().flex_none();
-    match status_color(status, theme) {
-        Some(c) => dot.bg(c),
-        None => dot.border_1().border_color(theme.text_faint.opacity(0.6)),
-    }
+    status_icon(status, theme.status_symbols, theme)
+}
+
+/// Collie's status dot, filled for an agent state, a faint ring when idle. With `symbols`, herdr's
+/// `status_indicators = "symbols"` shapes instead (× ◐ ✓ ○, a dashed ring for its `·`), in the same colors. Every
+/// icon is drawn to the same 12 px box, so both styles are one size and switching never shifts a row.
+pub(crate) fn status_icon(status: AgentStatus, symbols: bool, theme: &Theme) -> Div {
+    let icon = match (symbols, status) {
+        (false, AgentStatus::Idle | AgentStatus::Unknown) => "icons/status-idle.svg",
+        (false, _) => "icons/status-dot.svg",
+        (true, AgentStatus::Blocked) => "icons/status-blocked.svg",
+        (true, AgentStatus::Working) => "icons/status-working.svg",
+        (true, AgentStatus::Done) => "icons/status-done.svg",
+        (true, AgentStatus::Idle) => "icons/status-idle.svg",
+        (true, AgentStatus::Unknown) => "icons/status-unknown.svg",
+    };
+    let faint = if symbols { theme.text_faint } else { theme.text_faint.opacity(0.6) };
+    let color = status_color(status, theme).unwrap_or(faint);
+    div().size(px(12.)).flex_none().child(gpui::svg().path(icon).size(px(12.)).text_color(color))
 }
 
 /// A small square text button (`+`).

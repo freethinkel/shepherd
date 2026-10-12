@@ -587,6 +587,33 @@ fn card_row(theme: &Theme, first: bool) -> Div {
         .gap(px(16.))
 }
 
+/// One way to draw agent status: the waiting, working, done and idle icons in it, its name, and a check when chosen.
+fn status_choice(theme: &Theme, symbols: bool, label: &'static str, checked: bool) -> gpui::Stateful<Div> {
+    use crate::model::AgentStatus::*;
+    let hover = theme.wash(0.06);
+    div()
+        .id(label)
+        .h(px(36.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .rounded(px(8.))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .child(
+            div()
+                .w(px(72.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .children([Blocked, Working, Done, Idle].map(|status| crate::shell::status_icon(status, symbols, theme))),
+        )
+        .child(div().flex_1().child(label))
+        .when(checked, |el| el.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(theme.accent)))
+}
+
 /// A row's title and, under it, its description.
 fn row_text(theme: &Theme, title: impl Into<SharedString>, description: impl Into<SharedString>) -> Div {
     div()
@@ -881,6 +908,19 @@ impl Render for SettingsView {
                             .child(toggle(&theme, "show-agents", settings.show_agents).on_click(cx.listener(
                                 |_, _: &ClickEvent, _, cx| update(cx, |s| s.show_agents = !s.show_agents),
                             ))),
+                    )
+                    .child(card_row(&theme, false).child(row_text(&theme, "Status icons", "How an agent's state shows, here and in herdr's own style.")))
+                    .child(
+                        div()
+                            .mx(px(8.))
+                            .mt(px(-8.))
+                            .pb(px(8.))
+                            .flex()
+                            .flex_col()
+                            .children([(false, "Dots"), (true, "Symbols")].map(|(symbols, label)| {
+                                status_choice(&theme, symbols, label, settings.status_symbols == symbols)
+                                    .on_click(move |_, _, cx| update(cx, |s| s.status_symbols = symbols))
+                            })),
                     )
                     .child(
                         card_row(&theme, false)

@@ -42,6 +42,8 @@ pub struct Settings {
     pub compact_workspaces: bool,
     /// One-line agent rows, without the task under the name.
     pub compact_agents: bool,
+    /// Agent status as herdr's `status_indicators = "symbols"` draws it, a glyph per state, instead of color dots.
+    pub status_symbols: bool,
     /// The Agents list keeps only agents waiting on you or done and not looked at yet.
     pub attention_agents: bool,
     /// The Agents list's height cap; dragging the section's top edge sets it, `None` is 40 % of the sidebar.
@@ -143,6 +145,7 @@ impl Default for Settings {
             workspace_show: WorkspaceShow::default(),
             compact_workspaces: false,
             compact_agents: false,
+            status_symbols: false,
             attention_agents: false,
             agents_height: None,
             recent_commands: Vec::new(),
@@ -219,7 +222,7 @@ impl Settings {
     }
 
     pub fn theme(&self, system: WindowAppearance) -> Theme {
-        Theme::resolve(&self.theme_light, &self.theme_dark, self.appearance, system, &self.font())
+        Theme { status_symbols: self.status_symbols, ..Theme::resolve(&self.theme_light, &self.theme_dark, self.appearance, system, &self.font()) }
     }
 
     /// The old single family as the light and dark themes: its variant of each appearance it has.
