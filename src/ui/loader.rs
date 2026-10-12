@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 const PERIOD: f32 = 0.75;
 /// How dim a cell rests between pulses (Zeron's `GSPIN_DIM`).
 const DIM: f32 = 0.1;
+/// An agent's spinner rests brighter, so its shape still reads as a glyph between pulses.
+const AGENT_DIM: f32 = 0.3;
 /// Zeron's sunrise gradient, a tint per row top to bottom.
 const ROW_TINTS: [u32; 3] = [0xB6D3EF, 0xEDB185, 0xF888A0];
 /// A wait shorter than this shows no loader, so a quick local connect doesn't flash one.
@@ -34,7 +36,7 @@ pub fn mini_spinner(cell: f32, tint: Hsla, window: &mut Window) -> Div {
 /// ask frames of. Its own animation asks for them, so each copy runs from when it first showed.
 pub fn glyph_spinner(cell: f32, rows: [Hsla; 3]) -> impl IntoElement {
     div().with_animation("glyph-spinner", gpui::Animation::new(Duration::from_secs_f32(PERIOD)).repeat(), move |el, t| {
-        el.child(cells(cell, 3, 2, |row, _| rows[row], ring, t))
+        el.child(cells(cell, 3, 2, |row, _| rows[row], ring, t, AGENT_DIM))
     })
 }
 
@@ -47,37 +49,38 @@ fn ring(row: usize, col: usize) -> f32 {
 fn grid(cell: f32, rows: usize, cols: usize, tint: impl Fn(usize, usize) -> Hsla, phase: impl Fn(usize, usize) -> f32, window: &mut Window) -> Div {
     window.request_animation_frame();
     static EPOCH: OnceLock<Instant> = OnceLock::new();
-    cells(cell, rows, cols, tint, phase, EPOCH.get_or_init(Instant::now).elapsed().as_secs_f32() / PERIOD)
+    cells(cell, rows, cols, tint, phase, EPOCH.get_or_init(Instant::now).elapsed().as_secs_f32() / PERIOD, DIM)
 }
 
-/// The cells at `t` periods in.
-fn cells(cell: f32, rows: usize, cols: usize, tint: impl Fn(usize, usize) -> Hsla, phase: impl Fn(usize, usize) -> f32, t: f32) -> Div {
+/// The cells at `t` periods in, resting at `dim`.
+fn cells(cell: f32, rows: usize, cols: usize, tint: impl Fn(usize, usize) -> Hsla, phase: impl Fn(usize, usize) -> f32, t: f32, dim: f32) -> Div {
     div().flex().flex_col().gap(px(cell / 2.)).children((0..rows).map(|row| {
         div().flex().gap(px(cell / 2.)).children((0..cols).map(|col| {
-            div().size(px(cell)).rounded(px(cell / 2.)).bg(tint(row, col)).opacity(opacity(t + phase(row, col)))
+            div().size(px(cell)).rounded(px(cell / 2.)).bg(tint(row, col)).opacity(opacity(t + phase(row, col), dim))
         }))
     }))
 }
 
-/// A cell's opacity at `t` periods in: full at the start, down to [`DIM`] by 45 %, resting there until 92 %, then
+/// A cell's opacity at `t` periods in: full at the start, down to `dim` by 45 %, resting there until 92 %, then
 /// back up (Zeron's `gspin_opacity`).
-fn opacity(t: f32) -> f32 {
+fn opacity(t: f32, dim: f32) -> f32 {
     let t = t.rem_euclid(1.);
     if t < 0.45 {
-        1. + (DIM - 1.) * t / 0.45
+        1. + (dim - 1.) * t / 0.45
     } else if t < 0.92 {
-        DIM
+        dim
     } else {
-        DIM + (1. - DIM) * (t - 0.92) / 0.08
+        dim + (1. - dim) * (t - 0.92) / 0.08
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::opacity;
+    use super::{DIM, opacity};
 
     #[test]
     fn a_cell_dims_rests_and_flares_once_a_period() {
+        let opacity = |t| opacity(t, DIM);
         assert_eq!(opacity(0.), 1.);
         assert!((opacity(0.45) - 0.1).abs() < 1e-5);
         assert_eq!(opacity(0.7), 0.1);

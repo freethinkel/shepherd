@@ -24,10 +24,11 @@ pub(crate) fn status_icon(status: AgentStatus, style: crate::theme::StatusIcons,
     let faint = if style == Symbols { theme.text_faint } else { theme.text_faint.opacity(0.6) };
     let color = status_color(status, theme).unwrap_or(faint);
     let el = div().size(px(12.)).flex_none().flex().items_center().justify_center();
+    // Animated is drawn a quarter up on the others, the spinner's cells 2.5 px: the check's drawing still fits the box
     let icon = match (style, status) {
-        (Animated, AgentStatus::Working) => return el.child(crate::ui::loader::glyph_spinner(2., glyph_rows(color, theme))),
-        (Animated, AgentStatus::Done) => "icons/status-done.svg",
-        (Animated, _) => return el.child(div().size(px(6.)).rounded_full().bg(color)),
+        (Animated, AgentStatus::Working) => return el.child(crate::ui::loader::glyph_spinner(2.5, glyph_rows(color, theme))),
+        (Animated, AgentStatus::Done) => return el.child(gpui::svg().path("icons/status-done.svg").flex_none().size(px(15.)).text_color(color)),
+        (Animated, _) => return el.child(div().size(px(7.5)).rounded_full().bg(color)),
         (Dots, AgentStatus::Idle | AgentStatus::Unknown) => "icons/status-idle.svg",
         (Dots, _) => "icons/status-dot.svg",
         (Symbols, AgentStatus::Blocked) => "icons/status-blocked.svg",
@@ -39,14 +40,16 @@ pub(crate) fn status_icon(status: AgentStatus, style: crate::theme::StatusIcons,
     el.child(gpui::svg().path(icon).size(px(12.)).text_color(color))
 }
 
-/// Zeron's `GlyphPalette::for_accent`: the spinner's rows, top to bottom, lighter, `tint` itself, deeper.
+/// Zeron's `GlyphPalette::for_accent`: the spinner's rows, top to bottom, lighter, `tint` itself, deeper. The tint
+/// is saturated a step past the accent and the light row kept nearer it, so a working agent stands out of a list.
 fn glyph_rows(tint: Hsla, theme: &Theme) -> [Hsla; 3] {
+    let tint = Hsla { s: (tint.s * 1.35).min(1.), ..tint };
     let (mut light, mut deep) = (tint, tint);
     if theme.appearance == crate::theme::Appearance::Dark {
-        (light.l, light.s) = ((light.l + 0.14).min(0.90), light.s * 0.72);
+        (light.l, light.s) = ((light.l + 0.14).min(0.90), light.s * 0.9);
         deep.l = (deep.l - 0.08).max(0.22);
     } else {
-        (light.l, light.s) = ((light.l + 0.11).min(0.76), light.s * 0.78);
+        (light.l, light.s) = ((light.l + 0.11).min(0.76), light.s * 0.9);
         deep.l = (deep.l - 0.09).max(0.22);
     }
     [light, tint, deep]
