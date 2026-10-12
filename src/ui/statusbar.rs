@@ -1,4 +1,4 @@
-//! The window's bottom bar (Zeron's footer labels): the shown pane's branch, directory and token spend, and
+//! The window's bottom bar (Zeron's footer labels): the shown pane's branch, its PR or MR, directory and token spend, and
 //! Claude's plan limits. Git runs off the main thread and is cached per directory.
 use crate::model::{Pane, Snapshot};
 use crate::theme::Theme;
@@ -183,31 +183,67 @@ fn read_changes(dir: &str) -> Option<(u32, u32)> {
     Some(parse_shortstat(&git(&["diff", "--shortstat", base.trim()])?))
 }
 
-/// `gh pr view --json state,isDraft`, read: `open`, `draft`, `merged` or `closed`.
-pub fn parse_pr(json: &str) -> Option<&'static str> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    match (v["state"].as_str()?, v["isDraft"].as_bool().unwrap_or(false)) {
-        ("OPEN", true) => Some("draft"),
-        ("OPEN", false) => Some("open"),
-        ("MERGED", _) => Some("merged"),
-        ("CLOSED", _) => Some("closed"),
-        _ => None,
-    }
+/// A branch's GitHub PR or GitLab MR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pr {
+    pub number: u64,
+    pub url: String,
+    /// `open`, `draft`, `merged` or `closed`.
+    pub state: &'static str,
+    /// A GitLab MR, written `!12` rather than `#12`.
+    pub gitlab: bool,
 }
 
-/// The state of the PR of `dir`'s branch; `None` without gh, its login, or a PR.
-fn read_pr(dir: &str) -> Option<&'static str> {
+/// `gh pr view --json number,url,state,isDraft` or `glab mr view -F json`, read.
+pub fn parse_pr(json: &str) -> Option<Pr> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let gitlab = v["iid"].is_u64();
+    let draft = v["isDraft"].as_bool().or(v["draft"].as_bool()).unwrap_or(false);
+    let state = match (v["state"].as_str()?.to_ascii_lowercase().as_str(), draft) {
+        ("open" | "opened", true) => "draft",
+        ("open" | "opened", false) => "open",
+        ("merged", _) => "merged",
+        ("closed", _) => "closed",
+        _ => return None,
+    };
+    let number = v["number"].as_u64().or(v["iid"].as_u64())?;
+    let url = v["url"].as_str().or(v["web_url"].as_str())?.to_string();
+    Some(Pr { number, url, state, gitlab })
+}
+
+/// The PR (gh) or else the MR (glab) of a branch; `key` is its repo's directory and the branch, a line apart. `None`
+/// without either tool, its login, or one.
+fn read_pr(key: &str) -> Option<Pr> {
+    let (dir, branch) = key.split_once('\n')?;
     // An app opened from Finder gets launchd's PATH, without Homebrew's.
-    let gh = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"].into_iter().find(|p| Path::new(p).is_file()).unwrap_or("gh");
-    let out = std::process::Command::new(gh).args(["pr", "view", "--json", "state,isDraft"]).current_dir(dir).output().ok()?;
-    parse_pr(&String::from_utf8_lossy(&out.stdout))
+    let tool = |name: &'static str| {
+        ["/opt/homebrew/bin", "/usr/local/bin"].into_iter().map(|d| format!("{d}/{name}")).find(|p| Path::new(p).is_file()).unwrap_or(name.into())
+    };
+    let ask = |bin: String, args: &[&str]| {
+        let out = std::process::Command::new(bin).args(args).current_dir(dir).stdin(std::process::Stdio::null()).output().ok();
+        let stderr = out.as_ref().map(|o| String::from_utf8_lossy(&o.stderr).into_owned()).unwrap_or_default();
+        (out.and_then(|o| parse_pr(&String::from_utf8_lossy(&o.stdout))), stderr)
+    };
+    let (pr, stderr) = ask(tool("gh"), &["pr", "view", branch, "--json", "number,url,state,isDraft"]);
+    // gh found the repo on GitHub and the branch has no PR: no need to ask GitLab
+    if pr.is_some() || stderr.contains("no pull requests found") {
+        return pr;
+    }
+    ask(tool("glab"), &["mr", "view", branch, "-F", "json"]).0
+}
+
+/// The cached PR or MR of the branch checked out at `dir`, asked again after its TTL while `active` (the window is
+/// key). It's cached per branch, so after a checkout the last branch's PR is not shown.
+pub fn pr_of(dir: &str, active: bool, cx: &mut App) -> Option<Pr> {
+    let branch = branch_of(dir, cx)?;
+    cached(&format!("{dir}\n{branch}"), if active { PR_TTL } else { Duration::MAX }, read_pr, cx)
 }
 
 /// The worktree at `dir`'s cached changes and PR state, asked again after their TTLs while `active` (the window
 /// is key); in the background only a first lookup runs.
 pub fn changes_of(dir: &str, active: bool, cx: &mut App) -> (Option<(u32, u32)>, Option<&'static str>) {
-    let (ttl, pr_ttl) = if active { (CHANGES_TTL, PR_TTL) } else { (Duration::MAX, Duration::MAX) };
-    (cached(dir, ttl, read_changes, cx), cached(dir, pr_ttl, read_pr, cx))
+    let ttl = if active { CHANGES_TTL } else { Duration::MAX };
+    (cached(dir, ttl, read_changes, cx), pr_of(dir, active, cx).map(|p| p.state))
 }
 
 /// Asks git about the worktree at `dir`'s changes again on the next render, as when its agent stops.
@@ -615,6 +651,14 @@ pub fn bar(
                 .when(g.behind > 0, |el| el.child(div().flex_none().child(format!("↓{}", g.behind))))
                 .on_click(on_branch)
         }))
+        .children(dir.as_deref().and_then(|d| pr_of(d, cx.active_window().is_some(), cx)).map(|pr| {
+            let number = format!("{}{}", if pr.gitlab { "!" } else { "#" }, pr.number);
+            link(label(theme, "icons/git-pull-request.svg").id("statusbar-pr"), theme, false)
+                .flex_shrink_0()
+                .child(number)
+                .when(pr.state != "open", |el| el.child(div().text_color(theme.text_faint).child(pr.state)))
+                .on_click(move |_, _, cx| cx.open_url(&pr.url))
+        }))
         .children(dir.map(|d| {
             let short = short_path(&d, home.as_deref());
             link(label(theme, "icons/folder.svg").id("statusbar-cwd"), theme, false)
@@ -657,8 +701,11 @@ mod tests {
         assert_eq!(parse_shortstat(" 1 file changed, 1 insertion(+)\n"), (1, 0));
         assert_eq!(parse_shortstat(" 1 file changed, 4 deletions(-)\n"), (0, 4));
         assert_eq!(parse_shortstat(""), (0, 0));
-        assert_eq!(parse_pr(r#"{"isDraft":true,"state":"OPEN"}"#), Some("draft"));
-        assert_eq!(parse_pr(r#"{"isDraft":false,"state":"MERGED"}"#), Some("merged"));
+        let gh = parse_pr(r#"{"isDraft":true,"number":7,"state":"OPEN","url":"https://github.com/a/b/pull/7"}"#);
+        assert_eq!(gh, Some(Pr { number: 7, url: "https://github.com/a/b/pull/7".into(), state: "draft", gitlab: false }));
+        let glab = parse_pr(r#"{"iid":12,"draft":false,"state":"opened","web_url":"https://gitlab.com/a/b/-/merge_requests/12"}"#);
+        assert_eq!(glab, Some(Pr { number: 12, url: "https://gitlab.com/a/b/-/merge_requests/12".into(), state: "open", gitlab: true }));
+        assert_eq!(parse_pr(r#"{"isDraft":false,"number":3,"state":"MERGED","url":"u"}"#).map(|p| p.state), Some("merged"));
         assert_eq!(parse_pr(""), None);
     }
 

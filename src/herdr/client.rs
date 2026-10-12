@@ -71,7 +71,12 @@ impl Client {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let _w = w;
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                let line = tokio::select! {
+                    line = lines.next_line() => line,
+                    _ = tx.closed() => break, // the caller resubscribed: hang up now, not on the next event
+                };
+                let Ok(Some(line)) = line else { break };
                 let Ok(value) = serde_json::from_str::<Value>(&line) else { break };
                 // An error line (events_lost) ends the stream; the caller resubscribes and refetches.
                 if value.get("error").is_some() || tx.send(value).is_err() {

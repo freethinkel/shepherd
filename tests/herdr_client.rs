@@ -81,6 +81,24 @@ async fn subscription_ends_when_server_closes() {
 }
 
 #[tokio::test]
+async fn dropping_a_subscription_hangs_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("herdr.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (r, mut w) = stream.into_split();
+        let mut lines = BufReader::new(r).lines();
+        let req: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        w.write_all(format!("{}\n", json!({"id": req["id"], "result": {}})).as_bytes()).await.unwrap();
+        lines.next_line().await.unwrap() // EOF once the client hangs up
+    });
+    drop(Client::at(path).subscribe(&["tab.created"], &[]).await.unwrap());
+    let eof = tokio::time::timeout(std::time::Duration::from_secs(1), server).await.expect("the connection stayed open").unwrap();
+    assert_eq!(eof, None);
+}
+
+#[tokio::test]
 async fn a_missing_or_dead_socket_means_no_server() {
     let dir = tempfile::tempdir().unwrap();
     let missing = Client::at(dir.path().join("herdr.sock")).call("ping", json!({})).await.unwrap_err();

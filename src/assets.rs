@@ -58,6 +58,7 @@ impl gpui::AssetSource for Assets {
             "expand-arrows",
             "folder",
             "git-branch",
+            "git-pull-request",
             "grok-mark",
             "hermes-mark",
             "info-circle",
