@@ -104,6 +104,11 @@ const HERDR_FIELDS: [(&str, &str); 3] =
 pub struct SettingsView {
     section: Section,
     font: Entity<InputState>,
+    /// Font size and line height as typed; between edits they follow the setting.
+    font_size: Entity<InputState>,
+    line_height: Entity<InputState>,
+    /// The font size and line height the fields last showed, so a step while one is typed in still shows.
+    numbers_shown: [String; 2],
     herdr_bin: Entity<InputState>,
     herdr_socket: Entity<InputState>,
     /// The open list of a select, by the select's id.
@@ -162,6 +167,8 @@ impl SettingsView {
             })
         };
         let font = field(Some(settings.font_family.clone()), "Geist Mono", window, cx);
+        let font_size = field(Some(settings.font_size.to_string()), "13", window, cx);
+        let line_height = field(Some(format!("{:.1}", settings.line_height)), "1.4", window, cx);
         let herdr_bin = field(settings.herdr_bin.clone(), "herdr on PATH", window, cx);
         let herdr_socket = field(settings.herdr_socket.clone(), "~/.config/herdr/herdr.sock", window, cx);
         let herdr_config = HerdrConfig::load(&config_path()).map_err(|e| format!("{e:#}"));
@@ -191,6 +198,31 @@ impl SettingsView {
                 }
             }));
         }
+        for (i, input) in [&font_size, &line_height].into_iter().enumerate() {
+            // Enter leaves the field, which applies it. (Render runs before the blur arrives, so it can't.)
+            subscriptions.push(cx.subscribe_in(input, window, move |v: &mut Self, input, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => window.focus(&v.focus, cx),
+                InputEvent::Blur => set_number(i, input, 0.0, window, cx),
+                _ => {}
+            }));
+        }
+        // Up and down step the focused number field; intercepted, since the field's own bindings move its cursor.
+        let numbers_window = window.window_handle();
+        let number_inputs = [font_size.clone(), line_height.clone()];
+        subscriptions.push(cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
+            let dir = match event.keystroke.key.as_str() {
+                "up" => 1.0,
+                "down" => -1.0,
+                _ => return,
+            };
+            if window.window_handle() != numbers_window || event.keystroke.modifiers != Default::default() {
+                return;
+            }
+            if let Some(i) = number_inputs.iter().position(|input| input.read(cx).focus_handle(cx).is_focused(window)) {
+                set_number(i, &number_inputs[i], dir, window, cx);
+                cx.stop_propagation();
+            }
+        }));
         for (input, (key, _)) in herdr_fields.iter().zip(HERDR_FIELDS) {
             subscriptions.push(cx.subscribe_in(input, window, move |v: &mut Self, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
@@ -237,6 +269,9 @@ impl SettingsView {
         let mut view = SettingsView {
             section,
             font,
+            numbers_shown: numbers(&settings),
+            font_size,
+            line_height,
             herdr_bin,
             herdr_socket,
             open_select: None,
@@ -694,6 +729,65 @@ fn note(theme: &Theme, text: impl Into<SharedString>) -> Div {
 }
 
 /// A text field in a row: the filled pill of Zeron's selects.
+/// A short field for a number, between its − and + buttons.
+/// The number fields, font size and line height: a setting's value, how it is set (clamped), and one step.
+const NUMBERS: [(fn(&Settings) -> f32, fn(&mut Settings, f32), f32); 2] = [
+    (|s| s.font_size, |s, v| s.font_size = step_font_size(v, 0.0), 1.0),
+    (|s| s.line_height, |s, v| s.line_height = step_line_height(v, 0.0), 0.1),
+];
+
+/// The font size and line height as their fields show them.
+fn numbers(s: &Settings) -> [String; 2] {
+    [s.font_size.to_string(), format!("{:.1}", s.line_height)]
+}
+
+/// Sets number field `i`'s setting to what the field shows, typed or not, moved `steps` steps; then the field shows
+/// the setting, clamped. A field that doesn't parse moves from the setting.
+fn set_number(i: usize, input: &Entity<InputState>, steps: f32, window: &mut Window, cx: &mut App) {
+    let (get, set, step) = NUMBERS[i];
+    let typed = input.read(cx).value().trim().replace(',', ".").parse::<f32>().ok();
+    if typed.is_some() || steps != 0.0 {
+        update(cx, |s| set(s, typed.unwrap_or(get(s)) + steps * step));
+    }
+    let shown = numbers(&SettingsGlobal::of(cx).settings)[i].clone();
+    input.update(cx, |input, cx| input.set_value(shown, window, cx));
+}
+
+/// Number field `i`, with stepper chevrons at its right as `<input type="number">` has.
+fn number_field(theme: &Theme, i: usize, input: &Entity<InputState>) -> Div {
+    let hover = theme.wash(0.10);
+    let chevron = |dir: f32, icon: &'static str| {
+        div()
+            .id(("number-step", i * 2 + (dir > 0.) as usize))
+            .w(px(16.))
+            .h(px(12.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.))
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .child(gpui::svg().path(icon).size(px(10.)).text_color(theme.text_muted))
+            .on_click({
+                let input = input.clone();
+                move |_, window, cx| set_number(i, &input, dir, window, cx)
+            })
+    };
+    div()
+        .w(px(72.))
+        .flex_none()
+        .h(px(32.))
+        .pl(px(10.))
+        .pr(px(4.))
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .rounded(px(8.))
+        .bg(theme.wash(0.06))
+        .child(div().flex_1().min_w_0().child(Input::new(input)))
+        .child(div().flex_none().flex().flex_col().child(chevron(1., "icons/alt-arrow-up.svg")).child(chevron(-1., "icons/alt-arrow-down.svg")))
+}
+
 fn field(theme: &Theme, input: &Entity<InputState>) -> Div {
     div().w(px(240.)).flex_none().h(px(32.)).px(px(10.)).flex().items_center().rounded(px(8.)).bg(theme.wash(0.06)).child(Input::new(input))
 }
@@ -721,6 +815,14 @@ impl Render for SettingsView {
         let global = SettingsGlobal::of(cx);
         let settings = global.settings.clone();
         let error = global.error.clone();
+        // the number fields follow the setting when it changes elsewhere (a chevron, Cmd+=), even while typed in
+        let shown = numbers(&settings);
+        for (i, input) in [self.font_size.clone(), self.line_height.clone()].into_iter().enumerate() {
+            if shown[i] != self.numbers_shown[i] {
+                input.update(cx, |input, cx| input.set_value(shown[i].clone(), window, cx));
+            }
+        }
+        self.numbers_shown = shown;
         let herdr = self.herdr_config.as_ref().ok().cloned().unwrap_or_default();
         // Under herdr's cards: why its config cannot be read, what the last change did, else where it is saved.
         let herdr_note = self
@@ -812,34 +914,14 @@ impl Render for SettingsView {
                             card_row(&theme, false)
                                 .child(row_text(&theme, "Font size", "In points, for every pane."))
                                 .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.))
-                                        .child(action(&theme, "size-down", "−").w(px(32.)).on_click(cx.listener(
-                                            |_, _: &ClickEvent, _, cx| update(cx, |s| s.font_size = step_font_size(s.font_size, -1.0)),
-                                        )))
-                                        .child(div().w(px(40.)).flex().justify_center().child(format!("{}", settings.font_size)))
-                                        .child(action(&theme, "size-up", "+").w(px(32.)).on_click(cx.listener(
-                                            |_, _: &ClickEvent, _, cx| update(cx, |s| s.font_size = step_font_size(s.font_size, 1.0)),
-                                        ))),
+                                    number_field(&theme, 0, &self.font_size),
                                 ),
                         )
                         .child(
                             card_row(&theme, false)
                                 .child(row_text(&theme, "Line height", "Row height as a multiple of the font size."))
                                 .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(4.))
-                                        .child(action(&theme, "line-height-down", "−").w(px(32.)).on_click(cx.listener(
-                                            |_, _: &ClickEvent, _, cx| update(cx, |s| s.line_height = step_line_height(s.line_height, -0.1)),
-                                        )))
-                                        .child(div().w(px(40.)).flex().justify_center().child(format!("{:.1}", settings.line_height)))
-                                        .child(action(&theme, "line-height-up", "+").w(px(32.)).on_click(cx.listener(
-                                            |_, _: &ClickEvent, _, cx| update(cx, |s| s.line_height = step_line_height(s.line_height, 0.1)),
-                                        ))),
+                                    number_field(&theme, 1, &self.line_height),
                                 ),
                         )
                         .child(
