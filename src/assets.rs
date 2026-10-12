@@ -31,6 +31,9 @@ macro_rules! icons {
 impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         let Some(name) = path.strip_prefix("icons/").and_then(|p| p.strip_suffix(".svg")) else { return Ok(None) };
+        if let Some(icon) = name.strip_prefix("solar/") {
+            return Ok(solar_icon(icon).map(|svg| Cow::Owned(svg.into_bytes())));
+        }
         Ok(icons!(
             name,
             "add-circle",
@@ -87,6 +90,7 @@ impl gpui::AssetSource for Assets {
             "split-rows",
             "sun",
             "terminal",
+            "trash",
             "tuning",
             "widget",
         ))
@@ -95,4 +99,21 @@ impl gpui::AssetSource for Assets {
     fn list(&self, _path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
         Ok(Vec::new())
     }
+}
+
+/// The Solar icon set's Linear style (iconify's `solar` collection, `-linear` icons), by name: each icon's SVG body
+/// on a 24 px canvas. The sessions' icons; licence in assets/NOTICE.
+pub fn solar_names() -> impl Iterator<Item = &'static str> {
+    solar().keys().map(String::as_str)
+}
+
+/// The Solar Linear icon `name` as a whole SVG, served at `icons/solar/<name>.svg`.
+pub fn solar_icon(name: &str) -> Option<String> {
+    solar().get(name).map(|body| format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">{body}</svg>"#))
+}
+
+// the bodies hold escaped quotes, so they are owned rather than borrowed from the JSON
+fn solar() -> &'static std::collections::BTreeMap<String, String> {
+    static SOLAR: std::sync::OnceLock<std::collections::BTreeMap<String, String>> = std::sync::OnceLock::new();
+    SOLAR.get_or_init(|| serde_json::from_str(include_str!("../assets/solar-linear.json")).expect("assets/solar-linear.json"))
 }

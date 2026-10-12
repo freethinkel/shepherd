@@ -24,6 +24,11 @@ pub struct Settings {
     pub herdr_bin: Option<String>,
     /// herdr's API socket; `None` is herdr's own default.
     pub herdr_socket: Option<String>,
+    /// The saved herdr machine (`herdr machine`) shown, by id; its relay's socket is `herdr_socket`.
+    pub herdr_machine: Option<String>,
+    /// The names and icons given to herdr sessions and machines in Shepherd, by the place's key (a session's socket,
+    /// `machine:<id>`).
+    pub place_looks: BTreeMap<String, PlaceLook>,
     /// The command Cmd+click opens `path:line:col` with (`zed`, `code -g`, `nvim` in a pane to the right); `None`
     /// finds Zed, Cursor or VS Code.
     pub editor: Option<String>,
@@ -60,6 +65,16 @@ pub struct Settings {
     pub copy_on_select: bool,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
+}
+
+/// A herdr session's or machine's look in Shepherd, as Arc's spaces have one: `None` keeps herdr's name, or the
+/// name's first letter for the icon.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlaceLook {
+    pub name: Option<String>,
+    /// A short text, an emoji or a letter or two.
+    pub icon: Option<String>,
 }
 
 /// The parts of a workspace row that can be hidden; all shown by default.
@@ -136,6 +151,8 @@ impl Default for Settings {
             appearance: AppearanceMode::System,
             herdr_bin: None,
             herdr_socket: None,
+            herdr_machine: None,
+            place_looks: BTreeMap::new(),
             editor: None,
             keys: BTreeMap::new(),
             sidebar_width: SIDEBAR_WIDTH,

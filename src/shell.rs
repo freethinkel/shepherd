@@ -25,6 +25,7 @@ mod divider;
 mod motion;
 mod pane_drag;
 mod popups;
+mod sessions;
 mod sidebar;
 mod sync;
 mod tab_bar;
@@ -48,6 +49,8 @@ const TITLEBAR_CLUSTER: f32 = TOGGLE_LEFT + 24.0 + 8.0;
 pub struct Shell {
     snapshot: Option<Snapshot>,
     error: Option<String>,
+    /// Since when the place shown has sent no snapshot of its own yet: the one shown, if any, is the last it sent.
+    connecting: Option<Instant>,
     panes: HashMap<String, Entity<PaneTerminal>>,
     /// The panes shown last, most recent first: their views (and herdr sessions) outlive a tab switch.
     recent_panes: Vec<String>,
@@ -146,6 +149,34 @@ pub struct Shell {
     frame_save: gpui::Task<()>,
     /// Since when each agent has had its status: how long the waiting ones have waited.
     since: crate::model::Since,
+    /// The loop that keeps the window in step with herdr; replacing it (a switch of session) stops the last one.
+    sync: gpui::Task<()>,
+    /// herdr's sessions and machines, in the bar under the sidebar.
+    places: Vec<sessions::Place>,
+    /// A two-finger swipe over the sidebar in progress.
+    swipe: Option<sessions::Swipe>,
+    /// The workspace list springing home from this offset since then, after a swipe, beside the place it left.
+    slide: Option<(f32, Instant, Option<sessions::Place>)>,
+    /// The bar's row of places, when it overflows.
+    places_scroll: gpui::ScrollHandle,
+    /// Where the bar's lit square was last kept in view: it is scrolled to again only when it moves.
+    lit_seen: Cell<f32>,
+    /// The bar's row gliding from one scroll offset to another since then, to keep the lit square in its middle.
+    bar_glide: Cell<Option<(f32, f32, Instant)>>,
+    /// Where the bar was painted: a swipe there scrolls the bar, not to the next place.
+    bar_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// A place's right-click menu in the bar, and where it was clicked.
+    place_menu: Option<crate::ui::Popup<(sessions::Place, gpui::Point<Pixels>)>>,
+    /// The Edit dialog of a place's name and icon.
+    place_edit: Option<crate::ui::Popup<sessions::PlaceEdit>>,
+    /// The places not shown, by key, with their last snapshot.
+    snapshots: HashMap<String, Snapshot>,
+    /// The New session dialog, open over the window.
+    session_dialog: Option<crate::ui::Popup<sessions::SessionDialog>>,
+    /// Delete a session, or forget a machine? Asked first.
+    session_delete: Option<crate::ui::Popup<sessions::Place>>,
+    /// The saved machine shown, by its label; `None` for a session on this Mac.
+    machine_label: Option<String>,
 }
 
 /// New worktree: the repo's workspace and the branch name being typed.
@@ -214,6 +245,9 @@ impl Shell {
                         s.touched = Instant::now();
                     }
                     cx.set_global(crate::terminal::pane::Yielded(!active));
+                    if active {
+                        s.refresh_places(cx); // sessions made or deleted elsewhere
+                    }
                     cx.notify(); // the shown tab's agents count as seen once the window is active
                 })
                 .detach();
@@ -260,9 +294,10 @@ impl Shell {
                     let _ = this.update(cx, |s, cx| s.save_frame(cx));
                     true
                 });
-                let shell = Shell {
+                let mut shell = Shell {
                     snapshot: None,
                     error: None,
+                    connecting: Some(Instant::now()),
                     panes: HashMap::new(),
                     recent_panes: Vec::new(),
                     own_pane: std::env::var("HERDR_PANE_ID").ok(),
@@ -321,10 +356,24 @@ impl Shell {
                     frame: None,
                     frame_save: gpui::Task::ready(()),
                     since: Default::default(),
+                    sync: gpui::Task::ready(()),
+                    places: Vec::new(),
+                    swipe: None,
+                    slide: None,
+                    places_scroll: gpui::ScrollHandle::new(),
+                    bar_bounds: Default::default(),
+                    lit_seen: Cell::new(-1.),
+                    bar_glide: Cell::new(None),
+                    place_menu: None,
+                    place_edit: None,
+                    snapshots: HashMap::new(),
+                    session_dialog: None,
+                    session_delete: None,
+                    machine_label: None,
                 };
-                let client = shell.client.clone();
-                cx.set_global(PaneQueries(client.clone(), rt.clone()));
-                cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await).detach();
+                shell.resume_machine(cx);
+                shell.connect(cx);
+                shell.refresh_places(cx);
                 // Waiting times move on between snapshots.
                 // ponytail: a minute from launch, not from each wait, so a label can lag by up to a minute.
                 cx.spawn(async move |this, cx| loop {
@@ -354,6 +403,13 @@ impl Shell {
             let Some(window) = active.or_else(|| cx.windows().into_iter().find_map(|w| w.downcast::<Shell>())) else { return };
             let _ = window.update(cx, |shell, window, cx| shell.toggle_settings_here(window, cx));
         });
+    }
+
+    /// Follows herdr over `self.client` from scratch: its snapshot and the subscription that refreshes it.
+    fn connect(&mut self, cx: &mut Context<Self>) {
+        let (client, rt) = (self.client.clone(), self.rt.clone());
+        cx.set_global(PaneQueries(client.clone(), rt.clone()));
+        self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await);
     }
 
     fn toggle_settings_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -695,6 +751,10 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.tab_menu, window);
         crate::ui::reap_popup(&mut self.worktree_dialog, window);
         crate::ui::reap_popup(&mut self.remove_confirm, window);
+        crate::ui::reap_popup(&mut self.session_dialog, window);
+        crate::ui::reap_popup(&mut self.place_menu, window);
+        crate::ui::reap_popup(&mut self.place_edit, window);
+        crate::ui::reap_popup(&mut self.session_delete, window);
         crate::ui::reap_popup(&mut self.command_panel, window);
         if let Some(s) = &self.snapshot {
             self.removing.retain(|id| s.workspaces.iter().any(|w| &w.workspace_id == id));
@@ -778,8 +838,19 @@ impl Render for Shell {
                     .size_full(),
             )
             .when_some(self.error.clone(), |el, err| el.child(div().p_4().text_color(theme.text_muted).child(err)))
-            .when(snapshot.is_none() && self.error.is_none(), |el| {
-                el.child(div().p_4().text_color(theme.text_muted).child("Connecting to herdr…"))
+            .when(snapshot.is_none() && self.error.is_none() && self.connecting.is_some_and(|at| crate::ui::loader::due(at, window)), |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(12.))
+                        .child(crate::ui::loader::spinner(2.5, window))
+                        .child(div().text_size(px(12.)).text_color(theme.text_muted).child(format!("Connecting to {}…", self.place_label(cx)))),
+                )
             })
             .children(frames.into_iter().map(|f| {
                 let cell = div()

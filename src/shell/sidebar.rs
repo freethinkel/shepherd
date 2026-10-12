@@ -171,8 +171,15 @@ impl Shell {
         let hover_bg = theme.hover;
         let active = window.is_window_active();
 
+        let strip = update_strip(theme, cx);
+        let waiting = self.error.is_none() && self.connecting.is_some_and(|at| crate::ui::loader::due(at, window));
+        let (list_offset, beside) = self.list_offset(window);
+        let beside = beside.map(|(place, at)| {
+            div().absolute().top_0().bottom_0().w(px(self.sidebar_width - 1.)).left(px(at)).child(self.place_preview(&place, theme, window, cx))
+        });
         // Laid out at full width and clipped by its tweened box, so rows never reflow mid slide.
         div()
+            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| this.sidebar_scroll(e, cx)))
             .w(px(self.sidebar_width - 1.))
             .h_full()
             .flex_none()
@@ -188,14 +195,35 @@ impl Shell {
                     .items_center()
                     .text_size(px(11.))
                     .text_color(theme.text_faint)
-                    .child("Workspaces"),
+                    // the herdr session shown, as Arc names the space
+                    .child(div().flex_1().truncate().child(self.place_label(cx)))
+                    // the place's own snapshot hasn't come yet: the list is its last, or none
+                    .when(waiting, |el| el.child(crate::ui::loader::mini_spinner(2., theme.text_faint, window))),
             )
             .child(
+                // the list, and beside it under a swipe the place it goes to (or comes from)
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .child(
                 div()
                     .id("workspaces")
+                    // under a swipe's fingers, then springing home
+                    .relative()
+                    .left(px(list_offset))
+                    .opacity(1. - (list_offset.abs() / 400.).min(0.5))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    // a sideways swipe moves between places, not down the list
+                    .map(|mut el| {
+                        el.style().restrict_scroll_to_axis = Some(true);
+                        el
+                    })
                     .px(px(8.))
                     .flex()
                     .flex_col()
@@ -380,6 +408,8 @@ impl Shell {
                         }).collect::<Vec<_>>()
                     }),
             )
+                    .children(beside),
+            )
             .child(
                 div().flex_none().m(px(8.)).flex().gap(px(4.)).child(
                 div()
@@ -397,21 +427,6 @@ impl Shell {
                     .child(div().text_size(px(15.)).child("+"))
                     .child("New workspace")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
-                )
-                .child(
-                    div()
-                        .id("open-settings")
-                        .flex_none()
-                        .size(px(32.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(8.))
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(hover_bg))
-                        .child(gpui::svg().path("icons/settings.svg").size(px(16.)).text_color(theme.text_muted))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_settings_here(window, cx))),
                 ),
             )
             .when(SettingsGlobal::of(cx).settings.show_agents && any_agents, |el| {
@@ -422,7 +437,8 @@ impl Shell {
                         .relative()
                         .px(px(16.))
                         .pt(px(12.))
-                        .pb(px(6.))
+                        // the list's top fade starts just under the label
+                        .pb(px(4.))
                         .border_t_1()
                         .border_color(theme.border)
                         .text_size(px(11.))
@@ -488,7 +504,8 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .child(
-                        div()
+                        // Zeron's fade where rows scroll under the edges (the bar below)
+                        crate::ui::edge_fade::edge_faded(12., &self.agents_scroll, div()
                             .id("agents")
                             .min_h_0()
                             .overflow_y_scroll()
@@ -567,12 +584,142 @@ impl Shell {
                                     }));
                                 heading.into_iter().chain([agent.into_any_element()])
                             }))
-                            // the last row scrolls clear of the window's edge
-                            .child(div().flex_none().h(px(8.))),
+                            // the last row scrolls clear of the list's faded edge
+                            .child(div().flex_none().h(px(4.)))),
                     )
                     .child(crate::ui::scrollbar("agents-scrollbar", &self.agents_scroll, theme)),
                 )
             })
-            .children(update_strip(theme, cx))
+            .children(strip)
+            .child(self.place_bar(theme, list_offset, window, cx))
+    }
+
+    /// Arc's space bar: a button for each herdr session and machine, the shown one lit, and + for a new one.
+    /// `offset` is the workspace list's: the lit square under the buttons moves as far toward the next place as the list
+    /// has moved toward it.
+    fn place_bar(&self, theme: &Theme, offset: f32, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let hover_bg = theme.hover;
+        let shown_at = self.places.iter().position(|p| self.places_shown(p));
+        let buttons = self.places.iter().enumerate().map(|(i, place)| {
+            let shown = self.places_shown(place);
+            let (name, icon) = place.look(cx);
+            let letter = || div().text_size(px(12.)).font_weight(gpui::FontWeight::SEMIBOLD).child(name.chars().next().unwrap_or('?').to_uppercase().to_string());
+            let mark = match (icon, place) {
+                (Some(icon), _) => sessions::icon_mark(&icon, 15., if shown { theme.accent } else { theme.text_faint }),
+                (None, sessions::Place::Machine(_)) => {
+                    gpui::svg().path("icons/remote-server.svg").size(px(15.)).text_color(if shown { theme.accent } else { theme.text_faint }).into_any_element()
+                }
+                (None, sessions::Place::Session(_)) => letter().into_any_element(),
+            };
+            let (to, menu) = (place.clone(), place.clone());
+            div()
+                .id(("place", i))
+                .size(px(30.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .cursor_pointer()
+                .relative()
+                .text_color(if shown { theme.accent } else { theme.text_faint })
+                .when(!shown, |el| el.hover(move |s| s.bg(hover_bg)))
+                .child(mark)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    if !this.places_shown(&to) {
+                        this.switch_to(to.clone(), cx)
+                    }
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| this.open_place_menu(menu.clone(), e.position, cx)),
+                )
+        });
+        // one button and the gap after it
+        let step = 34.;
+        if let Some((from, to, at)) = self.bar_glide.get() {
+            let t = at.elapsed().as_secs_f32() / FOLD_DURATION.as_secs_f32();
+            let x = if t >= 1. { to } else { from + (to - from) * ease_out(t) };
+            self.places_scroll.set_offset(gpui::point(px(-x), px(0.)));
+            if t >= 1. {
+                self.bar_glide.set(None);
+            } else {
+                window.request_animation_frame();
+            }
+        }
+        let lit = shown_at.map(|at| {
+            let x = (at as f32 - offset / self.sidebar_width).clamp(0., (self.places.len() - 1) as f32) * step;
+            // a moved square glides to the row's middle; one that stays put leaves the row where it was scrolled
+            if x != self.lit_seen.get() {
+                self.lit_seen.set(x);
+                let width = f32::from(self.places_scroll.bounds().size.width);
+                let to = (x + 15. - width / 2.).clamp(0., f32::from(self.places_scroll.max_offset().x));
+                let from = -f32::from(self.places_scroll.offset().x);
+                if (to - from).abs() > 0.5 {
+                    self.bar_glide.set(Some((from, to, Instant::now())));
+                }
+            }
+            div().absolute().top_0().left(px(x)).size(px(30.)).rounded(px(8.)).bg(theme.selected)
+        });
+        if self.bar_glide.get().is_some() {
+            window.request_animation_frame(); // a glide set just now starts on the next frame
+        }
+        let bar_bounds = self.bar_bounds.clone();
+        div()
+            .relative()
+            .flex_none()
+            // close under the agents list, the window's edge kept below
+            .pt(px(2.))
+            .pb(px(8.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .child(
+                gpui::canvas(move |bounds, _, _| bar_bounds.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(
+                div()
+                    .id("open-settings")
+                    .size(px(30.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .child(gpui::svg().path("icons/settings.svg").size(px(16.)).text_color(theme.text_muted))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_settings_here(window, cx))),
+            )
+            // centred while they fit, scrolled sideways (faded at the edges) once they don't
+            .child(
+                div().flex_1().min_w_0().mx(px(12.)).child(crate::ui::edge_fade::edge_faded_x(16., 
+                    &self.places_scroll,
+                    div()
+                        .id("places")
+                        .w_full()
+                        .flex()
+                        .overflow_x_scroll()
+                        .track_scroll(&self.places_scroll)
+                        // auto margins centre the row while it fits and fall to 0 once it scrolls
+                        .child(div().flex_none().mx_auto().relative().flex().gap(px(step - 30.)).children(lit).children(buttons)),
+                )),
+            )
+            .child(
+                div()
+                    .id("place-new")
+                    .size(px(30.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .child(gpui::svg().path("icons/plus.svg").size(px(16.)).text_color(theme.text_muted))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_session_dialog(window, cx))),
+            )
     }
 }

@@ -152,6 +152,222 @@ impl Shell {
             )
             .with_priority(1)
         }))
+        .children(self.place_menu.as_ref().map(|menu| {
+            let (place, at) = menu.value.clone();
+            let (edit, doomed) = (place.clone(), place.clone());
+            gpui::deferred(
+                gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
+                    "place-menu-in",
+                    menu,
+                    menu_card(theme, "place-menu", 160.)
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            if let Some(m) = this.place_menu.as_mut() { m.close() }
+                            cx.notify();
+                        }))
+                        .child(row(theme, false, "place-menu-edit").h(px(28.)).rounded(px(6.)).child("Edit…").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_place_edit(edit.clone(), window, cx)
+                        })))
+                        .when(place.deletable(), |el| {
+                            let label = if matches!(place, sessions::Place::Machine(_)) { "Forget…" } else { "Delete…" };
+                            el.child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border)).child(
+                                row(theme, false, "place-menu-delete")
+                                    .h(px(28.))
+                                    .rounded(px(6.))
+                                    .text_color(theme.danger)
+                                    .child(label)
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        if let Some(m) = this.place_menu.as_mut() { m.close() }
+                                        this.confirm_delete(doomed.clone(), cx)
+                                    })),
+                            )
+                        }),
+                )),
+            )
+            .with_priority(1)
+        }))
+        .children(self.place_edit.as_ref().map(|edit| {
+            let field = |input: &Entity<InputState>| {
+                div()
+                    .mt(px(8.))
+                    .h(px(SESSION_FIELD_H))
+                    .flex()
+                    .items_center()
+                    .px(px(12.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.wash(0.04))
+                    .text_size(px(14.))
+                    .child(div().flex_1().child(Input::new(input)))
+            };
+            let card = dialog_card(theme, "place-edit", "Edit session")
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_place_edit(false, cx)))
+                .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
+                    if e.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        this.finish_place_edit(false, cx);
+                    }
+                }))
+                .child(div().mt(px(4.)).text_color(theme.text_muted).child("Name"))
+                .child(field(&edit.value.name))
+                // Arc's and Zen's picker: drawn icons or emoji, after the name's letter; the picked one lit
+                .child({
+                    let (picked, emoji) = (edit.value.icon.clone(), edit.value.emoji);
+                    let letter = edit.value.name.read(cx).value().trim().chars().next().unwrap_or('?').to_uppercase().to_string();
+                    let tab = |id: &'static str, label: &'static str, on: bool| {
+                        div()
+                            .id(id)
+                            .px(px(10.))
+                            .h(px(24.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .text_color(if on { theme.text } else { theme.text_muted })
+                            .when(on, |el| el.bg(theme.selected))
+                            .child(label)
+                    };
+                    let weak = cx.entity().downgrade();
+                    let grid: gpui::AnyElement = if emoji {
+                        // every emoji, found by name, laid out only where the list shows them
+                        let rows = Rc::new(sessions::emoji_rows(&edit.value.search.read(cx).value()));
+                        let (rows_, picked_) = (rows.clone(), picked.clone());
+                        let (selected, hover, faint) = (theme.selected, theme.hover, theme.text_faint);
+                        let list = gpui::uniform_list("place-emoji", rows.len(), move |range, _, _| {
+                            range
+                                .map(|i| match &rows_[i] {
+                                    sessions::EmojiRow::Heading(name) => div()
+                                        .h(px(36.))
+                                        .flex()
+                                        .items_end()
+                                        .pb(px(4.))
+                                        .text_size(px(11.))
+                                        .text_color(faint)
+                                        .child(*name)
+                                        .into_any_element(),
+                                    sessions::EmojiRow::Emoji(emoji) => div()
+                                        .h(px(36.))
+                                        .flex()
+                                        .gap(px(4.))
+                                        .children(emoji.iter().map(|e| {
+                                            let (weak, e) = (weak.clone(), e.to_string());
+                                            let on = picked_.as_deref() == Some(e.as_str());
+                                            div()
+                                                .id(SharedString::from(format!("place-emoji-{e}")))
+                                                .size(px(32.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(8.))
+                                                .cursor_pointer()
+                                                .text_size(px(18.))
+                                                .when(on, |el| el.bg(selected))
+                                                .when(!on, |el| el.hover(move |el| el.bg(hover)))
+                                                .child(e.clone())
+                                                .on_click(move |_, _, cx| {
+                                                    let _ = weak.update(cx, |s, cx| s.pick_place_icon(Some(e.clone()), cx));
+                                                })
+                                        }))
+                                        .into_any_element(),
+                                })
+                                .collect()
+                        })
+                        .track_scroll(&edit.value.emoji_scroll)
+                        .h(px(252.));
+                        let scroll = edit.value.emoji_scroll.0.borrow().base_handle.clone();
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(field(&edit.value.search))
+                            .child(match rows.is_empty() {
+                                true => div().h(px(252.)).pt(px(8.)).text_color(theme.text_faint).child("No emoji by that name").into_any_element(),
+                                false => crate::ui::edge_fade::edge_faded(12., &scroll, list).into_any_element(),
+                            })
+                            .into_any_element()
+                    } else {
+                        // every Solar Linear icon, found by name, laid out only where the list shows them
+                        let rows = Rc::new(sessions::icon_rows(&edit.value.search.read(cx).value()));
+                        let (rows_, picked_, weak) = (rows.clone(), picked.clone(), cx.entity().downgrade());
+                        let (accent, muted, selected, hover) = (theme.accent, theme.text_muted, theme.selected, theme.hover);
+                        let letter = letter.clone();
+                        let list = gpui::uniform_list("place-icons", rows.len(), move |range, _, _| {
+                            range
+                                .map(|i| {
+                                    div().h(px(36.)).flex().gap(px(4.)).children(rows_[i].iter().map(|tile| {
+                                        let (icon, id) = match tile {
+                                            sessions::IconTile::Letter => (None, "place-icon-letter".to_string()),
+                                            sessions::IconTile::Solar(name) => (Some(format!("icon:{name}")), format!("place-icon-{name}")),
+                                        };
+                                        let on = picked_ == icon;
+                                        let weak = weak.clone();
+                                        let mark = match &icon {
+                                            Some(icon) => sessions::icon_mark(icon, 16., if on { accent } else { muted }),
+                                            None => div().text_size(px(13.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(muted).child(letter.clone()).into_any_element(),
+                                        };
+                                        div()
+                                            .id(SharedString::from(id))
+                                            .size(px(32.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(8.))
+                                            .cursor_pointer()
+                                            .when(on, |el| el.bg(selected))
+                                            .when(!on, |el| el.hover(move |el| el.bg(hover)))
+                                            .child(mark)
+                                            .on_click(move |_, _, cx| {
+                                                let _ = weak.update(cx, |s, cx| s.pick_place_icon(icon.clone(), cx));
+                                            })
+                                    }))
+                                })
+                                .collect()
+                        })
+                        .track_scroll(&edit.value.emoji_scroll)
+                        .h(px(252.));
+                        let scroll = edit.value.emoji_scroll.0.borrow().base_handle.clone();
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(field(&edit.value.search))
+                            .child(match rows.is_empty() {
+                                true => div().h(px(252.)).pt(px(8.)).text_color(theme.text_faint).child("No icon by that name").into_any_element(),
+                                false => crate::ui::edge_fade::edge_faded(12., &scroll, list).into_any_element(),
+                            })
+                            .into_any_element()
+                    };
+                    div()
+                        .mt(px(12.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        // the heading, and on its right which set the grid shows
+                        .child(
+                            div()
+                                .flex()
+                                .items_end()
+                                .gap(px(2.))
+                                .child(div().flex_1().text_color(theme.text_muted).child("Icon"))
+                                .child(tab("place-icons-svg", "Icons", !emoji).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_place_emoji(false, cx))))
+                                .child(tab("place-icons-emoji", "Emoji", emoji).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_place_emoji(true, cx)))),
+                        )
+                        .child(grid)
+                })
+                .child(
+                    div()
+                        .mt(px(16.))
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(ghost_button(theme, "place-edit-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_place_edit(false, cx))))
+                        .child(
+                            solid_button("place-edit-save", "Save", theme.text, theme.surface)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_place_edit(true, cx))),
+                        ),
+                );
+            modal("place-edit", edit, window, card)
+        }))
         .children(self.ws_menu.as_ref().map(|menu| {
             let (id, at) = menu.value.clone();
             let worktree = snapshot
@@ -285,6 +501,114 @@ impl Shell {
                         ),
                 );
             modal("worktree-dialog", dialog, window, card)
+        }))
+        .children(self.session_dialog.as_ref().map(|dialog| {
+            let remote = dialog.value.remote;
+            let field = |input: &Entity<InputState>| {
+                div()
+                    .mt(px(8.))
+                    .h(px(SESSION_FIELD_H))
+                    .flex()
+                    .items_center()
+                    .px(px(12.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.wash(0.04))
+                    .text_size(px(14.))
+                    .child(div().flex_1().child(Input::new(input)))
+            };
+            let card = dialog_card(theme, "session-dialog", "New session")
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_session_dialog(false, cx)))
+                .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
+                    if e.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        this.finish_session_dialog(false, cx);
+                    }
+                }))
+                .child(div().mt(px(4.)).text_color(theme.text_muted).child(if remote { "Name, or empty for the host's default session" } else { "Name" }))
+                .child(field(&dialog.value.name))
+                // the host field slides open under the name, and the card grows with it
+                .child({
+                    // its margin and box: the height it springs to
+                    let full = 8. + SESSION_FIELD_H;
+                    let host = div().flex_none().overflow_hidden().child(field(&dialog.value.host));
+                    match dialog.value.flips {
+                        0 => host.h(px(0.)).into_any_element(),
+                        flips => host
+                            .with_animation(
+                                SharedString::from(format!("session-host-{flips}")),
+                                // gpui wants eased time inside 0..=1; the spring overshoots, so it shapes the height here
+                                gpui::Animation::new(SPRING_DURATION),
+                                move |el, t| {
+                                    let open = if remote { spring(t) } else { 1. - spring(t) };
+                                    el.h(px(full * open.max(0.))).opacity(open.clamp(0., 1.))
+                                },
+                            )
+                            .into_any_element(),
+                    }
+                })
+                // on: the session runs on an SSH host, saved as a herdr machine
+                .child(
+                    row(theme, false, "session-remote")
+                        .mt(px(12.))
+                        .mx(px(-8.))
+                        .h(px(30.))
+                        .rounded(px(6.))
+                        .child(div().flex_1().child("Remote"))
+                        .child(crate::ui::switch(theme, remote, "session-remote"))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_session_remote(window, cx))),
+                )
+                .child(
+                    div()
+                        .mt(px(16.))
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(
+                            ghost_button(theme, "session-cancel", "Cancel")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_session_dialog(false, cx))),
+                        )
+                        .child(
+                            solid_button("session-create", "Create", theme.text, theme.surface)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_session_dialog(true, cx))),
+                        ),
+                );
+            modal("session-dialog", dialog, window, card)
+        }))
+        .children(self.session_delete.as_ref().map(|confirm| {
+            let (title, text, action) = match &confirm.value {
+                sessions::Place::Session(s) if s.running => (
+                    "Delete session?",
+                    format!("{}'s server stops, closing its workspaces and their panes, and the session is deleted.", s.name),
+                    "Delete",
+                ),
+                sessions::Place::Session(s) => ("Delete session?", format!("{} and its saved workspaces are deleted.", s.name), "Delete"),
+                sessions::Place::Machine(m) => (
+                    "Forget machine?",
+                    format!("herdr forgets {}. Its session keeps running on {}.", m.label, m.target),
+                    "Forget",
+                ),
+            };
+            let card = dialog_card(theme, "session-delete-dialog", title)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_delete(false, cx)))
+                .child(div().mt(px(8.)).line_height(px(19.)).text_color(theme.text_muted).child(text))
+                .child(
+                    div()
+                        .mt(px(16.))
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(
+                            ghost_button(theme, "session-delete-cancel", "Cancel")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_delete(false, cx))),
+                        )
+                        .child(
+                            solid_button("session-delete-confirm", action, theme.danger, gpui::white())
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_delete(true, cx))),
+                        ),
+                );
+            modal("session-delete-dialog", confirm, window, card)
         }))
         .children(self.command_panel.as_ref().map(|panel| crate::ui::command_panel::overlay(panel, window)))
         .children(self.remove_confirm.as_ref().map(|confirm| {
@@ -450,3 +774,6 @@ impl Shell {
         }))
     }
 }
+
+/// The New session dialog's fields: one 14 px line in a bordered box.
+const SESSION_FIELD_H: f32 = 38.;

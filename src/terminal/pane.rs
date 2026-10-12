@@ -185,6 +185,8 @@ pub struct PaneTerminal {
     /// Typed while the pane was observed or connecting; sent once it is controlled.
     held: Vec<u8>,
     ended: Option<String>,
+    /// When the pane was made or last began attaching: a loader covers it once the wait goes on.
+    attaching: std::time::Instant,
     geometry: Option<GridGeometry>,
     /// The last grid resize, to pace them under `GridHold`.
     resized_at: Option<std::time::Instant>,
@@ -238,6 +240,7 @@ impl PaneTerminal {
             observing: false,
             held: Vec::new(),
             ended: None,
+            attaching: std::time::Instant::now(),
             geometry: None,
             resized_at: None,
             focus: cx.focus_handle(),
@@ -284,6 +287,7 @@ impl PaneTerminal {
             (false, false) => Mode::Control,
         };
         self.observing = mode == Mode::Observe;
+        self.attaching = std::time::Instant::now();
         let spawn = cx.background_executor().spawn(async move { Session::spawn(&pane_id, cols, rows, mode) });
         self._pump = Some(cx.spawn(async move |this, cx| {
             let result = spawn.await;
@@ -922,6 +926,9 @@ impl Render for PaneTerminal {
         }
         let focused = self.focus.is_focused(window);
         let search_bar = self.search.as_ref().map(|search| self.search_bar(search, &theme, cx));
+        let loader = (self.session.is_none() && crate::ui::loader::due(self.attaching, window)).then(|| {
+            div().absolute().inset_0().flex().items_center().justify_center().child(crate::ui::loader::spinner(2.5, window))
+        });
         self.scrollbar.0.state.set(self.scroll);
         if let Some(g) = self.geometry {
             self.scrollbar.0.bounds.set(g.bounds);
@@ -949,6 +956,7 @@ impl Render for PaneTerminal {
             .child(TerminalElement::new(cx.entity(), focused))
             .child(crate::ui::scrollbar(SharedString::from(format!("scrollbar-{}", self.pane_id)), &self.scrollbar, &theme))
             .children(search_bar)
+            .children(loader)
             .into_any_element()
     }
 }

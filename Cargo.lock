@@ -1552,6 +1552,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "emojis"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b1514ced566c94991ed9563258ecf61e311fd773bf0a3f20606830386bf66e3"
+dependencies = [
+ "phf",
+]
+
+[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5278,6 +5287,7 @@ dependencies = [
  "base64 0.22.1",
  "bincode",
  "block2 0.6.2",
+ "emojis",
  "futures",
  "gpui",
  "gpui-base",
