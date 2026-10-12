@@ -54,7 +54,7 @@ cat > "$REC/stdin""#,
     assert!(matches!(next(&mut rx), SessionEvent::Frame(b) if b == b"hello"));
     session.input(b"ls\r");
     session.resize(120, 40);
-    session.scroll(true, 3);
+    session.scroll(true, 3, None);
     session.mouse("down", "left", 4, 2, 0);
     drop(session); // closes stdin: the fake's cat ends
 
@@ -76,7 +76,7 @@ cat > "$REC/stdin""#,
         [
             json!({"type": "terminal.input", "bytes": "bHMN"}),
             json!({"type": "terminal.resize", "cols": 120, "rows": 40}),
-            json!({"type": "terminal.scroll", "direction": "up", "lines": 3, "source": "wheel"}),
+            json!({"type": "terminal.scroll", "direction": "up", "lines": 3, "source": "wheel", "column": null, "row": null}),
             json!({"type": "terminal.mouse", "action": "down", "button": "left", "column": 4, "row": 2, "modifiers": 0}),
         ]
     );
@@ -196,7 +196,7 @@ fn live_echo() {
         match recv(&mut rx, Duration::from_millis(200)) {
             Some(SessionEvent::Frame(b)) => seen.extend(b),
             Some(SessionEvent::Ended(why)) => panic!("ended: {why}"),
-            Some(SessionEvent::MouseCapture(_)) | None => {}
+            Some(SessionEvent::MouseCapture(_) | SessionEvent::Size(..)) | None => {}
         }
         if String::from_utf8_lossy(&seen).contains("shepherd-42") {
             return;
