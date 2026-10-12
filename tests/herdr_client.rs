@@ -54,13 +54,15 @@ async fn subscription_yields_events() {
     let dir = tempfile::tempdir().unwrap();
     let path = fake_server(&dir, |req| {
         assert_eq!(req["method"], "events.subscribe");
+        // herdr follows an agent's status only per pane
+        assert_eq!(req["params"]["subscriptions"][2], json!({"type": "pane.agent_status_changed", "pane_id": "w1:p1"}));
         vec![
             json!({"id": req["id"], "result": {"type": "subscription_started"}}),
             json!({"event": "tab.created", "data": {"type": "tab_created", "tab": {"tab_id": "w1:t2"}}}),
             json!({"event": "pane.closed", "data": {"type": "pane_closed", "pane_id": "w1:p2", "workspace_id": "w1"}}),
         ]
     });
-    let mut rx = Client::at(path).subscribe(&["tab.created", "pane.closed"]).await.unwrap();
+    let mut rx = Client::at(path).subscribe(&["tab.created", "pane.closed"], &["w1:p1".into()]).await.unwrap();
     assert_eq!(rx.recv().await.unwrap()["event"], "tab.created");
     assert_eq!(rx.recv().await.unwrap()["event"], "pane.closed");
 }
@@ -74,7 +76,7 @@ async fn subscription_ends_when_server_closes() {
             json!({"id": req["id"], "error": {"code": "events_lost", "message": "fell behind"}}),
         ]
     });
-    let mut rx = Client::at(path).subscribe(&["tab.created"]).await.unwrap();
+    let mut rx = Client::at(path).subscribe(&["tab.created"], &[]).await.unwrap();
     assert!(rx.recv().await.is_none());
 }
 

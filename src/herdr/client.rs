@@ -7,8 +7,8 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 
-/// Lifecycle events that need no `pane_id` filter (herdr rejects
-/// `pane.agent_status_changed` and friends without one; `pane.updated` carries agent status).
+/// Lifecycle events that need no `pane_id` filter (herdr rejects `pane.agent_status_changed` and friends without one,
+/// and sends no `pane.updated` when only an agent's status changes: [`Client::subscribe`] follows that per pane).
 pub const EVENT_TYPES: &[&str] = &[
     "workspace.created", "workspace.updated", "workspace.closed", "workspace.renamed",
     "workspace.moved", "workspace.reordered", "workspace.focused",
@@ -61,8 +61,10 @@ impl Client {
         into_result(serde_json::from_str(&line)?)
     }
 
-    pub async fn subscribe(&self, types: &[&str]) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
-        let subscriptions: Vec<Value> = types.iter().map(|t| json!({"type": t})).collect();
+    /// `types`, and `pane.agent_status_changed` for each of `panes`.
+    pub async fn subscribe(&self, types: &[&str], panes: &[String]) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+        let statuses = panes.iter().map(|p| json!({"type": "pane.agent_status_changed", "pane_id": p}));
+        let subscriptions: Vec<Value> = types.iter().map(|t| json!({"type": t})).chain(statuses).collect();
         let (w, mut lines) = self.send("events.subscribe", json!({"subscriptions": subscriptions})).await?;
         let first = lines.next_line().await?.ok_or_else(|| anyhow!("herdr closed the connection"))?;
         into_result(serde_json::from_str(&first)?)?;

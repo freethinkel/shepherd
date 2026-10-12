@@ -839,10 +839,12 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cl
     // When nothing listens on the socket, Shepherd starts herdr's server itself: again after 10 s if it never came
     // up, after a minute if it could not be run at all.
     let (mut next_start, mut spawned, mut start_error) = (Instant::now(), None::<Instant>, None::<String>);
+    // the panes whose agent status the subscription follows: herdr only sends that per pane
+    let mut watched: Vec<String> = Vec::new();
     loop {
         let sub = {
-            let c = client.clone();
-            rt.spawn(async move { c.subscribe(EVENT_TYPES).await })
+            let (c, panes) = (client.clone(), watched.clone());
+            rt.spawn(async move { c.subscribe(EVENT_TYPES, &panes).await })
         };
         let mut rx = match sub.await.expect("tokio") {
             Ok(rx) => rx,
@@ -878,8 +880,10 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cl
             let result = rt.spawn(async move { c.call("session.snapshot", json!({})).await }).await.expect("tokio");
             let update = result.and_then(|r| Snapshot::from_result(&r));
             let alive = this.update(cx, |s, cx| {
+                let mut panes = None;
                 match update {
                     Ok(snapshot) => {
+                        panes = Some(snapshot.panes.iter().map(|p| p.pane_id.clone()).collect::<Vec<_>>());
                         // a workspace's agent that starts or stops has likely edited its worktree
                         for w in snapshot.workspaces.iter().filter(|w| {
                             s.snapshot.as_ref().is_some_and(|old| old.workspaces.iter().any(|o| o.workspace_id == w.workspace_id && o.agent_status != w.agent_status))
@@ -896,9 +900,14 @@ async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, cl
                     Err(err) => s.error = Some(format!("{err:#}")),
                 }
                 cx.notify();
+                panes
             });
-            if alive.is_err() {
+            let Ok(panes) = alive else {
                 return; // window closed
+            };
+            if let Some(panes) = panes.filter(|p| *p != watched) {
+                watched = panes;
+                break; // panes came or went: follow the new set's agents
             }
             // ponytail: refetch the whole snapshot per event burst; incremental apply only if this shows up in profiles.
             let Some(event) = rx.recv().await else {
