@@ -9,9 +9,9 @@ macro_rules! app_actions {
         /// Every app action as (name in settings, label in the Keys settings).
         pub const ACTIONS: &[(&str, &str)] = &[$((stringify!($name), $label)),+];
 
-        fn binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
+        fn binding(action: &str, keystroke: &str, context: Option<&str>) -> Option<KeyBinding> {
             match action {
-                $(stringify!($name) => Some(KeyBinding::new(keystroke, $name, None)),)+
+                $(stringify!($name) => Some(KeyBinding::new(keystroke, $name, context)),)+
                 _ => None,
             }
         }
@@ -141,6 +141,7 @@ pub fn rebind(cx: &mut App, user: &BTreeMap<String, String>) {
     let previous = cx.try_global::<ActiveBindings>().map(|a| a.0.clone()).unwrap_or_default();
     let next = effective(user);
     apply(cx, &previous, &next);
+    rebind_herdr(cx, &next);
     cx.set_global(ActiveBindings(next));
     // macOS copies menu shortcuts when the menu is set: set it again so it shows (and only fires) the new ones.
     cx.set_menus(menus());
@@ -222,8 +223,41 @@ pub fn apply(cx: &mut App, previous: &[(String, String)], next: &[(String, Strin
         .filter(|(_, chord)| !next.iter().any(|(_, k)| k == chord))
         .map(|(_, chord)| KeyBinding::new(chord, NoAction, None))
         .collect();
-    bindings.extend(next.iter().filter_map(|(action, chord)| binding(action, chord)));
+    bindings.extend(next.iter().filter_map(|(action, chord)| binding(action, chord, None)));
     cx.bind_keys(bindings);
+}
+
+/// The chords of herdr's own keymap bound now, so the next rebind can unbind what it drops.
+struct HerdrBindings(Vec<String>);
+
+impl gpui::Global for HerdrBindings {}
+
+/// The key context herdr's chords are bound in: herdr's keymap is for its panes, and a prefix waiting for its
+/// second key would get in the way of typing elsewhere.
+const TERMINAL: &str = "Terminal";
+
+/// Binds herdr's keymap from its config.toml (`[keys]`, `[[keys.command]]`) in the panes, under Shepherd's
+/// own: a chord `shepherd` uses stays Shepherd's.
+fn rebind_herdr(cx: &mut App, shepherd: &[(String, String)]) {
+    use crate::herdr::keys::Bind;
+    // ponytail: read on rebind (start, Settings), not watched; a config.toml edit takes a restart
+    let config = crate::herdr::HerdrConfig::load(&crate::herdr::config_path()).unwrap_or_default();
+    let next: Vec<_> = crate::herdr::keys::bindings(&config)
+        .into_iter()
+        .filter(|(_, chord)| !shepherd.iter().any(|(_, k)| k == chord))
+        .collect();
+    let previous = cx.try_global::<HerdrBindings>().map(|b| b.0.clone()).unwrap_or_default();
+    let mut bindings: Vec<KeyBinding> = previous
+        .iter()
+        .filter(|chord| !next.iter().any(|(_, k)| k == *chord))
+        .map(|chord| KeyBinding::new(chord, NoAction, Some(TERMINAL)))
+        .collect();
+    bindings.extend(next.iter().filter_map(|(bind, chord)| match bind {
+        Bind::App(action) => binding(action, chord, Some(TERMINAL)),
+        Bind::Command(command) => Some(KeyBinding::new(chord, command.clone(), Some(TERMINAL))),
+    }));
+    cx.bind_keys(bindings);
+    cx.set_global(HerdrBindings(next.into_iter().map(|(_, chord)| chord).collect()));
 }
 
 #[cfg(test)]

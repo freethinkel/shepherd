@@ -20,6 +20,8 @@ pub enum Run {
     Tab(String),
     /// Check out this branch in the shown pane's repo.
     Branch(String),
+    /// A herdr plugin's action.
+    Herdr(crate::herdr::keys::HerdrCommand),
 }
 
 /// The heading an item sits under; also searched, so "tab" finds the tabs.
@@ -67,7 +69,7 @@ impl Item {
     /// comes first so match positions below its length are in the label.
     fn haystack(&self) -> String {
         match self.run {
-            Run::Action(_) | Run::Branch(_) => self.label.clone(),
+            Run::Action(_) | Run::Branch(_) | Run::Herdr(_) => self.label.clone(),
             Run::Tab(_) => [Some(self.label.as_str()), self.hint.as_deref(), Some(self.section.title())].into_iter().flatten().collect::<Vec<_>>().join(" "),
         }
     }
@@ -145,9 +147,9 @@ pub(crate) fn agent_icon(agent: &str) -> &'static str {
     }
 }
 
-/// Every action but the panel's own (with its chord in `bindings`), then every workspace with a tab to show
-/// and every tab, in the sidebar's order.
-pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<Item> {
+/// Every action but the panel's own (with its chord in `bindings`) and herdr's plugin actions as (id, title),
+/// then every workspace with a tab to show and every tab, in the sidebar's order.
+pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)], plugin_actions: &[(String, String)]) -> Vec<Item> {
     let busy = |status: AgentStatus| (!matches!(status, AgentStatus::Idle | AgentStatus::Unknown)).then_some(status);
     let mut out: Vec<Item> = ACTIONS
         .iter()
@@ -163,6 +165,16 @@ pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)]) -> Vec<
             run: Run::Action(name),
         })
         .collect();
+    out.extend(plugin_actions.iter().map(|(id, title)| Item {
+        key: format!("plugin:{id}"),
+        section: Section::Commands,
+        icon: "icons/widget.svg",
+        label: title.clone(),
+        hint: None,
+        chord: None,
+        status: None,
+        run: Run::Herdr(crate::herdr::keys::HerdrCommand { kind: crate::herdr::keys::CommandKind::PluginAction, command: id.clone(), keys: Vec::new() }),
+    }));
     let Some(s) = snapshot else { return out };
     let workspaces: Vec<_> = s.workspace_tree().into_iter().map(|(w, _)| w).collect();
     for w in &workspaces {
@@ -809,7 +821,7 @@ mod tests {
         }))
         .unwrap();
         let bindings = vec![("NewTab".to_string(), "cmd-t".to_string()), ("CommandPanel".to_string(), "cmd-k".to_string())];
-        let items = items(Some(&snapshot), &bindings);
+        let items = items(Some(&snapshot), &bindings, &[]);
         let new_tab = items.iter().find(|i| i.label == "New tab").unwrap();
         assert_eq!((new_tab.chord.as_deref(), &new_tab.run), (Some("cmd-t"), &Run::Action("NewTab")));
         assert!(items.iter().all(|i| i.run != Run::Action("CommandPanel")), "the panel does not list itself");

@@ -215,6 +215,8 @@ pub struct PaneTerminal {
     hover: Option<(usize, Range<usize>)>,
     /// The image a Cmd+click opened, in a dialog over the window until Esc, Space or a click outside it.
     preview: Option<Popup<Preview>>,
+    /// Always attaches by taking the terminal over (herdr's popup: whichever window shows it types into it).
+    pub takes_over: bool,
 }
 
 impl PaneTerminal {
@@ -263,6 +265,7 @@ impl PaneTerminal {
             pointer: None,
             hover: None,
             preview: None,
+            takes_over: false,
         }
         // Attaching waits for the first measured grid (`on_grid_metrics`): herdr resizes the real PTY to
         // whatever size the attach names.
@@ -285,7 +288,7 @@ impl PaneTerminal {
     fn attach(&mut self, takeover: bool, cx: &mut Context<Self>) {
         let (cols, rows) = (self.emulator.cols() as u16, self.emulator.rows() as u16);
         let pane_id = self.pane_id.clone();
-        let mode = match (takeover, yielded(cx)) {
+        let mode = match (takeover || self.takes_over, yielded(cx)) {
             (true, _) => Mode::Takeover,
             (false, true) => Mode::Observe,
             (false, false) => Mode::Control,

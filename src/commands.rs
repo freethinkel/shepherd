@@ -54,6 +54,9 @@ pub enum Command {
     /// Enter in the pane, without attaching to it: a waiting agent takes its highlighted choice (Claude's and Codex's
     /// is "Yes").
     Approve { pane_id: String },
+    /// A plugin's action (`plugin.action` or a bare `action`), as herdr's keybinding runs it but for the pane
+    /// you are in: herdr's own focus is its TUI clients'.
+    InvokePluginAction { action_id: String, pane: Option<crate::model::Pane> },
 }
 
 impl Command {
@@ -122,6 +125,16 @@ impl Command {
                 ("layout.set_split_ratio", json!({"tab_id": tab_id, "path": path, "ratio": ratio}))
             }
             Command::Approve { pane_id } => ("pane.send_input", json!({"pane_id": pane_id, "keys": ["enter"]})),
+            Command::InvokePluginAction { action_id, pane } => {
+                let mut context = json!({"invocation_source": "keybinding"});
+                if let Some(p) = pane {
+                    context["focused_pane_id"] = json!(p.pane_id);
+                    context["workspace_id"] = json!(p.workspace_id);
+                    context["tab_id"] = json!(p.tab_id);
+                    context["focused_pane_cwd"] = json!(p.foreground_cwd.as_ref().or(p.cwd.as_ref()));
+                }
+                ("plugin.action.invoke", json!({"action_id": action_id, "context": context}))
+            }
         }
     }
 }
@@ -275,6 +288,10 @@ mod tests {
         assert_eq!(
             req(Command::Approve { pane_id: "w1:p1".into() }),
             ("pane.send_input", json!({"pane_id": "w1:p1", "keys": ["enter"]}))
+        );
+        assert_eq!(
+            req(Command::InvokePluginAction { action_id: "persiyanov.reviewr.toggle".into(), pane: None }),
+            ("plugin.action.invoke", json!({"action_id": "persiyanov.reviewr.toggle", "context": {"invocation_source": "keybinding"}}))
         );
     }
 

@@ -1,5 +1,7 @@
 mod client;
 mod config;
+pub mod keys;
+pub mod popup;
 mod remote;
 mod session;
 mod wire;

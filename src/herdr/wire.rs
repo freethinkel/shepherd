@@ -45,6 +45,11 @@ pub enum ClientMessage {
         modifiers: u8,
         lines: u16,
     },
+    ClientShellHostTheme,
+    ClientShellFocus,
+    ClientShellMouseCapture,
+    /// A named control message of herdr's client-shell ("endpoint") protocol, its data JSON.
+    EndpointControl { kind: String, data: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -111,6 +116,122 @@ pub enum ServerMessage {
     ReloadSoundConfig,
     /// True while the controlled pane's app asks for mouse reporting.
     MouseCapture { enabled: bool, sgr_pixels: bool },
+    TerminalBell,
+    GraphicsFile,
+    GraphicsTransmissionRetired,
+    ClientShellSnapshot,
+    /// The client shell's view of the shown tab, read only for its popup.
+    PaneSurface(PaneSurfaceFrame),
+    SemanticNotification,
+    ClientShellError { message: String },
+    DirectTerminalKeyboardProtocol,
+    ClientShellKeyboardReportAll,
+    ClientShellEndpointResponseChunk,
+    PaneSurfacePatch,
+    EndpointControl { kind: String, data: String },
+}
+
+/// herdr's `PaneSurfaceFrame` up to its popup; the fields after it are left unread.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PaneSurfaceFrame {
+    pub boot_id: String,
+    pub projection_revision: u64,
+    pub surface_revision: u64,
+    pub frame: FrameData,
+    pub panes: Vec<PaneSurfacePane>,
+    pub splits: Vec<PaneSurfaceSplit>,
+    pub popup: Option<PopupSurface>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct FrameData {
+    pub cells: Vec<CellData>,
+    pub width: u16,
+    pub height: u16,
+    pub cursor: Option<CursorState>,
+    pub hyperlinks: Vec<String>,
+    pub graphics: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct CellData {
+    pub symbol: String,
+    pub fg: u32,
+    pub bg: u32,
+    pub modifier: u16,
+    pub skip: bool,
+    pub hyperlink: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct CursorState {
+    pub x: u16,
+    pub y: u16,
+    pub visible: bool,
+    pub shape: u8,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct SurfaceRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PaneSurfacePane {
+    pub pane_id: String,
+    pub content_revision: u64,
+    pub rect: SurfaceRect,
+    pub inner_rect: SurfaceRect,
+    pub scrollbar_rect: Option<SurfaceRect>,
+    pub scroll: Option<(u64, u64, u64)>,
+    pub focused: bool,
+    pub mouse_reporting: bool,
+    pub sgr_pixel_mouse: bool,
+    pub alternate_screen_active: bool,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub enum SplitDirection {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PaneSurfaceSplit {
+    pub direction: SplitDirection,
+    pub pos: u16,
+    pub area: SurfaceRect,
+    pub hit_rect: SurfaceRect,
+    pub path: Vec<bool>,
+}
+
+/// herdr's `ClientShellPopupSurface` up to its size; its rendered frame is left unread (the popup's terminal is
+/// controlled directly instead).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PopupSurface {
+    pub terminal_id: String,
+    pub title: String,
+    pub width: Option<PopupSize>,
+    pub height: Option<PopupSize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub enum PopupSize {
+    Cells(u16),
+    Percent(u8),
 }
 
 #[derive(Debug, Deserialize)]

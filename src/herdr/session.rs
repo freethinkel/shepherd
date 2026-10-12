@@ -31,7 +31,7 @@ pub fn set_socket(path: Option<String>) {
 
 /// herdr's client socket, resolved as herdr does: `HERDR_CLIENT_SOCKET_PATH`, else `<api socket stem>-client.sock`
 /// next to the API socket.
-fn client_socket() -> PathBuf {
+pub(super) fn client_socket() -> PathBuf {
     if let Some(path) = std::env::var_os("HERDR_CLIENT_SOCKET_PATH") {
         return path.into();
     }

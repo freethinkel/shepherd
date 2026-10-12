@@ -22,6 +22,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 mod divider;
+mod floating;
 mod motion;
 mod pane_drag;
 mod popups;
@@ -65,6 +66,8 @@ pub struct Shell {
     should_move: Rc<Cell<bool>>,
     client: Client,
     rt: tokio::runtime::Handle,
+    /// herdr's plugin actions as (id, title), for the command panel; read again whenever it opens.
+    plugin_actions: Vec<(String, String)>,
     /// The pane grid's bounds from the last paint, to turn a divider drag into a ratio.
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     divider: Option<DividerDrag>,
@@ -151,6 +154,11 @@ pub struct Shell {
     since: crate::model::Since,
     /// The loop that keeps the window in step with herdr; replacing it (a switch of session) stops the last one.
     sync: gpui::Task<()>,
+    /// herdr's popup over the panes, and the client shell that hears of it.
+    floating: Option<floating::Floating>,
+    popup_watch: gpui::Task<()>,
+    /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.
+    herdr_commands: Vec<(String, Vec<String>)>,
     /// herdr's sessions and machines, in the bar under the sidebar.
     places: Vec<sessions::Place>,
     /// A two-finger swipe over the sidebar in progress.
@@ -312,6 +320,7 @@ impl Shell {
                         .filter(|p| !p.trim().is_empty())
                         .map_or_else(Client::local, |p| Client::at(p.into())),
                     rt: rt.clone(),
+                    plugin_actions: Vec::new(),
                     grid_bounds: Rc::new(Cell::new(None)),
                     divider: None,
                     settling: None,
@@ -357,6 +366,9 @@ impl Shell {
                     frame_save: gpui::Task::ready(()),
                     since: Default::default(),
                     sync: gpui::Task::ready(()),
+                    floating: None,
+                    popup_watch: gpui::Task::ready(()),
+                    herdr_commands: Vec::new(),
                     places: Vec::new(),
                     swipe: None,
                     slide: None,
@@ -374,6 +386,7 @@ impl Shell {
                 shell.resume_machine(cx);
                 shell.connect(cx);
                 shell.refresh_places(cx);
+                shell.refresh_plugin_actions(cx);
                 // Waiting times move on between snapshots.
                 // ponytail: a minute from launch, not from each wait, so a label can lag by up to a minute.
                 cx.spawn(async move |this, cx| loop {
@@ -410,6 +423,8 @@ impl Shell {
         let (client, rt) = (self.client.clone(), self.rt.clone());
         cx.set_global(PaneQueries(client.clone(), rt.clone()));
         self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await);
+        self.floating = None;
+        self.popup_watch = cx.spawn(async move |this, cx| floating::popup_loop(this, cx).await);
     }
 
     fn toggle_settings_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -435,7 +450,9 @@ impl Shell {
         let items = match kind {
             Kind::Commands => {
                 let bindings = cx.try_global::<ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
-                crate::ui::command_panel::items(self.snapshot.as_ref(), &bindings)
+                // ponytail: this open lists the actions read last time; one installed since shows next time
+                self.refresh_plugin_actions(cx);
+                crate::ui::command_panel::items(self.snapshot.as_ref(), &bindings, &self.plugin_actions)
             }
             Kind::Agents => crate::ui::command_panel::agent_items(self.snapshot.as_ref(), self.agent_sort, &self.since),
             Kind::Branches => match dir.as_deref() {
@@ -455,6 +472,10 @@ impl Shell {
                         window.focus(&this.focus, cx);
                         window.dispatch_action(action, cx);
                     }
+                }
+                PanelEvent::Run(Run::Herdr(command)) => {
+                    window.focus(&this.focus, cx);
+                    this.run_herdr_command(command, window, cx);
                 }
                 PanelEvent::Run(Run::Tab(tab_id)) => this.selected_tab = Some(tab_id.clone()),
                 PanelEvent::Run(Run::Branch(branch)) => {
@@ -610,6 +631,74 @@ impl Shell {
     fn pane_command(&mut self, window: &Window, cx: &mut Context<Self>, make: impl FnOnce(String) -> Command) {
         if let Some(pane_id) = self.active_pane(window, cx) {
             self.send(make(pane_id), cx, |_, _, _| {});
+        }
+    }
+
+    fn refresh_plugin_actions(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let call = self.rt.spawn(async move { client.call("plugin.action.list", json!({})).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(result)) = call.await else { return };
+            let actions = result["actions"].as_array().into_iter().flatten().filter_map(|a| {
+                Some((format!("{}.{}", a["plugin_id"].as_str()?, a["action_id"].as_str()?), a["title"].as_str()?.to_string()))
+            });
+            let actions = actions.collect();
+            let _ = this.update(cx, |s, _| s.plugin_actions = actions);
+        })
+        .detach();
+    }
+
+    /// A `[[keys.command]]` of herdr's config, for the pane you are in.
+    fn run_herdr_command(&mut self, command: &crate::herdr::keys::HerdrCommand, window: &Window, cx: &mut Context<Self>) {
+        use crate::herdr::keys::CommandKind;
+        let pane_id = self.active_pane(window, cx);
+        let pane = self.snapshot.as_ref().and_then(|s| s.panes.iter().find(|p| Some(&p.pane_id) == pane_id.as_ref())).cloned();
+        match command.kind {
+            CommandKind::PluginAction => {
+                self.send(Command::InvokePluginAction { action_id: command.command.clone(), pane }, cx, |_, _, _| {})
+            }
+            // herdr's `shell`: detached, in the pane's directory, with herdr's socket for the `herdr` CLI
+            CommandKind::Shell => {
+                let mut sh = std::process::Command::new("sh");
+                sh.args(["-c", &command.command])
+                    .env("HERDR_SOCKET_PATH", self.client.path())
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                if let Some(p) = &pane {
+                    sh.env("HERDR_ACTIVE_PANE_ID", &p.pane_id)
+                        .env("HERDR_ACTIVE_TAB_ID", &p.tab_id)
+                        .env("HERDR_ACTIVE_WORKSPACE_ID", &p.workspace_id);
+                }
+                if let Some(dir) = crate::ui::statusbar::pane_dir(self.snapshot.as_ref(), pane_id.as_deref()) {
+                    sh.env("HERDR_ACTIVE_PANE_CWD", &dir).current_dir(dir);
+                }
+                match sh.spawn() {
+                    Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+                    Err(e) => crate::ui::toast::error(cx, format!("{}: {e}", command.command)),
+                }
+            }
+            // herdr runs these itself: its pane lands in the tab, its popup comes back over the client shell
+            CommandKind::Pane | CommandKind::Popup => {
+                let Some((id, _)) = self.herdr_commands.iter().find(|(_, keys)| *keys == command.keys) else {
+                    crate::ui::toast::error(cx, format!("{}: herdr has no such command (is its config reloaded?)", command.command));
+                    return;
+                };
+                let mut params = json!({"command_id": id});
+                if let Some(p) = &pane {
+                    params["workspace_id"] = json!(p.workspace_id);
+                    params["tab_id"] = json!(p.tab_id);
+                    params["pane_id"] = json!(p.pane_id);
+                }
+                let (client, label) = (self.client.clone(), command.command.clone());
+                let call = self.rt.spawn(async move { client.call("command.invoke", params).await });
+                cx.spawn(async move |_, cx| {
+                    if let Ok(Err(e)) = call.await {
+                        let _ = cx.update(|cx| crate::ui::toast::error(cx, format!("{label}: {e:#}")));
+                    }
+                })
+                .detach();
+            }
         }
     }
 
@@ -786,7 +875,7 @@ impl Render for Shell {
             remember_shown(&mut self.recent_panes, &shown, |id| snapshot.panes.iter().any(|p| p.pane_id == id));
         }
         prune(&mut self.panes, &mut self.focused, &self.recent_panes, |_| false);
-        let overlaid = self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open());
+        let overlaid = self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open()) || self.floating_open();
         for f in &shown {
             if !self.panes.contains_key(&f.pane_id) {
                 let id = f.pane_id.clone();
@@ -805,8 +894,14 @@ impl Render for Shell {
             window.focus(&handle, cx);
         }
 
-        if window.focused(cx).is_none() && self.settings.is_none() {
+        // A pane of a tab no longer shown keeps focus, and gpui then dispatches keys to the root, past our actions.
+        let hidden = self
+            .panes
+            .iter()
+            .any(|(id, p)| !shown.iter().any(|f| &f.pane_id == id) && p.read(cx).focus_handle(cx).is_focused(window));
+        if (window.focused(cx).is_none() || hidden) && self.settings.is_none() {
             window.focus(&self.focus, cx);
+            self.focused = None;
         }
         let shown_ws = tab.as_ref().map(|t| t.workspace_id.clone());
         let shown_tab = tab.as_ref().map(|t| t.tab_id.clone());
@@ -826,6 +921,7 @@ impl Render for Shell {
         let split = frames.len() > 1;
         let pane_drop = self.pane_drop_overlay(&frames, &shown_tab_id, &theme, window, cx);
         let edges: Vec<f32> = splits.iter().map(|s| crate::model::split_edge(&frames, s)).collect();
+        let floating = self.render_floating(&theme, window, cx);
         let grid = div()
             .flex_1()
             .min_h_0()
@@ -931,7 +1027,8 @@ impl Render for Shell {
                         }),
                     )
             }))
-            .children(pane_drop);
+            .children(pane_drop)
+            .children(floating);
 
         let statusbar = SettingsGlobal::of(cx).settings.show_status_bar.then(|| {
             let pane = self.active_pane(window, cx);
@@ -1013,6 +1110,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
             .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
             .on_action(cx.listener(|this, _: &AgentsPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Agents, w, cx)))
+            .on_action(cx.listener(|this, c: &crate::herdr::keys::HerdrCommand, w, cx| this.run_herdr_command(c, w, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
                 this.drag_divider(e.position, cx);
                 this.drag_sidebar(e.position.x, cx);

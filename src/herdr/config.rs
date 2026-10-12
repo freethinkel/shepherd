@@ -5,6 +5,15 @@ use anyhow::{Context, anyhow};
 use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table, Value};
 
+/// A string or a list of strings; anything else is none.
+pub(super) fn str_list(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(s) => vec![s.value().clone()],
+        Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Where herdr reads it: `HERDR_CONFIG_PATH`, else `$XDG_CONFIG_HOME/herdr`, else `~/.config/herdr`.
 pub fn config_path() -> PathBuf {
     if let Some(path) = std::env::var_os("HERDR_CONFIG_PATH") {
@@ -18,7 +27,7 @@ pub fn config_path() -> PathBuf {
 
 /// The file as herdr reads it; a missing one is empty, so every key reads as herdr's default.
 #[derive(Debug, Clone, Default)]
-pub struct HerdrConfig(DocumentMut);
+pub struct HerdrConfig(pub(super) DocumentMut);
 
 impl HerdrConfig {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
@@ -44,6 +53,12 @@ impl HerdrConfig {
 
     pub fn str(&self, key: &str) -> Option<&str> {
         self.get(key).and_then(Value::as_str)
+    }
+
+    /// A key herdr takes as a string or a list of them (`next_tab = ["prefix+n", "ctrl+alt+]"]`); `None` when
+    /// missing, so herdr's default applies.
+    pub fn strs(&self, key: &str) -> Option<Vec<String>> {
+        self.get(key).map(str_list)
     }
 
     /// Sets a dotted key, making missing tables; `None` removes it, so herdr's default applies. A value already

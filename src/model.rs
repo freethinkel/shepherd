@@ -87,7 +87,7 @@ pub struct Tab {
     pub agent_status: AgentStatus,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Pane {
     pub pane_id: String,
     pub tab_id: String,
@@ -108,7 +108,7 @@ pub struct Pane {
     pub agent_session: Option<AgentSession>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct AgentSession {
     pub value: String,
 }
