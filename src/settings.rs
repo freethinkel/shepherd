@@ -42,6 +42,8 @@ pub struct Settings {
     pub compact_workspaces: bool,
     /// One-line agent rows, without the task under the name.
     pub compact_agents: bool,
+    /// The Agents list keeps only agents waiting on you or done and not looked at yet.
+    pub attention_agents: bool,
     /// The Agents list's height cap; dragging the section's top edge sets it, `None` is 40 % of the sidebar.
     pub agents_height: Option<f32>,
     /// What the command panel ran last, newest first: an action's name, `workspace:<id>` or `tab:<id>`.
@@ -141,6 +143,7 @@ impl Default for Settings {
             workspace_show: WorkspaceShow::default(),
             compact_workspaces: false,
             compact_agents: false,
+            attention_agents: false,
             agents_height: None,
             recent_commands: Vec::new(),
             notify_agents: true,

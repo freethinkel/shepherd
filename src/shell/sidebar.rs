@@ -149,7 +149,7 @@ impl Shell {
                     .collect()
             })
             .unwrap_or_default();
-        let agents: Vec<(crate::model::Pane, String, Option<String>)> = snapshot
+        let mut agents: Vec<(crate::model::Pane, String, Option<String>)> = snapshot
             .as_ref()
             .map(|s| {
                 s.agents_by(self.agent_sort, &self.since)
@@ -162,6 +162,11 @@ impl Shell {
                     .collect()
             })
             .unwrap_or_default();
+        // the section stays while any agent runs, so its menu can turn the filter off again
+        let any_agents = !agents.is_empty();
+        if SettingsGlobal::of(cx).settings.attention_agents {
+            agents.retain(|(p, _, _)| crate::notify::wants_attention(p.agent_status));
+        }
         let agent_workspaces: Vec<String> = agents.iter().map(|(p, _, _)| p.workspace_id.clone()).collect();
         let hover_bg = theme.hover;
         let active = window.is_window_active();
@@ -211,7 +216,8 @@ impl Shell {
                                 snapshot.as_ref()?.panes.iter().find(|p| p.workspace_id == w.workspace_id)?.cwd.clone()
                             });
                             let branch = dir.as_deref().filter(|_| show.branch && !compact).and_then(|d| crate::ui::statusbar::branch_of(d, cx));
-                            let (changes, pr) = match dir.as_deref().filter(|_| nested) {
+                            // compact rows are the name alone: git and gh aren't even asked
+                            let (changes, pr) = match dir.as_deref().filter(|_| nested && !compact) {
                                 Some(d) => crate::ui::statusbar::changes_of(d, active, cx),
                                 None => (None, None),
                             };
@@ -408,7 +414,7 @@ impl Shell {
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_settings_here(window, cx))),
                 ),
             )
-            .when(SettingsGlobal::of(cx).settings.show_agents && !agents.is_empty(), |el| {
+            .when(SettingsGlobal::of(cx).settings.show_agents && any_agents, |el| {
                 let seam = theme.accent;
                 let dragging = self.agents_drag.is_some();
                 el.child(
@@ -491,6 +497,9 @@ impl Shell {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
+                            .when(agents.is_empty(), |el| {
+                                el.child(div().px(px(8.)).py(px(6.)).text_size(px(11.)).text_color(theme.text_faint).child("Nothing needs you"))
+                            })
                             .children(agents.into_iter().enumerate().flat_map(|(i, (pane, workspace, waited))| {
                                 // Grouped: a heading where the workspace changes, which the rows then leave out.
                                 let grouped = self.agent_sort == AgentSort::Grouped;

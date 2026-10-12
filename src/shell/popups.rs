@@ -112,6 +112,7 @@ impl Shell {
             let at = menu.value;
             let sort = self.agent_sort;
             let compact = SettingsGlobal::of(cx).settings.compact_agents;
+            let attention = SettingsGlobal::of(cx).settings.attention_agents;
             gpui::deferred(
                 gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
                     "agents-menu-in",
@@ -135,6 +136,16 @@ impl Shell {
                                 .child(crate::ui::switch(theme, compact, "compact-agents"))
                                 .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
                                     save_from_sidebar(cx, |s| s.compact_agents = !s.compact_agents)
+                                })),
+                        )
+                        .child(
+                            row(theme, false, "attention-agents")
+                                .h(px(30.))
+                                .rounded(px(6.))
+                                .child(div().flex_1().child("Needs attention only"))
+                                .child(crate::ui::switch(theme, attention, "attention-agents"))
+                                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                                    save_from_sidebar(cx, |s| s.attention_agents = !s.attention_agents)
                                 })),
                         ),
                 )),
