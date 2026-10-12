@@ -366,6 +366,10 @@ impl PaneTerminal {
 
     /// Re-attaches as [`Yielded`] now asks: observing, or controlling again.
     pub fn follow_yield(&mut self, cx: &mut Context<Self>) {
+        // a client shell has no observers: herdr sizes the tab to the client in front
+        if over_shell(cx) {
+            return;
+        }
         if self.geometry.is_some() && self.ended.is_none() && self.observing != yielded(cx) {
             self.reattach(false, cx);
         }

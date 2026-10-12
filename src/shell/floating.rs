@@ -38,13 +38,13 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
 
 impl Shell {
     /// The pane grid in cells, once a pane has measured its font.
-    fn grid_cells(&self, cx: &App) -> Option<(u16, u16)> {
+    pub(super) fn grid_cells(&self, cx: &App) -> Option<(u16, u16)> {
         let bounds = self.grid_bounds.get()?;
         let g = self.panes.values().find_map(|p| p.read(cx).geometry())?;
         Some(((f32::from(bounds.size.width) / g.cell_w) as u16, (f32::from(bounds.size.height) / g.line_h) as u16))
     }
 
-    fn show_popup(&mut self, surface: Option<PopupSurface>, cx: &mut Context<Self>) {
+    pub(super) fn show_popup(&mut self, surface: Option<PopupSurface>, cx: &mut Context<Self>) {
         match (surface, &mut self.floating) {
             (None, _) => {
                 if self.floating.take().is_some() {

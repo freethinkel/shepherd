@@ -8,7 +8,7 @@
 use super::popup::{Event as PopupEvent, PopupSurface};
 use super::session::{SessionEvent, client_socket};
 use super::wire::{
-    self, CellData, ClientMessage, CursorState, FrameData, HostThemeUpdate, KeyCode, KeyKind, PaneInput,
+    self, CellData, ClientMessage, CursorState, FrameData, KeyCode, KeyKind, PaneInput,
     PaneSurfaceFrame, PaneSurfacePane, ServerMessage, SurfaceRect, SurfaceSize,
 };
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -18,6 +18,8 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
+
+pub use super::wire::{DefaultColorKind, HostAppearance, HostColor, HostThemeUpdate};
 
 /// The PoC runs only when asked for.
 pub fn enabled() -> bool {
@@ -58,6 +60,9 @@ struct State {
     /// The size each pane was last sent, to send `Size` only on a change.
     sizes: HashMap<String, (u16, u16)>,
     next_request: u64,
+    /// The host's default fg/bg as herdr packs them: herdr resolves "default" to these RGBs in the surface, and
+    /// the pane gets them back as default, so its view paints them with the theme (translucent background too).
+    defaults: (u32, u32),
 }
 
 pub struct ClientShell {
@@ -113,7 +118,8 @@ impl ClientShell {
         state.sizes.remove(pane_id);
         if let Some(surface) = state.surface.take() {
             if let Some(pane) = surface.panes.iter().find(|p| p.pane_id == pane_id) {
-                send_pane(&mut state.sizes, &tx, &surface.frame, pane, surface.frame.cursor.as_ref());
+                let defaults = state.defaults;
+                send_pane(&mut state.sizes, &tx, &surface.frame, pane, surface.frame.cursor.as_ref(), defaults);
             }
             state.surface = Some(surface);
         }
@@ -142,6 +148,17 @@ impl ClientShell {
     }
 
     pub fn theme(&self, updates: Vec<HostThemeUpdate>) {
+        let packed = |c: &HostColor| 0x02_00_00_00 | (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32;
+        {
+            let mut state = self.state.lock().unwrap();
+            for update in &updates {
+                match update {
+                    HostThemeUpdate::DefaultColor { kind: DefaultColorKind::Foreground, color } => state.defaults.0 = packed(color),
+                    HostThemeUpdate::DefaultColor { kind: DefaultColorKind::Background, color } => state.defaults.1 = packed(color),
+                    _ => {}
+                }
+            }
+        }
         for update in updates {
             self.send(&ClientMessage::ClientShellHostTheme { update });
         }
@@ -193,7 +210,7 @@ fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<Ev
                 state.boot_id = surface.boot_id.clone();
                 for pane in &surface.panes {
                     if let Some(tx) = state.panes.get(&pane.pane_id) {
-                        send_pane(&mut state.sizes, tx, &surface.frame, pane, surface.frame.cursor.as_ref());
+                        send_pane(&mut state.sizes, tx, &surface.frame, pane, surface.frame.cursor.as_ref(), state.defaults);
                     }
                 }
                 let next = layout_of(&surface);
@@ -229,7 +246,7 @@ fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<Ev
                 // the panes whose content changed, and the focused one for the cursor
                 for pane in surface.panes.iter().filter(|p| p.focused || patch.panes.iter().any(|u| u.pane_id == p.pane_id)) {
                     if let Some(tx) = state.panes.get(&pane.pane_id) {
-                        send_pane(&mut state.sizes, tx, &surface.frame, pane, surface.frame.cursor.as_ref());
+                        send_pane(&mut state.sizes, tx, &surface.frame, pane, surface.frame.cursor.as_ref(), state.defaults);
                     }
                 }
             }
@@ -264,6 +281,7 @@ fn send_pane(
     frame: &FrameData,
     pane: &PaneSurfacePane,
     cursor: Option<&CursorState>,
+    defaults: (u32, u32),
 ) {
     let size = (pane.inner_rect.width, pane.inner_rect.height);
     if sizes.insert(pane.pane_id.clone(), size) != Some(size) {
@@ -271,12 +289,13 @@ fn send_pane(
     }
     let cursor = cursor.filter(|_| pane.focused);
     let _ = tx.unbounded_send(SessionEvent::MouseCapture(pane.mouse_reporting));
-    let _ = tx.unbounded_send(SessionEvent::Frame(pane_ansi(frame, &pane.inner_rect, cursor)));
+    let _ = tx.unbounded_send(SessionEvent::Frame(pane_ansi(frame, &pane.inner_rect, cursor, defaults)));
 }
 
 /// `area` of `frame` as a full repaint for an emulator of exactly its size: every row from its first column, the
-/// styles as SGR, links as OSC 8, then the cursor (hidden unless it is in `area`).
-pub fn pane_ansi(frame: &FrameData, area: &SurfaceRect, cursor: Option<&CursorState>) -> Vec<u8> {
+/// styles as SGR, links as OSC 8, then the cursor (hidden unless it is in `area`). `defaults` (packed fg, bg) go
+/// out as the emulator's default colors.
+pub fn pane_ansi(frame: &FrameData, area: &SurfaceRect, cursor: Option<&CursorState>, defaults: (u32, u32)) -> Vec<u8> {
     let mut out = Vec::with_capacity(area.width as usize * area.height as usize * 2);
     out.extend_from_slice(b"\x1b[?25l\x1b[0m");
     let width = frame.width as usize;
@@ -293,7 +312,7 @@ pub fn pane_ansi(frame: &FrameData, area: &SurfaceRect, cursor: Option<&CursorSt
             }
             if style != Some((cell.fg, cell.bg, cell.modifier)) {
                 style = Some((cell.fg, cell.bg, cell.modifier));
-                sgr(&mut out, cell);
+                sgr(&mut out, cell, defaults);
             }
             if cell.hyperlink != link {
                 link = cell.hyperlink;
@@ -319,15 +338,15 @@ pub fn pane_ansi(frame: &FrameData, area: &SurfaceRect, cursor: Option<&CursorSt
 }
 
 /// herdr's packed colors and ratatui modifier bits as one SGR.
-fn sgr(out: &mut Vec<u8>, cell: &CellData) {
+fn sgr(out: &mut Vec<u8>, cell: &CellData, (fg, bg): (u32, u32)) {
     out.extend_from_slice(b"\x1b[0");
     for (bit, code) in [(1u16, "1"), (2, "2"), (4, "3"), (8, "4"), (16, "5"), (64, "7"), (128, "8"), (256, "9")] {
         if cell.modifier & bit != 0 {
             let _ = write!(out, ";{code}");
         }
     }
-    color(out, cell.fg, 38);
-    color(out, cell.bg, 48);
+    color(out, if cell.fg == fg { 0 } else { cell.fg }, 38);
+    color(out, if cell.bg == bg { 0 } else { cell.bg }, 48);
     out.push(b'm');
 }
 
@@ -412,13 +431,14 @@ mod tests {
         ];
         let frame = FrameData { cells, width: 4, height: 2, cursor: None, hyperlinks: vec![], graphics: vec![] };
         let area = SurfaceRect { x: 2, y: 0, width: 2, height: 2 };
-        let bytes = pane_ansi(&frame, &area, Some(&CursorState { x: 3, y: 0, visible: true, shape: 0 }));
+        let bytes = pane_ansi(&frame, &area, Some(&CursorState { x: 3, y: 0, visible: true, shape: 0 }), (0x02_ff_00_00, 0));
         let mut emu = crate::terminal::emulator::Emulator::new(2, 2);
         emu.feed(&bytes);
         assert_eq!(emu.row_text(0), "xy");
         assert_eq!(emu.row_text(1).trim_end(), "你");
+        // red is the host's default foreground here: it goes back as default
         let x = emu.line(0)[0];
-        assert!(x.bold && x.fg == crate::terminal::emulator::CellColor::Rgb(255, 0, 0));
+        assert!(x.bold && x.fg == crate::terminal::emulator::CellColor::Foreground);
         assert_eq!(emu.cursor().map(|c| (c.row, c.col)), Some((0, 1)));
     }
 
@@ -467,7 +487,7 @@ mod tests {
         let mut took = Vec::new();
         for i in 0..40 {
             std::thread::sleep(Duration::from_millis(30));
-            while let Ok(Some(event)) = frames.try_next() {
+            while let Ok(event) = frames.try_recv() {
                 apply(&mut emu, event);
             }
             let before = screen(&emu);
@@ -482,5 +502,153 @@ mod tests {
         send("\x15"); // Ctrl+U: clear the typed line
         took.sort_by(f64::total_cmp);
         println!("{name}: keystroke → changed screen, ms: p50 {:.2}, p90 {:.2}, max {:.2}", took[took.len() / 2], took[took.len() * 9 / 10], took[took.len() - 1]);
+    }
+}
+
+#[cfg(test)]
+mod live_keys {
+    use super::*;
+
+    /// Live: types `echo hi`, Enter, then `sleep 9`, Enter, Ctrl+C as semantic keys, and prints the pane.
+    #[test]
+    #[ignore]
+    fn semantic_keys_reach_the_shell() {
+        let (shell, _rx) = ClientShell::connect(120, 40).unwrap();
+        let pane = std::env::var("PANE").unwrap();
+        let mut frames = shell.subscribe(&pane);
+        let none = gpui::Modifiers::default();
+        let ctrl = gpui::Modifiers { control: true, ..Default::default() };
+        let mut keys: Vec<PaneInput> = "echo hi".chars().map(|c| key_event(&c.to_string(), Some(&c.to_string()), &none).unwrap()).collect();
+        keys.push(key_event("enter", None, &none).unwrap());
+        keys.extend("sleep 9".chars().map(|c| key_event(&c.to_string(), Some(&c.to_string()), &none).unwrap()));
+        keys.push(key_event("enter", None, &none).unwrap());
+        shell.input(&pane, keys);
+        std::thread::sleep(Duration::from_millis(500));
+        shell.input(&pane, vec![key_event("c", Some("c"), &ctrl).unwrap()]);
+        std::thread::sleep(Duration::from_millis(500));
+        let mut emu = crate::terminal::emulator::Emulator::new(120, 40);
+        while let Ok(event) = frames.try_recv() {
+            match event {
+                SessionEvent::Frame(bytes) => drop(emu.feed(&bytes)),
+                SessionEvent::Size(c, r) => emu.resize(c, r),
+                _ => {}
+            }
+        }
+        for r in 0..12 {
+            println!("|{}", emu.row_text(r).trim_end());
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_tabs {
+    use super::*;
+
+    /// Live: the shell's view follows `tab.focus`; herdr's own focus (the API's) stays.
+    #[test]
+    #[ignore]
+    fn the_shell_shows_the_tab_it_focuses() {
+        let (shell, rx) = ClientShell::connect(120, 40).unwrap();
+        let mut rx = futures::executor::block_on_stream(rx);
+        let mut next_layout = || loop {
+            if let Some(Event::Layout(l)) = rx.next() {
+                break l.panes.iter().map(|p| (p.pane_id.clone(), p.rect, p.inner)).collect::<Vec<_>>();
+            }
+        };
+        println!("first: {:?}", next_layout());
+        shell.focus_tab(&std::env::var("TAB").unwrap());
+        println!("after tab.focus: {:?}", next_layout());
+    }
+}
+
+#[cfg(test)]
+mod live_cells {
+    use super::*;
+
+    /// Live: the packed fg/bg herdr sends for a few cells of each pane.
+    #[test]
+    #[ignore]
+    fn dump_cell_colors() {
+        let mut stream = UnixStream::connect(client_socket()).unwrap();
+        let hello = r#"{"generation":1,"cell_width_px":0,"cell_height_px":0,"surface_size":{"cols":120,"rows":40},"pixel_mouse":false,"direct_graphics":false,"endpoint_keybindings":false,"mouse_capture":false,"surface_active":true,"snapshot_codecs":["shell.snapshot.v1"],"surface_codecs":["shell.surface.v1"],"input_codecs":["shell.input.semantic.v1"],"blob_codecs":["shell.blob.v1"]}"#;
+        wire::write_message(&mut stream, &ClientMessage::EndpointControl { kind: "endpoint.hello.v1".into(), data: hello.into() }).unwrap();
+        loop {
+            if let Ok(Some(ServerMessage::PaneSurface(s))) = wire::read_message(&mut stream) {
+                for p in &s.panes {
+                    let r = &p.inner_rect;
+                    let at = |x: u16, y: u16| &s.frame.cells[(r.y + y) as usize * s.frame.width as usize + (r.x + x) as usize];
+                    let cells: Vec<_> = [(0, 0), (1, 1), (r.width - 1, 3)].iter().map(|&(x, y)| { let c = at(x, y); (c.symbol.clone(), format!("{:08x}", c.fg), format!("{:08x}", c.bg)) }).collect();
+                    println!("{} {:?} rect {:?} inner {:?} {cells:?}", p.pane_id, p.alternate_screen_active, (p.rect.x, p.rect.y, p.rect.width, p.rect.height), (r.x, r.y, r.width, r.height));
+                }
+                let border = &s.frame.cells[0];
+                println!("surface cell 0,0 {:?} fg {:08x} bg {:08x}", border.symbol, border.fg, border.bg);
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_attach_colors {
+    /// Live: what an attach (observe) gives for the same cells, to compare with `dump_cell_colors`.
+    #[test]
+    #[ignore]
+    fn attach_cell_colors() {
+        let pane = std::env::var("PANE").unwrap();
+        let (_s, rx) = crate::herdr::Session::spawn(&pane, 56, 38, crate::herdr::Mode::Observe).unwrap();
+        let mut emu = crate::terminal::emulator::Emulator::new(56, 38);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mut rx = rx;
+        while let Ok(crate::herdr::SessionEvent::Frame(b)) = rx.try_recv() {
+            emu.feed(&b);
+        }
+        println!("{:?} {:?}", emu.line(1)[1].fg, emu.line(1)[1].bg);
+    }
+}
+
+#[cfg(test)]
+mod live_resize_scroll {
+    use super::*;
+
+    /// Live: `ClientShellResize` re-lays the tab out; a wheel event scrolls the pane's history.
+    #[test]
+    #[ignore]
+    fn resize_and_wheel() {
+        let (shell, rx) = ClientShell::connect(120, 40).unwrap();
+        let mut rx = futures::executor::block_on_stream(rx);
+        let mut next_layout = || loop {
+            if let Some(Event::Layout(l)) = rx.next() {
+                break l;
+            }
+        };
+        let first = next_layout();
+        shell.resize(100, 30);
+        let resized = next_layout();
+        println!("{}x{} → {}x{}, panes {:?}", first.cols, first.rows, resized.cols, resized.rows, resized.panes.iter().map(|p| p.inner).collect::<Vec<_>>());
+        let pane = std::env::var("PANE").unwrap();
+        let frames = shell.subscribe(&pane);
+        std::thread::sleep(Duration::from_millis(200));
+        let screen = |frames: &mut UnboundedReceiver<SessionEvent>, emu: &mut crate::terminal::emulator::Emulator| {
+            while let Ok(e) = frames.try_recv() {
+                match e {
+                    SessionEvent::Frame(b) => drop(emu.feed(&b)),
+                    SessionEvent::Size(c, r) => emu.resize(c, r),
+                    _ => {}
+                }
+            }
+            emu.row_text(0)
+        };
+        let (mut frames, mut emu) = (frames, crate::terminal::emulator::Emulator::new(10, 10));
+        std::thread::sleep(Duration::from_millis(300));
+        let before = screen(&mut frames, &mut emu);
+        let wheel = PaneInput::Mouse { kind: wire::MouseKind::ScrollUp, position: wire::MousePosition::Cell { column: 2, row: 2 }, geometry: None, modifiers: 0, lines: 10 };
+        shell.input(&pane, vec![wheel]);
+        std::thread::sleep(Duration::from_millis(200));
+        let after = screen(&mut frames, &mut emu);
+        println!("row 0 before: {before:?}\nrow 0 after wheel up: {after:?}");
+        let down = PaneInput::Mouse { kind: wire::MouseKind::ScrollDown, position: wire::MousePosition::Cell { column: 2, row: 2 }, geometry: None, modifiers: 0, lines: 10 };
+        shell.input(&pane, vec![down]);
+        std::thread::sleep(Duration::from_millis(200));
+        println!("row 0 after wheel down: {:?}", screen(&mut frames, &mut emu));
     }
 }

@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+mod client_shell;
 mod divider;
 mod floating;
 mod motion;
@@ -157,6 +158,8 @@ pub struct Shell {
     /// herdr's popup over the panes, and the client shell that hears of it.
     floating: Option<floating::Floating>,
     popup_watch: gpui::Task<()>,
+    /// PoC: the window as one herdr client shell (`SHEPHERD_CLIENT_SHELL=1`).
+    client_shell: Option<client_shell::ShellView>,
     /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.
     herdr_commands: Vec<(String, Vec<String>)>,
     /// herdr's sessions and machines, in the bar under the sidebar.
@@ -368,6 +371,7 @@ impl Shell {
                     sync: gpui::Task::ready(()),
                     floating: None,
                     popup_watch: gpui::Task::ready(()),
+                    client_shell: None,
                     herdr_commands: Vec::new(),
                     places: Vec::new(),
                     swipe: None,
@@ -424,7 +428,11 @@ impl Shell {
         cx.set_global(PaneQueries(client.clone(), rt.clone()));
         self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await);
         self.floating = None;
-        self.popup_watch = cx.spawn(async move |this, cx| floating::popup_loop(this, cx).await);
+        self.popup_watch = if crate::herdr::client_shell::enabled() {
+            cx.spawn(async move |this, cx| client_shell::shell_loop(this, cx).await)
+        } else {
+            cx.spawn(async move |this, cx| floating::popup_loop(this, cx).await)
+        };
     }
 
     fn toggle_settings_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -854,10 +862,14 @@ impl Render for Shell {
         let toasts = crate::ui::toast::stack(&theme, TITLEBAR_HEIGHT + 8., window, cx);
         let tab = self.shown_tab();
         self.shown_workspace = tab.as_ref().map(|t| t.workspace_id.clone());
+        self.sync_client_shell(tab.as_ref().map(|t| t.tab_id.as_str()), window, cx);
         let (mut frames, mut splits) = match (&snapshot, &tab) {
             (Some(s), Some(t)) => (s.pane_frames(&t.tab_id), s.split_frames(&t.tab_id)),
             _ => (Vec::new(), Vec::new()),
         };
+        if let Some(laid_out) = self.client_shell_frames(&frames) {
+            frames = laid_out;
+        }
         // herdr caught up with a released divider: its snapshot is the layout again.
         if let Some((path, ratio)) = &self.settling {
             if splits.iter().any(|s| &s.path == path && (s.ratio - ratio).abs() < 0.02) {
