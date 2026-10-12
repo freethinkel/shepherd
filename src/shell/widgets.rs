@@ -12,25 +12,44 @@ pub(crate) fn status_color(status: AgentStatus, theme: &Theme) -> Option<Hsla> {
 
 /// An agent's status in the theme's style (the settings' Status icons).
 pub(crate) fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
-    status_icon(status, theme.status_symbols, theme)
+    status_icon(status, theme.status_icons, theme)
 }
 
-/// Collie's status dot, filled for an agent state, a faint ring when idle. With `symbols`, herdr's
-/// `status_indicators = "symbols"` shapes instead (× ◐ ✓ ○, a dashed ring for its `·`), in the same colors. Every
-/// icon is drawn to the same 12 px box, so both styles are one size and switching never shifts a row.
-pub(crate) fn status_icon(status: AgentStatus, symbols: bool, theme: &Theme) -> Div {
-    let icon = match (symbols, status) {
-        (false, AgentStatus::Idle | AgentStatus::Unknown) => "icons/status-idle.svg",
-        (false, _) => "icons/status-dot.svg",
-        (true, AgentStatus::Blocked) => "icons/status-blocked.svg",
-        (true, AgentStatus::Working) => "icons/status-working.svg",
-        (true, AgentStatus::Done) => "icons/status-done.svg",
-        (true, AgentStatus::Idle) => "icons/status-idle.svg",
-        (true, AgentStatus::Unknown) => "icons/status-unknown.svg",
-    };
-    let faint = if symbols { theme.text_faint } else { theme.text_faint.opacity(0.6) };
+/// Collie's status dot, filled for an agent state, a faint ring when idle; `Symbols` draws herdr's
+/// `status_indicators = "symbols"` shapes instead (× ◐ ✓ ○, a dashed ring for its `·`), and `Animated` Zeron's: its
+/// 2×3 glyph spinner while the agent works, a check when done, a small dot otherwise. Every style fills the same
+/// 12 px box in the same colors, so switching never shifts a row.
+pub(crate) fn status_icon(status: AgentStatus, style: crate::theme::StatusIcons, theme: &Theme) -> Div {
+    use crate::theme::StatusIcons::*;
+    let faint = if style == Symbols { theme.text_faint } else { theme.text_faint.opacity(0.6) };
     let color = status_color(status, theme).unwrap_or(faint);
-    div().size(px(12.)).flex_none().child(gpui::svg().path(icon).size(px(12.)).text_color(color))
+    let el = div().size(px(12.)).flex_none().flex().items_center().justify_center();
+    let icon = match (style, status) {
+        (Animated, AgentStatus::Working) => return el.child(crate::ui::loader::glyph_spinner(2., glyph_rows(color, theme))),
+        (Animated, AgentStatus::Done) => "icons/status-done.svg",
+        (Animated, _) => return el.child(div().size(px(6.)).rounded_full().bg(color)),
+        (Dots, AgentStatus::Idle | AgentStatus::Unknown) => "icons/status-idle.svg",
+        (Dots, _) => "icons/status-dot.svg",
+        (Symbols, AgentStatus::Blocked) => "icons/status-blocked.svg",
+        (Symbols, AgentStatus::Working) => "icons/status-working.svg",
+        (Symbols, AgentStatus::Done) => "icons/status-done.svg",
+        (Symbols, AgentStatus::Idle) => "icons/status-idle.svg",
+        (Symbols, AgentStatus::Unknown) => "icons/status-unknown.svg",
+    };
+    el.child(gpui::svg().path(icon).size(px(12.)).text_color(color))
+}
+
+/// Zeron's `GlyphPalette::for_accent`: the spinner's rows, top to bottom, lighter, `tint` itself, deeper.
+fn glyph_rows(tint: Hsla, theme: &Theme) -> [Hsla; 3] {
+    let (mut light, mut deep) = (tint, tint);
+    if theme.appearance == crate::theme::Appearance::Dark {
+        (light.l, light.s) = ((light.l + 0.14).min(0.90), light.s * 0.72);
+        deep.l = (deep.l - 0.08).max(0.22);
+    } else {
+        (light.l, light.s) = ((light.l + 0.11).min(0.76), light.s * 0.78);
+        deep.l = (deep.l - 0.09).max(0.22);
+    }
+    [light, tint, deep]
 }
 
 /// A small square text button (`+`).

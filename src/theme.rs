@@ -11,6 +11,19 @@ pub enum Appearance {
 }
 
 /// Light, dark, or whatever the system shows.
+/// How agent status is drawn (the settings' Status icons): herdr's two `status_indicators` styles, and Shepherd's
+/// own, Zeron's: a pulsing glyph while an agent works, a check when done, a small dot otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StatusIcons {
+    Symbols,
+    Animated,
+    /// Also what an unknown (future) value reads as.
+    #[default]
+    #[serde(other)]
+    Dots,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppearanceMode {
@@ -63,8 +76,8 @@ pub struct Theme {
     pub font_terminal: SharedString,
     pub terminal_font_size: f32,
     pub terminal_line_height: f32,
-    /// Agent status drawn as glyphs rather than dots (the settings' Status icons).
-    pub status_symbols: bool,
+    /// How agent status is drawn (the settings' Status icons).
+    pub status_icons: StatusIcons,
     pub terminal: TerminalPalette,
 }
 
@@ -249,7 +262,7 @@ impl Theme {
             font_terminal: font.family.clone().into(),
             terminal_font_size: font.size,
             terminal_line_height: font.line_height,
-            status_symbols: false,
+            status_icons: StatusIcons::Dots,
             terminal: TerminalPalette {
                 background: color(v.terminal.background),
                 foreground: color(v.terminal.foreground),

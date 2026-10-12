@@ -1,6 +1,7 @@
 //! Zeron's loaders (`crates/ui/src/loaders.rs`): the gradient matrix spinner, a 3×3 grid tinted per row with a pulse
-//! travelling up it, and its 2×3 one-color variant for compact slots, with the pulse running round the edge.
-use gpui::{Div, Hsla, ParentElement, Styled, Window, div, px};
+//! travelling up it, and its 2×3 variant for compact slots, with the pulse running round the edge: in one color, or
+//! (an agent at work) a tint per row.
+use gpui::{AnimationExt as _, Div, Hsla, IntoElement, ParentElement, Styled, Window, div, px};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -26,14 +27,31 @@ pub fn spinner(cell: f32, window: &mut Window) -> Div {
 
 /// The 2×3 spinner in one color, the flare going round clockwise from the top left.
 pub fn mini_spinner(cell: f32, tint: Hsla, window: &mut Window) -> Div {
+    grid(cell, 3, 2, |_, _| tint, ring, window)
+}
+
+/// Zeron's `mini_glyph_spinner`, an agent at work: [`mini_spinner`] with a tint per row, for a slot with no window to
+/// ask frames of. Its own animation asks for them, so each copy runs from when it first showed.
+pub fn glyph_spinner(cell: f32, rows: [Hsla; 3]) -> impl IntoElement {
+    div().with_animation("glyph-spinner", gpui::Animation::new(Duration::from_secs_f32(PERIOD)).repeat(), move |el, t| {
+        el.child(cells(cell, 3, 2, |row, _| rows[row], ring, t))
+    })
+}
+
+/// The 2×3 spinners' phases: clockwise round the edge from the top left.
+fn ring(row: usize, col: usize) -> f32 {
     const RING: [[usize; 2]; 3] = [[0, 1], [5, 2], [4, 3]];
-    grid(cell, 3, 2, |_, _| tint, |row, col| RING[row][col] as f32 / 6., window)
+    RING[row][col] as f32 / 6.
 }
 
 fn grid(cell: f32, rows: usize, cols: usize, tint: impl Fn(usize, usize) -> Hsla, phase: impl Fn(usize, usize) -> f32, window: &mut Window) -> Div {
     window.request_animation_frame();
     static EPOCH: OnceLock<Instant> = OnceLock::new();
-    let t = EPOCH.get_or_init(Instant::now).elapsed().as_secs_f32() / PERIOD;
+    cells(cell, rows, cols, tint, phase, EPOCH.get_or_init(Instant::now).elapsed().as_secs_f32() / PERIOD)
+}
+
+/// The cells at `t` periods in.
+fn cells(cell: f32, rows: usize, cols: usize, tint: impl Fn(usize, usize) -> Hsla, phase: impl Fn(usize, usize) -> f32, t: f32) -> Div {
     div().flex().flex_col().gap(px(cell / 2.)).children((0..rows).map(|row| {
         div().flex().gap(px(cell / 2.)).children((0..cols).map(|col| {
             div().size(px(cell)).rounded(px(cell / 2.)).bg(tint(row, col)).opacity(opacity(t + phase(row, col)))

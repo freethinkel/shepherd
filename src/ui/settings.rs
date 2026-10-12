@@ -6,7 +6,7 @@
 use crate::bindings::{ACTIONS, effective, rebind, recordable};
 use crate::herdr::{Client, HerdrConfig, config_path, set_binary, set_socket};
 use crate::settings::{Settings, SettingsGlobal, step_font_size, step_line_height};
-use crate::theme::{Appearance, AppearanceMode, Theme, variants_for};
+use crate::theme::{Appearance, AppearanceMode, StatusIcons, Theme, variants_for};
 use crate::ui::input_style;
 use crate::update::{self as updater, Updates};
 use gpui::{
@@ -588,7 +588,7 @@ fn card_row(theme: &Theme, first: bool) -> Div {
 }
 
 /// One way to draw agent status: the waiting, working, done and idle icons in it, its name, and a check when chosen.
-fn status_choice(theme: &Theme, symbols: bool, label: &'static str, checked: bool) -> gpui::Stateful<Div> {
+fn status_choice(theme: &Theme, style: StatusIcons, label: &'static str, checked: bool) -> gpui::Stateful<Div> {
     use crate::model::AgentStatus::*;
     let hover = theme.wash(0.06);
     div()
@@ -608,7 +608,7 @@ fn status_choice(theme: &Theme, symbols: bool, label: &'static str, checked: boo
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .children([Blocked, Working, Done, Idle].map(|status| crate::shell::status_icon(status, symbols, theme))),
+                .children([Blocked, Working, Done, Idle].map(|status| crate::shell::status_icon(status, style, theme))),
         )
         .child(div().flex_1().child(label))
         .when(checked, |el| el.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(theme.accent)))
@@ -909,7 +909,11 @@ impl Render for SettingsView {
                                 |_, _: &ClickEvent, _, cx| update(cx, |s| s.show_agents = !s.show_agents),
                             ))),
                     )
-                    .child(card_row(&theme, false).child(row_text(&theme, "Status icons", "How an agent's state shows, here and in herdr's own style.")))
+                    .child(card_row(&theme, false).child(row_text(
+                        &theme,
+                        "Status icons",
+                        "How an agent's state shows. Dots and Symbols are herdr's styles; Animated is Zeron's, a pulse while an agent works.",
+                    )))
                     .child(
                         div()
                             .mx(px(8.))
@@ -917,10 +921,12 @@ impl Render for SettingsView {
                             .pb(px(8.))
                             .flex()
                             .flex_col()
-                            .children([(false, "Dots"), (true, "Symbols")].map(|(symbols, label)| {
-                                status_choice(&theme, symbols, label, settings.status_symbols == symbols)
-                                    .on_click(move |_, _, cx| update(cx, |s| s.status_symbols = symbols))
-                            })),
+                            .children([(StatusIcons::Dots, "Dots"), (StatusIcons::Symbols, "Symbols"), (StatusIcons::Animated, "Animated")].map(
+                                |(style, label)| {
+                                    status_choice(&theme, style, label, settings.status_icons == style)
+                                        .on_click(move |_, _, cx| update(cx, |s| s.status_icons = style))
+                                },
+                            )),
                     )
                     .child(
                         card_row(&theme, false)
