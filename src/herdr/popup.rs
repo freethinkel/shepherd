@@ -69,7 +69,7 @@ pub fn watch(cols: u16, rows: u16) -> anyhow::Result<UnboundedReceiver<Event>> {
     Ok(rx)
 }
 
-fn commands(snapshot: &str) -> Vec<(String, Vec<String>)> {
+pub(super) fn commands(snapshot: &str) -> Vec<(String, Vec<String>)> {
     #[derive(serde::Deserialize)]
     struct Command {
         command_id: String,

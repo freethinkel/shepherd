@@ -34,10 +34,12 @@ pub enum ClientMessage {
     GraphicsTransmissionResult,
     GraphicsTransmissionStarted,
     ClientShellHello,
-    ClientShellResize,
-    ClientShellPaneInput,
+    /// The client shell's whole pane grid in cells; herdr lays the shown tab's panes out in it.
+    ClientShellResize { cell_width_px: u32, cell_height_px: u32, surface_size: SurfaceSize, pixel_mouse: bool },
+    ClientShellPaneInput { pane_id: String, events: Vec<PaneInput> },
     ClientShellPopupInput,
-    ClientShellEndpointRequest,
+    /// One API call (JSON `{id, method, params}`) on behalf of this client shell, e.g. `tab.focus` for its own view.
+    ClientShellEndpointRequest { boot_id: String, request: String },
     AttachMouse {
         kind: MouseKind,
         position: MousePosition,
@@ -45,8 +47,8 @@ pub enum ClientMessage {
         modifiers: u8,
         lines: u16,
     },
-    ClientShellHostTheme,
-    ClientShellFocus,
+    ClientShellHostTheme { update: HostThemeUpdate },
+    ClientShellFocus { focused: bool },
     ClientShellMouseCapture,
     /// A named control message of herdr's client-shell ("endpoint") protocol, its data JSON.
     EndpointControl { kind: String, data: String },
@@ -81,6 +83,8 @@ pub enum MouseKind {
     Up(MouseButton),
     Drag(MouseButton),
     Moved,
+    ScrollUp,
+    ScrollDown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -95,6 +99,94 @@ pub struct MouseGeometry {
     pub rows: u16,
     pub width_px: u32,
     pub height_px: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SurfaceSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// herdr's `ClientPaneInputEvent`: keys stay semantic, so herdr encodes them for the pane app's keyboard protocol.
+#[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
+pub enum PaneInput {
+    Key {
+        code: KeyCode,
+        /// crossterm's `KeyModifiers` bits: shift 1, control 2, alt 4, super 8.
+        modifiers: u8,
+        kind: KeyKind,
+        repeat_count: u16,
+        shifted_codepoint: Option<u32>,
+        generated_text: Option<String>,
+        tracks_release: bool,
+        physical_key_id: Option<u32>,
+        /// herdr's `WindowsKeyRecord`, always `None` here.
+        windows_record: Option<()>,
+    },
+    /// Raw text for the PTY as it is.
+    TextCommit(String),
+    Mouse { kind: MouseKind, position: MousePosition, geometry: Option<MouseGeometry>, modifiers: u8, lines: u16 },
+    /// Bracketed or not as the pane's app asked.
+    Paste(String),
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
+pub enum KeyCode {
+    Backspace,
+    Enter,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Tab,
+    BackTab,
+    Delete,
+    Insert,
+    Esc,
+    Char(char),
+    F(u8),
+    Null,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[allow(dead_code)]
+pub enum KeyKind {
+    Press,
+    Repeat,
+    Release,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct HostColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum DefaultColorKind {
+    Foreground,
+    Background,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum HostAppearance {
+    Dark,
+    Light,
+}
+
+/// The colors herdr answers the panes' OSC 10/11/4 queries with.
+#[derive(Debug, Clone, Serialize)]
+pub enum HostThemeUpdate {
+    DefaultColor { kind: DefaultColorKind, color: HostColor },
+    PaletteColors(Vec<(u8, HostColor)>),
+    Appearance(HostAppearance),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,8 +218,8 @@ pub enum ServerMessage {
     ClientShellError { message: String },
     DirectTerminalKeyboardProtocol,
     ClientShellKeyboardReportAll,
-    ClientShellEndpointResponseChunk,
-    PaneSurfacePatch,
+    ClientShellEndpointResponseChunk { boot_id: String, request_id: String, final_chunk: bool, data: Vec<u8> },
+    PaneSurfacePatch(PaneSurfacePatch),
     EndpointControl { kind: String, data: String },
 }
 
@@ -144,6 +236,26 @@ pub struct PaneSurfaceFrame {
     pub popup: Option<PopupSurface>,
 }
 
+/// Cell changes against the last surface (`base_surface_revision`), plus the panes whose content changed.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct PaneSurfacePatch {
+    pub boot_id: String,
+    pub projection_revision: u64,
+    pub base_surface_revision: u64,
+    pub surface_revision: u64,
+    pub rows: Vec<PatchRow>,
+    pub panes: Vec<PaneSurfacePane>,
+    pub cursor: Option<CursorState>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchRow {
+    pub x: u16,
+    pub y: u16,
+    pub cells: Vec<CellData>,
+}
+
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct FrameData {
@@ -155,7 +267,7 @@ pub struct FrameData {
     pub graphics: Vec<u8>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct CellData {
     pub symbol: String,
@@ -166,7 +278,7 @@ pub struct CellData {
     pub hyperlink: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct CursorState {
     pub x: u16,
@@ -175,7 +287,7 @@ pub struct CursorState {
     pub shape: u8,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct SurfaceRect {
     pub x: u16,
@@ -184,7 +296,7 @@ pub struct SurfaceRect {
     pub height: u16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct PaneSurfacePane {
     pub pane_id: String,

@@ -6,7 +6,7 @@ use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, Side};
 use super::find::{Link, find_all, hyperlink, link_at};
 use super::keys::{dropped_paths, keystroke_bytes, paste_bytes};
-use crate::herdr::{Client, Mode, Session, SessionEvent};
+use crate::herdr::{Client, Mode, PaneInput, Session, SessionEvent};
 use crate::theme::Theme;
 use crate::ui::Popup;
 use alacritty_terminal::index::Point as GridPoint;
@@ -64,6 +64,21 @@ pub fn claim(cx: &mut App) {
     if yielded(cx) {
         cx.set_global(Yielded(false));
     }
+}
+
+/// Shepherd's one client shell (PoC, `SHEPHERD_CLIENT_SHELL=1`): panes take their cut of it instead of attaching.
+pub struct ShellConnection(pub std::sync::Arc<crate::herdr::client_shell::ClientShell>);
+
+impl gpui::Global for ShellConnection {}
+
+fn over_shell(cx: &App) -> bool {
+    cx.has_global::<ShellConnection>()
+}
+
+/// PoC: `SHEPHERD_LATENCY=1` prints keystroke → frame on the main thread → painted, per transport.
+fn latency_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SHEPHERD_LATENCY").is_some())
 }
 
 /// herdr's socket for per-pane queries (scroll position); absent in tests.
@@ -217,6 +232,9 @@ pub struct PaneTerminal {
     preview: Option<Popup<Preview>>,
     /// Always attaches by taking the terminal over (herdr's popup: whichever window shows it types into it).
     pub takes_over: bool,
+    /// PoC latency probe: when the last key went out, and when its frame reached the main thread.
+    typed: Option<std::time::Instant>,
+    arrived: std::cell::Cell<Option<(std::time::Instant, std::time::Instant)>>,
 }
 
 impl PaneTerminal {
@@ -266,6 +284,8 @@ impl PaneTerminal {
             hover: None,
             preview: None,
             takes_over: false,
+            typed: None,
+            arrived: Default::default(),
         }
         // Attaching waits for the first measured grid (`on_grid_metrics`): herdr resizes the real PTY to
         // whatever size the attach names.
@@ -286,6 +306,15 @@ impl PaneTerminal {
     /// Connects off the main thread: herdr's handshake takes tens of milliseconds, and attaching happens while a
     /// frame is laid out (a tab switch attaches every pane it shows).
     fn attach(&mut self, takeover: bool, cx: &mut Context<Self>) {
+        // herdr's popup is no pane of the surface: it stays an attach
+        if let Some(ShellConnection(shell)) = cx.try_global::<ShellConnection>().filter(|_| !self.takes_over) {
+            let (session, rx) = Session::over_shell(shell.clone(), &self.pane_id);
+            self.session = Some(session);
+            self.observing = false;
+            self.ended = None;
+            self._pump = Some(cx.spawn(async move |this, cx| pump(this, rx, cx).await));
+            return;
+        }
         let (cols, rows) = (self.emulator.cols() as u16, self.emulator.rows() as u16);
         let pane_id = self.pane_id.clone();
         let mode = match (takeover || self.takes_over, yielded(cx)) {
@@ -349,7 +378,8 @@ impl PaneTerminal {
         }
         let first = self.geometry.is_none();
         let (cols, rows) = (geometry.cols, geometry.rows);
-        let resized = self.emulator.cols() != cols as usize || self.emulator.rows() != rows as usize;
+        // over the client shell herdr sizes the pane (`SessionEvent::Size`), not its view
+        let resized = !over_shell(cx) && (self.emulator.cols() != cols as usize || self.emulator.rows() != rows as usize);
         let held = cx.try_global::<GridHold>().is_some_and(|hold| hold.0);
         if !first && resized && held && self.resized_at.is_some_and(|at| at.elapsed() < HELD_RESIZE) {
             return; // a drag is under way and the grid just reflowed: the next frame (or the drop) catches up
@@ -425,6 +455,11 @@ impl PaneTerminal {
             }
         }
         let marks = self.search_marks(&lines, cx);
+        if let Some((typed, arrived)) = self.arrived.take() {
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+            let via = if self.session.as_ref().is_some_and(Session::is_shell) { "shell" } else { "attach" };
+            eprintln!("latency {via}: frame {:.2} ms, painted {:.2} ms", ms(arrived - typed), ms(typed.elapsed()));
+        }
         Some(GridSnapshot { lines, cursor: self.emulator.cursor(), marks })
     }
 
@@ -826,6 +861,9 @@ impl PaneTerminal {
     }
 
     fn input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        if latency_log() {
+            self.typed = Some(std::time::Instant::now());
+        }
         match &self.session {
             Some(session) if !self.observing => session.input(bytes),
             _ if self.ended.is_none() => {
@@ -863,6 +901,8 @@ impl PaneTerminal {
             match cx.read_from_clipboard() {
                 // ponytail: always bracketed; herdr's frames do not tell us whether the app asked for it.
                 Some(item) => match item.text() {
+                    // the client shell brackets the paste as the pane's app asked
+                    Some(text) if self.session.as_ref().is_some_and(|s| s.shell_input(vec![PaneInput::Paste(text.to_string())])) => {}
                     Some(text) => self.input(&paste_bytes(&text, true), cx),
                     // an image: ctrl-v, the key agent TUIs (Claude Code, Codex) read the clipboard's image on
                     None => self.input(b"\x16", cx),
@@ -875,6 +915,16 @@ impl PaneTerminal {
         if ks.key == "c" && mods.platform {
             if let Some(text) = self.emulator.selection_text() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if let Some(session) = self.session.as_ref().filter(|s| s.is_shell()) {
+            if let Some(event) = crate::herdr::client_shell::key_event(&ks.key, ks.key_char.as_deref(), mods) {
+                if latency_log() {
+                    self.typed = Some(std::time::Instant::now());
+                }
+                session.shell_input(vec![event]);
                 cx.stop_propagation();
             }
             return;
@@ -1171,8 +1221,14 @@ async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionE
                 match event {
                     // Replies (DSR, DA…) are dropped: frames are herdr's re-render, and herdr already
                     // answered the app's own queries.
-                    SessionEvent::Frame(bytes) => drop(pane.emulator.feed(&bytes)),
+                    SessionEvent::Frame(bytes) => {
+                        drop(pane.emulator.feed(&bytes));
+                        if let Some(typed) = pane.typed.take() {
+                            pane.arrived.set(Some((typed, std::time::Instant::now())));
+                        }
+                    }
                     SessionEvent::MouseCapture(enabled) => pane.mouse_capture = enabled,
+                    SessionEvent::Size(cols, rows) => pane.emulator.resize(cols, rows),
                     SessionEvent::Ended(why) => {
                         pane.ended = Some(why);
                         pane.session = None;
