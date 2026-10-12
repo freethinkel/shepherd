@@ -5,13 +5,13 @@
 use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement, cell_at};
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, Side};
 use super::find::{Link, find_all, hyperlink, link_at};
-use super::keys::{keystroke_bytes, paste_bytes};
+use super::keys::{dropped_paths, keystroke_bytes, paste_bytes};
 use crate::herdr::{Client, Mode, Session, SessionEvent};
 use crate::theme::Theme;
 use alacritty_terminal::index::Point as GridPoint;
 use alacritty_terminal::selection::SelectionType;
 use gpui::{
-    App, AsyncApp, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent, Modifiers,
+    App, AsyncApp, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, Focusable, IntoElement, KeyDownEvent, Modifiers,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
     ScrollDelta, ScrollWheelEvent, SharedString, Styled, Subscription, Task, WeakEntity, Window, div, prelude::*, px,
 };
@@ -939,6 +939,11 @@ impl Render for PaneTerminal {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            // files from Finder: their paths, pasted
+            .on_drop(cx.listener(|pane, paths: &ExternalPaths, window, cx| {
+                window.focus(&pane.focus, cx);
+                pane.input(&paste_bytes(&dropped_paths(paths.paths()), true), cx);
+            }))
             .on_modifiers_changed(cx.listener(|pane, e: &ModifiersChangedEvent, _, cx| pane.update_hover(e.modifiers.platform, cx)))
             .when(self.hover.is_some(), |el| el.cursor_pointer())
             .child(TerminalElement::new(cx.entity(), focused))

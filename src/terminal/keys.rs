@@ -133,9 +133,29 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
+/// Files dropped on a terminal, as text: each path shell-escaped with backslashes and space-separated, as Ghostty
+/// does, so a shell or an agent TUI (Claude Code picks up image paths) reads them whole.
+pub fn dropped_paths<P: AsRef<std::path::Path>>(paths: &[P]) -> String {
+    let escape = |p: &P| {
+        p.as_ref().to_string_lossy().chars().fold(String::new(), |mut out, c| {
+            if c.is_whitespace() || "\\'\"`$&|;<>()[]{}*?!#~".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+            out
+        })
+    };
+    paths.iter().map(escape).collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_paths_are_escaped_and_joined() {
+        assert_eq!(dropped_paths(&["/tmp/a.png", "/Users/me/My Shot (1).png"]), r"/tmp/a.png /Users/me/My\ Shot\ \(1\).png");
+    }
 
     fn mods() -> Modifiers {
         Modifiers::default()
