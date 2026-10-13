@@ -48,7 +48,7 @@ impl Shell {
         match (surface, &mut self.floating) {
             (None, _) => {
                 if self.floating.take().is_some() {
-                    self.focused = None; // the keyboard goes back to herdr's focused pane
+                    self.popup_closed = true;
                 }
             }
             (Some(surface), Some(f)) if f.surface.terminal_id == surface.terminal_id => f.surface = surface,

@@ -59,6 +59,9 @@ pub struct Shell {
     own_pane: Option<String>,
     /// herdr's focused pane we last moved keyboard focus to; refocusing on every render would undo clicks.
     focused: Option<String>,
+    /// herdr's popup just closed: the keyboard goes back to herdr's focused pane unless a press outside it landed
+    /// on a pane, which keeps it.
+    popup_closed: bool,
     /// The last key or click in Shepherd: herdr pane focus changes soon after one are Shepherd's own.
     touched: Instant,
     /// The tab Shepherd shows. Local on purpose: herdr's focus is shared with its TUI clients.
@@ -313,6 +316,7 @@ impl Shell {
                     recent_panes: Vec::new(),
                     own_pane: std::env::var("HERDR_PANE_ID").ok(),
                     focused: None,
+                    popup_closed: false,
                     touched: Instant::now(),
                     selected_tab: std::env::var("SHEPHERD_TAB").ok(),
                     should_move: Rc::new(Cell::new(false)),
@@ -884,6 +888,9 @@ impl Render for Shell {
             remember_shown(&mut self.recent_panes, &shown, |id| snapshot.panes.iter().any(|p| p.pane_id == id));
         }
         prune(&mut self.panes, &mut self.focused, &self.recent_panes, |_| false);
+        if std::mem::take(&mut self.popup_closed) && !self.panes.values().any(|p| p.read(cx).focus_handle(cx).is_focused(window)) {
+            self.focused = None;
+        }
         let overlaid = self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open()) || self.floating_open();
         for f in &shown {
             if !self.panes.contains_key(&f.pane_id) {
