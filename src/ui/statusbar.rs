@@ -633,14 +633,17 @@ pub enum Item {
 
 /// The bar for the pane `pane_id` of `snapshot`. `on_branch`, `on_spent` and `on_usage` run on a click on
 /// the branch, the spend and the limits (the last two with the label's bounds); `open` is the one whose popup is up.
+/// `on_review` runs on the review panel's toggle at the bar's right end, lit while `review_open`.
 pub fn bar(
     snapshot: Option<&Snapshot>,
     pane_id: Option<&str>,
     theme: &Theme,
     open: Option<Item>,
+    review_open: bool,
     on_branch: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_spent: impl Fn(&gpui::Bounds<gpui::Pixels>, &mut Window, &mut App) + 'static,
     on_usage: impl Fn(&gpui::Bounds<gpui::Pixels>, &mut Window, &mut App) + 'static,
+    on_review: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let pane = snapshot.zip(pane_id).and_then(|(s, id)| s.panes.iter().find(|p| p.pane_id == id));
@@ -697,6 +700,12 @@ pub fn bar(
                 .child(donut(u.five_hour, theme.text.opacity(0.2), color))
                 .child(format!("{}%", u.five_hour.round()))
         }))
+        .child(
+            link(div().id("statusbar-review").flex_none().flex().items_center().px(px(6.)), theme, review_open)
+                .tooltip(crate::shell::tip("Toggle pull request panel", Some("ToggleReview")))
+                .child(gpui::svg().path("icons/sidebar-minimalistic-right.svg").size(px(12.)).text_color(if review_open { theme.text } else { muted }))
+                .on_click(on_review),
+        )
         .into_any_element()
 }
 

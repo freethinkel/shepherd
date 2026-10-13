@@ -68,7 +68,7 @@ impl Shell {
             .child(div().flex_1().min_w_0().truncate().font_weight(gpui::FontWeight::MEDIUM).child(if gitlab { "Merge request" } else { "Pull request" }))
             .children(key.clone().map(|key| {
                 if busy {
-                    div().size(px(24.)).flex().items_center().justify_center().child(spinner(theme, "review-busy".into())).into_any_element()
+                    div().size(px(24.)).flex().items_center().justify_center().child(crate::ui::loader::mini_spinner(2., theme.text_faint, window)).into_any_element()
                 } else {
                     titlebar_button(theme, "review-refresh", "icons/solar/refresh.svg")
                         .tooltip(tip("Refresh", None))
@@ -79,7 +79,7 @@ impl Shell {
 
         let body: Vec<AnyElement> = match (&key, review) {
             (None, _) => vec![empty(theme, "No branch", "The focused pane isn't in a git repo.")],
-            (Some(_), None) => vec![div().pt(px(24.)).flex().justify_center().child(spinner(theme, "review-loading".into())).into_any_element()],
+            (Some(_), None) => vec![div().pt(px(24.)).flex().justify_center().child(crate::ui::loader::spinner(2.5, window)).into_any_element()],
             (Some(_), Some(Review::NoRemote)) => vec![empty(theme, "No remote", "This repo has no origin to ask about.")],
             (Some(_), Some(Review::NoTool(tool))) => vec![empty(theme, format!("{tool} isn't installed"), format!("Install it to see the {noun} here: brew install {tool}"))],
             (Some(_), Some(Review::NoLogin(tool, host))) => {
@@ -93,7 +93,7 @@ impl Shell {
                     None => out.push(empty(theme, format!("No {noun}"), format!("{} has none yet.", branch.unwrap_or_default()))),
                 }
                 if !checks.is_empty() || pipeline.is_some() {
-                    out.push(checks_section(theme, if gitlab { "Pipeline" } else { "Checks" }, &checks, pipeline));
+                    out.push(checks_section(theme, if gitlab { "Pipeline" } else { "Checks" }, &checks, pipeline, window));
                 }
                 if let Some(r) = request.filter(|r| !r.body.trim().is_empty()) {
                     out.push(section(theme, "Description").children(markdown(&r.body).into_iter().map(|b| render_block(theme, b))).into_any_element());
@@ -221,7 +221,7 @@ fn request_card(theme: &Theme, r: &crate::ui::review::Request) -> AnyElement {
 
 /// The checks or jobs, with how many failed, run and passed; a GitLab pipeline's title carries its own state and
 /// opens it.
-fn checks_section(theme: &Theme, title: &'static str, checks: &[Check], pipeline: Option<(String, CheckState)>) -> AnyElement {
+fn checks_section(theme: &Theme, title: &'static str, checks: &[Check], pipeline: Option<(String, CheckState)>, window: &mut Window) -> AnyElement {
     let count = |states: &[CheckState]| checks.iter().filter(|c| states.contains(&c.state)).count();
     let summary: Vec<String> = [
         (count(&[CheckState::Failed]), "failed"),
@@ -241,7 +241,7 @@ fn checks_section(theme: &Theme, title: &'static str, checks: &[Check], pipeline
         .text_size(px(11.))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_faint)
-        .children(pipeline.as_ref().map(|(_, state)| check_icon(theme, *state, usize::MAX)))
+        .children(pipeline.as_ref().map(|(_, state)| check_icon(theme, *state, window)))
         .child(div().flex_1().child(title))
         .child(summary.join(" · "))
         .when_some(pipeline.map(|(url, _)| url), |el, url| el.cursor_pointer().hover(|s| s.underline()).on_click(move |_, _, cx| cx.open_url(&url)));
@@ -261,7 +261,7 @@ fn checks_section(theme: &Theme, title: &'static str, checks: &[Check], pipeline
                 .items_center()
                 .gap(px(8.))
                 .rounded(px(6.))
-                .child(check_icon(theme, c.state, i))
+                .child(check_icon(theme, c.state, window))
                 .child(div().flex_1().min_w_0().truncate().text_color(theme.text).child(c.name.clone()))
                 .when(!c.group.is_empty(), |el| el.child(div().min_w_0().max_w(px(96.)).truncate().text_color(theme.text_faint).child(c.group.clone())))
                 .children(c.secs.map(|s| div().flex_none().text_color(theme.text_faint).child(duration(s))))
@@ -270,22 +270,15 @@ fn checks_section(theme: &Theme, title: &'static str, checks: &[Check], pipeline
         .into_any_element()
 }
 
-fn check_icon(theme: &Theme, state: CheckState, i: usize) -> AnyElement {
+fn check_icon(theme: &Theme, state: CheckState, window: &mut Window) -> AnyElement {
     let (icon, color) = match state {
         CheckState::Success => ("icons/solar/check-circle.svg", theme.success),
         CheckState::Failed => ("icons/solar/close-circle.svg", theme.danger),
         CheckState::Pending => ("icons/solar/clock-circle.svg", theme.warning),
         CheckState::Skipped => ("icons/solar/forbidden-circle.svg", theme.text_faint),
         CheckState::Running => {
-            return gpui::svg()
-                .path("icons/spinner.svg")
-                .size(px(14.))
-                .flex_none()
-                .text_color(theme.warning)
-                .with_animation(("review-running", i), gpui::Animation::new(Duration::from_millis(900)).repeat(), |svg, t| {
-                    svg.with_transformation(gpui::Transformation::rotate(gpui::percentage(t)))
-                })
-                .into_any_element();
+            let loader = crate::ui::loader::mini_spinner(2.5, theme.warning, window);
+            return div().size(px(14.)).flex_none().flex().items_center().justify_center().child(loader).into_any_element();
         }
     };
     gpui::svg().path(icon).size(px(14.)).flex_none().text_color(color).into_any_element()

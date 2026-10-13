@@ -36,7 +36,7 @@ mod widgets;
 mod workspaces;
 use motion::*;
 use sync::sync_loop;
-pub(crate) use widgets::{menu_card, modal, row, status_dot, status_icon};
+pub(crate) use widgets::{menu_card, modal, row, status_dot, status_icon, tip};
 use widgets::*;
 pub(crate) use tab_bar::agent_favicon;
 
@@ -1219,7 +1219,8 @@ impl Render for Shell {
             } else {
                 self.usage_menu.as_ref().is_some_and(|m| m.is_open()).then_some(Item::Usage)
             };
-            crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, open, on_branch, on_spent, on_usage, cx)
+            let on_review = cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_review(cx));
+            crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, open, self.review_open, on_branch, on_spent, on_usage, on_review, cx)
         });
         let spring_back = self.pane_spring_back(window);
         let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
