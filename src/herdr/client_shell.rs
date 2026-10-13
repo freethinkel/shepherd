@@ -523,3 +523,86 @@ mod live_popup {
         std::thread::sleep(Duration::from_millis(500));
     }
 }
+
+/// Keystroke → changed screen on one attach, the key sent over the attach (`Input`) or over a client shell
+/// (`ClientShellPaneInput`): `cargo test --lib client_shell::input_paths -- --ignored --nocapture`.
+#[cfg(test)]
+mod input_paths {
+    use super::*;
+    use crate::herdr::session::{Mode, Session};
+    use futures::StreamExt;
+
+    #[test]
+    #[ignore]
+    fn attach_echo_latency() {
+        let mut stream = UnixStream::connect(client_socket()).unwrap();
+        let hello = serde_json::json!({
+            "generation": 1, "cell_width_px": 0, "cell_height_px": 0, "surface_size": {"cols": 80, "rows": 24},
+            "pixel_mouse": false, "direct_graphics": false, "endpoint_keybindings": false, "mouse_capture": false,
+            "surface_active": true, "snapshot_codecs": ["shell.snapshot.v1"], "surface_codecs": ["shell.surface.v1"],
+            "input_codecs": ["shell.input.semantic.v1"], "blob_codecs": ["shell.blob.v1"],
+        });
+        wire::write_message(&mut stream, &ClientMessage::EndpointControl { kind: "endpoint.hello.v1".into(), data: hello.to_string() }).unwrap();
+        let pane = loop {
+            if let Ok(Some(ServerMessage::PaneSurface(s))) = wire::read_message(&mut stream) {
+                break s.panes.iter().find(|p| p.focused).unwrap_or(&s.panes[0]).pane_id.clone();
+            }
+        };
+        let mut reader = stream.try_clone().unwrap();
+        std::thread::spawn(move || while wire::read_message(&mut reader).is_ok() {});
+        let shell = Mutex::new(stream);
+        let (session, mut frames) = Session::spawn(&pane, 80, 24, Mode::Control).unwrap();
+        let mut emu = crate::terminal::emulator::Emulator::new(80, 24);
+        // `RUN`: a command typed into the pane first, e.g. a program that echoes each key after a delay
+        if let Ok(run) = std::env::var("RUN") {
+            session.input(format!("{run}\r").as_bytes());
+            std::thread::sleep(Duration::from_secs(1));
+            drain(&mut frames, &mut emu);
+        }
+        for _ in 0..2 {
+            bench("attach Input", &mut frames, &mut emu, |c| session.input(c.as_bytes()));
+            bench("ClientShellPaneInput", &mut frames, &mut emu, |c| {
+                let input = ClientMessage::ClientShellPaneInput { pane_id: pane.clone(), events: vec![PaneInput::TextCommit(c.into())] };
+                wire::write_message(&mut *shell.lock().unwrap(), &input).unwrap();
+            });
+        }
+        session.input(b"\x03");
+    }
+
+    fn drain(frames: &mut UnboundedReceiver<SessionEvent>, emu: &mut crate::terminal::emulator::Emulator) {
+        while let Ok(event) = frames.try_recv() {
+            if let SessionEvent::Frame(bytes) = event {
+                emu.feed(&bytes);
+            }
+        }
+    }
+
+    fn bench(
+        name: &str,
+        frames: &mut UnboundedReceiver<SessionEvent>,
+        emu: &mut crate::terminal::emulator::Emulator,
+        send: impl Fn(&str),
+    ) {
+        let screen = |emu: &crate::terminal::emulator::Emulator| (0..emu.rows()).map(|r| emu.row_text(r)).collect::<Vec<_>>();
+        let mut took = Vec::new();
+        for i in 0..40 {
+            std::thread::sleep(Duration::from_millis(50));
+            drain(frames, emu);
+            let before = screen(emu);
+            let start = std::time::Instant::now();
+            send(["q", "w", "e", "r"][i % 4]);
+            while screen(emu) == before {
+                match futures::executor::block_on(frames.next()) {
+                    Some(SessionEvent::Frame(bytes)) => drop(emu.feed(&bytes)),
+                    Some(_) => {}
+                    None => return,
+                }
+            }
+            took.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        send("\x15"); // Ctrl+U: clear the typed line
+        std::thread::sleep(Duration::from_millis(100));
+        took.sort_by(f64::total_cmp);
+        println!("{name}: keystroke → changed screen, ms: p50 {:.2}, p90 {:.2}, max {:.2}", took[took.len() / 2], took[took.len() * 9 / 10], took[took.len() - 1]);
+    }
+}
