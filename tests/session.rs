@@ -54,7 +54,7 @@ cat > "$REC/stdin""#,
     assert!(matches!(next(&mut rx), SessionEvent::Frame(b) if b == b"hello"));
     session.input(b"ls\r");
     session.resize(120, 40);
-    session.scroll(true, 3);
+    session.scroll(true, 3, None);
     session.mouse("down", "left", 4, 2, 0);
     drop(session); // closes stdin: the fake's cat ends
 
