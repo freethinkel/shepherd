@@ -34,6 +34,12 @@ Zeron
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
 
+Lobe Icons
+  The Copilot, Kimi, Kilo Code, Qoder, Qwen and Mastra marks (assets/icons/{copilot,kimi,kilo,qoder,qwen,mastra}-mark.svg)
+  are from Lobe Icons (https://github.com/lobehub/lobe-icons, the @lobehub/icons-static-svg package), MIT License,
+  Copyright (c) LobeHub. The Factory mark (assets/icons/factory-mark.svg) is factory.ai's favicon without its tile.
+  The marks are their owners' trademarks, used to name their agents.
+
 Ghostty
   The sprite glyphs in src/terminal/sprite/ (box drawing, blocks, braille, branch, geometric shapes, Powerline
   and Legacy Computing symbols) and their reference renders in src/terminal/sprite/testdata/ are ported from

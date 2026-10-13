@@ -144,11 +144,18 @@ pub(crate) fn agent_icon(agent: &str) -> &'static str {
         "claude" => "icons/claude-mark.svg",
         "codex" => "icons/openai-mark.svg",
         "cursor" => "icons/cursor-mark.svg",
-        "agy" => "icons/antigravity-mark.svg",
+        "agy" | "antigravity_cli" => "icons/antigravity-mark.svg", // herdr's agent kind, and its integration target
         "opencode" => "icons/opencode-mark.svg",
         "grok" => "icons/grok-mark.svg",
         "devin" => "icons/devin-mark.svg",
-        "pi" => "icons/pi-mark.svg",
+        "pi" | "omp" => "icons/pi-mark.svg", // oh-my-pi is pi's fork
+        "copilot" => "icons/copilot-mark.svg",
+        "droid" => "icons/factory-mark.svg",
+        "kimi" => "icons/kimi-mark.svg",
+        "kilo" => "icons/kilo-mark.svg",
+        "qoder" | "qodercli" => "icons/qoder-mark.svg",
+        "qwen" => "icons/qwen-mark.svg",
+        "mastra" | "mastracode" => "icons/mastra-mark.svg",
         "hermes" => "icons/hermes-mark.svg",
         _ => "icons/bot.svg",
     }

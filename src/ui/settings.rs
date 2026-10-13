@@ -1122,10 +1122,23 @@ impl Render for SettingsView {
                                 false => format!("{status} · `{}` is not on PATH", integration.command),
                             };
                             let (target, install) = (integration.target.clone(), button != "Uninstall");
+                            // Zeron's tile: the agent's mark on a soft square, muted with the row when the agent is missing.
+                            let mark = crate::ui::command_panel::agent_icon(&integration.target);
+                            let ink = if integration.available { theme.text } else { theme.text_muted };
+                            let tile = div()
+                                .flex_none()
+                                .size(px(36.))
+                                .rounded(px(10.))
+                                .bg(theme.hover)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(gpui::svg().path(mark).size(px(18.)).text_color(crate::ui::command_panel::icon_ink(mark, ink)));
                             card_row(&theme, i == 0)
                                 .min_h(px(52.))
                                 .py(px(8.))
                                 .when(!integration.available, |el| el.text_color(theme.text_muted))
+                                .child(tile)
                                 .child(row_text(&theme, integration.label.clone(), status))
                                 .child(
                                     action(&theme, SharedString::from(format!("integration-{}", integration.target)), if busy { "…" } else { button })
