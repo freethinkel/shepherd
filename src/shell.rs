@@ -163,6 +163,9 @@ pub struct Shell {
     popup_surface: Option<(crate::herdr::popup::Surface, (u16, u16))>,
     /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.
     herdr_commands: Vec<(String, Vec<String>)>,
+    /// Panes `[[keys.command]]` of `type = "pane"` opened, by the command's keys: pressed again in their tab, the
+    /// command brings its pane back instead of stacking another (herdr opens one per press).
+    command_panes: Vec<(Vec<String>, String)>,
     /// herdr's sessions and machines, in the bar under the sidebar.
     places: Vec<sessions::Place>,
     /// A two-finger swipe over the sidebar in progress.
@@ -376,6 +379,7 @@ impl Shell {
                     popup_watch: gpui::Task::ready(()),
                     popup_surface: None,
                     herdr_commands: Vec::new(),
+                    command_panes: Vec::new(),
                     places: Vec::new(),
                     swipe: None,
                     slide: None,
@@ -748,6 +752,19 @@ impl Shell {
             }
             // herdr runs these itself: its pane lands in the tab, its popup comes back over the client shell
             CommandKind::Pane | CommandKind::Popup => {
+                let panes = self.snapshot.as_ref().map_or(&[][..], |s| &s.panes[..]);
+                self.command_panes.retain(|(_, id)| panes.iter().any(|p| &p.pane_id == id));
+                let open = self.command_panes.iter().find(|(keys, id)| {
+                    *keys == command.keys && pane.as_ref().is_some_and(|shown| panes.iter().any(|p| &p.pane_id == id && p.tab_id == shown.tab_id))
+                });
+                let open = open.map(|(_, id)| id.clone());
+                if let Some(id) = open.filter(|_| command.kind == CommandKind::Pane) {
+                    self.focus_next = Some(id.clone());
+                    let client = self.client.clone();
+                    self.rt.spawn(async move { client.call("pane.focus", json!({"pane_id": id})).await });
+                    cx.notify();
+                    return;
+                }
                 let Some((id, _)) = self.herdr_commands.iter().find(|(_, keys)| *keys == command.keys) else {
                     crate::ui::toast::error(cx, format!("{}: herdr has no such command (is its config reloaded?)", command.command));
                     return;
@@ -758,12 +775,27 @@ impl Shell {
                     params["tab_id"] = json!(p.tab_id);
                     params["pane_id"] = json!(p.pane_id);
                 }
-                let (client, label) = (self.client.clone(), command.command.clone());
-                let call = self.rt.spawn(async move { client.call("command.invoke", params).await });
-                cx.spawn(async move |_, cx| {
-                    if let Ok(Err(e)) = call.await {
+                let (client, label, keys) = (self.client.clone(), command.command.clone(), command.keys.clone());
+                let before: Vec<String> = self.snapshot.iter().flat_map(|s| s.panes.iter().map(|p| p.pane_id.clone())).collect();
+                let tab = pane.as_ref().map(|p| p.tab_id.clone());
+                // herdr opens the pane before it answers: the one in the tab that was not there is it
+                let call = self.rt.spawn(async move {
+                    client.call("command.invoke", params).await?;
+                    client.call("pane.list", json!({})).await
+                });
+                cx.spawn(async move |this, cx| match call.await {
+                    Ok(Ok(list)) => {
+                        let new = list["panes"].as_array().into_iter().flatten().find(|p| {
+                            p["tab_id"].as_str() == tab.as_deref() && p["pane_id"].as_str().is_some_and(|id| !before.iter().any(|b| b == id))
+                        });
+                        if let Some(id) = new.and_then(|p| p["pane_id"].as_str()) {
+                            let _ = this.update(cx, |s, _| s.command_panes.push((keys, id.to_string())));
+                        }
+                    }
+                    Ok(Err(e)) => {
                         let _ = cx.update(|cx| crate::ui::toast::error(cx, format!("{label}: {e:#}")));
                     }
+                    Err(_) => {}
                 })
                 .detach();
             }
