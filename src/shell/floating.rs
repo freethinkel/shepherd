@@ -116,7 +116,7 @@ impl Shell {
                             .items_center()
                             .justify_center()
                             .text_size(px(12.))
-                            .font_weight(gpui::FontWeight::BOLD)
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.text_muted)
                             .border_b_1()
                             .border_color(theme.border)
