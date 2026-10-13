@@ -76,7 +76,8 @@ cat > "$REC/stdin""#,
         [
             json!({"type": "terminal.input", "bytes": "bHMN"}),
             json!({"type": "terminal.resize", "cols": 120, "rows": 40}),
-            json!({"type": "terminal.scroll", "direction": "up", "lines": 3, "source": "wheel"}),
+            // no pointer cell given: herdr scrolls at its default one
+            json!({"type": "terminal.scroll", "direction": "up", "lines": 3, "source": "wheel", "column": null, "row": null}),
             json!({"type": "terminal.mouse", "action": "down", "button": "left", "column": 4, "row": 2, "modifiers": 0}),
         ]
     );
