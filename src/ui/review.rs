@@ -295,6 +295,23 @@ pub fn markdown(text: &str) -> Vec<Block> {
     blocks
 }
 
+/// The text of `blocks` as one run, headings, rules and code left out: a folded description's few lines.
+pub fn preview(blocks: &[Block]) -> String {
+    let text = blocks.iter().filter_map(|b| match b {
+        Block::Paragraph(t) | Block::Quote(t) => Some(t.clone()),
+        Block::Item(_, marker, t) => Some(format!("{marker} {t}")),
+        Block::Heading(_) | Block::Code(_) | Block::Rule => None,
+    });
+    text.collect::<Vec<_>>().join(" ")
+}
+
+// ponytail: by size, not by laid-out lines; a long single line in a narrow panel may fold without needing to
+/// Whether a description has more than its folded lines show: more than one block, or a paragraph longer than
+/// about four lines of a panel.
+pub fn folds(blocks: &[Block]) -> bool {
+    blocks.len() > 1 || preview(blocks).chars().count() > 160
+}
+
 fn strip_comments(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
@@ -436,6 +453,9 @@ mod tests {
             ]
         );
         assert_eq!(markdown("a_b * c ![img](u)"), [Block::Paragraph("a_b * c img".into())]);
+        assert_eq!(preview(&markdown(text)), "Fixes the login bug. Second line. • one • nested ☑ done 1. first quoted More");
+        assert!(folds(&markdown(text)));
+        assert!(!folds(&markdown("One short line.")));
         assert_eq!(markdown(""), []);
     }
 }

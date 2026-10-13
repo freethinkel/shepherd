@@ -3,11 +3,13 @@
 use super::*;
 use gpui::AnyElement;
 use crate::settings::{REVIEW_MAX, REVIEW_MIN, REVIEW_WIDTH};
-use crate::ui::review::{Block, Check, CheckState, Review, duration, markdown, read_review};
+use crate::ui::review::{Block, Check, CheckState, Review, duration, folds, markdown, preview, read_review};
 use crate::ui::statusbar::{branch_of, cached, fetching, pane_dir, refetch};
 
 /// How often gh or glab are asked again about a branch, as the status bar asks about its PR.
 const REVIEW_TTL: Duration = Duration::from_secs(120);
+/// How many lines of a description show folded.
+const FOLDED_LINES: usize = 4;
 /// How often while one of its checks runs or waits to.
 pub(super) const REVIEW_POLL: Duration = Duration::from_secs(10);
 
@@ -96,7 +98,11 @@ impl Shell {
                     out.push(checks_section(theme, if gitlab { "Pipeline" } else { "Checks" }, &checks, pipeline, window));
                 }
                 if let Some(r) = request.filter(|r| !r.body.trim().is_empty()) {
-                    out.push(section(theme, "Description").children(markdown(&r.body).into_iter().map(|b| render_block(theme, b))).into_any_element());
+                    let toggle = cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.review_expanded = !this.review_expanded;
+                        cx.notify();
+                    });
+                    out.push(description(theme, &r.body, self.review_expanded, toggle));
                 }
                 out
             }
@@ -159,14 +165,50 @@ fn empty(theme: &Theme, title: impl Into<SharedString>, hint: impl Into<SharedSt
         .into_any_element()
 }
 
-fn section(theme: &Theme, title: &'static str) -> Div {
+/// The description: folded, its text in a few lines; unfolded, its blocks. The heading, or a click on the folded
+/// text, folds and unfolds it.
+fn description(theme: &Theme, body: &str, expanded: bool, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
+    let blocks = markdown(body);
+    let long = folds(&blocks);
+    let toggle = Rc::new(toggle);
+    let on_heading = toggle.clone();
+    let text = theme.text;
     div()
         .flex()
         .flex_col()
         .gap(px(6.))
         .text_size(px(12.))
         .text_color(theme.text_muted)
-        .child(div().text_size(px(11.)).font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text_faint).child(title))
+        .child(
+            div()
+                .id("review-description")
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .text_size(px(11.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_faint)
+                .child("Description")
+                .when(long, |el| {
+                    el.cursor_pointer()
+                        .hover(move |s| s.text_color(text))
+                        .child(gpui::svg().path(if expanded { "icons/alt-arrow-up.svg" } else { "icons/alt-arrow-down.svg" }).size(px(12.)).text_color(theme.text_faint))
+                        .on_click(move |e, window, cx| on_heading(e, window, cx))
+                }),
+        )
+        .map(|el| match long && !expanded {
+            true => el.child(
+                div()
+                    .id("review-description-folded")
+                    .line_clamp(FOLDED_LINES)
+                    .text_ellipsis()
+                    .cursor_pointer()
+                    .child(preview(&blocks))
+                    .on_click(move |e, window, cx| toggle(e, window, cx)),
+            ),
+            false => el.children(blocks.into_iter().map(|b| render_block(theme, b))),
+        })
+        .into_any_element()
 }
 
 /// The title (a click opens it), its state, number and author.

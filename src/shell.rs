@@ -111,6 +111,8 @@ pub struct Shell {
     /// The branch the review panel shows (its key), while its checks run and the window is key: asked again
     /// every `REVIEW_POLL`.
     review_poll: Option<String>,
+    /// The review panel shows the whole description, not its first lines.
+    review_expanded: bool,
     agent_sort: AgentSort,
     /// Saved in the settings when a drag ends.
     agents_height: Option<f32>,
@@ -365,6 +367,7 @@ impl Shell {
                     review_width: SettingsGlobal::of(cx).settings.review_width,
                     review_drag: false,
                     review_poll: None,
+                    review_expanded: false,
                     agent_sort: SettingsGlobal::of(cx).settings.agent_sort,
                     agents_height: SettingsGlobal::of(cx).settings.agents_height,
                     agents_drag: None,
