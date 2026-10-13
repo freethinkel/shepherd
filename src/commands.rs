@@ -35,6 +35,10 @@ pub enum Command {
     /// Deletes a linked worktree's checkout and closes its workspace; the branch stays. Without `force` herdr
     /// refuses a checkout with changes (`dirty_worktree_requires_force`).
     RemoveWorktree { workspace_id: String, force: bool },
+    /// Every worktree of the workspace's repo (`git worktree list`), with the workspace each is open in.
+    ListWorktrees { workspace_id: String },
+    /// Opens a worktree of the workspace's repo at `path` as its own workspace.
+    OpenWorktree { workspace_id: String, path: String },
     RenameWorkspace { workspace_id: String, label: String },
     Split { pane_id: String, down: bool },
     ClosePane { pane_id: String },
@@ -89,6 +93,10 @@ impl Command {
             }
             Command::RemoveWorktree { workspace_id, force } => {
                 ("worktree.remove", json!({"workspace_id": workspace_id, "force": force}))
+            }
+            Command::ListWorktrees { workspace_id } => ("worktree.list", json!({"workspace_id": workspace_id})),
+            Command::OpenWorktree { workspace_id, path } => {
+                ("worktree.open", json!({"workspace_id": workspace_id, "path": path, "focus": false}))
             }
             Command::RenameWorkspace { workspace_id, label } => {
                 ("workspace.rename", json!({"workspace_id": workspace_id, "label": label}))
@@ -228,6 +236,11 @@ mod tests {
         assert_eq!(
             req(Command::CreateWorktree { workspace_id: "w1".into(), branch: Some("fix/login".into()) }),
             ("worktree.create", json!({"workspace_id": "w1", "branch": "fix/login", "focus": false}))
+        );
+        assert_eq!(req(Command::ListWorktrees { workspace_id: "w1".into() }), ("worktree.list", json!({"workspace_id": "w1"})));
+        assert_eq!(
+            req(Command::OpenWorktree { workspace_id: "w1".into(), path: "/wt/fix".into() }),
+            ("worktree.open", json!({"workspace_id": "w1", "path": "/wt/fix", "focus": false}))
         );
         assert_eq!(
             req(Command::RenameWorkspace { workspace_id: "w1".into(), label: "api".into() }),

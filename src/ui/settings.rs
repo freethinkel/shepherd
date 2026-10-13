@@ -103,7 +103,8 @@ const HERDR_FIELDS: [(&str, &str); 3] =
 
 pub struct SettingsView {
     section: Section,
-    font: Entity<InputState>,
+    /// Installed font families, read once: the font select's options.
+    fonts: Vec<SharedString>,
     /// Font size and line height as typed; between edits they follow the setting.
     font_size: Entity<InputState>,
     line_height: Entity<InputState>,
@@ -166,7 +167,6 @@ impl SettingsView {
                 input
             })
         };
-        let font = field(Some(settings.font_family.clone()), "Geist Mono", window, cx);
         let font_size = field(Some(settings.font_size.to_string()), "13", window, cx);
         let line_height = field(Some(format!("{:.1}", settings.line_height)), "1.4", window, cx);
         let herdr_bin = field(settings.herdr_bin.clone(), "herdr on PATH", window, cx);
@@ -180,15 +180,14 @@ impl SettingsView {
             })
             .collect();
 
-        let select_search = field(None, "Search themes", window, cx);
+        let select_search = field(None, "Search", window, cx);
         let mut subscriptions = vec![cx.subscribe(&select_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify()
             }
         })];
         for (input, apply) in [
-            (&font, (|s: &mut Settings, v: String| if !v.is_empty() { s.font_family = v }) as fn(&mut Settings, String)),
-            (&herdr_bin, |s: &mut Settings, v: String| s.herdr_bin = (!v.is_empty()).then_some(v)),
+            (&herdr_bin, (|s: &mut Settings, v: String| s.herdr_bin = (!v.is_empty()).then_some(v)) as fn(&mut Settings, String)),
             (&herdr_socket, |s: &mut Settings, v: String| s.herdr_socket = (!v.is_empty()).then_some(v)),
         ] {
             subscriptions.push(cx.subscribe_in(input, window, move |_, input, event: &InputEvent, _, cx| {
@@ -268,7 +267,8 @@ impl SettingsView {
             .unwrap_or(Section::General);
         let mut view = SettingsView {
             section,
-            font,
+            // Dot-prefixed families are macOS's private UI fonts.
+            fonts: cx.text_system().all_font_names().into_iter().filter(|n| !n.starts_with('.')).map(SharedString::from).collect(),
             numbers_shown: numbers(&settings),
             font_size,
             line_height,
@@ -289,7 +289,7 @@ impl SettingsView {
         // SHEPHERD_SELECT=<select id>[:query] opens that list at launch, filtered, for screenshots.
         if let Ok(spec) = std::env::var("SHEPHERD_SELECT") {
             let (id, query) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
-            if let Some(id) = ["light-theme-select", "dark-theme-select", "editor-select"].into_iter().find(|s| *s == id) {
+            if let Some(id) = ["light-theme-select", "dark-theme-select", "editor-select", "font-select"].into_iter().find(|s| *s == id) {
                 view.open_select = Some(crate::ui::Popup::new(id));
                 view.select_search.update(cx, |input, cx| {
                     input.set_value(query.to_string(), window, cx);
@@ -464,7 +464,7 @@ impl SettingsView {
                 .flex()
                 .flex_col()
                 .children(rows)
-                .when(first.is_none(), |el| el.child(div().px(px(8.)).py(px(6.)).text_color(theme.text_muted).child("No matching themes")));
+                .when(first.is_none(), |el| el.child(div().px(px(8.)).py(px(6.)).text_color(theme.text_muted).child("No matches")));
             let pick = pick.clone();
             let card = crate::shell::menu_card(theme, "select-menu", 240.)
                 .w(px(if searchable { 280. } else { 240. }))
@@ -545,6 +545,17 @@ impl SettingsView {
         // A command typed into settings.json by hand shows as itself.
         let fallback = SharedString::from(current.unwrap_or_default().to_string());
         self.select(theme, "editor-select", labels, index, fallback, |_| None, |i, cx| update(cx, |s| s.editor = EDITORS[i].0.map(String::from)), cx)
+    }
+
+    /// Every installed family (Zed's font picker); a family named in settings.json that is not installed shows as itself.
+    // ponytail: proportional families are listed too; filter by fixed advances (Zeron's fontdb check) if picking one bites.
+    fn font_select(&self, theme: &Theme, current: &str, cx: &mut Context<Self>) -> Div {
+        let fonts = self.fonts.clone();
+        let index = fonts.iter().position(|f| f == current);
+        self.select(theme, "font-select", fonts.clone(), index, current.to_string().into(), |_| None, move |i, cx| {
+            let family = fonts[i].to_string();
+            update(cx, |s| s.font_family = family)
+        }, cx)
     }
 }
 
@@ -954,7 +965,7 @@ impl Render for SettingsView {
                                     "Font family",
                                     "Any installed monospace font. Icons missing from it come from installed Nerd Fonts.",
                                 ))
-                                .child(field(&theme, &self.font)),
+                                .child(self.font_select(&theme, &settings.font_family, cx)),
                         )
                         .child(
                             card_row(&theme, false)
@@ -1122,10 +1133,23 @@ impl Render for SettingsView {
                                 false => format!("{status} · `{}` is not on PATH", integration.command),
                             };
                             let (target, install) = (integration.target.clone(), button != "Uninstall");
+                            // Zeron's tile: the agent's mark on a soft square, muted with the row when the agent is missing.
+                            let mark = crate::ui::command_panel::agent_icon(&integration.target);
+                            let ink = if integration.available { theme.text } else { theme.text_muted };
+                            let tile = div()
+                                .flex_none()
+                                .size(px(36.))
+                                .rounded(px(10.))
+                                .bg(theme.hover)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(gpui::svg().path(mark).size(px(18.)).text_color(crate::ui::command_panel::icon_ink(mark, ink)));
                             card_row(&theme, i == 0)
                                 .min_h(px(52.))
                                 .py(px(8.))
                                 .when(!integration.available, |el| el.text_color(theme.text_muted))
+                                .child(tile)
                                 .child(row_text(&theme, integration.label.clone(), status))
                                 .child(
                                     action(&theme, SharedString::from(format!("integration-{}", integration.target)), if busy { "…" } else { button })

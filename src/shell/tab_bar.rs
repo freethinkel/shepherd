@@ -141,17 +141,10 @@ fn merge(prev: &[&str], now: &[&str]) -> Vec<(String, Phase)> {
 /// The icon for what runs in a tab: the agent's mark (Zeron's harness icons), a bot for agents without one,
 /// a terminal for a plain shell.
 fn agent_icon(agent: Option<&str>) -> &'static str {
-    match agent {
+    match agent.map(crate::ui::command_panel::agent_icon) {
         None => "icons/prompt.svg",
-        Some("claude") => "icons/claude-mark.svg",
-        Some("codex") => "icons/openai-mark.svg",
-        Some("cursor") => "icons/cursor-mark.svg",
-        Some("opencode") => "icons/opencode-mark.svg",
-        Some("pi") => "icons/pi-mark.svg",
-        Some("grok") => "icons/grok-mark.svg",
-        Some("devin") => "icons/devin-mark.svg",
-        Some("agy") => "icons/antigravity-mark.svg",
-        Some(_) => "icons/bot-filled.svg",
+        Some("icons/bot.svg") => "icons/bot-filled.svg",
+        Some(mark) => mark,
     }
 }
 
@@ -169,9 +162,13 @@ fn agent_tint(agent: Option<&str>, theme: &Theme) -> (Hsla, Hsla) {
         // Cognition's Devin palette blue
         Some("devin") => brand(0x0294DE, 0xFFFFFF),
         // ponytail: pi.dev's yellow accent; pi has no published brand color
-        Some("pi") => brand(0xF1BE58, 0x1A1A1A),
+        Some("pi" | "omp") => brand(0xF1BE58, 0x1A1A1A),
+        // ponytail: Qwen's logo purple, by eye
+        Some("qwen") => brand(0x615CED, 0xFFFFFF),
         // monochrome brands
-        Some("grok" | "opencode") => brand(0x0A0A0A, 0xFFFFFF),
+        Some("grok" | "opencode" | "copilot" | "droid" | "kimi" | "kilo" | "qoder" | "qodercli" | "mastra" | "mastracode") => {
+            brand(0x0A0A0A, 0xFFFFFF)
+        }
         Some(_) => (theme.text, theme.surface),
     }
 }
@@ -500,6 +497,7 @@ impl Shell {
                 .child(
                     div()
                         .id(SharedString::from(format!("tab-x-{}", t.id)))
+                        .tooltip(tip("Close tab", Some("CloseTab")))
                         .size(px(SLOT))
                         .flex_none()
                         .relative()
@@ -670,6 +668,7 @@ impl Shell {
             .when_some(shown_ws, |el, ws| {
                 el.child(
                     icon_button(theme, "new-tab", "+")
+                        .tooltip(tip("New tab", Some("NewTab")))
                         .size(px(TAB_H))
                         .rounded(px(8.))
                         .text_size(px(19.))
@@ -715,7 +714,8 @@ mod tests {
         assert_eq!(agent_icon(None), "icons/prompt.svg");
         assert_eq!(agent_icon(Some("claude")), "icons/claude-mark.svg");
         assert_eq!(agent_icon(Some("codex")), "icons/openai-mark.svg");
-        assert_eq!(agent_icon(Some("kimi")), "icons/bot-filled.svg");
+        assert_eq!(agent_icon(Some("kimi")), "icons/kimi-mark.svg");
+        assert_eq!(agent_icon(Some("letta")), "icons/bot-filled.svg");
     }
 
     #[test]

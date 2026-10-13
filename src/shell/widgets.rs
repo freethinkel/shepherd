@@ -43,11 +43,15 @@ pub(crate) fn status_icon(status: AgentStatus, style: crate::theme::StatusIcons,
 /// Zeron's `GlyphPalette::for_accent`: the spinner's rows, top to bottom, lighter, `tint` itself, deeper. The tint
 /// is saturated a step past the accent and the light row kept nearer it, so a working agent stands out of a list.
 fn glyph_rows(tint: Hsla, theme: &Theme) -> [Hsla; 3] {
-    let tint = Hsla { s: (tint.s * 1.35).min(1.), ..tint };
+    let mut tint = Hsla { s: (tint.s * 1.35).min(1.), ..tint };
+    // a dark accent sinks into a dark sidebar: lift it toward the text
+    if theme.appearance == crate::theme::Appearance::Dark {
+        tint.l = tint.l.max(0.62);
+    }
     let (mut light, mut deep) = (tint, tint);
     if theme.appearance == crate::theme::Appearance::Dark {
         (light.l, light.s) = ((light.l + 0.14).min(0.90), light.s * 0.9);
-        deep.l = (deep.l - 0.08).max(0.22);
+        deep.l = (deep.l - 0.08).max(0.45);
     } else {
         (light.l, light.s) = ((light.l + 0.11).min(0.76), light.s * 0.9);
         deep.l = (deep.l - 0.09).max(0.22);
@@ -221,6 +225,39 @@ pub(super) fn menu_choice(theme: &Theme, id: &'static str, icon: &'static str, l
         .child(gpui::svg().path(icon).size(px(14.)).flex_none().text_color(theme.text_muted))
         .child(div().flex_1().child(label))
         .when(checked, |el| el.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(theme.text_muted)))
+}
+
+/// Zeron's `TextTooltip`: a one-line chip under the pointer.
+struct Tip(SharedString);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .max_w(px(320.))
+            .px(px(9.))
+            .py(px(6.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.card)
+            .text_size(px(11.))
+            .text_color(theme.text_muted)
+            .child(self.0.clone())
+    }
+}
+
+/// `.tooltip(...)` with `text`, and `action`'s chord after it while one is bound ("Settings · ⌘,").
+pub(crate) fn tip(text: impl Into<SharedString>, action: Option<&'static str>) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let text: SharedString = text.into();
+    move |_, cx| {
+        let chord = action.and_then(|a| cx.try_global::<ActiveBindings>()?.0.iter().find(|(name, _)| name == a).map(|(_, keys)| keys.clone()));
+        let text = match chord {
+            Some(keys) => format!("{text} · {}", keys.split_whitespace().map(crate::ui::command_panel::glyphs).collect::<Vec<_>>().join(" ")).into(),
+            None => text.clone(),
+        };
+        cx.new(|_| Tip(text)).into()
+    }
 }
 
 /// Zeron's titlebar button: 24 px, a 16 px muted icon, a wash on hover. It occludes the drag strip under it.

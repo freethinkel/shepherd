@@ -17,7 +17,10 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
         // the shell's surface sizes herdr's focused tab while no other client does: make it the pane grid
         let Ok((cols, rows)) = this.update(cx, |s, cx| s.grid_cells(cx).unwrap_or((120, 40))) else { return };
         let watch = cx.background_executor().spawn(async move { popup::watch(cols, rows) });
-        if let Ok(mut rx) = watch.await {
+        if let Ok((mut rx, surface)) = watch.await {
+            if this.update(cx, |s, _| s.popup_surface = Some((surface, (cols, rows)))).is_err() {
+                return;
+            }
             while let Some(event) = rx.next().await {
                 let alive = this.update(cx, |s, cx| match event {
                     Event::Popup(surface) => s.show_popup(surface, cx),
@@ -28,7 +31,11 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
                 }
             }
         }
-        if this.update(cx, |s, cx| s.show_popup(None, cx)).is_err() {
+        let gone = this.update(cx, |s, cx| {
+            s.popup_surface = None;
+            s.show_popup(None, cx)
+        });
+        if gone.is_err() {
             return;
         }
         // ponytail: retry every 5 s (herdr restarting, a remote place whose client socket is not forwarded)
@@ -63,6 +70,13 @@ impl Shell {
 
     /// The popup's card, centred over the pane grid; a press outside it closes the popup, as Esc in a dialog.
     pub(super) fn render_floating(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let grid = self.grid_cells(cx);
+        if let (Some((surface, sent)), Some(now)) = (&mut self.popup_surface, grid) {
+            if *sent != now {
+                surface.resize(now.0, now.1);
+                *sent = now;
+            }
+        }
         let f = self.floating.as_mut()?;
         if !window.is_window_active() {
             f.view = None;

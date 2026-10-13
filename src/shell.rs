@@ -72,6 +72,8 @@ pub struct Shell {
     rt: tokio::runtime::Handle,
     /// herdr's plugin actions as (id, title), for the command panel; read again whenever it opens.
     plugin_actions: Vec<(String, String)>,
+    /// The terminal colors last sent to herdr, so an unchanged theme is not sent again.
+    host_theme: Option<(Vec<crate::herdr::Rgb>, bool)>,
     /// The pane grid's bounds from the last paint, to turn a divider drag into a ratio.
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     divider: Option<DividerDrag>,
@@ -161,10 +163,15 @@ pub struct Shell {
     /// herdr's popup over the panes, and the client shell that hears of it.
     floating: Option<floating::Floating>,
     popup_watch: gpui::Task<()>,
+    /// The client shell's surface and the grid it was last sized to.
+    popup_surface: Option<(crate::herdr::popup::Surface, (u16, u16))>,
     /// PoC: the window's herdr client shell for theme, popup and commands (`SHEPHERD_CLIENT_SHELL=1`).
     client_shell: Option<client_shell::ShellView>,
     /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.
     herdr_commands: Vec<(String, Vec<String>)>,
+    /// Panes `[[keys.command]]` of `type = "pane"` opened, by the command's keys: pressed again in their tab, the
+    /// command brings its pane back instead of stacking another (herdr opens one per press).
+    command_panes: Vec<(Vec<String>, String)>,
     /// herdr's sessions and machines, in the bar under the sidebar.
     places: Vec<sessions::Place>,
     /// A two-finger swipe over the sidebar in progress.
@@ -265,6 +272,7 @@ impl Shell {
                     cx.notify(); // the shown tab's agents count as seen once the window is active
                 })
                 .detach();
+                cx.observe_global::<Theme>(|s: &mut Shell, cx| s.push_host_theme(cx)).detach();
                 cx.observe_global::<crate::terminal::pane::Yielded>(|s: &mut Shell, cx| {
                     for pane in s.panes.values() {
                         pane.update(cx, |p, cx| p.follow_yield(cx));
@@ -328,6 +336,7 @@ impl Shell {
                         .map_or_else(Client::local, |p| Client::at(p.into())),
                     rt: rt.clone(),
                     plugin_actions: Vec::new(),
+                    host_theme: None,
                     grid_bounds: Rc::new(Cell::new(None)),
                     divider: None,
                     settling: None,
@@ -375,8 +384,10 @@ impl Shell {
                     sync: gpui::Task::ready(()),
                     floating: None,
                     popup_watch: gpui::Task::ready(()),
+                    popup_surface: None,
                     client_shell: None,
                     herdr_commands: Vec::new(),
+                    command_panes: Vec::new(),
                     places: Vec::new(),
                     swipe: None,
                     slide: None,
@@ -395,6 +406,7 @@ impl Shell {
                 shell.connect(cx);
                 shell.refresh_places(cx);
                 shell.refresh_plugin_actions(cx);
+                shell.push_host_theme(cx);
                 // Waiting times move on between snapshots.
                 // ponytail: a minute from launch, not from each wait, so a label can lag by up to a minute.
                 cx.spawn(async move |this, cx| loop {
@@ -471,6 +483,14 @@ impl Shell {
                 Some(d) => crate::ui::command_panel::branch_items(&crate::ui::statusbar::read_branches(d), crate::ui::statusbar::branch_of(d, cx).as_deref()),
                 None => Vec::new(),
             },
+            Kind::Worktrees => Vec::new(), // herdr's list fills it: see `open_worktrees_panel`
+            Kind::Themes => {
+                let appearance = Theme::of(cx).appearance;
+                let dark = appearance == crate::theme::Appearance::Dark;
+                let s = &SettingsGlobal::of(cx).settings;
+                let current = if dark { &s.theme_dark } else { &s.theme_light };
+                crate::ui::command_panel::theme_items(crate::theme::variants_for(appearance), dark, current)
+            }
         };
         let panel = cx.new(|cx| crate::ui::command_panel::Panel::new(kind, items, window, cx));
         let events = cx.subscribe_in(&panel, window, move |this, _, event: &PanelEvent, window, cx| {
@@ -501,6 +521,31 @@ impl Shell {
                         });
                     })
                     .detach();
+                }
+                PanelEvent::Run(Run::Theme(id)) => {
+                    let dark = Theme::of(cx).appearance == crate::theme::Appearance::Dark;
+                    let id = id.clone();
+                    crate::ui::settings::update(cx, |s| *if dark { &mut s.theme_dark } else { &mut s.theme_light } = id);
+                }
+                PanelEvent::Run(Run::Worktree { repo, path, workspace_id }) => {
+                    let open_tab = workspace_id.as_ref().and_then(|id| {
+                        let s = this.snapshot.as_ref()?;
+                        let w = s.workspaces.iter().find(|w| &w.workspace_id == id)?;
+                        w.active_tab_id.clone().or_else(|| s.tabs_of(id).first().map(|t| t.tab_id.clone()))
+                    });
+                    match open_tab {
+                        Some(tab) => this.selected_tab = Some(tab),
+                        None => {
+                            let command = Command::OpenWorktree { workspace_id: repo.clone(), path: path.clone() };
+                            this.send_then(command, cx, |shell, result, cx| {
+                                match result {
+                                    Ok(value) => shell.selected_tab = crate::commands::created_tab_id(&value),
+                                    Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),
+                                }
+                                cx.notify();
+                            });
+                        }
+                    }
                 }
                 PanelEvent::Dismiss => {}
             }
@@ -646,6 +691,33 @@ impl Shell {
         }
     }
 
+    /// herdr paints the terminals' default colors itself: it is told the theme's.
+    fn push_host_theme(&mut self, cx: &mut Context<Self>) {
+        use crate::herdr::Rgb;
+        let theme = Theme::of(cx);
+        let rgb = |c: gpui::Hsla| {
+            let c = gpui::Rgba::from(c);
+            let u = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+            Rgb { r: u(c.r), g: u(c.g), b: u(c.b) }
+        };
+        let t = &theme.terminal;
+        let colors: Vec<Rgb> = [t.foreground, t.background].into_iter().chain(t.ansi).map(rgb).collect();
+        let next = Some((colors.clone(), theme.appearance == crate::theme::Appearance::Light));
+        if self.host_theme == next {
+            return;
+        }
+        self.host_theme = next;
+        let light = theme.appearance == crate::theme::Appearance::Light;
+        let ansi: [Rgb; 16] = colors[2..].try_into().unwrap();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = crate::herdr::push_host_theme(colors[0], colors[1], ansi, light) {
+                    eprintln!("shepherd: herdr host theme: {e}");
+                }
+            })
+            .detach();
+    }
+
     fn refresh_plugin_actions(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let call = self.rt.spawn(async move { client.call("plugin.action.list", json!({})).await });
@@ -702,6 +774,19 @@ impl Shell {
             }
             // herdr runs these itself: its pane lands in the tab, its popup comes back over the client shell
             CommandKind::Pane | CommandKind::Popup => {
+                let panes = self.snapshot.as_ref().map_or(&[][..], |s| &s.panes[..]);
+                self.command_panes.retain(|(_, id)| panes.iter().any(|p| &p.pane_id == id));
+                let open = self.command_panes.iter().find(|(keys, id)| {
+                    *keys == command.keys && pane.as_ref().is_some_and(|shown| panes.iter().any(|p| &p.pane_id == id && p.tab_id == shown.tab_id))
+                });
+                let open = open.map(|(_, id)| id.clone());
+                if let Some(id) = open.filter(|_| command.kind == CommandKind::Pane) {
+                    self.focus_next = Some(id.clone());
+                    let client = self.client.clone();
+                    self.rt.spawn(async move { client.call("pane.focus", json!({"pane_id": id})).await });
+                    cx.notify();
+                    return;
+                }
                 let Some((id, _)) = self.herdr_commands.iter().find(|(_, keys)| *keys == command.keys) else {
                     crate::ui::toast::error(cx, format!("{}: herdr has no such command (is its config reloaded?)", command.command));
                     return;
@@ -712,12 +797,27 @@ impl Shell {
                     params["tab_id"] = json!(p.tab_id);
                     params["pane_id"] = json!(p.pane_id);
                 }
-                let (client, label) = (self.client.clone(), command.command.clone());
-                let call = self.rt.spawn(async move { client.call("command.invoke", params).await });
-                cx.spawn(async move |_, cx| {
-                    if let Ok(Err(e)) = call.await {
+                let (client, label, keys) = (self.client.clone(), command.command.clone(), command.keys.clone());
+                let before: Vec<String> = self.snapshot.iter().flat_map(|s| s.panes.iter().map(|p| p.pane_id.clone())).collect();
+                let tab = pane.as_ref().map(|p| p.tab_id.clone());
+                // herdr opens the pane before it answers: the one in the tab that was not there is it
+                let call = self.rt.spawn(async move {
+                    client.call("command.invoke", params).await?;
+                    client.call("pane.list", json!({})).await
+                });
+                cx.spawn(async move |this, cx| match call.await {
+                    Ok(Ok(list)) => {
+                        let new = list["panes"].as_array().into_iter().flatten().find(|p| {
+                            p["tab_id"].as_str() == tab.as_deref() && p["pane_id"].as_str().is_some_and(|id| !before.iter().any(|b| b == id))
+                        });
+                        if let Some(id) = new.and_then(|p| p["pane_id"].as_str()) {
+                            let _ = this.update(cx, |s, _| s.command_panes.push((keys, id.to_string())));
+                        }
+                    }
+                    Ok(Err(e)) => {
                         let _ = cx.update(|cx| crate::ui::toast::error(cx, format!("{label}: {e:#}")));
                     }
+                    Err(_) => {}
                 })
                 .detach();
             }
@@ -757,6 +857,22 @@ impl Shell {
             shell.selected_tab = crate::commands::created_tab_id(result);
             cx.notify();
         });
+    }
+
+    /// While a divider, the sidebar or the agents list is being dragged, the whole window shows the resize cursor:
+    /// the pointer outruns the narrow hit strip, whose own cursor would otherwise flicker with the terminal's.
+    fn resize_cursor(&self) -> Option<impl IntoElement> {
+        let vertical = if let Some(d) = &self.divider {
+            d.vertical
+        } else if self.sidebar_drag {
+            true
+        } else if self.agents_drag.is_some() {
+            false
+        } else {
+            return None;
+        };
+        let style = if vertical { gpui::CursorStyle::ResizeColumn } else { gpui::CursorStyle::ResizeRow };
+        Some(canvas(|_, _, _| (), move |_, _, window, _| window.set_window_cursor_style(style)).absolute().size_0())
     }
 
     /// The strip under the transparent titlebar drags the window; a double click zooms it.
@@ -1135,6 +1251,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
             .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
+            .on_action(cx.listener(|this, _: &ChangeTheme, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Themes, w, cx)))
             .on_action(cx.listener(|this, _: &AgentsPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Agents, w, cx)))
             .on_action(cx.listener(|this, c: &crate::herdr::keys::HerdrCommand, w, cx| this.run_herdr_command(c, w, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
@@ -1153,6 +1270,7 @@ impl Render for Shell {
                 this.end_agents_drag(cx);
             }))
             .child(self.drag_strip())
+            .children(self.resize_cursor())
             .when(sidebar_w > 0. && !on_page, |el| {
                 el.child(
                     div()
@@ -1212,6 +1330,7 @@ impl Render for Shell {
             .when(!on_page, |el| {
                 el.child(
                     titlebar_button(&theme, "toggle-sidebar", "icons/sidebar-minimalistic-left.svg")
+                        .tooltip(tip("Toggle sidebar", Some("ToggleSidebar")))
                         .absolute()
                         .top(px(TRAFFIC_LIGHTS_CENTER - 12.))
                         .left(px(TOGGLE_LEFT))
@@ -1226,6 +1345,7 @@ impl Render for Shell {
             .when(sidebar_w >= TITLEBAR_CLUSTER + 32. && !on_page, |el| {
                 el.child(
                     titlebar_button(&theme, "sidebar-view", "icons/more-horizontal.svg")
+                        .tooltip(tip("Sidebar view", None))
                         .absolute()
                         .top(px(TRAFFIC_LIGHTS_CENTER - 12.))
                         .left(px(sidebar_w - 8. - 24.))

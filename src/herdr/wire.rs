@@ -55,6 +55,33 @@ pub enum ClientMessage {
     EndpointControl { kind: String, data: String },
 }
 
+/// herdr's `ClientHostThemeUpdate`: a color or the appearance of the terminal a client shell runs in.
+#[derive(Debug, Clone, Serialize)]
+pub enum HostThemeUpdate {
+    DefaultColor { kind: DefaultColorKind, color: Rgb },
+    PaletteColors(Vec<(u8, Rgb)>),
+    Appearance(HostAppearance),
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum DefaultColorKind {
+    Foreground,
+    Background,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum HostAppearance {
+    Dark,
+    Light,
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 #[allow(dead_code)]
 pub enum AttachScrollDirection {
@@ -161,33 +188,6 @@ pub enum KeyKind {
     Press,
     Repeat,
     Release,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct Rgb {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-pub enum DefaultColorKind {
-    Foreground,
-    Background,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-pub enum HostAppearance {
-    Dark,
-    Light,
-}
-
-/// The colors herdr answers the panes' OSC 10/11/4 queries with.
-#[derive(Debug, Clone, Serialize)]
-pub enum HostThemeUpdate {
-    DefaultColor { kind: DefaultColorKind, color: Rgb },
-    PaletteColors(Vec<(u8, Rgb)>),
-    Appearance(HostAppearance),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +398,11 @@ mod tests {
             }),
             [16, 2, 0, 0, 4, 2, 0, 1, 1]
         );
+        let bg = Rgb { r: 250, g: 250, b: 250 };
+        let update = HostThemeUpdate::DefaultColor { kind: DefaultColorKind::Background, color: bg };
+        assert_eq!(bytes(&ClientMessage::ClientShellHostTheme { update }), [17, 0, 1, 250, 250, 250]);
+        let update = HostThemeUpdate::Appearance(HostAppearance::Light);
+        assert_eq!(bytes(&ClientMessage::ClientShellHostTheme { update }), [17, 2, 1]);
     }
 
     #[test]
