@@ -24,6 +24,9 @@ pub enum Run {
     Herdr(crate::herdr::keys::HerdrCommand),
     /// Use this theme variant for the shown appearance.
     Theme(String),
+    /// Show this worktree of `repo`'s repo (a workspace of its checkout): its workspace when one has it open, else
+    /// herdr opens it.
+    Worktree { repo: String, path: String, workspace_id: Option<String> },
 }
 
 /// The heading an item sits under; also searched, so "tab" finds the tabs.
@@ -36,6 +39,7 @@ pub enum Section {
     Agents,
     Branches,
     Themes,
+    Worktrees,
 }
 
 impl Section {
@@ -48,6 +52,7 @@ impl Section {
             Section::Agents => "Agents",
             Section::Branches => "Branches",
             Section::Themes => "Themes",
+            Section::Worktrees => "Worktrees",
         }
     }
 }
@@ -74,6 +79,8 @@ impl Item {
     fn haystack(&self) -> String {
         match self.run {
             Run::Action(_) | Run::Branch(_) | Run::Herdr(_) | Run::Theme(_) => self.label.clone(),
+            // the branch, then its folder
+            Run::Worktree { .. } => [Some(self.label.as_str()), self.hint.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" "),
             Run::Tab(_) => [Some(self.label.as_str()), self.hint.as_deref(), Some(self.section.title())].into_iter().flatten().collect::<Vec<_>>().join(" "),
         }
     }
@@ -86,6 +93,7 @@ pub enum Kind {
     Agents,
     Branches,
     Themes,
+    Worktrees,
 }
 
 impl Kind {
@@ -94,6 +102,7 @@ impl Kind {
             Kind::Commands => "CommandPanel",
             Kind::Agents => "AgentsPanel",
             Kind::Branches => "", // opened from the status bar, no chord
+            Kind::Worktrees => "", // opened from a workspace's menu, no chord
             Kind::Themes => "ChangeTheme",
         }
     }
@@ -317,6 +326,38 @@ pub fn theme_items(variants: Vec<(String, String)>, dark: bool, current: &str) -
         .collect()
 }
 
+/// herdr's `worktree.list` answer as rows, in its order (the repo's checkout first), bare ones left out: the branch,
+/// then the folder (`home` as `~`) after "open" when a workspace has it, or "prunable" when its folder is gone.
+pub fn worktree_items(list: &serde_json::Value, repo: &str, home: &str) -> Vec<Item> {
+    let entries = list["worktrees"].as_array().map(Vec::as_slice).unwrap_or_default();
+    entries
+        .iter()
+        .filter(|w| !w["is_bare"].as_bool().unwrap_or(false))
+        .filter_map(|w| {
+            let path = w["path"].as_str()?.to_string();
+            let workspace_id = w["open_workspace_id"].as_str().map(str::to_string);
+            let shown = match path.strip_prefix(home).filter(|rest| !home.is_empty() && (rest.is_empty() || rest.starts_with('/'))) {
+                Some(rest) => format!("~{rest}"),
+                None => path.clone(),
+            };
+            let state = if workspace_id.is_some() { Some("open") } else { w["is_prunable"].as_bool().unwrap_or(false).then_some("prunable") };
+            Some(Item {
+                key: format!("worktree:{path}"),
+                section: Section::Worktrees,
+                icon: if w["is_linked_worktree"].as_bool().unwrap_or(false) { "icons/git-branch.svg" } else { "icons/folder.svg" },
+                label: w["branch"].as_str().unwrap_or("detached").to_string(),
+                hint: Some(match state {
+                    Some(state) => format!("{state} · {shown}"),
+                    None => shown,
+                }),
+                chord: None,
+                status: None,
+                run: Run::Worktree { repo: repo.to_string(), path, workspace_id },
+            })
+        })
+        .collect()
+}
+
 /// How well `query` matches `text`, ignoring case, and which chars of `text` it matched; None if it does not:
 /// `text` starting with it ranks first, then it starting a word, then anywhere, then its letters in order (more
 /// of them on word starts, fewer gaps, higher).
@@ -466,7 +507,7 @@ impl Panel {
     pub fn new(kind: Kind, items: Vec<Item>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let items = match kind {
             Kind::Commands => with_recent(items, &crate::settings::SettingsGlobal::of(cx).settings.recent_commands),
-            Kind::Agents | Kind::Branches | Kind::Themes => items,
+            Kind::Agents | Kind::Branches | Kind::Themes | Kind::Worktrees => items,
         };
         let theme = Theme::of(cx).clone();
         let placeholder = match kind {
@@ -474,6 +515,7 @@ impl Panel {
             Kind::Agents => "Search agents",
             Kind::Branches => "Switch branch",
             Kind::Themes => "Change theme",
+            Kind::Worktrees => "Open worktree",
         };
         let input = cx.new(|cx| {
             let mut input = InputState::new(window, cx).placeholder(placeholder);
@@ -489,6 +531,12 @@ impl Panel {
         let chord = cx.try_global::<ActiveBindings>().and_then(|b| b.0.iter().find(|(a, _)| a == kind.action()).map(|(_, k)| k.clone()));
         let matches = rank("", &items);
         Panel { kind, input, items, query: String::new(), matches, selected: 0, chord, scroll: ScrollHandle::new(), _events: events }
+    }
+
+    /// Fills a panel opened before its list arrived (the worktrees herdr answers with), keeping what is typed.
+    pub fn set_items(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
+        self.items = items;
+        self.refilter(cx);
     }
 
     fn refilter(&mut self, cx: &mut Context<Self>) {
@@ -605,6 +653,9 @@ impl Render for Panel {
                 Kind::Branches if self.items.is_empty() => ("No branches", "This pane isn't in a git repo."),
                 Kind::Branches => ("No results", "Try a branch name."),
                 Kind::Themes => ("No results", "Try a theme name."),
+                // herdr always lists the repo's own checkout, so an empty list is one still on its way
+                Kind::Worktrees if self.items.is_empty() => ("Asking herdr…", "Its worktrees of this repo show up here."),
+                Kind::Worktrees => ("No results", "Try a branch or a folder."),
             };
             div().py(px(24.)).flex().flex_col().items_center().gap(px(6.)).child(title).child(div().text_color(theme.text_muted).child(hint))
         });
@@ -887,5 +938,29 @@ mod tests {
         let rows: Vec<_> = items.iter().map(|i| (i.label.as_str(), i.hint.as_deref())).collect();
         assert_eq!(rows, [("B", Some("current")), ("A", None), ("C", None)]);
         assert_eq!(items[1].run, Run::Theme("a".into()));
+    }
+
+    #[test]
+    fn worktrees_list_herdr_s_order_without_bare_ones() {
+        let list = serde_json::json!({"type": "worktree_list", "worktrees": [
+            {"path": "/u/repo", "branch": "main", "is_bare": false, "is_detached": false, "is_prunable": false,
+             "is_linked_worktree": false, "open_workspace_id": "w1", "label": "repo"},
+            {"path": "/u/.herdr/worktrees/repo/fix", "branch": "fix", "is_bare": false, "is_detached": false,
+             "is_prunable": true, "is_linked_worktree": true, "label": "repo"},
+            {"path": "/u/bare.git", "is_bare": true, "is_detached": false, "is_prunable": false, "is_linked_worktree": true, "label": "x"},
+            {"path": "/tmp/probe", "is_bare": false, "is_detached": true, "is_prunable": false, "is_linked_worktree": true, "label": "repo"},
+        ]});
+        let items = worktree_items(&list, "w1", "/u");
+        let rows: Vec<_> = items.iter().map(|i| (i.label.as_str(), i.hint.as_deref(), i.icon)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("main", Some("open · ~/repo"), "icons/folder.svg"),
+                ("fix", Some("prunable · ~/.herdr/worktrees/repo/fix"), "icons/git-branch.svg"),
+                ("detached", Some("/tmp/probe"), "icons/git-branch.svg"),
+            ]
+        );
+        assert_eq!(items[0].run, Run::Worktree { repo: "w1".into(), path: "/u/repo".into(), workspace_id: Some("w1".into()) });
+        assert_eq!(items[1].run, Run::Worktree { repo: "w1".into(), path: "/u/.herdr/worktrees/repo/fix".into(), workspace_id: None });
     }
 }

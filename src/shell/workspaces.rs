@@ -38,6 +38,32 @@ impl Shell {
         cx.notify();
     }
 
+    /// The command panel over the worktrees of the workspace's repo: open at once, filled when herdr answers.
+    pub(super) fn open_worktrees_panel(&mut self, workspace_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::command_panel::Kind;
+        self.close_command_panel(cx);
+        self.toggle_command_panel(Kind::Worktrees, window, cx);
+        let Some(panel) = self.command_panel.as_ref().map(|p| p.value.0.downgrade()) else { return };
+        let repo = workspace_id.clone();
+        self.send_then(Command::ListWorktrees { workspace_id }, cx, move |shell, result, cx| {
+            let Some(panel) = panel.upgrade() else { return };
+            match result {
+                Ok(list) => {
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let items = crate::ui::command_panel::worktree_items(&list, &repo, &home);
+                    panel.update(cx, |panel, cx| panel.set_items(items, cx));
+                }
+                Err(err) => {
+                    // herdr refuses a folder outside git (`not_git_worktree`): say so and drop the empty panel
+                    crate::ui::toast::error(cx, format!("{err:#}"));
+                    if shell.command_panel.as_ref().is_some_and(|p| p.value.0 == panel) {
+                        shell.close_command_panel(cx);
+                    }
+                }
+            }
+        });
+    }
+
     pub(super) fn new_worktree(&mut self, workspace_id: String, branch: String, cx: &mut Context<Self>) {
         let pending = (workspace_id.clone(), branch.clone());
         self.pending_worktrees.push(pending.clone());

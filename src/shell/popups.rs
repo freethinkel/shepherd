@@ -387,9 +387,11 @@ impl Shell {
                 .as_ref()
                 .and_then(|s| s.workspaces.iter().find(|w| w.workspace_id == id))
                 .and_then(|w| w.worktree.clone());
-            // a repo's checkout makes worktrees; a linked worktree removes itself instead
+            // a repo's checkout makes and opens worktrees; a linked worktree removes itself instead. herdr reports a
+            // repo (`worktree`) only once it has a worktree group, so any other workspace may be one: herdr refuses
+            // a folder outside git (`not_git_worktree`), and that shows as a toast.
             let linked = worktree.as_ref().is_some_and(|w| w.is_linked_worktree);
-            let has_repo = worktree.is_some() && !linked;
+            let has_repo = !linked;
             let checkout = worktree.map(|w| w.checkout_path).filter(|p| !p.is_empty());
             gpui::deferred(
                 gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
@@ -407,6 +409,15 @@ impl Shell {
                                     move |this, _: &ClickEvent, window, cx| {
                                         if let Some(m) = this.ws_menu.as_mut() { m.close() }
                                         this.open_worktree_dialog(id.clone(), window, cx);
+                                    }
+                                }),
+                            ))
+                            .child(row(theme, false, "ws-menu-open-worktree").h(px(28.)).rounded(px(6.)).child("Open worktree").on_pick(at,
+                                cx.listener({
+                                    let id = id.clone();
+                                    move |this, _: &ClickEvent, window, cx| {
+                                        if let Some(m) = this.ws_menu.as_mut() { m.close() }
+                                        this.open_worktrees_panel(id.clone(), window, cx);
                                     }
                                 }),
                             ))
@@ -450,7 +461,7 @@ impl Shell {
                                 .h(px(28.))
                                 .rounded(px(6.))
                                 .text_color(theme.danger)
-                                .child("Close workspace")
+                                .child(if linked { "Close worktree" } else { "Close workspace" }) // the checkout stays
                                 .on_pick(at, cx.listener({
                                     let id = id.clone();
                                     move |this, _: &ClickEvent, _, cx| {

@@ -459,6 +459,7 @@ impl Shell {
                 Some(d) => crate::ui::command_panel::branch_items(&crate::ui::statusbar::read_branches(d), crate::ui::statusbar::branch_of(d, cx).as_deref()),
                 None => Vec::new(),
             },
+            Kind::Worktrees => Vec::new(), // herdr's list fills it: see `open_worktrees_panel`
             Kind::Themes => {
                 let appearance = Theme::of(cx).appearance;
                 let dark = appearance == crate::theme::Appearance::Dark;
@@ -501,6 +502,26 @@ impl Shell {
                     let dark = Theme::of(cx).appearance == crate::theme::Appearance::Dark;
                     let id = id.clone();
                     crate::ui::settings::update(cx, |s| *if dark { &mut s.theme_dark } else { &mut s.theme_light } = id);
+                }
+                PanelEvent::Run(Run::Worktree { repo, path, workspace_id }) => {
+                    let open_tab = workspace_id.as_ref().and_then(|id| {
+                        let s = this.snapshot.as_ref()?;
+                        let w = s.workspaces.iter().find(|w| &w.workspace_id == id)?;
+                        w.active_tab_id.clone().or_else(|| s.tabs_of(id).first().map(|t| t.tab_id.clone()))
+                    });
+                    match open_tab {
+                        Some(tab) => this.selected_tab = Some(tab),
+                        None => {
+                            let command = Command::OpenWorktree { workspace_id: repo.clone(), path: path.clone() };
+                            this.send_then(command, cx, |shell, result, cx| {
+                                match result {
+                                    Ok(value) => shell.selected_tab = crate::commands::created_tab_id(&value),
+                                    Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),
+                                }
+                                cx.notify();
+                            });
+                        }
+                    }
                 }
                 PanelEvent::Dismiss => {}
             }
