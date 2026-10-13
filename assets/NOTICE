@@ -9,7 +9,8 @@ Solar icon set, Linear style (assets/solar-linear.json)
 
 Zeron
   The theme families (the zeron-theme crate), the theme tokens in src/theme.rs (via Collie) the terminal code
-  in src/terminal/, the sidebar, settings and tab icons (agent marks) in assets/icons/, the settings page layout, the sidebar fold motion, the project icon (src/ui/project_icon.rs) the scroll-edge fade (src/ui/edge_fade.rs) and the loaders (src/ui/loader.rs) are from or adapted from Zeron
+  in src/terminal/, the sidebar, settings and tab icons (agent marks) in assets/icons/, the settings page layout, the sidebar fold motion, the project icon (src/ui/project_icon.rs) the scroll-edge fade (src/ui/edge_fade.rs) the loaders (src/ui/loader.rs) and the markdown drawing and its text selection (src/ui/markdown.rs, over the
+  zeron-markdown crate) are from or adapted from Zeron
   (https://github.com/zeronsh/zeron), MIT License, Copyright (c) 2026 Wing:
 
   MIT License

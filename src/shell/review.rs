@@ -3,7 +3,7 @@
 use super::*;
 use gpui::AnyElement;
 use crate::settings::{REVIEW_MAX, REVIEW_MIN, REVIEW_WIDTH};
-use crate::ui::review::{Block, Check, CheckState, Review, duration, folds, markdown, preview, read_review};
+use crate::ui::review::{Check, CheckState, Review, duration, folds, markdown, preview, read_review};
 use crate::ui::statusbar::{branch_of, cached, fetching, pane_dir, refetch};
 
 /// How often gh or glab are asked again about a branch, as the status bar asks about its PR.
@@ -206,7 +206,7 @@ fn description(theme: &Theme, body: &str, expanded: bool, toggle: impl Fn(&Click
                     .child(preview(&blocks))
                     .on_click(move |e, window, cx| toggle(e, window, cx)),
             ),
-            false => el.children(blocks.into_iter().map(|b| render_block(theme, b))),
+            false => el.children(crate::ui::markdown::render(&blocks, "review-md", theme)),
         })
         .into_any_element()
 }
@@ -324,28 +324,4 @@ fn check_icon(theme: &Theme, state: CheckState, window: &mut Window) -> AnyEleme
         }
     };
     gpui::svg().path(icon).size(px(14.)).flex_none().text_color(color).into_any_element()
-}
-
-fn render_block(theme: &Theme, block: Block) -> AnyElement {
-    match block {
-        Block::Heading(text) => div().pt(px(4.)).text_size(px(13.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme.text).child(text),
-        Block::Paragraph(text) => div().child(text),
-        Block::Item(level, marker, text) => div()
-            .pl(px(level as f32 * 14.))
-            .flex()
-            .gap(px(6.))
-            .child(div().flex_none().text_color(theme.text_faint).child(marker))
-            .child(div().flex_1().min_w_0().child(text)),
-        Block::Quote(text) => div().pl(px(8.)).border_l_2().border_color(theme.border_strong).text_color(theme.text_faint).child(text),
-        Block::Code(text) => div()
-            .p(px(8.))
-            .rounded(px(6.))
-            .bg(theme.wash(0.05))
-            .overflow_hidden()
-            .font_family(theme.font_terminal.clone())
-            .text_size(px(11.5))
-            .child(text),
-        Block::Rule => div().h(px(1.)).bg(theme.border),
-    }
-    .into_any_element()
 }

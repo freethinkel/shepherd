@@ -220,89 +220,65 @@ fn gitlab(dir: &str, branch: &str, host: &str) -> Review {
     Review::Found { request, checks, pipeline }
 }
 
-/// A block of a PR description, as the panel draws it.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Block {
-    Heading(String),
-    Paragraph(String),
-    /// A list item: its nesting, its marker (`•`, `3.`, `☐`, `☑`) and text.
-    Item(usize, String, String),
-    Quote(String),
-    Code(String),
-    Rule,
-}
+pub use zeron_markdown::{Block, InlineRun};
 
-// ponytail: a few block kinds, inline marks stripped; a markdown crate when tables or styled spans are wanted
-/// `text` as markdown blocks: headings, lists, quotes, fenced code, rules and paragraphs; HTML comments (GitHub's
-/// templates are full of them) and tags dropped, links reduced to their text.
+/// `text` as Zeron's markdown blocks (pulldown-cmark), for a panel without HTML: comments (GitHub's templates are
+/// full of them) and tags (`<details>`, `<br>`) dropped; a task's `[x]` as a check box.
 pub fn markdown(text: &str) -> Vec<Block> {
-    let text = strip_comments(text);
-    let mut blocks = Vec::new();
-    let mut paragraph: Vec<String> = Vec::new();
-    let mut code: Option<Vec<&str>> = None;
-    let flush = |p: &mut Vec<String>, blocks: &mut Vec<Block>| {
-        if !p.is_empty() {
-            blocks.push(Block::Paragraph(p.join(" ")));
-            p.clear();
-        }
-    };
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(lines) = code.as_mut() {
-            if trimmed.starts_with("```") {
-                blocks.push(Block::Code(lines.join("\n")));
-                code = None;
-            } else {
-                lines.push(line);
-            }
-            continue;
-        }
-        if trimmed.starts_with("```") {
-            flush(&mut paragraph, &mut blocks);
-            code = Some(Vec::new());
-            continue;
-        }
-        let indent = (line.len() - line.trim_start().len()) / 2;
-        let item = |marker: &str, rest: &str| Block::Item(indent, marker.into(), inline(rest));
-        let block = if trimmed.is_empty() {
-            None
-        } else if trimmed.starts_with('#') && trimmed.trim_start_matches('#').starts_with(' ') {
-            Some(Block::Heading(inline(trimmed.trim_start_matches('#'))))
-        } else if ["---", "***", "___"].contains(&trimmed) {
-            Some(Block::Rule)
-        } else if let Some(rest) = trimmed.strip_prefix("> ").or(trimmed.strip_prefix('>')) {
-            Some(Block::Quote(inline(rest)))
-        } else if let Some(rest) = ["- ", "* ", "+ "].iter().find_map(|m| trimmed.strip_prefix(m)) {
-            Some(match rest.get(..4) {
-                Some("[ ] ") => item("☐", &rest[4..]),
-                Some("[x] " | "[X] ") => item("☑", &rest[4..]),
-                _ => item("•", rest),
-            })
-        } else if let Some((n, rest)) = trimmed.split_once(". ").filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) {
-            Some(item(&format!("{n}."), rest))
-        } else {
-            paragraph.push(inline(trimmed));
-            continue;
-        };
-        flush(&mut paragraph, &mut blocks);
-        blocks.extend(block);
-    }
-    flush(&mut paragraph, &mut blocks);
-    if let Some(lines) = code {
-        blocks.push(Block::Code(lines.join("\n")));
-    }
-    blocks.retain(|b| !matches!(b, Block::Paragraph(p) | Block::Heading(p) if p.trim().is_empty()));
+    let mut blocks: Vec<Block> = zeron_markdown::parse_full(&strip_comments(text)).blocks.iter().map(|b| b.block.clone()).collect();
+    blocks.iter_mut().for_each(tidy);
+    blocks.retain(|b| !matches!(b, Block::Paragraph { runs } if runs_text(runs).trim().is_empty()));
     blocks
 }
 
-/// The text of `blocks` as one run, headings, rules and code left out: a folded description's few lines.
+fn tidy(block: &mut Block) {
+    match block {
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => tidy_runs(runs),
+        Block::BlockQuote { children } => children.iter_mut().for_each(tidy),
+        Block::List { items, .. } => items.iter_mut().flatten().for_each(tidy),
+        Block::Table { header, rows, .. } => header.iter_mut().chain(rows.iter_mut().flatten()).for_each(|cell| tidy_runs(cell)),
+        Block::CodeBlock { .. } | Block::Rule => {}
+    }
+}
+
+fn tidy_runs(runs: &mut Vec<InlineRun>) {
+    for run in runs.iter_mut() {
+        if let Some(task) = &run.style.task {
+            run.text = if task.checked { "☑ " } else { "☐ " }.into();
+        } else if !run.style.code {
+            let text = strip_tags(&run.text);
+            // a tag's own line (`<details>`) leaves only its line breaks
+            if text != run.text {
+                run.text = text.trim().to_string();
+            }
+        }
+    }
+    runs.retain(|r| !r.text.is_empty());
+}
+
+/// The runs' text, as it reads.
+pub fn runs_text(runs: &[InlineRun]) -> String {
+    runs.iter().map(|r| r.text.as_str()).collect()
+}
+
+/// The text of `blocks` as one run, headings, code, tables and rules left out: a folded description's few lines.
 pub fn preview(blocks: &[Block]) -> String {
-    let text = blocks.iter().filter_map(|b| match b {
-        Block::Paragraph(t) | Block::Quote(t) => Some(t.clone()),
-        Block::Item(_, marker, t) => Some(format!("{marker} {t}")),
-        Block::Heading(_) | Block::Code(_) | Block::Rule => None,
-    });
-    text.collect::<Vec<_>>().join(" ")
+    fn plain(block: &Block, out: &mut Vec<String>) {
+        match block {
+            Block::Paragraph { runs } => out.push(runs_text(runs)),
+            Block::BlockQuote { children } => children.iter().for_each(|c| plain(c, out)),
+            Block::List { items, .. } => {
+                for item in items {
+                    out.push("•".into());
+                    item.iter().for_each(|c| plain(c, out));
+                }
+            }
+            Block::Heading { .. } | Block::CodeBlock { .. } | Block::Table { .. } | Block::Rule => {}
+        }
+    }
+    let mut out = Vec::new();
+    blocks.iter().for_each(|b| plain(b, &mut out));
+    out.join(" ")
 }
 
 // ponytail: by size, not by laid-out lines; a long single line in a narrow panel may fold without needing to
@@ -322,38 +298,22 @@ fn strip_comments(text: &str) -> String {
     out + rest
 }
 
-/// A line's text without its marks: `**`, `__`, backticks, HTML tags; `[text](url)` and `![alt](url)` as their text.
-fn inline(s: &str) -> String {
+/// `s` without its HTML tags (`<br>`, `</details>`); a `<` not opening one stays.
+fn strip_tags(s: &str) -> String {
     let mut out = String::new();
-    let mut rest = s.trim();
-    while let Some(c) = rest.chars().next() {
-        let after = &rest[c.len_utf8()..];
-        // `[text](url)`: the text
-        if c == '[' || (c == '!' && after.starts_with('[')) {
-            let open = if c == '!' { &after[1..] } else { after };
-            if let Some((text, tail)) = open.split_once("](") {
-                if let Some(end) = tail.find(')') {
-                    out.push_str(text);
-                    rest = &tail[end + 1..];
-                    continue;
-                }
+    let mut rest = s;
+    while let Some(start) = rest.find('<') {
+        let after = &rest[start + 1..];
+        out.push_str(&rest[..start]);
+        match after.find('>').filter(|_| after.starts_with(|c: char| c.is_ascii_alphabetic() || c == '/')) {
+            Some(end) => rest = &after[end + 1..],
+            None => {
+                out.push('<');
+                rest = after;
             }
-        }
-        // an HTML tag: `<br>`, `</details>`
-        if c == '<' && after.starts_with(|n: char| n.is_ascii_alphabetic() || n == '/') {
-            if let Some(end) = after.find('>') {
-                rest = &after[end + 1..];
-                continue;
-            }
-        }
-        if !(c == '`' || ((c == '*' || c == '_') && after.starts_with(c))) {
-            out.push(c);
-            rest = after;
-        } else {
-            rest = after.strip_prefix(c).filter(|_| c != '`').unwrap_or(after);
         }
     }
-    out.trim().to_string()
+    out + rest
 }
 
 #[cfg(test)]
@@ -436,26 +396,18 @@ mod tests {
 
     #[test]
     fn markdown_blocks() {
-        let text = "<!-- template\nhint -->\n## Summary\n\nFixes **the** `login` [bug](https://x/1).\nSecond line.\n\n- one\n  - nested\n- [x] done\n1. first\n> quoted\n\n```rust\nlet a = 1;\n```\n---\n<details><summary>More</summary>";
-        assert_eq!(
-            markdown(text),
-            [
-                Block::Heading("Summary".into()),
-                Block::Paragraph("Fixes the login bug. Second line.".into()),
-                Block::Item(0, "•".into(), "one".into()),
-                Block::Item(1, "•".into(), "nested".into()),
-                Block::Item(0, "☑".into(), "done".into()),
-                Block::Item(0, "1.".into(), "first".into()),
-                Block::Quote("quoted".into()),
-                Block::Code("let a = 1;".into()),
-                Block::Rule,
-                Block::Paragraph("More".into()),
-            ]
-        );
-        assert_eq!(markdown("a_b * c ![img](u)"), [Block::Paragraph("a_b * c img".into())]);
-        assert_eq!(preview(&markdown(text)), "Fixes the login bug. Second line. • one • nested ☑ done 1. first quoted More");
-        assert!(folds(&markdown(text)));
+        let text = "<!-- template\nhint -->\n## Summary\n\nFixes **the** `login` [bug](https://x/1).\n\n- one\n- [x] done\n\n<details><summary>More</summary>\n\na < b";
+        let blocks = markdown(text);
+        assert!(matches!(&blocks[0], Block::Heading { level: 2, runs } if runs_text(runs) == "Summary"));
+        let Block::Paragraph { runs } = &blocks[1] else { panic!("{blocks:?}") };
+        assert_eq!(runs_text(runs), "Fixes the login bug.");
+        assert!(runs.iter().any(|r| r.text == "the" && r.style.bold));
+        assert!(runs.iter().any(|r| r.text == "login" && r.style.code));
+        assert!(runs.iter().any(|r| r.text == "bug" && r.style.link.as_deref() == Some("https://x/1")));
+        assert_eq!(preview(&blocks), "Fixes the login bug. • one • ☑ done More a < b");
+        assert!(folds(&blocks));
         assert!(!folds(&markdown("One short line.")));
         assert_eq!(markdown(""), []);
+        assert_eq!(markdown("<!-- only a hint -->"), []);
     }
 }

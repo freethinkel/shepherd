@@ -1232,7 +1232,17 @@ impl Render for Shell {
         let root = div()
             .id("root")
             .track_focus(&self.focus)
-            .capture_key_down(cx.listener(|s, _: &gpui::KeyDownEvent, _, cx| s.touch(cx)))
+            .capture_key_down(cx.listener(|s, e: &gpui::KeyDownEvent, _, cx| {
+                s.touch(cx);
+                // Cmd+C over a selection in the review panel copies it, not the pane's
+                let m = &e.keystroke.modifiers;
+                if m.platform && !(m.shift || m.alt || m.control) && e.keystroke.key == "c" {
+                    if let Some(text) = crate::ui::markdown::selected_text() {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                        cx.stop_propagation();
+                    }
+                }
+            }))
             .capture_any_mouse_down(cx.listener(|s, _: &MouseDownEvent, _, cx| s.touch(cx)))
             .relative()
             .size_full()
