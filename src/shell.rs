@@ -749,6 +749,22 @@ impl Shell {
         });
     }
 
+    /// While a divider, the sidebar or the agents list is being dragged, the whole window shows the resize cursor:
+    /// the pointer outruns the narrow hit strip, whose own cursor would otherwise flicker with the terminal's.
+    fn resize_cursor(&self) -> Option<impl IntoElement> {
+        let vertical = if let Some(d) = &self.divider {
+            d.vertical
+        } else if self.sidebar_drag {
+            true
+        } else if self.agents_drag.is_some() {
+            false
+        } else {
+            return None;
+        };
+        let style = if vertical { gpui::CursorStyle::ResizeColumn } else { gpui::CursorStyle::ResizeRow };
+        Some(canvas(|_, _, _| (), move |_, _, window, _| window.set_window_cursor_style(style)).absolute().size_0())
+    }
+
     /// The strip under the transparent titlebar drags the window; a double click zooms it.
     fn drag_strip(&self) -> Stateful<Div> {
         let (down, up, out, moved) =
@@ -1140,6 +1156,7 @@ impl Render for Shell {
                 this.end_agents_drag(cx);
             }))
             .child(self.drag_strip())
+            .children(self.resize_cursor())
             .when(sidebar_w > 0. && !on_page, |el| {
                 el.child(
                     div()
