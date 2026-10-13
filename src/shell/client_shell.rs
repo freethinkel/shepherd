@@ -94,7 +94,7 @@ impl Shell {
     }
 }
 
-fn host_theme(theme: &Theme) -> Vec<Update> {
+pub(super) fn host_theme(theme: &Theme) -> Vec<Update> {
     use crate::herdr::client_shell::{DefaultColorKind as Kind, HostAppearance as Appearance, Rgb};
     let rgb = |c: Hsla| {
         let c = gpui::Rgba::from(c);

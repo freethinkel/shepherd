@@ -63,6 +63,12 @@ pub struct Settings {
     pub dock_badge: bool,
     /// A finished selection in a pane goes to the clipboard and clears, as in herdr.
     pub copy_on_select: bool,
+    /// macOS Secure Keyboard Entry while a Shepherd window is in front: other apps cannot read the keys typed.
+    pub secure_input: bool,
+    /// The workspaces sidebar is shown; `⌘B` hides it.
+    pub sidebar_open: bool,
+    /// Worktree groups folded in the sidebar, by workspace id.
+    pub folded: Vec<String>,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
 }
@@ -170,6 +176,9 @@ impl Default for Settings {
             notify_sound: true,
             dock_badge: true,
             copy_on_select: true,
+            secure_input: false,
+            sidebar_open: true,
+            folded: Vec::new(),
             window: None,
         }
     }

@@ -72,8 +72,6 @@ pub struct Shell {
     rt: tokio::runtime::Handle,
     /// herdr's plugin actions as (id, title), for the command panel; read again whenever it opens.
     plugin_actions: Vec<(String, String)>,
-    /// The terminal colors last sent to herdr, so an unchanged theme is not sent again.
-    host_theme: Option<(Vec<crate::herdr::Rgb>, bool)>,
     /// The pane grid's bounds from the last paint, to turn a divider drag into a ratio.
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     divider: Option<DividerDrag>,
@@ -81,7 +79,6 @@ pub struct Shell {
     settling: Option<(Vec<bool>, f32)>,
     /// The tab or workspace label being edited in place.
     renaming: Option<Rename>,
-    // ponytail: in memory only; persist in settings if folds should survive a restart
     folded: std::collections::HashSet<String>,
     /// A workspace's right-click menu and where it opened.
     ws_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
@@ -93,7 +90,6 @@ pub struct Shell {
     shown_workspace: Option<String>,
     /// Saved in the settings when a drag ends.
     sidebar_width: f32,
-    // ponytail: open/closed in memory only; persist in settings if it should survive a restart
     sidebar_open: bool,
     /// The sidebar's width tween while it shows or hides.
     sidebar_motion: Option<FoldMotion>,
@@ -270,6 +266,7 @@ impl Shell {
                     cx.set_global(crate::terminal::pane::Yielded(!active));
                     if active {
                         s.refresh_places(cx); // sessions made or deleted elsewhere
+                        s.push_host_theme(cx);
                     }
                     cx.notify(); // the shown tab's agents count as seen once the window is active
                 })
@@ -338,18 +335,17 @@ impl Shell {
                         .map_or_else(Client::local, |p| Client::at(p.into())),
                     rt: rt.clone(),
                     plugin_actions: Vec::new(),
-                    host_theme: None,
                     grid_bounds: Rc::new(Cell::new(None)),
                     divider: None,
                     settling: None,
                     renaming: None,
-                    folded: Default::default(),
+                    folded: SettingsGlobal::of(cx).settings.folded.iter().cloned().collect(),
                     fold_motion: Default::default(),
                     seam_hover: Default::default(),
                     ws_menu: None,
                     shown_workspace: None,
                     sidebar_width: SettingsGlobal::of(cx).settings.sidebar_width,
-                    sidebar_open: true,
+                    sidebar_open: SettingsGlobal::of(cx).settings.sidebar_open,
                     sidebar_motion: None,
                     sidebar_drag: false,
                     sidebar_edge: None,
@@ -409,7 +405,6 @@ impl Shell {
                 shell.connect(cx);
                 shell.refresh_places(cx);
                 shell.refresh_plugin_actions(cx);
-                shell.push_host_theme(cx);
                 // Waiting times move on between snapshots.
                 // ponytail: a minute from launch, not from each wait, so a label can lag by up to a minute.
                 cx.spawn(async move |this, cx| loop {
@@ -694,31 +689,13 @@ impl Shell {
         }
     }
 
-    /// herdr paints the terminals' default colors itself: it is told the theme's.
-    fn push_host_theme(&mut self, cx: &mut Context<Self>) {
-        use crate::herdr::Rgb;
-        let theme = Theme::of(cx);
-        let rgb = |c: gpui::Hsla| {
-            let c = gpui::Rgba::from(c);
-            let u = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
-            Rgb { r: u(c.r), g: u(c.g), b: u(c.b) }
-        };
-        let t = &theme.terminal;
-        let colors: Vec<Rgb> = [t.foreground, t.background].into_iter().chain(t.ansi).map(rgb).collect();
-        let next = Some((colors.clone(), theme.appearance == crate::theme::Appearance::Light));
-        if self.host_theme == next {
-            return;
+    /// herdr paints the terminals' default colors itself: it is told the theme's over the popup watch, which then
+    /// is the client in front again (back from herdr's TUI on another machine, say). The client shell (PoC) does
+    /// this in `sync_client_shell`.
+    fn push_host_theme(&self, cx: &App) {
+        if let Some((surface, _)) = &self.popup_surface {
+            surface.theme(client_shell::host_theme(Theme::of(cx)));
         }
-        self.host_theme = next;
-        let light = theme.appearance == crate::theme::Appearance::Light;
-        let ansi: [Rgb; 16] = colors[2..].try_into().unwrap();
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(e) = crate::herdr::push_host_theme(colors[0], colors[1], ansi, light) {
-                    eprintln!("shepherd: herdr host theme: {e}");
-                }
-            })
-            .detach();
     }
 
     fn refresh_plugin_actions(&mut self, cx: &mut Context<Self>) {
@@ -935,6 +912,23 @@ fn reapply_traffic_lights(window: &mut Window) {
     window.set_window_title("Shepherd");
 }
 
+/// Turns macOS Secure Keyboard Entry on or off. The system counts enables, so it is called only on a change.
+fn secure_input(on: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn EnableSecureEventInput() -> i32;
+        fn DisableSecureEventInput() -> i32;
+    }
+    static ON: AtomicBool = AtomicBool::new(false);
+    if ON.swap(on, Ordering::Relaxed) != on {
+        // SAFETY: no arguments; balanced by `ON`
+        unsafe {
+            if on { EnableSecureEventInput() } else { DisableSecureEventInput() };
+        }
+    }
+}
+
 /// The window's last frame and its display, while that display is plugged in and the frame on it.
 fn saved_window(cx: &App) -> Option<(gpui::DisplayId, gpui::WindowBounds)> {
     let frame = SettingsGlobal::of(cx).settings.window.clone()?;
@@ -972,6 +966,8 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_badge(window, cx);
         self.mark_seen(window, cx);
+        // any Shepherd window in front, not this one: a window in the back renders too
+        secure_input(SettingsGlobal::of(cx).settings.secure_input && cx.active_window().is_some());
         crate::ui::reap_popup(&mut self.view_menu, window);
         crate::ui::reap_popup(&mut self.agents_menu, window);
         crate::ui::reap_popup(&mut self.ws_menu, window);

@@ -18,7 +18,12 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
         let Ok((cols, rows)) = this.update(cx, |s, cx| s.grid_cells(cx).unwrap_or((120, 40))) else { return };
         let watch = cx.background_executor().spawn(async move { popup::watch(cols, rows) });
         if let Ok((mut rx, surface)) = watch.await {
-            if this.update(cx, |s, _| s.popup_surface = Some((surface, (cols, rows)))).is_err() {
+            // at once: a shell in front without a theme blanks herdr's (as in `client_shell::shell_loop`)
+            let started = this.update(cx, |s, cx| {
+                surface.theme(client_shell::host_theme(Theme::of(cx)));
+                s.popup_surface = Some((surface, (cols, rows)));
+            });
+            if started.is_err() {
                 return;
             }
             while let Some(event) = rx.next().await {

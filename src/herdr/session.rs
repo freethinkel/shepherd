@@ -47,39 +47,6 @@ fn api_socket() -> PathBuf {
     })
 }
 
-/// Tells herdr the colors Shepherd paints terminals with. herdr bakes its host theme into every frame and answers
-/// apps' color queries (OSC 10/11, `?997`) with it, but takes one only from the client shell in front: so a client
-/// shell connects for a moment, sends it and leaves. With no other client shell, herdr keeps it; herdr's own TUI
-/// takes the theme back while it is the one in front.
-// ponytail: the moment's client shell claims the layout of herdr's active tab at 80x24; panes Shepherd shows are
-// locked to its own sizes, a hidden one reflows until Shepherd shows it. A lasting client shell would avoid it.
-pub fn push_host_theme(fg: wire::Rgb, bg: wire::Rgb, ansi: [wire::Rgb; 16], light: bool) -> std::io::Result<()> {
-    use wire::{DefaultColorKind, HostAppearance, HostThemeUpdate};
-    let mut stream = UnixStream::connect(client_socket())?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    let hello = json!({
-        "generation": 1, "cell_width_px": 8, "cell_height_px": 16, "surface_size": {"cols": 80, "rows": 24},
-        "pixel_mouse": false, "direct_graphics": false, "endpoint_keybindings": false, "mouse_capture": false,
-        "surface_active": true, "snapshot_codecs": ["shell.snapshot.v1"], "surface_codecs": ["shell.surface.v1"],
-        "input_codecs": ["shell.input.semantic.v1"], "blob_codecs": ["shell.blob.v1"],
-    });
-    wire::write_message(&mut stream, &ClientMessage::EndpointControl { kind: "endpoint.hello.v1".into(), data: hello.to_string() })?;
-    match wire::read_message(&mut stream)? {
-        Some(ServerMessage::EndpointControl { kind, .. }) if kind == "endpoint.welcome.v1" => {}
-        other => return Err(std::io::Error::other(format!("herdr refused the client shell: {other:?}"))),
-    }
-    let appearance = if light { HostAppearance::Light } else { HostAppearance::Dark };
-    for update in [
-        HostThemeUpdate::DefaultColor { kind: DefaultColorKind::Foreground, color: fg },
-        HostThemeUpdate::DefaultColor { kind: DefaultColorKind::Background, color: bg },
-        HostThemeUpdate::PaletteColors((0..16).map(|i| (i as u8, ansi[i])).collect()),
-        HostThemeUpdate::Appearance(appearance),
-    ] {
-        wire::write_message(&mut stream, &ClientMessage::ClientShellHostTheme { update })?;
-    }
-    Ok(())
-}
-
 pub(super) fn binary() -> String {
     std::env::var("SHEPHERD_HERDR").ok().or_else(|| BINARY.read().unwrap().clone()).unwrap_or_else(find_herdr)
 }

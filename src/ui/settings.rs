@@ -140,6 +140,7 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     // Nothing changed, nothing saved: leaving a field must not overwrite a file that failed to load.
     let Some(settings) = SettingsGlobal::of(cx).settings.changed_by(change) else { return };
     let keys_changed = settings.keys != SettingsGlobal::of(cx).settings.keys;
+    let secure_changed = settings.secure_input != SettingsGlobal::of(cx).settings.secure_input;
     let path = {
         let global = cx.global_mut::<SettingsGlobal>();
         global.settings = settings.clone();
@@ -152,6 +153,8 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     cx.set_global(settings.theme(cx.window_appearance()));
     if keys_changed {
         rebind(cx, &settings.keys);
+    } else if secure_changed {
+        crate::bindings::set_menus(cx);
     }
     cx.refresh_windows();
 }
@@ -951,6 +954,13 @@ impl Render for SettingsView {
                             .child(row_text(&theme, "Copy on select", "A finished selection goes to the clipboard, then clears."))
                             .child(toggle(&theme, "copy-on-select", settings.copy_on_select).on_click(cx.listener(
                                 |_, _: &ClickEvent, _, cx| update(cx, |s| s.copy_on_select = !s.copy_on_select),
+                            ))),
+                    )
+                    .child(
+                        card_row(&theme, false)
+                            .child(row_text(&theme, "Secure keyboard entry", "While Shepherd is in front, other apps cannot read what you type."))
+                            .child(toggle(&theme, "secure-input", settings.secure_input).on_click(cx.listener(
+                                |_, _: &ClickEvent, _, cx| update(cx, |s| s.secure_input = !s.secure_input),
                             ))),
                     ),
             ),

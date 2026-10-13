@@ -2,7 +2,7 @@
 //! hears of it, in the pane surfaces herdr sends it. One such connection per session, read only for the popup; the
 //! popup's terminal itself is then controlled like a pane's ([`super::Session`] takes its terminal id).
 use super::session::client_socket;
-use super::wire::{self, ClientMessage, ServerMessage, SurfaceSize};
+use super::wire::{self, ClientMessage, HostThemeUpdate, ServerMessage, SurfaceSize};
 pub use super::wire::{PopupSize, PopupSurface};
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use std::os::unix::net::UnixStream;
@@ -25,6 +25,14 @@ impl Surface {
     pub fn resize(&self, cols: u16, rows: u16) {
         let msg = ClientMessage::ClientShellResize { cell_width_px: 0, cell_height_px: 0, surface_size: SurfaceSize { cols: cols.max(20), rows: rows.max(8) }, pixel_mouse: false };
         let _ = wire::write_message(&mut &self.0, &msg); // a dead shell is noticed by its reader
+    }
+
+    /// Shepherd's colors for herdr's host theme. herdr keeps them with this shell and applies them whenever it is the
+    /// client in front again (another client gone, or this one sending), so a TUI's theme does not outlast the TUI.
+    pub fn theme(&self, updates: Vec<HostThemeUpdate>) {
+        for update in updates {
+            let _ = wire::write_message(&mut &self.0, &ClientMessage::ClientShellHostTheme { update });
+        }
     }
 }
 
