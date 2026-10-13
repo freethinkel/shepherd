@@ -68,6 +68,8 @@ pub struct Shell {
     rt: tokio::runtime::Handle,
     /// herdr's plugin actions as (id, title), for the command panel; read again whenever it opens.
     plugin_actions: Vec<(String, String)>,
+    /// The terminal colors last sent to herdr, so an unchanged theme is not sent again.
+    host_theme: Option<(Vec<crate::herdr::Rgb>, bool)>,
     /// The pane grid's bounds from the last paint, to turn a divider drag into a ratio.
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     divider: Option<DividerDrag>,
@@ -157,6 +159,8 @@ pub struct Shell {
     /// herdr's popup over the panes, and the client shell that hears of it.
     floating: Option<floating::Floating>,
     popup_watch: gpui::Task<()>,
+    /// The client shell's surface and the grid it was last sized to.
+    popup_surface: Option<(crate::herdr::popup::Surface, (u16, u16))>,
     /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.
     herdr_commands: Vec<(String, Vec<String>)>,
     /// herdr's sessions and machines, in the bar under the sidebar.
@@ -259,6 +263,7 @@ impl Shell {
                     cx.notify(); // the shown tab's agents count as seen once the window is active
                 })
                 .detach();
+                cx.observe_global::<Theme>(|s: &mut Shell, cx| s.push_host_theme(cx)).detach();
                 cx.observe_global::<crate::terminal::pane::Yielded>(|s: &mut Shell, cx| {
                     for pane in s.panes.values() {
                         pane.update(cx, |p, cx| p.follow_yield(cx));
@@ -321,6 +326,7 @@ impl Shell {
                         .map_or_else(Client::local, |p| Client::at(p.into())),
                     rt: rt.clone(),
                     plugin_actions: Vec::new(),
+                    host_theme: None,
                     grid_bounds: Rc::new(Cell::new(None)),
                     divider: None,
                     settling: None,
@@ -368,6 +374,7 @@ impl Shell {
                     sync: gpui::Task::ready(()),
                     floating: None,
                     popup_watch: gpui::Task::ready(()),
+                    popup_surface: None,
                     herdr_commands: Vec::new(),
                     places: Vec::new(),
                     swipe: None,
@@ -387,6 +394,7 @@ impl Shell {
                 shell.connect(cx);
                 shell.refresh_places(cx);
                 shell.refresh_plugin_actions(cx);
+                shell.push_host_theme(cx);
                 // Waiting times move on between snapshots.
                 // ponytail: a minute from launch, not from each wait, so a label can lag by up to a minute.
                 cx.spawn(async move |this, cx| loop {
@@ -665,6 +673,33 @@ impl Shell {
         if let Some(pane_id) = self.active_pane(window, cx) {
             self.send(make(pane_id), cx, |_, _, _| {});
         }
+    }
+
+    /// herdr paints the terminals' default colors itself: it is told the theme's.
+    fn push_host_theme(&mut self, cx: &mut Context<Self>) {
+        use crate::herdr::Rgb;
+        let theme = Theme::of(cx);
+        let rgb = |c: gpui::Hsla| {
+            let c = gpui::Rgba::from(c);
+            let u = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+            Rgb { r: u(c.r), g: u(c.g), b: u(c.b) }
+        };
+        let t = &theme.terminal;
+        let colors: Vec<Rgb> = [t.foreground, t.background].into_iter().chain(t.ansi).map(rgb).collect();
+        let next = Some((colors.clone(), theme.appearance == crate::theme::Appearance::Light));
+        if self.host_theme == next {
+            return;
+        }
+        self.host_theme = next;
+        let light = theme.appearance == crate::theme::Appearance::Light;
+        let ansi: [Rgb; 16] = colors[2..].try_into().unwrap();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = crate::herdr::push_host_theme(colors[0], colors[1], ansi, light) {
+                    eprintln!("shepherd: herdr host theme: {e}");
+                }
+            })
+            .detach();
     }
 
     fn refresh_plugin_actions(&mut self, cx: &mut Context<Self>) {

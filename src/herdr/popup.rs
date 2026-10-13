@@ -17,10 +17,20 @@ pub enum Event {
     Commands(Vec<(String, Vec<String>)>),
 }
 
-/// The client shell's [`Event`]s; the stream ends when herdr hangs up or refuses.
-/// `cols`×`rows` is the shell's surface: herdr sizes the tab it shows to it while no other client does, so it
-/// should be Shepherd's pane grid.
-pub fn watch(cols: u16, rows: u16) -> anyhow::Result<UnboundedReceiver<Event>> {
+/// The client shell's surface, which herdr lays its focused tab out at while no other client does: kept at
+/// Shepherd's pane grid, as herdr-gpui keeps its own.
+pub struct Surface(UnixStream);
+
+impl Surface {
+    pub fn resize(&self, cols: u16, rows: u16) {
+        let msg = ClientMessage::ClientShellResize { cell_width_px: 0, cell_height_px: 0, surface_size: (cols.max(20), rows.max(8)), pixel_mouse: false };
+        let _ = wire::write_message(&mut &self.0, &msg); // a dead shell is noticed by its reader
+    }
+}
+
+/// The client shell's [`Event`]s, and its [`Surface`] (`cols`×`rows` at first); the stream ends when herdr hangs up
+/// or refuses.
+pub fn watch(cols: u16, rows: u16) -> anyhow::Result<(UnboundedReceiver<Event>, Surface)> {
     let mut stream = UnixStream::connect(client_socket())?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let hello = serde_json::json!({
@@ -46,6 +56,7 @@ pub fn watch(cols: u16, rows: u16) -> anyhow::Result<UnboundedReceiver<Event>> {
         anyhow::bail!("herdr refused the client shell: {}", error["message"]);
     }
     stream.set_read_timeout(None)?;
+    let surface = Surface(stream.try_clone()?);
     let (tx, rx) = unbounded();
     std::thread::spawn(move || {
         let mut last = None;
@@ -66,7 +77,7 @@ pub fn watch(cols: u16, rows: u16) -> anyhow::Result<UnboundedReceiver<Event>> {
             }
         }
     });
-    Ok(rx)
+    Ok((rx, surface))
 }
 
 fn commands(snapshot: &str) -> Vec<(String, Vec<String>)> {
@@ -111,9 +122,15 @@ mod tests {
 
     /// Live: `cargo test popup::tests::live -- --ignored --nocapture`, then open a popup in herdr.
     #[test]
+    fn resize_encodes_like_herdr() {
+        let msg = ClientMessage::ClientShellResize { cell_width_px: 0, cell_height_px: 0, surface_size: (120, 40), pixel_mouse: false };
+        assert_eq!(bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap(), [12, 0, 0, 120, 40, 0]);
+    }
+
+    #[test]
     #[ignore]
     fn live() {
-        let rx = watch(120, 40).unwrap();
+        let (rx, _surface) = watch(120, 40).unwrap();
         for popup in futures::executor::block_on_stream(rx).take(4) {
             println!("{popup:?}");
         }
