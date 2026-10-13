@@ -34,6 +34,11 @@ struct State {
     /// The host's default fg/bg as herdr packs them: herdr resolves "default" to these RGBs in the popup's cells, and
     /// the view gets them back as default, so it paints them with the theme.
     defaults: (u32, u32),
+    /// herdr's run, from its surfaces: an endpoint request names it.
+    boot_id: String,
+    /// The endpoint request waited on: its id, and who to tell once herdr has answered it.
+    // ponytail: one at a time; a newer request leaves the older one to its timeout
+    answer: Option<(String, std::sync::mpsc::Sender<()>)>,
 }
 
 pub struct ClientShell {
@@ -115,6 +120,21 @@ impl ClientShell {
         });
     }
 
+    /// Points this shell's tab, and with it herdr's focus, at `tab_id`; returns once herdr has done it (or after a
+    /// second). A popup herdr opens from then on belongs to that tab, so it comes to this shell. Other client shells
+    /// (herdr's TUI) keep their own tab.
+    pub fn focus_tab(&self, tab_id: &str) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let boot_id = {
+            let mut state = self.state.lock().unwrap();
+            state.answer = Some(("tab.focus".into(), tx));
+            state.boot_id.clone()
+        };
+        let request = serde_json::json!({"id": "tab.focus", "method": "tab.focus", "params": {"tab_id": tab_id}}).to_string();
+        self.send(&ClientMessage::ClientShellEndpointRequest { boot_id, request });
+        let _ = rx.recv_timeout(Duration::from_secs(1));
+    }
+
     pub fn popup_input(&self, terminal_id: &str, events: Vec<PaneInput>) {
         self.send(&ClientMessage::ClientShellPopupInput { terminal_id: terminal_id.into(), events });
     }
@@ -159,6 +179,7 @@ fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<Po
             ServerMessage::PaneSurface(surface) => {
                 let mut state = state.lock().unwrap();
                 let state = &mut *state;
+                state.boot_id.clone_from(&surface.boot_id);
                 let surface_popup = surface.popup.as_ref().map(PopupSurface::from);
                 if surface_popup != shown {
                     shown = surface_popup;
@@ -173,6 +194,12 @@ fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<Po
             }
             ServerMessage::EndpointControl { kind, data } if kind == "shell.snapshot.v1" => {
                 let _ = tx.unbounded_send(PopupEvent::Commands(super::popup::commands(&data)));
+            }
+            ServerMessage::ClientShellEndpointResponseChunk { request_id, final_chunk: true, .. } => {
+                let mut state = state.lock().unwrap();
+                if state.answer.as_ref().is_some_and(|(id, _)| *id == request_id) {
+                    let _ = state.answer.take().map(|(_, tx)| tx.send(()));
+                }
             }
             ServerMessage::ServerShutdown { .. } => break,
             _ => {}
@@ -604,5 +631,30 @@ mod input_paths {
         std::thread::sleep(Duration::from_millis(100));
         took.sort_by(f64::total_cmp);
         println!("{name}: keystroke → changed screen, ms: p50 {:.2}, p90 {:.2}, max {:.2}", took[took.len() / 2], took[took.len() * 9 / 10], took[took.len() - 1]);
+    }
+}
+
+/// `TAB=<tab id> cargo test --lib client_shell::focus_tab -- --ignored --nocapture`: how soon herdr answers the
+/// shell's `tab.focus`, and whether it did (no answer waits the full second).
+#[cfg(test)]
+mod focus_tab {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn answered() {
+        let (shell, events) = ClientShell::connect(80, 24).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let start = std::time::Instant::now();
+        shell.focus_tab(&std::env::var("TAB").unwrap());
+        println!("tab.focus returned after {:?}", start.elapsed());
+        // `OPEN`: a `herdr` command that opens a popup through the public API; it should come to this shell
+        let Ok(open) = std::env::var("OPEN") else { return };
+        std::process::Command::new("sh").args(["-c", &open]).status().unwrap();
+        let popup = futures::executor::block_on_stream(events).take(20).find_map(|e| match e {
+            PopupEvent::Popup(Some(p)) => Some(p.terminal_id),
+            _ => None,
+        });
+        println!("popup here: {popup:?}");
     }
 }

@@ -62,8 +62,9 @@ pub(super) async fn shell_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
 impl Shell {
     /// Tells herdr what changed since the last render: the grid's size and the theme. Coming back to the window
     /// makes the shell herdr's client in front again, so herdr takes Shepherd's theme back from its TUI.
-    /// Not sent on purpose: `tab.focus` (it moves herdr's own focus too) and `ClientShellFocus` (the client in front's
-    /// focus marks herdr's active tab seen and mutes its notifications).
+    /// Not sent on purpose: `tab.focus` on a tab switch (it moves herdr's own focus too; only a command does, see
+    /// `focus_shown_tab`) and `ClientShellFocus` (the client in front's focus marks herdr's active tab seen and mutes
+    /// its notifications).
     pub(super) fn sync_client_shell(&mut self, window: &Window, cx: &App) {
         let cells = self.grid_cells(cx);
         let Some(view) = &mut self.client_shell else { return };
@@ -80,6 +81,16 @@ impl Shell {
             view.conn.theme(host_theme(theme));
             view.theme = Some(theme.terminal.background);
         }
+    }
+}
+
+impl Shell {
+    /// herdr gives a popup to the tab in its focus as the popup opens, and only a client shell on that tab gets it.
+    /// Shepherd shows tabs on its own, so before a command runs, the shell's tab (and herdr's focus) moves to the shown
+    /// one: a popup the command opens comes to this window, and Shepherd's `pane.focus` (an agent seen) keeps it there.
+    pub(super) fn focus_shown_tab(&self, cx: &App) -> Option<gpui::Task<()>> {
+        let (conn, tab) = (self.client_shell.as_ref()?.conn.clone(), self.shown_tab()?);
+        Some(cx.background_executor().spawn(async move { conn.focus_tab(&tab.tab_id) }))
     }
 }
 

@@ -662,8 +662,18 @@ impl Shell {
 
     /// A `[[keys.command]]` of herdr's config, for the pane you are in.
     fn run_herdr_command(&mut self, command: &crate::herdr::keys::HerdrCommand, window: &Window, cx: &mut Context<Self>) {
-        use crate::herdr::keys::CommandKind;
         let pane_id = self.active_pane(window, cx);
+        let Some(focused) = self.focus_shown_tab(cx) else { return self.run_herdr_command_in(command, pane_id, cx) };
+        let command = command.clone();
+        cx.spawn(async move |this, cx| {
+            focused.await;
+            let _ = this.update(cx, |s, cx| s.run_herdr_command_in(&command, pane_id, cx));
+        })
+        .detach();
+    }
+
+    fn run_herdr_command_in(&mut self, command: &crate::herdr::keys::HerdrCommand, pane_id: Option<String>, cx: &mut Context<Self>) {
+        use crate::herdr::keys::CommandKind;
         let pane = self.snapshot.as_ref().and_then(|s| s.panes.iter().find(|p| Some(&p.pane_id) == pane_id.as_ref())).cloned();
         match command.kind {
             CommandKind::PluginAction => {
