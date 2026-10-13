@@ -500,6 +500,7 @@ impl Shell {
                 .child(
                     div()
                         .id(SharedString::from(format!("tab-x-{}", t.id)))
+                        .tooltip(tip("Close tab", Some("CloseTab")))
                         .size(px(SLOT))
                         .flex_none()
                         .relative()
@@ -670,6 +671,7 @@ impl Shell {
             .when_some(shown_ws, |el, ws| {
                 el.child(
                     icon_button(theme, "new-tab", "+")
+                        .tooltip(tip("New tab", Some("NewTab")))
                         .size(px(TAB_H))
                         .rounded(px(8.))
                         .text_size(px(19.))

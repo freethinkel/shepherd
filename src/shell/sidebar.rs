@@ -149,31 +149,19 @@ impl Shell {
                     .collect()
             })
             .unwrap_or_default();
-        let mut agents: Vec<(crate::model::Pane, String, Option<String>)> = snapshot
-            .as_ref()
-            .map(|s| {
-                s.agents_by(self.agent_sort, &self.since)
-                    .into_iter()
-                    .map(|p| {
-                        let ws = s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id);
-                        let waited = crate::model::waiting_since(&self.since, p).map(|at| crate::model::ago(at.elapsed()));
-                        (p.clone(), ws.map(|w| w.label.clone()).unwrap_or_default(), waited)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut agents = snapshot.as_ref().map(|s| agent_entries(s, self.agent_sort, &self.since)).unwrap_or_default();
         // the section stays while any agent runs, so its menu can turn the filter off again
         let any_agents = !agents.is_empty();
         if SettingsGlobal::of(cx).settings.attention_agents {
             agents.retain(|(p, _, _)| crate::notify::wants_attention(p.agent_status));
         }
-        let agent_workspaces: Vec<String> = agents.iter().map(|(p, _, _)| p.workspace_id.clone()).collect();
         let hover_bg = theme.hover;
         let active = window.is_window_active();
 
         let strip = update_strip(theme, cx);
         let waiting = self.error.is_none() && self.connecting.is_some_and(|at| crate::ui::loader::due(at, window));
         let (list_offset, beside) = self.list_offset(window);
+        let list_fade = 1. - (list_offset.abs() / 400.).min(0.5);
         let beside = beside.map(|(place, at)| {
             div().absolute().top_0().bottom_0().w(px(self.sidebar_width - 1.)).left(px(at)).child(self.place_preview(&place, theme, window, cx))
         });
@@ -186,6 +174,17 @@ impl Shell {
             .flex()
             .flex_col()
             .pt(px(TITLEBAR_HEIGHT))
+            // everything between the titlebar and the place bar goes under a swipe's fingers, then springs home, and
+            // beside it the place it goes to (or comes from)
+            .child(
+                div().relative().flex_1().min_h_0().overflow_hidden().children(beside).child(
+            div()
+                .relative()
+                .left(px(list_offset))
+                .opacity(list_fade)
+                .size_full()
+                .flex()
+                .flex_col()
             .child(
                 div()
                     .px(px(16.))
@@ -201,7 +200,6 @@ impl Shell {
                     .when(waiting, |el| el.child(crate::ui::loader::mini_spinner(2., theme.text_faint, window))),
             )
             .child(
-                // the list, and beside it under a swipe the place it goes to (or comes from)
                 div()
                     .relative()
                     .flex_1()
@@ -212,10 +210,6 @@ impl Shell {
                     .child(
                 div()
                     .id("workspaces")
-                    // under a swipe's fingers, then springing home
-                    .relative()
-                    .left(px(list_offset))
-                    .opacity(1. - (list_offset.abs() / 400.).min(0.5))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -243,8 +237,20 @@ impl Shell {
                             let dir = w.worktree.as_ref().map(|t| t.checkout_path.clone()).filter(|d| !d.is_empty()).or_else(|| {
                                 snapshot.as_ref()?.panes.iter().find(|p| p.workspace_id == w.workspace_id)?.cwd.clone()
                             });
-                            let branch = dir.as_deref().filter(|_| show.branch && !compact).and_then(|d| crate::ui::statusbar::branch_of(d, cx));
-                            // compact rows are the name alone: git and gh aren't even asked
+                            let git = dir.as_deref().filter(|_| show.branch).and_then(|d| crate::ui::statusbar::git_of(d, cx));
+                            // herdr's commits ahead of and behind the upstream, also on a compact row
+                            let sync = git.as_ref().filter(|g| g.ahead > 0 || g.behind > 0).map(|g| {
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .gap(px(3.))
+                                    .text_size(px(11.))
+                                    .when(g.ahead > 0, |el| el.child(div().text_color(theme.success.opacity(0.8)).child(format!("↑{}", g.ahead))))
+                                    .when(g.behind > 0, |el| el.child(div().text_color(theme.danger.opacity(0.8)).child(format!("↓{}", g.behind))))
+                            });
+                            let branch = git.map(|g| g.branch).filter(|_| !compact);
+                            let (sync, sync_inline) = if compact { (None, sync) } else { (sync, None) };
+                            // compact rows are the name and its ↑↓ alone: gh and git's diff aren't even asked
                             let (changes, pr) = match dir.as_deref().filter(|_| nested && !compact) {
                                 Some(d) => crate::ui::statusbar::changes_of(d, active, cx),
                                 None => (None, None),
@@ -307,6 +313,7 @@ impl Shell {
                                                 .children(icon)
                                                 .child(name)
                                                 .children(folded.map(|n| count_badge(theme, n)))
+                                                .children(sync_inline)
                                                 .child(div().flex_1())
                                                 .children(inline),
                                         )
@@ -329,6 +336,7 @@ impl Shell {
                                                             .child(gpui::svg().path("icons/git-branch.svg").size(px(11.)).flex_none().text_color(theme.text_muted))
                                                             .child(div().min_w_0().truncate().child(b))
                                                     }))
+                                                    .children(sync)
                                                     .child(div().flex_1())
                                                     .children(below),
                                             )
@@ -421,8 +429,7 @@ impl Shell {
                             div().flex().flex_col().flex_none().child(header).child(body).into_any_element()
                         }).collect::<Vec<_>>()
                     }),
-            )
-                    .children(beside),
+            ),
             )
             .child(
                 div().flex_none().m(px(8.)).flex().gap(px(4.)).child(
@@ -463,6 +470,7 @@ impl Shell {
                         .child("Agents")
                         .child(
                             icon_button(theme, "agents-view", "")
+                                .tooltip(tip("Sort agents", None))
                                 .size(px(20.))
                                 .my(px(-4.))
                                 .child(gpui::svg().path("icons/more-horizontal.svg").size(px(14.)).text_color(theme.text_faint))
@@ -531,79 +539,17 @@ impl Shell {
                             .when(agents.is_empty(), |el| {
                                 el.child(div().px(px(8.)).py(px(6.)).text_size(px(11.)).text_color(theme.text_faint).child("Nothing needs you"))
                             })
-                            .children(agents.into_iter().enumerate().flat_map(|(i, (pane, workspace, waited))| {
-                                // Grouped: a heading where the workspace changes, which the rows then leave out.
-                                let grouped = self.agent_sort == AgentSort::Grouped;
-                                let heading = (grouped && (i == 0 || agent_workspaces[i - 1] != pane.workspace_id)).then(|| {
-                                    div()
-                                        .flex_none()
-                                        .px(px(8.))
-                                        .pt(px(if i == 0 { 2. } else { 8. }))
-                                        .pb(px(2.))
-                                        .truncate()
-                                        .text_size(px(11.))
-                                        .text_color(theme.text_faint)
-                                        .child(workspace.clone())
-                                        .into_any_element()
-                                });
-                                let selected = shown_tab.as_deref() == Some(pane.tab_id.as_str());
+                            .children(agent_rows(agents, self.agent_sort, SettingsGlobal::of(cx).settings.compact_agents, shown_tab.as_deref(), theme, |row, pane| {
                                 let (tab_id, pane_id) = (pane.tab_id.clone(), pane.pane_id.clone());
-                                let title = pane.terminal_title_stripped.clone().unwrap_or_default();
-                                let compact = SettingsGlobal::of(cx).settings.compact_agents;
-                                let mark = crate::ui::command_panel::agent_icon(pane.agent.as_deref().unwrap_or_default());
-                                let mark = || gpui::svg().path(mark).size(px(14.)).flex_none().text_color(crate::ui::command_panel::icon_ink(mark, theme.text_muted));
-                                let agent = row(theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
-                                    .h(px(if compact { 30. } else { 44. }))
-                                    .child(status_dot(pane.agent_status, theme))
-                                    .when(compact, |el| {
-                                        el.child(mark())
-                                            .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme.text_muted).child(title.clone()))
-                                            .children(waited.clone().map(|w| div().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(w)))
-                                    })
-                                    .when(!compact, |el| el.child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex()
-                                            .flex_col()
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .gap(px(6.))
-                                                    .items_center()
-                                                    .child(mark())
-                                                    .when(!grouped, |el| {
-                                                        el.child(
-                                                            div()
-                                                                .min_w_0()
-                                                                .truncate()
-                                                                .text_color(theme.text_faint)
-                                                                .child(workspace),
-                                                        )
-                                                    })
-                                                    .children(waited.map(|w| {
-                                                        div().ml_auto().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(w)
-                                                    })),
-                                            )
-                                            .child(
-                                                div()
-                                                    .truncate()
-                                                    .text_size(px(11.))
-                                                    .text_color(theme.text_muted)
-                                                    .child(title),
-                                            ),
-                                    ))
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.show_agent(tab_id.clone(), pane_id.clone(), cx)
-                                    }));
-                                heading.into_iter().chain([agent.into_any_element()])
+                                row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.show_agent(tab_id.clone(), pane_id.clone(), cx)))
                             }))
                             // the last row scrolls clear of the list's faded edge
                             .child(div().flex_none().h(px(4.)))),
                     )
                     .child(crate::ui::scrollbar("agents-scrollbar", &self.agents_scroll, theme)),
                 )
-            })
+            }),
+            ))
             .children(strip)
             .child(self.place_bar(theme, list_offset, window, cx))
     }
@@ -628,6 +574,7 @@ impl Shell {
             let (to, menu) = (place.clone(), place.clone());
             div()
                 .id(("place", i))
+                .tooltip(tip(name.clone(), None))
                 .size(px(30.))
                 .flex_none()
                 .flex()
@@ -696,6 +643,7 @@ impl Shell {
             .child(
                 div()
                     .id("open-settings")
+                    .tooltip(tip("Settings", Some("OpenSettings")))
                     .size(px(30.))
                     .flex_none()
                     .flex()
@@ -724,6 +672,7 @@ impl Shell {
             .child(
                 div()
                     .id("place-new")
+                    .tooltip(tip("New session", None))
                     .size(px(30.))
                     .flex_none()
                     .flex()
@@ -736,4 +685,81 @@ impl Shell {
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_session_dialog(window, cx))),
             )
     }
+}
+
+/// The agents list's entries for `s`, in `sort`'s order: each agent with its workspace's label and how long it has
+/// waited.
+pub(super) fn agent_entries(s: &Snapshot, sort: AgentSort, since: &crate::model::Since) -> Vec<(crate::model::Pane, String, Option<String>)> {
+    s.agents_by(sort, since)
+        .into_iter()
+        .map(|p| {
+            let ws = s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id);
+            let waited = crate::model::waiting_since(since, p).map(|at| crate::model::ago(at.elapsed()));
+            (p.clone(), ws.map(|w| w.label.clone()).unwrap_or_default(), waited)
+        })
+        .collect()
+}
+
+/// The agents list's rows, `act` making each one do something (the swipe's preview of another place leaves them inert).
+pub(super) fn agent_rows(
+    agents: Vec<(crate::model::Pane, String, Option<String>)>,
+    sort: AgentSort,
+    compact: bool,
+    shown_tab: Option<&str>,
+    theme: &Theme,
+    act: impl Fn(Stateful<Div>, &crate::model::Pane) -> Stateful<Div>,
+) -> Vec<gpui::AnyElement> {
+    let workspaces: Vec<String> = agents.iter().map(|(p, _, _)| p.workspace_id.clone()).collect();
+    let grouped = sort == AgentSort::Grouped;
+    agents
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, (pane, workspace, waited))| {
+            // Grouped: a heading where the workspace changes, which the rows then leave out.
+            let heading = (grouped && (i == 0 || workspaces[i - 1] != pane.workspace_id)).then(|| {
+                div()
+                    .flex_none()
+                    .px(px(8.))
+                    .pt(px(if i == 0 { 2. } else { 8. }))
+                    .pb(px(2.))
+                    .truncate()
+                    .text_size(px(11.))
+                    .text_color(theme.text_faint)
+                    .child(workspace.clone())
+                    .into_any_element()
+            });
+            let selected = shown_tab == Some(pane.tab_id.as_str());
+            let title = pane.terminal_title_stripped.clone().unwrap_or_default();
+            let mark = crate::ui::command_panel::agent_icon(pane.agent.as_deref().unwrap_or_default());
+            let mark = || gpui::svg().path(mark).size(px(14.)).flex_none().text_color(crate::ui::command_panel::icon_ink(mark, theme.text_muted));
+            let agent = row(theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
+                .h(px(if compact { 30. } else { 44. }))
+                .child(status_dot(pane.agent_status, theme))
+                .when(compact, |el| {
+                    el.child(mark())
+                        .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme.text_muted).child(title.clone()))
+                        .children(waited.clone().map(|w| div().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(w)))
+                })
+                .when(!compact, |el| {
+                    el.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(6.))
+                                    .items_center()
+                                    .child(mark())
+                                    .when(!grouped, |el| el.child(div().min_w_0().truncate().text_color(theme.text_faint).child(workspace)))
+                                    .children(waited.map(|w| div().ml_auto().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(w))),
+                            )
+                            .child(div().truncate().text_size(px(11.)).text_color(theme.text_muted).child(title)),
+                    )
+                });
+            heading.into_iter().chain([act(agent, &pane).into_any_element()])
+        })
+        .collect()
 }

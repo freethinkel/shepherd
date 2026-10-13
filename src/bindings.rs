@@ -48,6 +48,7 @@ app_actions! {
     FontSizeDown: "Smaller text",
     FontSizeReset: "Default text size",
     OpenSettings: "Settings",
+    ChangeTheme: "Change theme",
     CommandPanel: "Command panel",
     AgentsPanel: "Agents",
     Quit: "Quit",

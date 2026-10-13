@@ -122,7 +122,12 @@ pub fn pane_dir(snapshot: Option<&Snapshot>, pane_id: Option<&str>) -> Option<St
 
 /// `dir`'s cached branch, if git has been asked already.
 pub fn branch_of(dir: &str, cx: &mut App) -> Option<String> {
-    cached(dir, GIT_TTL, read_git, cx).map(|g| g.branch)
+    git_of(dir, cx).map(|g| g.branch)
+}
+
+/// `dir`'s branch and how far it is from its upstream, as the status bar shows them.
+pub fn git_of(dir: &str, cx: &mut App) -> Option<Git> {
+    cached(dir, GIT_TTL, read_git, cx)
 }
 
 /// Asks git about `dir` again on the next render, as after a checkout.

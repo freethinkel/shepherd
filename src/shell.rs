@@ -459,6 +459,13 @@ impl Shell {
                 Some(d) => crate::ui::command_panel::branch_items(&crate::ui::statusbar::read_branches(d), crate::ui::statusbar::branch_of(d, cx).as_deref()),
                 None => Vec::new(),
             },
+            Kind::Themes => {
+                let appearance = Theme::of(cx).appearance;
+                let dark = appearance == crate::theme::Appearance::Dark;
+                let s = &SettingsGlobal::of(cx).settings;
+                let current = if dark { &s.theme_dark } else { &s.theme_light };
+                crate::ui::command_panel::theme_items(crate::theme::variants_for(appearance), dark, current)
+            }
         };
         let panel = cx.new(|cx| crate::ui::command_panel::Panel::new(kind, items, window, cx));
         let events = cx.subscribe_in(&panel, window, move |this, _, event: &PanelEvent, window, cx| {
@@ -489,6 +496,11 @@ impl Shell {
                         });
                     })
                     .detach();
+                }
+                PanelEvent::Run(Run::Theme(id)) => {
+                    let dark = Theme::of(cx).appearance == crate::theme::Appearance::Dark;
+                    let id = id.clone();
+                    crate::ui::settings::update(cx, |s| *if dark { &mut s.theme_dark } else { &mut s.theme_light } = id);
                 }
                 PanelEvent::Dismiss => {}
             }
@@ -1109,6 +1121,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
             .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
+            .on_action(cx.listener(|this, _: &ChangeTheme, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Themes, w, cx)))
             .on_action(cx.listener(|this, _: &AgentsPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Agents, w, cx)))
             .on_action(cx.listener(|this, c: &crate::herdr::keys::HerdrCommand, w, cx| this.run_herdr_command(c, w, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
@@ -1186,6 +1199,7 @@ impl Render for Shell {
             .when(!on_page, |el| {
                 el.child(
                     titlebar_button(&theme, "toggle-sidebar", "icons/sidebar-minimalistic-left.svg")
+                        .tooltip(tip("Toggle sidebar", Some("ToggleSidebar")))
                         .absolute()
                         .top(px(TRAFFIC_LIGHTS_CENTER - 12.))
                         .left(px(TOGGLE_LEFT))
@@ -1200,6 +1214,7 @@ impl Render for Shell {
             .when(sidebar_w >= TITLEBAR_CLUSTER + 32. && !on_page, |el| {
                 el.child(
                     titlebar_button(&theme, "sidebar-view", "icons/more-horizontal.svg")
+                        .tooltip(tip("Sidebar view", None))
                         .absolute()
                         .top(px(TRAFFIC_LIGHTS_CENTER - 12.))
                         .left(px(sidebar_w - 8. - 24.))

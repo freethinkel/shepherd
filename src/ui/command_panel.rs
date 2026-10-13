@@ -22,6 +22,8 @@ pub enum Run {
     Branch(String),
     /// A herdr plugin's action.
     Herdr(crate::herdr::keys::HerdrCommand),
+    /// Use this theme variant for the shown appearance.
+    Theme(String),
 }
 
 /// The heading an item sits under; also searched, so "tab" finds the tabs.
@@ -33,6 +35,7 @@ pub enum Section {
     Tabs,
     Agents,
     Branches,
+    Themes,
 }
 
 impl Section {
@@ -44,6 +47,7 @@ impl Section {
             Section::Tabs => "Tabs",
             Section::Agents => "Agents",
             Section::Branches => "Branches",
+            Section::Themes => "Themes",
         }
     }
 }
@@ -69,7 +73,7 @@ impl Item {
     /// comes first so match positions below its length are in the label.
     fn haystack(&self) -> String {
         match self.run {
-            Run::Action(_) | Run::Branch(_) | Run::Herdr(_) => self.label.clone(),
+            Run::Action(_) | Run::Branch(_) | Run::Herdr(_) | Run::Theme(_) => self.label.clone(),
             Run::Tab(_) => [Some(self.label.as_str()), self.hint.as_deref(), Some(self.section.title())].into_iter().flatten().collect::<Vec<_>>().join(" "),
         }
     }
@@ -81,6 +85,7 @@ pub enum Kind {
     Commands,
     Agents,
     Branches,
+    Themes,
 }
 
 impl Kind {
@@ -89,6 +94,7 @@ impl Kind {
             Kind::Commands => "CommandPanel",
             Kind::Agents => "AgentsPanel",
             Kind::Branches => "", // opened from the status bar, no chord
+            Kind::Themes => "ChangeTheme",
         }
     }
 }
@@ -120,6 +126,7 @@ fn action_icon(name: &str) -> &'static str {
         "NextWorkspace" => "icons/alt-arrow-down.svg",
         "ToggleSidebar" => "icons/sidebar-minimalistic-left.svg",
         "OpenSettings" => "icons/settings.svg",
+        "ChangeTheme" => "icons/sun.svg",
         "AgentsPanel" => "icons/bot.svg",
         "Quit" => "icons/logout-2.svg",
         _ => "icons/terminal.svg",
@@ -284,6 +291,25 @@ pub fn branch_items(refs: &str, current: Option<&str>) -> Vec<Item> {
         .collect()
 }
 
+/// The theme variants of one appearance as (id, name); `current` is marked and listed first.
+pub fn theme_items(variants: Vec<(String, String)>, dark: bool, current: &str) -> Vec<Item> {
+    let mut variants = variants;
+    variants.sort_by_key(|(id, _)| id != current); // stable: the rest keep their order
+    variants
+        .into_iter()
+        .map(|(id, name)| Item {
+            key: format!("theme:{id}"),
+            section: Section::Themes,
+            icon: if dark { "icons/moon.svg" } else { "icons/sun.svg" },
+            label: name,
+            hint: (id == current).then(|| "current".into()),
+            chord: None,
+            status: None,
+            run: Run::Theme(id),
+        })
+        .collect()
+}
+
 /// How well `query` matches `text`, ignoring case, and which chars of `text` it matched; None if it does not:
 /// `text` starting with it ranks first, then it starting a word, then anywhere, then its letters in order (more
 /// of them on word starts, fewer gaps, higher).
@@ -383,7 +409,7 @@ fn highlighted(text: &str, query: &str, theme: &Theme) -> StyledText {
 }
 
 /// A keystroke the way the macOS menus write it: ⌃⌥⇧⌘ then the key.
-fn glyphs(keystroke: &str) -> String {
+pub(crate) fn glyphs(keystroke: &str) -> String {
     let Ok(k) = Keystroke::parse(keystroke) else { return keystroke.to_string() };
     let m = k.modifiers;
     let key = match k.key.as_str() {
@@ -433,13 +459,14 @@ impl Panel {
     pub fn new(kind: Kind, items: Vec<Item>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let items = match kind {
             Kind::Commands => with_recent(items, &crate::settings::SettingsGlobal::of(cx).settings.recent_commands),
-            Kind::Agents | Kind::Branches => items,
+            Kind::Agents | Kind::Branches | Kind::Themes => items,
         };
         let theme = Theme::of(cx).clone();
         let placeholder = match kind {
             Kind::Commands => "Search commands, workspaces and tabs",
             Kind::Agents => "Search agents",
             Kind::Branches => "Switch branch",
+            Kind::Themes => "Change theme",
         };
         let input = cx.new(|cx| {
             let mut input = InputState::new(window, cx).placeholder(placeholder);
@@ -570,6 +597,7 @@ impl Render for Panel {
                 Kind::Agents => ("No results", "Try an agent's task or its workspace."),
                 Kind::Branches if self.items.is_empty() => ("No branches", "This pane isn't in a git repo."),
                 Kind::Branches => ("No results", "Try a branch name."),
+                Kind::Themes => ("No results", "Try a theme name."),
             };
             div().py(px(24.)).flex().flex_col().items_center().gap(px(6.)).child(title).child(div().text_color(theme.text_muted).child(hint))
         });
@@ -843,5 +871,14 @@ mod tests {
         let rows: Vec<_> = items.iter().map(|i| (i.label.as_str(), i.hint.as_deref())).collect();
         assert_eq!(rows, [("main", Some("current")), ("feature", None), ("fix", None)]);
         assert_eq!(items[1].run, Run::Branch("feature".into()));
+    }
+
+    #[test]
+    fn themes_list_the_current_one_first() {
+        let variants = [("a", "A"), ("b", "B"), ("c", "C")].map(|(i, n)| (i.to_string(), n.to_string())).to_vec();
+        let items = theme_items(variants, true, "b");
+        let rows: Vec<_> = items.iter().map(|i| (i.label.as_str(), i.hint.as_deref())).collect();
+        assert_eq!(rows, [("B", Some("current")), ("A", None), ("C", None)]);
+        assert_eq!(items[1].run, Run::Theme("a".into()));
     }
 }

@@ -442,32 +442,63 @@ impl Shell {
         (offset, left.map(|p| (p, if from > 0. { offset - width } else { offset + width })))
     }
 
-    /// Another place's workspaces as a swipe shows them beside the list: its last snapshot, or a word on why there is
-    /// none.
+    /// Another place's sidebar as a swipe shows it beside this one's: its name, then its workspaces and agents from its
+    /// last snapshot, or a word on why there is none.
     pub(super) fn place_preview(&self, place: &Place, theme: &Theme, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
+        let settings = SettingsGlobal::of(cx).settings.clone();
+        let heading = div().px(px(16.)).pt(px(8.)).pb(px(6.)).text_size(px(11.)).text_color(theme.text_faint).truncate().child(place.look(cx).0);
+        let column = div().size_full().flex().flex_col().child(heading);
         let Some(snapshot) = self.snapshots.get(&place.key()) else {
             if let Place::Session(s) = place && !s.running {
                 let why = "Not running: it starts when you get there";
-                return div().px(px(16.)).pt(px(8.)).text_size(px(11.)).text_color(theme.text_faint).child(why).into_any_element();
+                return column.child(div().px(px(16.)).pt(px(8.)).text_size(px(11.)).text_color(theme.text_faint).child(why)).into_any_element();
             }
-            return div().px(px(16.)).pt(px(12.)).child(crate::ui::loader::spinner(2.5, window)).into_any_element();
+            return column.child(div().px(px(16.)).pt(px(12.)).child(crate::ui::loader::spinner(2.5, window))).into_any_element();
         };
         let groups = crate::model::groups(snapshot.workspace_tree());
-        div()
+        let workspaces = div().flex_1().min_h_0().overflow_hidden().px(px(8.)).flex().flex_col().gap(px(2.)).children(groups.into_iter().flat_map(|(w, kids)| {
+            let dir = w.worktree.as_ref().map(|t| t.checkout_path.clone()).filter(|d| !d.is_empty());
+            let seed = w.worktree.as_ref().map_or(w.label.clone(), |t| t.repo_key.clone());
+            let icon = crate::ui::project_icon::project_icon(&w.label, &seed, dir.as_deref(), 14., false, theme, cx);
+            let head = div().h(px(32.)).px(px(8.)).flex().items_center().gap(px(8.)).child(icon).child(div().truncate().child(w.label.clone()));
+            std::iter::once(head.into_any_element()).chain(
+                kids.into_iter().map(|k| div().h(px(32.)).pl(px(30.)).flex().items_center().text_color(theme.text_muted).child(div().truncate().child(k.label.clone())).into_any_element()),
+            )
+        }));
+        let new_workspace = div()
+            .flex_none()
+            .m(px(8.))
+            .h(px(32.))
             .px(px(8.))
             .flex()
-            .flex_col()
-            .gap(px(2.))
-            .children(groups.into_iter().flat_map(|(w, kids)| {
-                let dir = w.worktree.as_ref().map(|t| t.checkout_path.clone()).filter(|d| !d.is_empty());
-                let seed = w.worktree.as_ref().map_or(w.label.clone(), |t| t.repo_key.clone());
-                let icon = crate::ui::project_icon::project_icon(&w.label, &seed, dir.as_deref(), 14., false, theme, cx);
-                let head = div().h(px(32.)).px(px(8.)).flex().items_center().gap(px(8.)).child(icon).child(div().truncate().child(w.label.clone()));
-                std::iter::once(head.into_any_element()).chain(
-                    kids.into_iter().map(|k| div().h(px(32.)).pl(px(30.)).flex().items_center().text_color(theme.text_muted).child(div().truncate().child(k.label.clone())).into_any_element()),
-                )
-            }))
-            .into_any_element()
+            .items_center()
+            .gap(px(8.))
+            .text_color(theme.text_muted)
+            .child(div().text_size(px(15.)).child("+"))
+            .child("New workspace");
+        // its waits are not tracked here, so they go without
+        let mut agents = super::sidebar::agent_entries(snapshot, self.agent_sort, &Default::default());
+        let any_agents = !agents.is_empty();
+        if settings.attention_agents {
+            agents.retain(|(p, _, _)| crate::notify::wants_attention(p.agent_status));
+        }
+        let agents = (settings.show_agents && any_agents).then(|| {
+            let heading = div().px(px(16.)).pt(px(12.)).pb(px(4.)).border_t_1().border_color(theme.border).text_size(px(11.)).text_color(theme.text_faint).child("Agents");
+            let list = div()
+                .flex_none()
+                .map(|el| match self.agents_height {
+                    Some(h) => el.max_h(px(h)),
+                    None => el.max_h(gpui::relative(0.4)),
+                })
+                .overflow_hidden()
+                .px(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .children(super::sidebar::agent_rows(agents, self.agent_sort, settings.compact_agents, None, theme, |row, _| row));
+            [heading.into_any_element(), list.into_any_element()]
+        });
+        column.child(workspaces).child(new_workspace).children(agents.into_iter().flatten()).into_any_element()
     }
 
     /// Moves the window to a session on this Mac: its socket goes in the settings, and everything the last server's

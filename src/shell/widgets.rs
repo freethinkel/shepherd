@@ -223,6 +223,39 @@ pub(super) fn menu_choice(theme: &Theme, id: &'static str, icon: &'static str, l
         .when(checked, |el| el.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(theme.text_muted)))
 }
 
+/// Zeron's `TextTooltip`: a one-line chip under the pointer.
+struct Tip(SharedString);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .max_w(px(320.))
+            .px(px(9.))
+            .py(px(6.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.card)
+            .text_size(px(11.))
+            .text_color(theme.text_muted)
+            .child(self.0.clone())
+    }
+}
+
+/// `.tooltip(...)` with `text`, and `action`'s chord after it while one is bound ("Settings · ⌘,").
+pub(crate) fn tip(text: impl Into<SharedString>, action: Option<&'static str>) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let text: SharedString = text.into();
+    move |_, cx| {
+        let chord = action.and_then(|a| cx.try_global::<ActiveBindings>()?.0.iter().find(|(name, _)| name == a).map(|(_, keys)| keys.clone()));
+        let text = match chord {
+            Some(keys) => format!("{text} · {}", keys.split_whitespace().map(crate::ui::command_panel::glyphs).collect::<Vec<_>>().join(" ")).into(),
+            None => text.clone(),
+        };
+        cx.new(|_| Tip(text)).into()
+    }
+}
+
 /// Zeron's titlebar button: 24 px, a 16 px muted icon, a wash on hover. It occludes the drag strip under it.
 pub(super) fn titlebar_button(theme: &Theme, id: &'static str, icon: &'static str) -> Stateful<Div> {
     let hover = theme.hover;
