@@ -677,6 +677,14 @@ impl Shell {
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.new_tab(ws.clone(), cx))),
                 )
             })
+            .child(
+                titlebar_button(theme, "toggle-review", "icons/sidebar-minimalistic-right.svg")
+                    .tooltip(tip("Toggle pull request panel", Some("ToggleReview")))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_review(cx);
+                    })),
+            )
     }
 }
 

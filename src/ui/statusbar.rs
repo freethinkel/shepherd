@@ -106,12 +106,31 @@ pub(crate) fn cached<T: Clone + PartialEq + Send + 'static>(key: &str, ttl: Dura
             (entry.fetched, entry.busy) = (Some(Instant::now()), false);
             if fresh.is_some() && entry.value != fresh {
                 entry.value = fresh;
-                cx.refresh_windows();
             }
+            // also when nothing changed: a refresh spinner waits on `busy`
+            cx.refresh_windows();
         });
     })
     .detach();
     value
+}
+
+/// Asks `key` again on the next render, as the review panel's refresh does.
+pub(crate) fn refetch<T: 'static>(key: &str, cx: &mut App) {
+    if let Some(entry) = cx.default_global::<Cache<T>>().0.get_mut(key) {
+        entry.fetched = None;
+    }
+    cx.refresh_windows();
+}
+
+/// A lookup of `key` is running.
+pub(crate) fn fetching<T: 'static>(key: &str, cx: &mut App) -> bool {
+    cx.default_global::<Cache<T>>().0.get(key).is_some_and(|e| e.busy)
+}
+
+/// A CLI by name, found in Homebrew's folders first: an app opened from Finder gets launchd's PATH, without them.
+pub(crate) fn tool(name: &str) -> String {
+    ["/opt/homebrew/bin", "/usr/local/bin"].into_iter().map(|d| format!("{d}/{name}")).find(|p| Path::new(p).is_file()).unwrap_or(name.into())
 }
 
 /// The directory `pane_id` of `snapshot` shows: its foreground process's, else its shell's.
@@ -220,10 +239,6 @@ pub fn parse_pr(json: &str) -> Option<Pr> {
 /// without either tool, its login, or one.
 fn read_pr(key: &str) -> Option<Pr> {
     let (dir, branch) = key.split_once('\n')?;
-    // An app opened from Finder gets launchd's PATH, without Homebrew's.
-    let tool = |name: &'static str| {
-        ["/opt/homebrew/bin", "/usr/local/bin"].into_iter().map(|d| format!("{d}/{name}")).find(|p| Path::new(p).is_file()).unwrap_or(name.into())
-    };
     let ask = |bin: String, args: &[&str]| {
         let out = std::process::Command::new(bin).args(args).current_dir(dir).stdin(std::process::Stdio::null()).output().ok();
         let stderr = out.as_ref().map(|o| String::from_utf8_lossy(&o.stderr).into_owned()).unwrap_or_default();

@@ -27,6 +27,7 @@ mod floating;
 mod motion;
 mod pane_drag;
 mod popups;
+mod review;
 mod sessions;
 mod sidebar;
 mod sync;
@@ -101,6 +102,15 @@ pub struct Shell {
     sidebar_drag: bool,
     /// The drag hit a width limit (-1 min, +1 max) at this instant: the edge nudges past it and springs back.
     sidebar_edge: Option<(f32, Instant)>,
+    /// The review panel on the right shows; saved in the settings.
+    review_open: bool,
+    /// Saved in the settings when a drag ends.
+    review_width: f32,
+    /// The review panel's edge is being dragged.
+    review_drag: bool,
+    /// The branch the review panel shows (its key), while its checks run and the window is key: asked again
+    /// every `REVIEW_POLL`.
+    review_poll: Option<String>,
     agent_sort: AgentSort,
     /// Saved in the settings when a drag ends.
     agents_height: Option<f32>,
@@ -351,6 +361,10 @@ impl Shell {
                     sidebar_motion: None,
                     sidebar_drag: false,
                     sidebar_edge: None,
+                    review_open: SettingsGlobal::of(cx).settings.review_open,
+                    review_width: SettingsGlobal::of(cx).settings.review_width,
+                    review_drag: false,
+                    review_poll: None,
                     agent_sort: SettingsGlobal::of(cx).settings.agent_sort,
                     agents_height: SettingsGlobal::of(cx).settings.agents_height,
                     agents_drag: None,
@@ -417,6 +431,13 @@ impl Shell {
                         }
                     });
                     if alive.is_err() {
+                        return; // window closed
+                    }
+                })
+                .detach();
+                cx.spawn(async move |this, cx| loop {
+                    cx.background_executor().timer(review::REVIEW_POLL).await;
+                    if this.update(cx, |s, cx| s.poll_review(cx)).is_err() {
                         return; // window closed
                     }
                 })
@@ -864,7 +885,7 @@ impl Shell {
     fn resize_cursor(&self) -> Option<impl IntoElement> {
         let vertical = if let Some(d) = &self.divider {
             d.vertical
-        } else if self.sidebar_drag {
+        } else if self.sidebar_drag || self.review_drag {
             true
         } else if self.agents_drag.is_some() {
             false
@@ -1203,6 +1224,7 @@ impl Render for Shell {
         let spring_back = self.pane_spring_back(window);
         let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
         let on_page = settings_page.is_some();
+        let review = (self.review_open && !on_page).then(|| self.render_review(&theme, snapshot.as_ref(), window, cx));
         let root = div()
             .id("root")
             .track_focus(&self.focus)
@@ -1249,6 +1271,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.step_workspace(false, cx)))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &ToggleReview, _, cx| this.toggle_review(cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
             .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
             .on_action(cx.listener(|this, _: &ChangeTheme, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Themes, w, cx)))
@@ -1257,16 +1280,19 @@ impl Render for Shell {
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
                 this.drag_divider(e.position, cx);
                 this.drag_sidebar(e.position.x, cx);
+                this.drag_review(e.position.x, w, cx);
                 this.drag_agents(e.position.y, w, cx);
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
                 this.end_sidebar_drag(cx);
+                this.end_review_drag(cx);
                 this.end_agents_drag(cx);
             }))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
                 this.end_sidebar_drag(cx);
+                this.end_review_drag(cx);
                 this.end_agents_drag(cx);
             }))
             .child(self.drag_strip())
@@ -1288,6 +1314,7 @@ impl Render for Shell {
                 Some(page) => el.child(page),
                 None => el.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).child(grid).children(statusbar)),
             })
+            .children(review.into_iter().flatten())
             // The sidebar's edge: drag to resize, double-click for the default width.
             .when(self.sidebar_open && !sliding && !on_page, |el| {
                 el.child(

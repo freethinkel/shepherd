@@ -87,6 +87,7 @@ impl gpui::AssetSource for Assets {
             "remote-server",
             "settings",
             "sidebar-minimalistic-left",
+            "sidebar-minimalistic-right",
             "spinner",
             "split-columns",
             "status-blocked",

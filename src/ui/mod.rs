@@ -3,6 +3,7 @@ pub mod divider;
 pub mod edge_fade;
 pub mod loader;
 pub mod project_icon;
+pub mod review;
 pub mod settings;
 pub mod statusbar;
 pub mod toast;

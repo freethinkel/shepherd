@@ -44,6 +44,7 @@ app_actions! {
     PreviousWorkspace: "Previous workspace",
     NextWorkspace: "Next workspace",
     ToggleSidebar: "Toggle sidebar",
+    ToggleReview: "Toggle pull request panel",
     FontSizeUp: "Bigger text",
     FontSizeDown: "Smaller text",
     FontSizeReset: "Default text size",
@@ -80,6 +81,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("PreviousWorkspace", "cmd-up"),
     ("NextWorkspace", "cmd-down"),
     ("ToggleSidebar", "cmd-b"),
+    ("ToggleReview", "cmd-alt-b"),
     ("FontSizeUp", "cmd-="),
     ("FontSizeUp", "cmd-+"),
     ("FontSizeDown", "cmd--"),
@@ -177,6 +179,7 @@ fn menus() -> Vec<gpui::Menu> {
         ]),
         Menu::new("View").items([
             I::action("Toggle Sidebar", ToggleSidebar),
+            I::action("Toggle Pull Request Panel", ToggleReview),
             I::action("Zoom Pane", ToggleZoom),
             I::separator(),
             I::action("Command Panel", CommandPanel),
