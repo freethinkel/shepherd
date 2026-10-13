@@ -12,6 +12,10 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let confirming = self.session_delete.as_ref().is_some_and(|c| c.is_open()) || self.remove_confirm.as_ref().is_some_and(|c| c.is_open());
+        if confirming && !self.confirm_focus.is_focused(window) {
+            window.focus(&self.confirm_focus, cx);
+        }
         root
         .children(self.view_menu.as_ref().map(|menu| {
             // under the `…` button, its left edge on the button's
@@ -616,6 +620,14 @@ impl Shell {
             };
             let card = dialog_card(theme, "session-delete-dialog", title)
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_delete(false, cx)))
+                .track_focus(&self.confirm_focus)
+                .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
+                    "enter" | "escape" => {
+                        cx.stop_propagation();
+                        this.finish_delete(e.keystroke.key == "enter", cx);
+                    }
+                    _ => {}
+                }))
                 .child(div().mt(px(8.)).line_height(px(19.)).text_color(theme.text_muted).child(text))
                 .child(
                     div()
@@ -644,6 +656,14 @@ impl Shell {
             };
             let card = dialog_card(theme, "remove-dialog", "Remove worktree?")
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_remove_confirm(false, cx)))
+                .track_focus(&self.confirm_focus)
+                .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
+                    "enter" | "escape" => {
+                        cx.stop_propagation();
+                        this.finish_remove_confirm(e.keystroke.key == "enter", cx);
+                    }
+                    _ => {}
+                }))
                 .child(
                     div()
                         .mt(px(8.))

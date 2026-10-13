@@ -142,6 +142,8 @@ pub struct Shell {
     /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
     /// actions still dispatch.
     focus: gpui::FocusHandle,
+    /// Holds keyboard focus while a delete or remove confirm is up, for its Enter and Escape.
+    confirm_focus: gpui::FocusHandle,
     /// The Settings page, shown in place of the sidebar and the panes while open.
     settings: Option<(Entity<crate::ui::settings::SettingsView>, Subscription)>,
     /// A pane being dragged by its grip.
@@ -372,6 +374,7 @@ impl Shell {
                     agents_scroll: gpui::ScrollHandle::new(),
                     tab_bar: Default::default(),
                     focus: cx.focus_handle(),
+                    confirm_focus: cx.focus_handle(),
                     settings: None,
                     pane_drop: None,
                     pane_spring_back: None,
