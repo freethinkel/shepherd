@@ -261,33 +261,6 @@ pub fn runs_text(runs: &[InlineRun]) -> String {
     runs.iter().map(|r| r.text.as_str()).collect()
 }
 
-/// The text of `blocks` as one run, headings, code, tables and rules left out: a folded description's few lines.
-pub fn preview(blocks: &[Block]) -> String {
-    fn plain(block: &Block, out: &mut Vec<String>) {
-        match block {
-            Block::Paragraph { runs } => out.push(runs_text(runs)),
-            Block::BlockQuote { children } => children.iter().for_each(|c| plain(c, out)),
-            Block::List { items, .. } => {
-                for item in items {
-                    out.push("•".into());
-                    item.iter().for_each(|c| plain(c, out));
-                }
-            }
-            Block::Heading { .. } | Block::CodeBlock { .. } | Block::Table { .. } | Block::Rule => {}
-        }
-    }
-    let mut out = Vec::new();
-    blocks.iter().for_each(|b| plain(b, &mut out));
-    out.join(" ")
-}
-
-// ponytail: by size, not by laid-out lines; a long single line in a narrow panel may fold without needing to
-/// Whether a description has more than its folded lines show: more than one block, or a paragraph longer than
-/// about four lines of a panel.
-pub fn folds(blocks: &[Block]) -> bool {
-    blocks.len() > 1 || preview(blocks).chars().count() > 160
-}
-
 fn strip_comments(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
@@ -404,9 +377,9 @@ mod tests {
         assert!(runs.iter().any(|r| r.text == "the" && r.style.bold));
         assert!(runs.iter().any(|r| r.text == "login" && r.style.code));
         assert!(runs.iter().any(|r| r.text == "bug" && r.style.link.as_deref() == Some("https://x/1")));
-        assert_eq!(preview(&blocks), "Fixes the login bug. • one • ☑ done More a < b");
-        assert!(folds(&blocks));
-        assert!(!folds(&markdown("One short line.")));
+        assert!(matches!(&blocks[2], Block::List { items, .. } if items.len() == 2));
+        assert!(matches!(&blocks[3], Block::Paragraph { runs } if runs_text(runs) == "More"));
+        assert!(matches!(&blocks[4], Block::Paragraph { runs } if runs_text(runs) == "a < b"));
         assert_eq!(markdown(""), []);
         assert_eq!(markdown("<!-- only a hint -->"), []);
     }

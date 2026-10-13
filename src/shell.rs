@@ -113,6 +113,8 @@ pub struct Shell {
     review_poll: Option<String>,
     /// The review panel shows the whole description, not its first lines.
     review_expanded: bool,
+    /// The description's whole height at the last paint: whether it has more than its folded lines.
+    review_body_h: Rc<Cell<f32>>,
     agent_sort: AgentSort,
     /// Saved in the settings when a drag ends.
     agents_height: Option<f32>,
@@ -368,6 +370,7 @@ impl Shell {
                     review_drag: false,
                     review_poll: None,
                     review_expanded: false,
+                    review_body_h: Default::default(),
                     agent_sort: SettingsGlobal::of(cx).settings.agent_sort,
                     agents_height: SettingsGlobal::of(cx).settings.agents_height,
                     agents_drag: None,

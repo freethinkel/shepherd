@@ -3,13 +3,13 @@
 use super::*;
 use gpui::AnyElement;
 use crate::settings::{REVIEW_MAX, REVIEW_MIN, REVIEW_WIDTH};
-use crate::ui::review::{Check, CheckState, Review, duration, folds, markdown, preview, read_review};
+use crate::ui::review::{Check, CheckState, Review, duration, markdown, read_review};
 use crate::ui::statusbar::{branch_of, cached, fetching, pane_dir, refetch};
 
 /// How often gh or glab are asked again about a branch, as the status bar asks about its PR.
 const REVIEW_TTL: Duration = Duration::from_secs(120);
-/// How many lines of a description show folded.
-const FOLDED_LINES: usize = 4;
+/// How much of a description shows folded: about six lines.
+const FOLDED: f32 = 120.;
 /// How often while one of its checks runs or waits to.
 pub(super) const REVIEW_POLL: Duration = Duration::from_secs(10);
 
@@ -102,7 +102,7 @@ impl Shell {
                         this.review_expanded = !this.review_expanded;
                         cx.notify();
                     });
-                    out.push(description(theme, &r.body, self.review_expanded, toggle));
+                    out.push(description(theme, &r.body, self.review_expanded, self.review_body_h.clone(), toggle));
                 }
                 out
             }
@@ -165,14 +165,53 @@ fn empty(theme: &Theme, title: impl Into<SharedString>, hint: impl Into<SharedSt
         .into_any_element()
 }
 
-/// The description: folded, its text in a few lines; unfolded, its blocks. The heading, or a click on the folded
-/// text, folds and unfolds it.
-fn description(theme: &Theme, body: &str, expanded: bool, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
-    let blocks = markdown(body);
-    let long = folds(&blocks);
+/// The description, drawn whole: folded, cut to its first lines with their bottom fading out. The heading, or a
+/// click on the folded text (not a drag selecting it), unfolds and folds it. `height` is the whole text's height at
+/// the last paint: a short one has nothing to fold.
+fn description(
+    theme: &Theme,
+    body: &str,
+    expanded: bool,
+    height: Rc<Cell<f32>>,
+    toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let long = height.get() > FOLDED + 1.;
+    let folded = long && !expanded;
     let toggle = Rc::new(toggle);
     let on_heading = toggle.clone();
     let text = theme.text;
+    let blocks = div()
+        .flex_none()
+        .relative()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .children(crate::ui::markdown::render(&markdown(body), "review-md", theme))
+        .child(
+            canvas(
+                move |bounds, window, _| {
+                    let h = f32::from(bounds.size.height);
+                    if (height.replace(h) - h).abs() > 0.5 {
+                        window.refresh();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        );
+    let body = div()
+        .id("review-description-body")
+        .flex()
+        .flex_col()
+        .child(blocks)
+        .when(folded, |el| {
+            el.max_h(px(FOLDED)).overflow_hidden().cursor_pointer().on_click(move |e, window, cx| {
+                if crate::ui::markdown::selected_text().is_none() {
+                    toggle(e, window, cx);
+                }
+            })
+        });
     div()
         .flex()
         .flex_col()
@@ -196,18 +235,7 @@ fn description(theme: &Theme, body: &str, expanded: bool, toggle: impl Fn(&Click
                         .on_click(move |e, window, cx| on_heading(e, window, cx))
                 }),
         )
-        .map(|el| match long && !expanded {
-            true => el.child(
-                div()
-                    .id("review-description-folded")
-                    .line_clamp(FOLDED_LINES)
-                    .text_ellipsis()
-                    .cursor_pointer()
-                    .child(preview(&blocks))
-                    .on_click(move |e, window, cx| toggle(e, window, cx)),
-            ),
-            false => el.children(crate::ui::markdown::render(&blocks, "review-md", theme)),
-        })
+        .map(|el| if folded { el.child(crate::ui::edge_fade::bottom_faded(48., body)) } else { el.child(body) })
         .into_any_element()
 }
 

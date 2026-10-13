@@ -6,17 +6,23 @@ use gpui::{AnyElement, App, Bounds, EdgeFade, Element, GlobalElementId, Inspecto
 /// Fades `child` within `band` px of its top and bottom edges, each only while `scroll` hides rows past it. The
 /// handle is read at paint time, after this frame's scroll offset is clamped.
 pub fn edge_faded(band: f32, scroll: &ScrollHandle, child: impl IntoElement) -> EdgeFaded {
-    EdgeFaded { band, scroll: scroll.clone(), across: false, top: true, child: child.into_any_element() }
+    EdgeFaded { band, scroll: Some(scroll.clone()), across: false, top: true, child: child.into_any_element() }
+}
+
+/// Fades `child` within `band` px of its bottom edge, always: a clipped text that goes on.
+pub fn bottom_faded(band: f32, child: impl IntoElement) -> EdgeFaded {
+    EdgeFaded { band, scroll: None, across: false, top: false, child: child.into_any_element() }
 }
 
 /// [`edge_faded`] for a strip that scrolls sideways: its left and right edges.
 pub fn edge_faded_x(band: f32, scroll: &ScrollHandle, child: impl IntoElement) -> EdgeFaded {
-    EdgeFaded { band, scroll: scroll.clone(), across: true, top: true, child: child.into_any_element() }
+    EdgeFaded { band, scroll: Some(scroll.clone()), across: true, top: true, child: child.into_any_element() }
 }
 
 pub struct EdgeFaded {
     band: f32,
-    scroll: ScrollHandle,
+    /// `None`: no scroll to follow, the bottom always fades.
+    scroll: Option<ScrollHandle>,
     across: bool,
     top: bool,
     child: AnyElement,
@@ -59,13 +65,18 @@ impl Element for EdgeFaded {
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
-        let (offset, max) = if self.across {
-            (self.scroll.offset().x, self.scroll.max_offset().x)
-        } else {
-            (self.scroll.offset().y, self.scroll.max_offset().y)
+        let (start, end) = match &self.scroll {
+            Some(scroll) => {
+                let (offset, max) = if self.across {
+                    (scroll.offset().x, scroll.max_offset().x)
+                } else {
+                    (scroll.offset().y, scroll.max_offset().y)
+                };
+                let scrolled = -f32::from(offset);
+                (self.top && scrolled > 1., scrolled < f32::from(max) - 1.)
+            }
+            None => (false, true),
         };
-        let scrolled = -f32::from(offset);
-        let (start, end) = (self.top && scrolled > 1., scrolled < f32::from(max) - 1.);
         let fade = (start || end).then(|| EdgeFade {
             bounds,
             band: px(self.band),
