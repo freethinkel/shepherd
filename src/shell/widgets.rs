@@ -43,11 +43,15 @@ pub(crate) fn status_icon(status: AgentStatus, style: crate::theme::StatusIcons,
 /// Zeron's `GlyphPalette::for_accent`: the spinner's rows, top to bottom, lighter, `tint` itself, deeper. The tint
 /// is saturated a step past the accent and the light row kept nearer it, so a working agent stands out of a list.
 fn glyph_rows(tint: Hsla, theme: &Theme) -> [Hsla; 3] {
-    let tint = Hsla { s: (tint.s * 1.35).min(1.), ..tint };
+    let mut tint = Hsla { s: (tint.s * 1.35).min(1.), ..tint };
+    // a dark accent sinks into a dark sidebar: lift it toward the text
+    if theme.appearance == crate::theme::Appearance::Dark {
+        tint.l = tint.l.max(0.62);
+    }
     let (mut light, mut deep) = (tint, tint);
     if theme.appearance == crate::theme::Appearance::Dark {
         (light.l, light.s) = ((light.l + 0.14).min(0.90), light.s * 0.9);
-        deep.l = (deep.l - 0.08).max(0.22);
+        deep.l = (deep.l - 0.08).max(0.45);
     } else {
         (light.l, light.s) = ((light.l + 0.11).min(0.76), light.s * 0.9);
         deep.l = (deep.l - 0.09).max(0.22);
