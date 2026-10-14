@@ -188,7 +188,12 @@ struct Drag {
 
 pub struct PaneTerminal {
     pane_id: String,
+    /// What is shown: the live grid, or while scrolled back, a local copy of herdr's history.
     emulator: Emulator,
+    /// While `emulator` shows the history copy: the live grid, which herdr's frames keep updating.
+    live: Option<Emulator>,
+    /// The lines scrolled while the history is being read.
+    history_pending: Option<i64>,
     session: Option<Session>,
     /// The session (or the one connecting) only observes: see [`Yielded`].
     observing: bool,
@@ -252,6 +257,8 @@ impl PaneTerminal {
         PaneTerminal {
             pane_id,
             emulator: Emulator::new(80, 24),
+            live: None,
+            history_pending: None,
             session: None,
             observing: false,
             held: Vec::new(),
@@ -391,6 +398,7 @@ impl PaneTerminal {
         }
         self.geometry = Some(geometry);
         if resized {
+            self.leave_history(); // the copy is wrapped at the old width
             self.emulator.resize(cols, rows);
             self.resized_at = Some(std::time::Instant::now());
         }
@@ -420,6 +428,9 @@ impl PaneTerminal {
                     if pane.scroll_local_until.is_some_and(|t| std::time::Instant::now() < t) {
                         scroll.offset_from_bottom = pane.scroll.offset_from_bottom.min(scroll.max_offset_from_bottom);
                     }
+                    if pane.live.is_some() {
+                        scroll.offset_from_bottom = pane.emulator.display_offset() as u32; // herdr itself stays at its bottom
+                    }
                     if scroll != pane.scroll {
                         pane.scroll = scroll;
                         cx.notify();
@@ -436,10 +447,76 @@ impl PaneTerminal {
     /// Scroll herdr by `delta` lines (positive = up, into history) and move the thumb now, not a round trip later.
     /// `at` is the wheel's (col, row): an app reading the mouse (vim) gets the wheel there, herdr's default is 0,0.
     fn scroll_by(&mut self, delta: i64, at: Option<(u16, u16)>, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else { return };
-        if delta == 0 {
+        if self.session.is_none() || delta == 0 {
             return;
         }
+        if let Some(rest) = self.scroll_locally(delta, cx) {
+            self.scroll_herdr(rest, at, cx);
+        }
+    }
+
+    /// Scrolls through herdr's history without herdr: up from the live bottom reads it once (`pane.read`, at most
+    /// herdr's 1000 lines), then each step is local, as fast as a terminal's own scrollback. Returns the lines left
+    /// to herdr: all of them for an app that takes the wheel, the alternate screen, herdr scrolled already, a
+    /// client-shell popup; those past the lines read.
+    fn scroll_locally(&mut self, delta: i64, cx: &mut Context<Self>) -> Option<i64> {
+        if let Some(pending) = &mut self.history_pending {
+            *pending += delta;
+            return None;
+        }
+        if self.live.is_some() {
+            let target = self.emulator.display_offset() as i64 + delta;
+            if target <= 0 {
+                self.leave_history();
+            } else if target as usize <= self.emulator.history_lines() {
+                self.emulator.scroll_to_offset(target as usize);
+                self.scroll.offset_from_bottom = target as u32;
+            } else {
+                self.leave_history();
+                return Some(target); // herdr scrolls on from its bottom
+            }
+            cx.notify();
+            return None;
+        }
+        let shell = self.session.as_ref().is_some_and(Session::is_shell);
+        let local = delta > 0 && self.scroll.offset_from_bottom == 0 && !self.mouse_capture && !self.emulator.alt_screen() && !shell;
+        let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>().filter(|_| local) else { return Some(delta) };
+        self.history_pending = Some(delta);
+        let (client, pane_id) = (client.clone(), self.pane_id.clone());
+        let size = (self.emulator.cols(), self.emulator.rows());
+        let params = serde_json::json!({"pane_id": pane_id, "source": "recent", "lines": 1000, "format": "ansi", "strip_ansi": false});
+        let call = rt.spawn(async move { client.call("pane.read", params).await });
+        cx.spawn(async move |this, cx| {
+            let text = call.await.ok().and_then(Result::ok).and_then(|r| r["read"]["text"].as_str().map(str::to_owned));
+            let _ = this.update(cx, |pane, cx| {
+                let Some(delta) = pane.history_pending.take() else { return }; // a key or a resize came first
+                // the grid must be the one the history was read at, or its lines land wrong
+                match text.filter(|_| (pane.emulator.cols(), pane.emulator.rows()) == size) {
+                    Some(text) => {
+                        let history = Emulator::with_history(&text, size.0 as u16, size.1 as u16);
+                        pane.live = Some(std::mem::replace(&mut pane.emulator, history));
+                        pane.scroll_by(delta, None, cx);
+                    }
+                    None => pane.scroll_herdr(delta, None, cx),
+                }
+            });
+        })
+        .detach();
+        None
+    }
+
+    /// Back to the live grid: herdr is at its bottom all along.
+    // ponytail: the copy is not refreshed while it is shown; new output shows once you are back at the bottom
+    fn leave_history(&mut self) {
+        self.history_pending = None;
+        if let Some(live) = self.live.take() {
+            self.emulator = live;
+            self.scroll.offset_from_bottom = 0;
+        }
+    }
+
+    fn scroll_herdr(&mut self, delta: i64, at: Option<(u16, u16)>, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else { return };
         session.scroll(delta > 0, delta.unsigned_abs().min(u16::MAX as u64) as u16, at);
         let max = self.scroll.max_offset_from_bottom as i64;
         self.scroll.offset_from_bottom = (self.scroll.offset_from_bottom as i64 + delta).clamp(0, max) as u32;
@@ -460,7 +537,11 @@ impl PaneTerminal {
             }
         }
         let marks = self.search_marks(&lines, cx);
-        Some(GridSnapshot { lines, cursor: self.emulator.cursor(), marks, images: self.images.clone() })
+        // herdr places images for its live screen: scrolled back, they move down with the text
+        let back = self.live.as_ref().map_or(0, |_| self.emulator.display_offset() as u16);
+        let images = self.images.iter().map(|i| PaneImage { y: i.y.saturating_add(back), ..i.clone() }).collect();
+        let cursor = if self.live.is_some() { None } else { self.emulator.cursor() };
+        Some(GridSnapshot { lines, cursor, marks, images })
     }
 
     fn search_marks(&self, lines: &[Vec<CellSnapshot>], cx: &App) -> Vec<(usize, Range<usize>, bool)> {
@@ -861,6 +942,10 @@ impl PaneTerminal {
     }
 
     fn input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        if self.live.is_some() || self.history_pending.is_some() {
+            self.leave_history(); // typing goes back to the live bottom, as in a terminal
+            cx.notify();
+        }
         match &self.session {
             Some(session) if !self.observing => session.input(bytes),
             _ if self.ended.is_none() => {
@@ -1215,9 +1300,12 @@ async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionE
                 match event {
                     // Replies (DSR, DA…) are dropped: frames are herdr's re-render, and herdr already
                     // answered the app's own queries.
-                    SessionEvent::Frame(bytes) => drop(pane.emulator.feed(&bytes)),
+                    SessionEvent::Frame(bytes) => drop(pane.live.as_mut().unwrap_or(&mut pane.emulator).feed(&bytes)),
                     SessionEvent::MouseCapture(enabled) => pane.mouse_capture = enabled,
-                    SessionEvent::Size(cols, rows) => pane.emulator.resize(cols, rows),
+                    SessionEvent::Size(cols, rows) => {
+                        pane.leave_history();
+                        pane.emulator.resize(cols, rows)
+                    }
                     SessionEvent::Ended(why) => {
                         pane.ended = Some(why);
                         pane.session = None;

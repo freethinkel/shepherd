@@ -176,10 +176,29 @@ pub struct Emulator {
 
 impl Emulator {
     pub fn new(cols: u16, rows: u16) -> Self {
+        // herdr owns scrollback; scrolling is a terminal.scroll request to it, or a local copy ([`Self::with_history`]).
+        Self::sized(cols, rows, 0)
+    }
+
+    /// herdr's history as `pane.read` gives it (`source: recent`, `format: ansi`): the lines above its screen, then
+    /// the screen, wrapped at this width, no newline after the last. The grid holds them all, viewed at the live
+    /// bottom, so [`Self::scroll`] walks back through them without asking herdr.
+    pub fn with_history(text: &str, cols: u16, rows: u16) -> Self {
+        let mut e = Self::sized(cols, rows, text.matches('\n').count() + 1);
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                e.feed(b"\r\n");
+            }
+            e.feed(b"\x1b[0m");
+            e.feed(line.strip_suffix('\r').unwrap_or(line).as_bytes());
+        }
+        e
+    }
+
+    fn sized(cols: u16, rows: u16, history: usize) -> Self {
         let capture = EventCapture::default();
         let config = Config {
-            // herdr owns scrollback; scrolling is a terminal.scroll request to it.
-            scrolling_history: 0,
+            scrolling_history: history,
             ..Config::default()
         };
         let term = Term::new(config, &GridSize::new(cols, rows), capture.clone());
@@ -234,6 +253,11 @@ impl Emulator {
     /// Arrow keys should send SS3 (`ESC O A`) instead of CSI.
     pub fn app_cursor_mode(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
+    /// The app is on the alternate screen (vim, less): it has no history of its own.
+    pub fn alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
     /// Pastes should be wrapped in `ESC [200~` / `ESC [201~`.
@@ -544,6 +568,22 @@ mod tests {
         let mut e = emu(20, 2);
         e.feed(b"abcdef\x1b[3D\x1b[K"); // erase from cursor (col 3) to end
         assert_eq!(e.row_text(0), "abc");
+    }
+
+    #[test]
+    fn a_read_history_scrolls_back_without_herdr() {
+        // 30 lines, the screen 10 of them: the last 10 show, the 20 above are history; styles carry over
+        let text = (1..=30).map(|i| if i == 25 { "\x1b[1mbold".to_string() } else { format!("l{i}") }).collect::<Vec<_>>().join("\r\n");
+        let mut e = Emulator::with_history(&text, 20, 10);
+        assert_eq!((e.history_lines(), e.row_text(0).as_str(), e.row_text(9).as_str()), (20, "l21", "l30"));
+        assert!(e.line(4)[0].bold && !e.line(5)[0].bold, "each line starts unstyled");
+        e.scroll(5);
+        assert_eq!(e.row_text(0), "l16");
+        e.scroll(100);
+        assert_eq!((e.display_offset(), e.row_text(0).as_str()), (20, "l1"));
+        // a full-width line ends where its newline does, not a row later
+        let e = Emulator::with_history("abcd\r\nef", 4, 2);
+        assert_eq!((e.row_text(0).as_str(), e.row_text(1).as_str()), ("abcd", "ef"));
     }
 
     #[test]
