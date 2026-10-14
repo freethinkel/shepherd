@@ -621,7 +621,8 @@ impl Shell {
             .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
             .child(
                 div()
-                    .flex_1()
+                    // off macOS the `+` follows the last tab, apart from the window's buttons at the right end
+                    .when(cfg!(target_os = "macos"), |el| el.flex_1())
                     .min_w_0()
                     .h_full()
                     .relative()
@@ -665,7 +666,7 @@ impl Shell {
                     }),
             )
             .children(flying)
-            // `+` stays put on the right; only the tabs scroll
+            // `+` stays in view; only the tabs scroll
             .when_some(shown_ws, |el, ws| {
                 el.child(
                     icon_button(theme, "new-tab", "+")
