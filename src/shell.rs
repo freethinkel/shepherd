@@ -469,6 +469,16 @@ impl Shell {
         cx.notify();
     }
 
+    /// Settings on its Usage page, opened if it is not up: the limits popup's way there.
+    pub(crate) fn open_usage_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_none() {
+            self.toggle_settings_here(window, cx);
+        }
+        if let Some((view, _)) = &self.settings {
+            view.update(cx, |v, cx| v.show_usage(cx));
+        }
+    }
+
     /// cmd-k (commands) or the agents key: opens that panel over the window, or closes it when it is open.
     pub fn toggle_command_panel(&mut self, kind: crate::ui::command_panel::Kind, window: &mut Window, cx: &mut Context<Self>) {
         use crate::ui::command_panel::{Kind, PanelEvent, Run};

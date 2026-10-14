@@ -33,6 +33,7 @@ enum Section {
     Terminal,
     Appearance,
     Notifications,
+    Usage,
     Integrations,
     Herdr,
     Shortcuts,
@@ -40,11 +41,12 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 8] = [
+    const ALL: [Section; 9] = [
         Section::General,
         Section::Terminal,
         Section::Appearance,
         Section::Notifications,
+        Section::Usage,
         Section::Integrations,
         Section::Herdr,
         Section::Shortcuts,
@@ -57,6 +59,7 @@ impl Section {
             Section::Terminal => "Terminal",
             Section::Appearance => "Appearance",
             Section::Notifications => "Notifications",
+            Section::Usage => "Usage",
             Section::Integrations => "Integrations",
             Section::Herdr => "herdr",
             Section::Shortcuts => "Shortcuts",
@@ -70,6 +73,7 @@ impl Section {
             Section::Terminal => "icons/terminal.svg",
             Section::Appearance => "icons/tuning.svg",
             Section::Notifications => "icons/bell.svg",
+            Section::Usage => "icons/clock-circle.svg",
             Section::Integrations => "icons/widget.svg",
             Section::Herdr => "icons/remote-server.svg",
             Section::Shortcuts => "icons/keyboard.svg",
@@ -160,6 +164,12 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
 }
 
 impl SettingsView {
+    /// Turns to the Usage page.
+    pub fn show_usage(&mut self, cx: &mut Context<Self>) {
+        self.section = Section::Usage;
+        cx.notify();
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = SettingsGlobal::of(cx).settings.clone();
         let theme = Theme::of(cx).clone();
@@ -944,7 +954,7 @@ impl Render for SettingsView {
                     )
                     .child(
                         card_row(&theme, false)
-                            .child(row_text(&theme, "Status bar", "The branch, folder, focused agent and Claude usage along the bottom."))
+                            .child(row_text(&theme, "Status bar", "The branch, folder, focused agent and plan usage along the bottom."))
                             .child(toggle(&theme, "show-status-bar", settings.show_status_bar).on_click(cx.listener(
                                 |_, _: &ClickEvent, _, cx| update(cx, |s| s.show_status_bar = !s.show_status_bar),
                             ))),
@@ -1125,6 +1135,40 @@ impl Render for SettingsView {
                             ),
                     )
                     .child(note(&theme, herdr_note))
+            }
+            Section::Usage => {
+                use crate::settings::UsageAgent;
+                let agents = UsageAgent::ALL.map(|agent| {
+                    let (source, url) = match agent {
+                        UsageAgent::Claude => ("From Claude Code's sign-in.", "https://claude.ai/settings/usage"),
+                        UsageAgent::Codex => ("From Codex's ChatGPT sign-in.", "https://chatgpt.com/codex/settings/usage"),
+                    };
+                    // ponytail: no loading state; the first second after opening reads as not signed in
+                    let limits = crate::ui::statusbar::usage_of(agent, cx).filter(|l| !l.is_empty());
+                    card(&theme)
+                        .child(
+                            card_row(&theme, true)
+                                .child(row_text(&theme, agent.label(), source))
+                                .child(action(&theme, SharedString::from(format!("usage-web-{}", agent.key())), "Open on the web").on_click(move |_: &ClickEvent, _, cx| cx.open_url(url))),
+                        )
+                        .child(div().px(px(8.)).pb(px(8.)).text_size(px(12.)).map(|el| match &limits {
+                            Some(limits) => el.children(limits.iter().map(|l| crate::ui::statusbar::limit_row(&theme, l))),
+                            None => el.child(div().px(px(8.)).pb(px(4.)).text_color(theme.text_muted).child(format!("Sign in to {} to see its limits.", agent.label()))),
+                        }))
+                });
+                div()
+                    .child(page_header(&theme, "Usage", "Your agents' plan limits, and whose the status bar shows."))
+                    .child(
+                        card(&theme).child(
+                            card_row(&theme, true).child(row_text(&theme, "Status bar shows", "The ring at the bar's right end, and its pop-up.")).child(
+                                div().flex().gap(px(8.)).children(UsageAgent::ALL.map(|agent| {
+                                    choice(&theme, SharedString::from(format!("usage-agent-{}", agent.key())), agent.label(), settings.usage_agent == agent)
+                                        .on_click(move |_: &ClickEvent, _, cx| update(cx, |s| s.usage_agent = agent))
+                                })),
+                            ),
+                        ),
+                    )
+                    .children(agents)
             }
             Section::Integrations => {
                 let body = match &self.integrations {
