@@ -27,11 +27,47 @@ const ICON_PATHS: &[&str] = &[
 ];
 
 /// The first of [`ICON_PATHS`] in the checkout holding `dir` (a linked worktree's `.git` is a file), else the
-/// avatar of the GitHub account its `origin` belongs to: GitHub has no icon per repo.
+/// avatar of the GitHub account its `origin` belongs to: GitHub has no icon per repo. `dir` is located: a machine's
+/// checkout is looked in there.
 fn find_icon(dir: &str) -> Option<PathBuf> {
+    if let (Some(target), path) = crate::herdr::split(dir) {
+        return remote_icon(dir, target, path);
+    }
     let dir = Path::new(dir).canonicalize().ok()?;
     let root = dir.ancestors().find(|p| p.join(".git").exists()).unwrap_or(&dir);
-    ICON_PATHS.iter().map(|p| root.join(p)).find(|p| p.is_file()).or_else(|| github_avatar(root))
+    ICON_PATHS.iter().map(|p| root.join(p)).find(|p| p.is_file()).or_else(|| github_avatar(&root.to_string_lossy()))
+}
+
+/// The icon of the checkout holding `path` on the machine at `target`: found there in one round trip and copied into
+/// Shepherd's caches once, else the GitHub avatar of its `origin`'s owner.
+fn remote_icon(dir: &str, target: &str, path: &str) -> Option<PathBuf> {
+    let look = format!(
+        "cd {} 2>/dev/null && cd \"$(git rev-parse --show-toplevel)\" && for p in {}; do [ -f \"$p\" ] && echo \"$PWD/$p\" && exit 0; done",
+        crate::herdr::quote(path),
+        ICON_PATHS.join(" ")
+    );
+    let found = String::from_utf8_lossy(&crate::herdr::ssh(target, &look).ok()?.stdout).trim().to_string();
+    if found.is_empty() {
+        return github_avatar(dir);
+    }
+    let ext = Path::new(&found).extension().and_then(|e| e.to_str()).unwrap_or("png");
+    let name = format!("{:08x}.{ext}", fnv(&format!("{target}:{found}")));
+    let cache = PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/Shepherd/remote-icons");
+    let file = cache.join(name);
+    if !file.is_file() {
+        let out = crate::herdr::ssh(target, &format!("cat {}", crate::herdr::quote(&found))).ok()?;
+        if !out.status.success() || out.stdout.is_empty() {
+            return None;
+        }
+        std::fs::create_dir_all(&cache).ok()?;
+        std::fs::write(&file, &out.stdout).ok()?;
+    }
+    Some(file)
+}
+
+/// FNV-1a of `s`, for a cache file's name.
+fn fnv(s: &str) -> u32 {
+    s.bytes().fold(2166136261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16777619))
 }
 
 /// The owner in a GitHub remote URL: `git@github.com:owner/repo.git`, `https://github.com/owner/repo`,
@@ -43,9 +79,9 @@ fn github_owner(url: &str) -> Option<&str> {
 }
 
 // ponytail: downloaded once and kept; delete ~/Library/Caches/Shepherd/avatars to pick up a changed avatar.
-/// The owner's GitHub avatar, downloaded once into Shepherd's caches.
-fn github_avatar(root: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git").arg("-C").arg(root).args(["remote", "get-url", "origin"]).output().ok()?;
+/// The GitHub avatar of the owner of the located `dir`'s origin, downloaded once into Shepherd's caches.
+fn github_avatar(dir: &str) -> Option<PathBuf> {
+    let out = crate::herdr::git(dir, &["remote", "get-url", "origin"]).ok()?;
     let owner = github_owner(&String::from_utf8_lossy(&out.stdout))?.to_string();
     let dir = PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/Shepherd/avatars");
     let path = dir.join(format!("{owner}.png"));
@@ -75,7 +111,7 @@ const MONOGRAM_PALETTE: [(u32, u32); 8] = [
 
 /// `seed`'s entry in [`MONOGRAM_PALETTE`], by FNV-1a.
 fn tone_index(seed: &str) -> usize {
-    seed.bytes().fold(2166136261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16777619)) as usize % MONOGRAM_PALETTE.len()
+    fnv(seed) as usize % MONOGRAM_PALETTE.len()
 }
 
 /// `name`'s first letter on its tone, washed brighter on the selected row.

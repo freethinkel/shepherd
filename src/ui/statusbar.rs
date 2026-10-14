@@ -405,8 +405,13 @@ impl Spent {
 /// A Claude Code transcript's usage, summed. Each answer is written once per content block with the same
 /// usage, so it counts once by its message id.
 pub fn parse_spent(jsonl: &str) -> Spent {
-    let mut seen = std::collections::HashSet::new();
     let mut spent = Spent::default();
+    add_spent(jsonl, &mut std::collections::HashSet::new(), &mut spent);
+    spent
+}
+
+/// Adds the answers in `jsonl` not in `seen` yet to `spent`, as [`parse_spent`] counts them.
+fn add_spent(jsonl: &str, seen: &mut std::collections::HashSet<String>, spent: &mut Spent) {
     let lines = jsonl.lines().filter(|l| l.contains("\"usage\"")).filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
     for v in lines.filter(|v| seen.insert(v["message"]["id"].as_str().unwrap_or_default().to_string())) {
         let n = |k: &str| v["message"]["usage"][k].as_u64().unwrap_or(0);
@@ -416,7 +421,6 @@ pub fn parse_spent(jsonl: &str) -> Spent {
         spent.cache_write += n("cache_creation_input_tokens");
         spent.cache_read += n("cache_read_input_tokens");
     }
-    spent
 }
 
 /// `1234` as `1.2k`, `5600000` as `5.6M`.
@@ -431,15 +435,61 @@ pub fn short_count(n: u64) -> String {
 // ponytail: rereads the whole transcript each SPENT_TTL; read on from the last offset if transcripts get huge.
 // Subagents' own transcripts (`<session>/subagents/`) aren't counted.
 /// What Claude session `id` spent, from its transcript in any of Claude Code's project folders.
-fn read_spent(id: &str) -> Option<Spent> {
+/// The tokens of the agent session `key` (its id, located: a machine's session is read on that machine).
+fn read_spent(key: &str) -> Option<Spent> {
+    let (machine, id) = crate::herdr::split(key);
+    if let Some(target) = machine {
+        return read_remote_spent(target, id);
+    }
     let projects = Path::new(&std::env::var_os("HOME")?).join(".claude/projects");
     let file = std::fs::read_dir(projects).ok()?.flatten().map(|d| d.path().join(format!("{id}.jsonl"))).find(|f| f.is_file())?;
     Some(parse_spent(&std::fs::read_to_string(file).ok()?))
 }
 
 /// What `pane`'s agent session spent so far, refreshed in the background.
+/// A machine's transcript read so far: its path there, how many bytes of it, and what they added up to.
+struct Tail {
+    file: String,
+    read: u64,
+    seen: std::collections::HashSet<String>,
+    spent: Spent,
+}
+
+// ponytail: one tail per session ever shown, never dropped
+/// The tokens of the session `id` on the machine at `target`: its transcript is found once, then each time only what
+/// was written to it since comes over SSH.
+fn read_remote_spent(target: &str, id: &str) -> Option<Spent> {
+    static TAILS: std::sync::Mutex<Option<HashMap<String, Tail>>> = std::sync::Mutex::new(None);
+    let key = format!("{target}\n{id}");
+    let known = TAILS.lock().unwrap().get_or_insert_default().get(&key).map(|t| (t.file.clone(), t.read));
+    let (file, read) = match known {
+        Some(known) => known,
+        None => {
+            // a session id is a uuid; anything else stays out of the remote shell's glob
+            if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return None;
+            }
+            let find = format!("ls ~/.claude/projects/*/{id}.jsonl 2>/dev/null | head -n 1");
+            let out = crate::herdr::ssh(target, &find).ok()?;
+            let file = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (!file.is_empty()).then_some((file, 0))?
+        }
+    };
+    let out = crate::herdr::ssh(target, &format!("tail -c +{} {}", read + 1, crate::herdr::quote(&file))).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // only whole lines: one being written is read next time
+    let whole = out.stdout.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let mut tails = TAILS.lock().unwrap();
+    let tail = tails.get_or_insert_default().entry(key).or_insert_with(|| Tail { file, read: 0, seen: Default::default(), spent: Spent::default() });
+    add_spent(&String::from_utf8_lossy(&out.stdout[..whole]), &mut tail.seen, &mut tail.spent);
+    tail.read += whole as u64;
+    Some(tail.spent.clone())
+}
+
 fn spent_of(pane: &Pane, cx: &mut App) -> Option<Spent> {
-    pane.agent_session.as_ref().and_then(|s| cached(&s.value, SPENT_TTL, read_spent, cx))
+    pane.agent_session.as_ref().and_then(|s| cached(&crate::herdr::locate(&s.value), SPENT_TTL, read_spent, cx))
 }
 
 /// The spend popup's card: every agent with a session, what it spent by kind, and the sum; in the sidebar's
@@ -673,18 +723,22 @@ pub fn bar(
                 .when(g.behind > 0, |el| el.child(div().flex_none().child(format!("↓{}", g.behind))))
                 .on_click(on_branch)
         }))
+        // the PR or MR, else a branch's pipeline of its own
         .children(review.filter(|_| show.pull_request).and_then(|r| match r {
-            crate::ui::review::Review::Found { request: Some(req), .. } => Some((req.pr.clone(), r.ci())),
+            crate::ui::review::Review::Found { request: Some(req), .. } => Some((Some(req.pr.clone()), r.ci())),
+            crate::ui::review::Review::Found { request: None, pipeline: Some(_), .. } => Some((None, r.ci())),
             _ => None,
         }).map(|(pr, ci)| {
-            let number = format!("{}{}", if pr.gitlab { "!" } else { "#" }, pr.number);
-            link(label(theme, "icons/git-pull-request.svg").id("statusbar-pr"), theme, review_open)
-                .flex_shrink_0()
-                .tooltip(crate::shell::tip("Toggle pull request panel", Some("ToggleReview")))
-                .child(number)
-                .when(pr.state != "open", |el| el.child(div().text_color(theme.text_faint).child(pr.state)))
-                .children(ci.map(|state| crate::ui::review::check_icon(theme, state, 12., window)))
-                .on_click(on_review)
+            let el = match &pr {
+                Some(pr) => link(label(theme, "icons/git-pull-request.svg").id("statusbar-pr"), theme, review_open)
+                    .tooltip(crate::shell::tip("Toggle pull request panel", Some("ToggleReview")))
+                    .child(format!("{}{}", if pr.gitlab { "!" } else { "#" }, pr.number))
+                    .when(pr.state != "open", |el| el.child(div().text_color(theme.text_faint).child(pr.state))),
+                None => link(div().id("statusbar-pr").flex().items_center().gap(px(5.)).px(px(6.)), theme, review_open)
+                    .tooltip(crate::shell::tip("Toggle pipeline panel", Some("ToggleReview")))
+                    .child("CI"),
+            };
+            el.flex_shrink_0().children(ci.map(|state| crate::ui::review::check_icon(theme, state, 12., window))).on_click(on_review)
         }))
         .children(dir.filter(|_| show.folder).map(|d| {
             // a machine's folder is not this Mac's to open
@@ -762,6 +816,11 @@ mod tests {
         assert_eq!(spent, Spent { answers: 2, input: 4, output: 15, cache_write: 200, cache_read: 2000 });
         assert_eq!(spent.total(), 2219);
         assert_eq!(parse_spent(""), Spent::default());
+        // a machine's transcript comes in pieces: an answer seen in one is not counted again in the next
+        let (mut seen, mut tail) = (std::collections::HashSet::new(), Spent::default());
+        add_spent(&[line("a", 10), line("a", 10)].join("\n"), &mut seen, &mut tail);
+        add_spent(&[line("a", 10), line("b", 5)].join("\n"), &mut seen, &mut tail);
+        assert_eq!(tail, spent);
         assert_eq!(short_count(999), "999");
         assert_eq!(short_count(1234), "1.2k");
         assert_eq!(short_count(5_600_000), "5.6M");

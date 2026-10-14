@@ -14,11 +14,10 @@ use gpui::{
 use std::cell::RefCell;
 use std::ops::Range;
 
-/// `blocks`, keyed under `key` (their paragraphs' selection keys and element ids start with it).
+/// `blocks`, keyed under `key` (their paragraphs' selection keys and element ids start with it). A view of them
+/// paints one [`frame_reset`] before the first, however many times it renders some.
 pub fn render(blocks: &[Block], key: &str, theme: &Theme) -> Vec<AnyElement> {
-    let mut out: Vec<AnyElement> = vec![frame_reset().into_any_element()];
-    out.extend(blocks.iter().enumerate().map(|(i, b)| block(b, &format!("{key}-{i}"), theme)));
-    out
+    blocks.iter().enumerate().map(|(i, b)| block(b, &format!("{key}-{i}"), theme)).collect()
 }
 
 fn block(b: &Block, key: &str, theme: &Theme) -> AnyElement {
@@ -173,7 +172,7 @@ thread_local! {
 }
 
 /// Clears the paint-order list; painted before the first paragraph.
-fn frame_reset() -> impl IntoElement {
+pub fn frame_reset() -> impl IntoElement {
     canvas(|_, _, _| (), |_, _, _, _| PAINTED.with(|p| p.borrow_mut().clear())).absolute().size_0()
 }
 

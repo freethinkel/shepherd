@@ -564,6 +564,13 @@ pub fn approve(dir: &str, gitlab: bool, number: u64) -> Result<(), String> {
     act(dir, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
 }
 
+/// Marks the draft PR or MR `number` in `dir` ready for review.
+pub fn mark_ready(dir: &str, gitlab: bool, number: u64) -> Result<(), String> {
+    let n = number.to_string();
+    let args: &[&str] = if gitlab { &["glab", "mr", "update", &n, "--ready"] } else { &["gh", "pr", "ready", &n] };
+    act(dir, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+}
+
 /// Takes the CLI user's approval of the GitLab MR `number` in `dir` back.
 pub fn revoke(dir: &str, number: u64) -> Result<(), String> {
     act(dir, &["glab".into(), "mr".into(), "revoke".into(), number.to_string()])

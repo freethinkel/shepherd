@@ -90,13 +90,18 @@ pub fn git(dir: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
         (None, path) => Command::new("git").arg("-C").arg(path).args(args).stdin(Stdio::null()).output(),
         (Some(target), path) => {
             let words: Vec<String> = ["git", "-C", path].iter().chain(args).map(|w| quote(w)).collect();
-            Command::new("ssh").args(ssh_options()).arg("--").arg(target).arg(words.join(" ")).stdin(Stdio::null()).output()
+            ssh(target, &words.join(" "))
         }
     }
 }
 
+/// `script` run by the shell of the machine at `target`, over the shared SSH connection.
+pub fn ssh(target: &str, script: &str) -> std::io::Result<std::process::Output> {
+    Command::new("ssh").args(ssh_options()).arg("--").arg(target).arg(script).stdin(Stdio::null()).output()
+}
+
 /// `word` for the remote shell, as one argument.
-fn quote(word: &str) -> String {
+pub fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 

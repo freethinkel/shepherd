@@ -223,7 +223,14 @@ impl Shell {
                                 cx.notify();
                             }
                         });
-                        footer = request_footer(theme, r, running, &self.review_acting, on_approve, on_merge, on_cancel);
+                        let on_ready = cx.listener({
+                            let (dir, key, number) = (dir.clone(), key_or.clone(), r.pr.number);
+                            move |this, _: &ClickEvent, _, cx| {
+                                let dir = dir.clone();
+                                this.review_act("ready".into(), key.clone(), move || crate::ui::review::mark_ready(&dir, gitlab, number), cx)
+                            }
+                        });
+                        footer = request_footer(theme, r, running, &self.review_acting, on_approve, on_merge, on_cancel, on_ready);
                         out.push(request_card(theme, r))
                     }
                     None => out.push(empty(theme, format!("No {noun}"), format!("{} has none yet.", branch.unwrap_or_default()))),
@@ -304,7 +311,20 @@ impl Shell {
             .border_l_1()
             .border_color(theme.border)
             .child(header)
-            .child(div().id("review-body").flex_1().min_h_0().overflow_y_scroll().p(px(12.)).flex().flex_col().gap(px(16.)).children(body))
+            .child(
+                div()
+                    .id("review-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(12.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.))
+                    // one reset for the description's and the logs' selectable text, before either paints
+                    .child(crate::ui::markdown::frame_reset())
+                    .children(body),
+            )
             .children(footer);
         let edge = div()
             .id("review-resize")
@@ -521,7 +541,7 @@ fn badge(label: &'static str, color: gpui::Hsla) -> Div {
         .child(label)
 }
 
-/// The panel's bottom bar while the PR or MR is open: Approve, which once one has reads Approved and takes it back
+/// The panel's bottom bar while the PR or MR is open (a draft's has Mark as ready): Approve, which once one has reads Approved and takes it back
 /// (GitLab), and Merge (off with conflicts or while CI runs); a button that is off says why.
 fn request_footer(
     theme: &Theme,
@@ -531,7 +551,19 @@ fn request_footer(
     on_approve: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_merge: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_ready: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Option<AnyElement> {
+    let bar = || div().flex_none().px(px(12.)).py(px(10.)).flex().items_center().gap(px(8.)).border_t_1().border_color(theme.border).text_size(px(12.));
+    if r.pr.state == "draft" {
+        // a draft merges once it's ready
+        let readying = acting.contains("ready");
+        let hover = theme.hover;
+        let ready = footer_button("review-ready", "icons/check.svg", if readying { "Marking…" } else { "Mark as ready" }, theme.text, None, readying)
+            .border_1()
+            .border_color(theme.border)
+            .when(!readying, |el| el.hover(move |s| s.bg(hover)).on_click(on_ready));
+        return Some(bar().child(div().flex_1().text_color(theme.text_faint).child("Draft")).child(ready).into_any_element());
+    }
     if r.pr.state != "open" {
         return None;
     }
@@ -584,20 +616,7 @@ fn request_footer(
             .when(running && no_merge.is_none() && !merging, |el| el.tooltip(tip("Merge once the pipeline passes", None)))
             .when(no_merge.is_none() && !merging, |el| el.on_click(on_merge))
     };
-    let bar = div()
-        .flex_none()
-        .px(px(12.))
-        .py(px(10.))
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .border_t_1()
-        .border_color(theme.border)
-        .text_size(px(12.))
-        .child(div().flex_1())
-        .child(approve)
-        .child(merge);
-    Some(bar.into_any_element())
+    Some(bar().child(div().flex_1()).child(approve).child(merge).into_any_element())
 }
 
 /// A footer button: icon and label in `ink`, dimmed with `off` (its reason, as the tooltip) or while `busy`.
@@ -670,7 +689,7 @@ fn request_card(theme: &Theme, r: &Request) -> AnyElement {
                     .text_color(theme.text_muted)
                     .children(r.reviewers.iter().map(|rv| {
                         let (icon, color, said) = match rv.verdict {
-                            Verdict::Approved => ("icons/solar/check-circle.svg", theme.success, "approved"),
+                            Verdict::Approved => ("icons/check.svg", theme.success, "approved"),
                             Verdict::Changes => ("icons/solar/close-circle.svg", theme.danger, "requested changes"),
                             Verdict::Commented => ("icons/solar/chat-round-dots.svg", theme.text_muted, "commented"),
                             Verdict::Pending => ("icons/solar/clock-circle.svg", theme.text_faint, "hasn't reviewed yet"),
@@ -919,17 +938,15 @@ fn checks_section(
         .into_any_element()
 }
 
-/// A job's log under its row: its last lines in the terminal's font, a spinner until read, a link to its page.
+/// A job's log under its row: its last lines as a code block, selectable and copied with Cmd+C, a spinner until read,
+/// a link to its page.
 fn log_box(theme: &Theme, i: usize, text: Option<&str>, url: Option<String>, window: &mut Window) -> AnyElement {
     let accent = theme.accent;
     div()
         .mb(px(6.))
-        .p(px(8.))
-        .rounded(px(6.))
-        .bg(theme.wash(0.06))
         .flex()
         .flex_col()
-        .gap(px(6.))
+        .gap(px(4.))
         .child(
             div()
                 .flex()
@@ -949,13 +966,10 @@ fn log_box(theme: &Theme, i: usize, text: Option<&str>, url: Option<String>, win
         .child(match text {
             None => div().py(px(4.)).flex().justify_center().child(crate::ui::loader::mini_spinner(2., theme.text_faint, window)).into_any_element(),
             Some("") => div().text_size(px(11.)).text_color(theme.text_faint).child("No log yet").into_any_element(),
-            Some(text) => div()
-                .font_family("Geist Mono")
-                .text_size(px(10.5))
-                .line_height(px(15.))
-                .text_color(theme.text_muted)
-                .children(text.lines().map(|l| div().child(l.to_string())))
-                .into_any_element(),
+            Some(text) => {
+                let code = crate::ui::review::Block::CodeBlock { language: None, code: text.to_string() };
+                div().text_size(px(10.5)).line_height(px(15.)).children(crate::ui::markdown::render(&[code], &format!("review-log-{i}"), theme)).into_any_element()
+            }
         })
         .into_any_element()
 }
