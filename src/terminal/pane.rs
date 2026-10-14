@@ -228,8 +228,6 @@ pub struct PaneTerminal {
     pub takes_over: bool,
     /// Kitty images herdr shows on the pane (from the window's client shell), drawn over the grid.
     images: Vec<PaneImage>,
-    /// Images no longer shown, to free from the window's atlas at the next render.
-    retired: Vec<std::sync::Arc<gpui::RenderImage>>,
 }
 
 impl PaneTerminal {
@@ -280,7 +278,6 @@ impl PaneTerminal {
             preview: None,
             takes_over: false,
             images: Vec::new(),
-            retired: Vec::new(),
         }
         // Attaching waits for the first measured grid (`on_grid_metrics`): herdr resizes the real PTY to
         // whatever size the attach names.
@@ -298,15 +295,14 @@ impl PaneTerminal {
         self.ended.as_deref()
     }
 
-    /// herdr's images on this pane now; those gone are freed at the next render.
-    pub fn set_images(&mut self, images: Vec<PaneImage>, cx: &mut Context<Self>) {
+    /// herdr's images on this pane now; returns those it no longer shows, for the window to free.
+    pub fn set_images(&mut self, images: Vec<PaneImage>, cx: &mut Context<Self>) -> Vec<std::sync::Arc<gpui::RenderImage>> {
         if self.images.is_empty() && images.is_empty() {
-            return;
+            return Vec::new();
         }
         let old = std::mem::replace(&mut self.images, images);
-        let gone = old.into_iter().map(|i| i.image).filter(|o| !self.images.iter().any(|i| std::sync::Arc::ptr_eq(&i.image, o)));
-        self.retired.extend(gone);
         cx.notify();
+        old.into_iter().map(|i| i.image).filter(|o| !self.images.iter().any(|i| std::sync::Arc::ptr_eq(&i.image, o))).collect()
     }
 
     /// Connects off the main thread: herdr's handshake takes tens of milliseconds, and attaching happens while a
@@ -1249,9 +1245,6 @@ impl Focusable for PaneTerminal {
 
 impl Render for PaneTerminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        for image in self.retired.drain(..) {
-            let _ = window.drop_image(image);
-        }
         let theme = Theme::of(cx).clone();
         if let Some(why) = self.ended.clone() {
             let takeover = needs_takeover(&why);

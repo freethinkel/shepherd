@@ -41,6 +41,7 @@ pub(super) async fn shell_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
                     PopupEvent::Popup(surface) => s.show_popup(surface, cx),
                     PopupEvent::Commands(commands) => s.herdr_commands = commands,
                     PopupEvent::Images(images) => s.show_images(images, cx),
+                    PopupEvent::Ready => cx.notify(), // `follow_shown_tab` waits for it
                 });
                 if alive.is_err() {
                     return;
@@ -88,18 +89,21 @@ impl Shell {
 }
 
 impl Shell {
-    /// A grid cell in device pixels, from a measured pane; (0, 0) before one is drawn.
+    /// A grid cell in device pixels, from a measured pane of the tab shown; (0, 0) before one is drawn.
     pub(super) fn cell_px(&self, cx: &App) -> (u32, u32) {
-        self.panes.values().find_map(|p| p.read(cx).geometry()).map_or((0, 0), |g| g.cell_px)
+        self.shown_geometry(cx).map_or((0, 0), |g| g.cell_px)
     }
 
-    /// Hands each pane its images; a pane herdr shows none on loses its own.
-    // ponytail: a pane made after the last scene waits for herdr's next one
-    pub(super) fn show_images(&mut self, mut images: crate::herdr::graphics::PaneImages, cx: &mut Context<Self>) {
+    /// Hands each pane its images (a pane made later gets them as it is made); a pane herdr shows none on loses
+    /// its own, freed from the window's atlas at the next render.
+    pub(super) fn show_images(&mut self, images: crate::herdr::graphics::PaneImages, cx: &mut Context<Self>) {
         for (id, pane) in &self.panes {
-            let mine = images.remove(id).unwrap_or_default();
-            pane.update(cx, |pane, cx| pane.set_images(mine, cx));
+            let mine = images.get(id).cloned().unwrap_or_default();
+            let gone = pane.update(cx, |pane, cx| pane.set_images(mine, cx));
+            self.retired_images.extend(gone);
         }
+        self.pane_images = images;
+        cx.notify();
     }
 
     /// herdr gives a popup to the tab in its focus as the popup opens, and only a client shell on that tab gets it.
@@ -114,9 +118,12 @@ impl Shell {
         }
         if let Some((surface, _)) = &self.popup_surface {
             if !surface.focus_tab(&tab) {
-                return; // herdr's first surface is still to come: the next render tries again
+                return; // herdr's first surface is still to come: `Ready` renders again
             }
         } else if let Some(view) = &self.client_shell {
+            if !view.conn.ready() {
+                return;
+            }
             let (conn, id) = (view.conn.clone(), tab.clone());
             cx.background_executor().spawn(async move { conn.focus_tab(&id) }).detach();
         } else {

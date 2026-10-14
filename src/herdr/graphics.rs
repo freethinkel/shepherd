@@ -1,6 +1,7 @@
 //! herdr's Kitty graphics, as a client shell gets them ([`GraphicsScene`]). herdr's own terminal keeps the images and
 //! places, scrolls and clips them; Shepherd keeps the bytes herdr sends once, and per pane, the part of each image
-//! shown and the cells it covers. Decoding happens here, on the shell's reader thread.
+//! shown and the cells it covers. Decoding happens on a thread of its own ([`worker`]), so a large image does not hold
+//! up the shell's popup and commands.
 use super::wire::{AssetKey, GraphicsFormat, GraphicsPlacement, GraphicsScene, GraphicsSource, GraphicsTarget};
 use gpui::RenderImage;
 use std::collections::{HashMap, HashSet};
@@ -50,11 +51,11 @@ impl Graphics {
                 self.assets.insert(asset.key, Arc::new(image));
             }
         }
+        let kept: HashSet<&AssetKey> = scene.placements.iter().map(|p| &p.asset).chain(&scene.retained_assets).collect();
+        self.assets.retain(|key, _| kept.contains(key));
         if !fresh && scene.placements == self.placements {
             return None;
         }
-        let kept: HashSet<&AssetKey> = scene.placements.iter().map(|p| &p.asset).chain(&scene.retained_assets).collect();
-        self.assets.retain(|key, _| kept.contains(key));
         let mut cuts = HashMap::new();
         let mut panes = PaneImages::new();
         // ponytail: popup images are left out; the popup is replayed as cells
@@ -84,6 +85,21 @@ impl Graphics {
         self.placements = scene.placements;
         Some(panes)
     }
+}
+
+/// A thread that applies the scenes sent to it and hands `show` the images whenever they change; it ends when the
+/// sender is dropped or `show` returns false.
+pub fn worker(show: impl Fn(PaneImages) -> bool + Send + 'static) -> std::sync::mpsc::Sender<GraphicsScene> {
+    let (tx, rx) = std::sync::mpsc::channel::<GraphicsScene>();
+    std::thread::spawn(move || {
+        let mut graphics = Graphics::default();
+        for scene in rx {
+            if graphics.apply(scene).is_some_and(|images| !show(images)) {
+                return;
+            }
+        }
+    });
+    tx
 }
 
 /// herdr's image bytes as RGBA: raw RGB or RGBA at the key's size, or a PNG (herdr has inflated zlib already).
@@ -177,6 +193,10 @@ mod tests {
         assert!(Arc::ptr_eq(&moved["w:p"][0].image, &image.image));
         assert_eq!(moved["w:p"][0].y, 1);
 
+        // no longer retained, with nothing else changed: the bytes still go
+        g.apply(scene(vec![], vec![placed(&k, 4, 1, [1, 0, 2, 1])]));
+        assert!(g.assets.contains_key(&k));
+
         // deleted: the bytes go too, so a later placement of the key shows nothing until herdr sends them again
         assert!(g.apply(scene(vec![], vec![])).unwrap().is_empty());
         assert!(g.apply(scene(vec![], vec![placed(&k, 0, 0, [0, 0, 3, 1])])).unwrap().is_empty());
@@ -197,11 +217,14 @@ mod tests {
         assert_eq!(shown["w:b"].iter().map(|i| i.z).collect::<Vec<_>>(), [-1, 0], "under the text first");
         assert_eq!(shown["w:b"][1].image.as_bytes(0).unwrap(), [3, 2, 1, 4]);
 
-        // w:a's tab is hidden: herdr retains its image, so it shows again without the bytes
+        // w:a's tab is hidden: herdr retains its image, so it shows again without the bytes; once herdr lets it go,
+        // it goes even though nothing shown changed
         let hidden = g.apply(GraphicsScene { assets: vec![], placements: vec![], retained_assets: vec![a.clone()] }).unwrap();
         assert!(hidden.is_empty());
         let back = g.apply(GraphicsScene { assets: vec![], placements: vec![placed(&a, 0, 0, [0, 0, 2, 1])], retained_assets: vec![] });
         assert_eq!(back.unwrap()["w:a"].len(), 1);
+        g.apply(GraphicsScene { assets: vec![], placements: vec![], retained_assets: vec![a.clone()] });
+        assert!(g.apply(GraphicsScene::default()).is_none() && g.assets.is_empty());
     }
 
     #[test]

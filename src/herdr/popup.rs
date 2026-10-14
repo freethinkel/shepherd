@@ -21,6 +21,8 @@ pub enum Event {
     Commands(Vec<(String, Vec<String>)>),
     /// The images on the panes of the shell's tab, when they change (see [`super::graphics`]).
     Images(super::graphics::PaneImages),
+    /// herdr's first surface came: the shell can now make endpoint requests (`tab.focus`).
+    Ready,
 }
 
 /// The client shell's surface, which herdr lays its focused tab out at while no other client does: kept at
@@ -93,13 +95,16 @@ pub fn watch(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(Unbou
     let (tx, rx) = unbounded();
     std::thread::spawn(move || {
         let mut last = None;
-        let mut graphics = super::graphics::Graphics::default();
+        let images = tx.clone();
+        let scenes = super::graphics::worker(move |i| images.unbounded_send(Event::Images(i)).is_ok());
         loop {
             let mut events = Vec::new();
             match wire::read_message(&mut stream) {
                 Ok(Some(ServerMessage::PaneSurface(mut frame))) => {
-                    *boot_id.lock().unwrap() = std::mem::take(&mut frame.boot_id);
-                    events.extend(graphics.apply(std::mem::take(&mut frame.graphics)).map(Event::Images));
+                    if std::mem::replace(&mut *boot_id.lock().unwrap(), std::mem::take(&mut frame.boot_id)).is_empty() {
+                        events.push(Event::Ready);
+                    }
+                    let _ = scenes.send(std::mem::take(&mut frame.graphics));
                     let popup = frame.popup.as_ref().map(PopupSurface::from);
                     if popup != last {
                         last = popup;

@@ -471,11 +471,11 @@ impl gpui::Element for TerminalElement {
             for quad in prepaint.bg_quads.drain(..) {
                 window.paint_quad(quad);
             }
-            for quad in prepaint.sel_quads.drain(..) {
-                window.paint_quad(quad);
-            }
             for (bounds, image, _) in prepaint.images.iter().filter(|i| i.2) {
                 let _ = window.paint_image(*bounds, Default::default(), image.clone(), 0, false);
+            }
+            for quad in prepaint.sel_quads.drain(..) {
+                window.paint_quad(quad);
             }
             if prepaint.cursor_under_text {
                 if let Some(cursor) = prepaint.cursor.take() {

@@ -251,8 +251,27 @@ pub struct GraphicsScene {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GraphicsAsset {
     pub key: AssetKey,
-    // ponytail: decoded byte by byte (herdr writes it as bytes, the same layout); a bytes visitor if it ever shows
+    #[serde(deserialize_with = "bytes")]
     pub data: Vec<u8>,
+}
+
+/// herdr writes image bytes as one byte string (length, then the bytes: `Vec<u8>`'s layout), read at once here
+/// rather than byte by byte.
+fn bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    struct Bytes;
+    impl serde::de::Visitor<'_> for Bytes {
+        type Value = Vec<u8>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("image bytes")
+        }
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Vec<u8>, E> {
+            Ok(v.to_vec())
+        }
+        fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
+            Ok(v)
+        }
+    }
+    d.deserialize_bytes(Bytes)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
@@ -441,8 +460,21 @@ pub fn read_message(r: &mut impl Read) -> io::Result<Option<ServerMessage>> {
     }
     let mut payload = vec![0; len];
     r.read_exact(&mut payload)?;
-    Ok(bincode::serde::decode_from_slice(&payload, bincode::config::standard()).ok().map(|(msg, _)| msg))
+    match bincode::serde::decode_from_slice(&payload, bincode::config::standard()) {
+        Ok((msg, _)) => Ok(Some(msg)),
+        Err(e) => {
+            // a modelled message that does not decode: herdr's layout moved under the same protocol version
+            static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if payload.first().is_some_and(|&i| i <= LAST_MODELLED) && !TOLD.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("shepherd: herdr message {} does not decode, so it is skipped (another herdr version?): {e}", payload[0]);
+            }
+            Ok(None)
+        }
+    }
 }
+
+/// The index of [`ServerMessage`]'s last variant.
+const LAST_MODELLED: u8 = 20;
 
 #[cfg(test)]
 mod tests {
@@ -475,10 +507,25 @@ mod tests {
         assert_eq!(bytes(&ClientMessage::ClientShellHostTheme { update }), [17, 2, 1]);
     }
 
+    /// herdr's scene as bincode lays it out: enum variants as varint indices, the image bytes as length + bytes.
+    #[test]
+    fn decodes_a_graphics_scene() {
+        let target = (0u32, "w:p");
+        let key = ((0u32, target, 7u32), 3u32, 1u32, 2u32, 4u64, 9u64);
+        let scene = (vec![(key, vec![1u8, 2, 3, 4])], Vec::<u8>::new(), Vec::<u8>::new());
+        let bytes = bincode::serde::encode_to_vec(scene, bincode::config::standard()).unwrap();
+        let (scene, _): (GraphicsScene, _) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+        let asset = &scene.assets[0];
+        assert_eq!(asset.data, [1, 2, 3, 4]);
+        assert_eq!((asset.key.image_width, asset.key.image_height, asset.key.format), (3, 1, GraphicsFormat::Png));
+        let GraphicsSource::Terminal { target: GraphicsTarget::Pane { pane_id }, image_id: 7 } = &asset.key.source else { panic!() };
+        assert_eq!(pane_id, "w:p");
+    }
+
     #[test]
     fn decodes_mouse_capture_and_skips_unmodelled_messages() {
         let mut framed = Vec::new();
-        for payload in [vec![8u8, 1, 0], vec![20u8, 0]] {
+        for payload in [vec![8u8, 1, 0], vec![21u8, 0]] {
             framed.extend((payload.len() as u32).to_le_bytes());
             framed.extend(payload);
         }

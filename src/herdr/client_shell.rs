@@ -140,6 +140,11 @@ impl ClientShell {
         let _ = rx.recv_timeout(Duration::from_secs(1));
     }
 
+    /// herdr's first surface came, so endpoint requests (`focus_tab`) can name its run.
+    pub fn ready(&self) -> bool {
+        !self.state.lock().unwrap().boot_id.is_empty()
+    }
+
     pub fn popup_input(&self, terminal_id: &str, events: Vec<PaneInput>) {
         self.send(&ClientMessage::ClientShellPopupInput { terminal_id: terminal_id.into(), events });
     }
@@ -173,7 +178,8 @@ impl Drop for ClientShell {
 
 fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<PopupEvent>) {
     let mut shown: Option<PopupSurface> = None;
-    let mut graphics = super::graphics::Graphics::default();
+    let images = tx.clone();
+    let scenes = super::graphics::worker(move |i| images.unbounded_send(PopupEvent::Images(i)).is_ok());
     loop {
         let message = match wire::read_message(&mut stream) {
             Ok(Some(message)) => message,
@@ -183,11 +189,12 @@ fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<Po
         match message {
             // ponytail: the whole surface is decoded for its popup; the panes' cells are dropped unread by Shepherd
             ServerMessage::PaneSurface(mut surface) => {
-                if let Some(images) = graphics.apply(std::mem::take(&mut surface.graphics)) {
-                    let _ = tx.unbounded_send(PopupEvent::Images(images));
-                }
+                let _ = scenes.send(std::mem::take(&mut surface.graphics));
                 let mut state = state.lock().unwrap();
                 let state = &mut *state;
+                if state.boot_id.is_empty() {
+                    let _ = tx.unbounded_send(PopupEvent::Ready);
+                }
                 state.boot_id.clone_from(&surface.boot_id);
                 let surface_popup = surface.popup.as_ref().map(PopupSurface::from);
                 if surface_popup != shown {

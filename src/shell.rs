@@ -165,6 +165,10 @@ pub struct Shell {
     popup_surface: Option<(crate::herdr::popup::Surface, ((u16, u16), (u32, u32)))>,
     /// The tab the window's client shell was last pointed at (`follow_shown_tab`).
     shell_tab: Option<String>,
+    /// herdr's Kitty images per pane, as last sent, for panes made after it.
+    pane_images: crate::herdr::graphics::PaneImages,
+    /// Images no pane shows any more: freed from the window's atlas at the next render (a hidden pane never renders).
+    retired_images: Vec<std::sync::Arc<gpui::RenderImage>>,
     /// PoC: the window's herdr client shell for theme, popup and commands (`SHEPHERD_CLIENT_SHELL=1`).
     client_shell: Option<client_shell::ShellView>,
     /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.
@@ -387,6 +391,8 @@ impl Shell {
                     popup_watch: gpui::Task::ready(()),
                     popup_surface: None,
                     shell_tab: None,
+                    pane_images: Default::default(),
+                    retired_images: Vec::new(),
                     client_shell: None,
                     herdr_commands: Vec::new(),
                     command_panes: Vec::new(),
@@ -606,6 +612,13 @@ impl Shell {
             let _ = this.update(cx, |shell, cx| then(shell, result, cx));
         })
         .detach();
+    }
+
+    /// Where a pane of the tab shown landed: its cell metrics are the window's now (a hidden pane keeps those of
+    /// the scale or font it was last drawn at).
+    fn shown_geometry(&self, cx: &App) -> Option<crate::terminal::pane::GridGeometry> {
+        let (snapshot, tab) = (self.snapshot.as_ref()?, self.shown_tab()?);
+        snapshot.panes.iter().filter(|p| p.tab_id == tab.tab_id).find_map(|p| self.panes.get(&p.pane_id)?.read(cx).geometry())
     }
 
     fn shown_tab(&self) -> Option<crate::model::Tab> {
@@ -967,6 +980,9 @@ fn save_from_sidebar(cx: &mut App, change: impl FnOnce(&mut crate::settings::Set
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for image in self.retired_images.drain(..) {
+            let _ = window.drop_image(image);
+        }
         self.sync_badge(window, cx);
         self.mark_seen(window, cx);
         // any Shepherd window in front, not this one: a window in the back renders too
@@ -1016,6 +1032,9 @@ impl Render for Shell {
         if let Some(snapshot) = &snapshot {
             remember_shown(&mut self.recent_panes, &shown, |id| snapshot.panes.iter().any(|p| p.pane_id == id));
         }
+        for (_, pane) in self.panes.iter().filter(|(id, _)| !self.recent_panes.contains(id)) {
+            self.retired_images.extend(pane.update(cx, |pane, cx| pane.set_images(Vec::new(), cx)));
+        }
         prune(&mut self.panes, &mut self.focused, &self.recent_panes, |_| false);
         if std::mem::take(&mut self.popup_closed) && !self.panes.values().any(|p| p.read(cx).focus_handle(cx).is_focused(window)) {
             self.focused = None;
@@ -1024,7 +1043,12 @@ impl Render for Shell {
         for f in &shown {
             if !self.panes.contains_key(&f.pane_id) {
                 let id = f.pane_id.clone();
-                self.panes.insert(id.clone(), cx.new(|cx| PaneTerminal::new(id, cx)));
+                let images = self.pane_images.get(&id).cloned().unwrap_or_default();
+                self.panes.insert(id.clone(), cx.new(|cx| {
+                    let mut pane = PaneTerminal::new(id, cx);
+                    pane.set_images(images, cx);
+                    pane
+                }));
             }
             // an open panel keeps its input's focus; a panel run from the command panel opens before this render
             if f.focused && !overlaid && self.focused.as_deref() != Some(f.pane_id.as_str()) {

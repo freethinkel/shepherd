@@ -32,6 +32,7 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
                     Event::Popup(surface) => s.show_popup(surface, cx),
                     Event::Commands(commands) => s.herdr_commands = commands,
                     Event::Images(images) => s.show_images(images, cx),
+                    Event::Ready => cx.notify(), // `follow_shown_tab` waits for it
                 });
                 if alive.is_err() {
                     return;
@@ -55,7 +56,7 @@ impl Shell {
     /// The pane grid in cells, once a pane has measured its font.
     pub(super) fn grid_cells(&self, cx: &App) -> Option<(u16, u16)> {
         let bounds = self.grid_bounds.get()?;
-        let g = self.panes.values().find_map(|p| p.read(cx).geometry())?;
+        let g = self.shown_geometry(cx)?;
         Some(((f32::from(bounds.size.width) / g.cell_w) as u16, (f32::from(bounds.size.height) / g.line_h) as u16))
     }
 

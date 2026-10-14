@@ -62,6 +62,12 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                             }
                         }
                         s.agents_changed(&snapshot, cx);
+                        // herdr's focus moved (its TUI, another window, a command): Shepherd shows the same tab. Only a
+                        // move counts, so a snapshot taken before your own switch reached herdr does not undo it.
+                        let old = s.snapshot.as_ref().map(|o| o.focused_tab_id.as_deref());
+                        if let Some(tab) = moved_focus(old, snapshot.focused_tab_id.as_deref()) {
+                            s.selected_tab = Some(tab.into());
+                        }
                         snapshot.track(&mut s.since, Instant::now());
                         s.snapshot = Some(snapshot);
                         s.error = None;
@@ -98,5 +104,26 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                 });
             }
         }
+    }
+}
+
+/// herdr's focused tab when its focus moved since the last snapshot (`old`: none yet, or its focused tab).
+fn moved_focus<'a>(old: Option<Option<&str>>, new: Option<&'a str>) -> Option<&'a str> {
+    new.filter(|t| old.is_some_and(|o| o != Some(*t)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::moved_focus;
+
+    #[test]
+    fn follows_herdrs_focus_only_when_it_moves() {
+        assert_eq!(moved_focus(Some(Some("w1:t1")), Some("w1:t2")), Some("w1:t2"));
+        // unchanged: Shepherd's own choice stands (a snapshot from before its switch reached herdr)
+        assert_eq!(moved_focus(Some(Some("w1:t1")), Some("w1:t1")), None);
+        // the first snapshot: Shepherd's start-up tab stands
+        assert_eq!(moved_focus(None, Some("w1:t1")), None);
+        assert_eq!(moved_focus(Some(None), Some("w1:t1")), Some("w1:t1"));
+        assert_eq!(moved_focus(Some(Some("w1:t1")), None), None);
     }
 }
