@@ -59,6 +59,47 @@ fn herdr(args: &[&str]) -> anyhow::Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// The SSH target of the machine shown; `None` while a local session is.
+static SHOWN: Mutex<Option<String>> = Mutex::new(None);
+
+/// Marks a located directory as a machine's: `MARK target MARK path`.
+const MARK: char = '\u{1}';
+
+/// The machine shown from now on, by its SSH target; `None` for a local session.
+pub fn show_machine(target: Option<String>) {
+    *SHOWN.lock().unwrap() = target;
+}
+
+/// A directory of the place shown, as the rest of Shepherd keeps it: a machine's path is that machine's, and git
+/// reaches it over SSH.
+pub fn locate(path: &str) -> String {
+    match SHOWN.lock().unwrap().as_deref() {
+        Some(target) => format!("{MARK}{target}{MARK}{path}"),
+        None => path.to_string(),
+    }
+}
+
+/// A located directory's machine, by its SSH target (`None` here), and its path there.
+pub fn split(dir: &str) -> (Option<&str>, &str) {
+    dir.strip_prefix(MARK).and_then(|rest| rest.split_once(MARK)).map_or((None, dir), |(target, path)| (Some(target), path))
+}
+
+/// `git -C <path> <args>` for a located directory: here, or on its machine over the shared SSH connection.
+pub fn git(dir: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    match split(dir) {
+        (None, path) => Command::new("git").arg("-C").arg(path).args(args).stdin(Stdio::null()).output(),
+        (Some(target), path) => {
+            let words: Vec<String> = ["git", "-C", path].iter().chain(args).map(|w| quote(w)).collect();
+            Command::new("ssh").args(ssh_options()).arg("--").arg(target).arg(words.join(" ")).stdin(Stdio::null()).output()
+        }
+    }
+}
+
+/// `word` for the remote shell, as one argument.
+fn quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
 /// The relays running, by machine id, to their API socket.
 static RELAYS: Mutex<Option<HashMap<String, PathBuf>>> = Mutex::new(None);
 

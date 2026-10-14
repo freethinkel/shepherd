@@ -668,6 +668,59 @@ impl Shell {
                 );
             modal("remove-dialog", confirm, window, card)
         }))
+        .children(self.merge_confirm.as_ref().map(|confirm| {
+            let ask = &confirm.value;
+            let into = if ask.base.is_empty() { "its base branch".to_string() } else { ask.base.clone() };
+            let title = match (ask.auto, ask.gitlab) {
+                (true, _) => "Merge when the pipeline passes?",
+                (false, true) => "Merge merge request?",
+                (false, false) => "Merge pull request?",
+            };
+            let text = if ask.auto {
+                format!("{} goes into {into} once its pipeline passes.", ask.label)
+            } else {
+                format!("{} goes into {into}.", ask.label)
+            };
+            // a merge's options, each a switch
+            let option = |id: &'static str, label: &'static str, on: bool, flip: fn(&mut crate::shell::review::MergeAsk)| {
+                row(theme, false, id)
+                    .h(px(30.))
+                    .mx(px(-8.))
+                    .rounded(px(6.))
+                    .child(div().flex_1().child(label))
+                    .child(crate::ui::switch(theme, on, id))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if let Some(confirm) = this.merge_confirm.as_mut() {
+                            flip(&mut confirm.value);
+                        }
+                        cx.notify();
+                    }))
+            };
+            let card = dialog_card(theme, "merge-dialog", title)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_merge(false, cx)))
+                .child(div().mt(px(8.)).line_height(px(19.)).text_color(theme.text_muted).child(text))
+                .child(
+                    div()
+                        .mt(px(12.))
+                        .flex()
+                        .flex_col()
+                        .child(option("merge-squash", "Squash commits", ask.squash, |a| a.squash = !a.squash))
+                        .when(ask.gitlab, |el| el.child(option("merge-remove-branch", "Delete source branch", ask.remove_branch, |a| a.remove_branch = !a.remove_branch))),
+                )
+                .child(
+                    div()
+                        .mt(px(16.))
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(ghost_button(theme, "merge-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_merge(false, cx))))
+                        .child(
+                            solid_button("merge-confirm", if ask.auto { "Set auto-merge" } else { "Merge" }, theme.text, theme.surface)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.finish_merge(true, cx))),
+                        ),
+                );
+            modal("merge-dialog", confirm, window, card)
+        }))
         .children(self.tab_menu.as_ref().map(|menu| {
             let (id, at) = menu.value.clone();
             gpui::deferred(
@@ -753,6 +806,42 @@ impl Shell {
                     .position(menu.value)
                     .snap_to_window_with_margin(px(8.))
                     .child(crate::ui::menu_motion("usage-menu-in", menu, card)),
+            )
+            .with_priority(1)
+        }))
+        .children(self.statusbar_menu.as_ref().map(|menu| {
+            let show = SettingsGlobal::of(cx).settings.status_bar_show;
+            let parts: [(&'static str, &'static str, &'static str, fn(&mut crate::settings::StatusBarShow) -> &mut bool); 5] = [
+                ("statusbar-show-branch", "icons/git-branch.svg", "Branch", |s| &mut s.branch),
+                ("statusbar-show-pr", "icons/git-pull-request.svg", "Pull request", |s| &mut s.pull_request),
+                ("statusbar-show-folder", "icons/folder.svg", "Directory", |s| &mut s.folder),
+                ("statusbar-show-tokens", "icons/bot.svg", "Tokens", |s| &mut s.tokens),
+                ("statusbar-show-usage", "icons/clock-circle.svg", "Plan limits", |s| &mut s.usage),
+            ];
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::BottomLeft)
+                    .position(menu.value)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(crate::ui::menu_motion(
+                        "statusbar-menu-in",
+                        menu,
+                        menu_card(theme, "statusbar-menu", 200.)
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                if let Some(m) = this.statusbar_menu.as_mut() { m.close() }
+                                cx.notify();
+                            }))
+                            .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child("SHOW"))
+                            .children(parts.map(|(id, icon, label, part)| {
+                                let mut shown = show;
+                                menu_choice(theme, id, icon, label, *part(&mut shown)).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                    save_from_sidebar(cx, |s| {
+                                        let on = part(&mut s.status_bar_show);
+                                        *on = !*on;
+                                    })
+                                }))
+                            })),
+                    )),
             )
             .with_priority(1)
         }))

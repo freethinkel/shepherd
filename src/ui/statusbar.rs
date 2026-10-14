@@ -133,10 +133,11 @@ pub(crate) fn tool(name: &str) -> String {
     ["/opt/homebrew/bin", "/usr/local/bin"].into_iter().map(|d| format!("{d}/{name}")).find(|p| Path::new(p).is_file()).unwrap_or(name.into())
 }
 
-/// The directory `pane_id` of `snapshot` shows: its foreground process's, else its shell's.
+/// The directory `pane_id` of `snapshot` shows: its foreground process's, else its shell's; located (a machine's
+/// is marked so, see `herdr::locate`).
 pub fn pane_dir(snapshot: Option<&Snapshot>, pane_id: Option<&str>) -> Option<String> {
     let pane = snapshot?.panes.iter().find(|p| Some(p.pane_id.as_str()) == pane_id)?;
-    pane.foreground_cwd.clone().or_else(|| pane.cwd.clone()).filter(|d| !d.is_empty())
+    pane.foreground_cwd.as_deref().or(pane.cwd.as_deref()).filter(|d| !d.is_empty()).map(crate::herdr::locate)
 }
 
 /// `dir`'s cached branch, if git has been asked already.
@@ -159,16 +160,14 @@ pub fn refresh_git(dir: &str, cx: &mut App) {
 
 /// `dir`'s local branches, newest commit first.
 pub fn read_branches(dir: &str) -> String {
-    std::process::Command::new("git")
-        .args(["-C", dir, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"])
-        .output()
+    crate::herdr::git(dir, &["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads"])
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
 }
 
 /// `git switch branch` in `dir`; git's complaint on failure.
 pub fn switch_branch(dir: &str, branch: &str) -> Result<(), String> {
-    let out = std::process::Command::new("git").args(["-C", dir, "switch", branch]).output().map_err(|e| e.to_string())?;
+    let out = crate::herdr::git(dir, &["switch", branch]).map_err(|e| e.to_string())?;
     match out.status.success() {
         true => Ok(()),
         false => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
@@ -177,10 +176,7 @@ pub fn switch_branch(dir: &str, branch: &str) -> Result<(), String> {
 
 fn read_git(dir: &str) -> Option<Git> {
     // --no-optional-locks: never take index.lock from under the agents' own git.
-    let out = std::process::Command::new("git")
-        .args(["--no-optional-locks", "-C", dir, "status", "--porcelain=v2", "--branch"])
-        .output()
-        .ok()?;
+    let out = crate::herdr::git(dir, &["--no-optional-locks", "status", "--porcelain=v2", "--branch"]).ok()?;
     parse_git(&String::from_utf8_lossy(&out.stdout))
 }
 
@@ -197,7 +193,7 @@ pub fn parse_shortstat(out: &str) -> (u32, u32) {
 /// merged the branch both move it up. `None` without any of them.
 fn read_changes(dir: &str) -> Option<(u32, u32)> {
     let git = |args: &[&str]| {
-        let out = std::process::Command::new("git").args(["--no-optional-locks", "-C", dir]).args(args).output().ok()?;
+        let out = crate::herdr::git(dir, &[&["--no-optional-locks"][..], args].concat()).ok()?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
     let remote = git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).unwrap_or_default();
@@ -239,17 +235,17 @@ pub fn parse_pr(json: &str) -> Option<Pr> {
 /// without either tool, its login, or one.
 fn read_pr(key: &str) -> Option<Pr> {
     let (dir, branch) = key.split_once('\n')?;
-    let ask = |bin: String, args: &[&str]| {
-        let out = std::process::Command::new(bin).args(args).current_dir(dir).stdin(std::process::Stdio::null()).output().ok();
+    let ask = |bin: &str, args: &[&str]| {
+        let out = crate::ui::review::cli(bin, args, dir).ok();
         let stderr = out.as_ref().map(|o| String::from_utf8_lossy(&o.stderr).into_owned()).unwrap_or_default();
         (out.and_then(|o| parse_pr(&String::from_utf8_lossy(&o.stdout))), stderr)
     };
-    let (pr, stderr) = ask(tool("gh"), &["pr", "view", branch, "--json", "number,url,state,isDraft"]);
+    let (pr, stderr) = ask("gh", &["pr", "view", branch, "--json", "number,url,state,isDraft"]);
     // gh found the repo on GitHub and the branch has no PR: no need to ask GitLab
     if pr.is_some() || stderr.contains("no pull requests found") {
         return pr;
     }
-    ask(tool("glab"), &["mr", "view", branch, "-F", "json"]).0
+    ask("glab", &["mr", "view", branch, "-F", "json"]).0
 }
 
 /// The cached PR or MR of the branch checked out at `dir`, asked again after its TTL while `active` (the window is
@@ -633,10 +629,13 @@ pub enum Item {
 
 /// The bar for the pane `pane_id` of `snapshot`. `on_branch`, `on_spent` and `on_usage` run on a click on
 /// the branch, the spend and the limits (the last two with the label's bounds); `open` is the one whose popup is up.
-/// `on_review` runs on the review panel's toggle at the bar's right end, lit while `review_open`.
+/// `on_review` runs on a click on the PR or MR (from `review`, with its CI's icon), which toggles the review panel
+/// and is lit while `review_open`. `show` hides labels.
 pub fn bar(
+    show: crate::settings::StatusBarShow,
     snapshot: Option<&Snapshot>,
     pane_id: Option<&str>,
+    review: Option<&crate::ui::review::Review>,
     theme: &Theme,
     open: Option<Item>,
     review_open: bool,
@@ -644,12 +643,13 @@ pub fn bar(
     on_spent: impl Fn(&gpui::Bounds<gpui::Pixels>, &mut Window, &mut App) + 'static,
     on_usage: impl Fn(&gpui::Bounds<gpui::Pixels>, &mut Window, &mut App) + 'static,
     on_review: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    window: &mut Window,
     cx: &mut App,
 ) -> gpui::AnyElement {
     let pane = snapshot.zip(pane_id).and_then(|(s, id)| s.panes.iter().find(|p| p.pane_id == id));
     let dir = pane_dir(snapshot, pane_id);
-    let git = dir.as_deref().and_then(|d| cached(d, GIT_TTL, read_git, cx));
-    let usage = cached("", USAGE_TTL, read_usage, cx);
+    let git = dir.as_deref().filter(|_| show.branch).and_then(|d| cached(d, GIT_TTL, read_git, cx));
+    let usage = show.usage.then(|| cached("", USAGE_TTL, read_usage, cx)).flatten();
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let muted = theme.text_muted.opacity(0.7);
     div()
@@ -669,26 +669,33 @@ pub fn bar(
                 .flex_shrink_0()
                 .max_w(px(220.))
                 .child(div().min_w_0().truncate().child(g.branch))
-                .when(g.dirty, |el| el.child(div().flex_none().text_color(theme.warning).child("●")))
                 .when(g.ahead > 0, |el| el.child(div().flex_none().child(format!("↑{}", g.ahead))))
                 .when(g.behind > 0, |el| el.child(div().flex_none().child(format!("↓{}", g.behind))))
                 .on_click(on_branch)
         }))
-        .children(dir.as_deref().and_then(|d| pr_of(d, cx.active_window().is_some(), cx)).map(|pr| {
+        .children(review.filter(|_| show.pull_request).and_then(|r| match r {
+            crate::ui::review::Review::Found { request: Some(req), .. } => Some((req.pr.clone(), r.ci())),
+            _ => None,
+        }).map(|(pr, ci)| {
             let number = format!("{}{}", if pr.gitlab { "!" } else { "#" }, pr.number);
-            link(label(theme, "icons/git-pull-request.svg").id("statusbar-pr"), theme, false)
+            link(label(theme, "icons/git-pull-request.svg").id("statusbar-pr"), theme, review_open)
                 .flex_shrink_0()
+                .tooltip(crate::shell::tip("Toggle pull request panel", Some("ToggleReview")))
                 .child(number)
                 .when(pr.state != "open", |el| el.child(div().text_color(theme.text_faint).child(pr.state)))
-                .on_click(move |_, _, cx| cx.open_url(&pr.url))
+                .children(ci.map(|state| crate::ui::review::check_icon(theme, state, 12., window)))
+                .on_click(on_review)
         }))
-        .children(dir.map(|d| {
-            let short = short_path(&d, home.as_deref());
+        .children(dir.filter(|_| show.folder).map(|d| {
+            // a machine's folder is not this Mac's to open
+            let (machine, path) = crate::herdr::split(&d);
+            let short = if machine.is_some() { short_path(path, None) } else { short_path(path, home.as_deref()) };
+            let local = machine.is_none().then(|| path.to_string());
             link(label(theme, "icons/folder.svg").id("statusbar-cwd"), theme, false)
                 .child(div().min_w_0().truncate().child(short))
-                .on_click(move |_, _, cx| cx.open_with_system(Path::new(&d)))
+                .when_some(local, |el, d| el.on_click(move |_, _, cx| cx.open_with_system(Path::new(&d))))
         }))
-        .children(pane.and_then(|p| spent_of(p, cx)).map(|s| {
+        .children(pane.filter(|_| show.tokens).and_then(|p| spent_of(p, cx)).map(|s| {
             on_click_at(link(div().id("statusbar-spent").flex_none().flex().items_center().px(px(6.)), theme, open == Some(Item::Spent)), on_spent)
                 .child(format!("{} tok", short_count(s.total())))
         }))
@@ -700,12 +707,6 @@ pub fn bar(
                 .child(donut(u.five_hour, theme.text.opacity(0.2), color))
                 .child(format!("{}%", u.five_hour.round()))
         }))
-        .child(
-            link(div().id("statusbar-review").flex_none().flex().items_center().px(px(6.)), theme, review_open)
-                .tooltip(crate::shell::tip("Toggle pull request panel", Some("ToggleReview")))
-                .child(gpui::svg().path("icons/sidebar-minimalistic-right.svg").size(px(12.)).text_color(if review_open { theme.text } else { muted }))
-                .on_click(on_review),
-        )
         .into_any_element()
 }
 

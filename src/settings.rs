@@ -45,6 +45,8 @@ pub struct Settings {
     pub show_agents: bool,
     /// The bottom status bar; General settings hide it.
     pub show_status_bar: bool,
+    /// Which of its labels the status bar shows: its right-click menu.
+    pub status_bar_show: StatusBarShow,
     /// What a workspace row shows besides its name: the sidebar `…` menu's Show.
     pub workspace_show: WorkspaceShow,
     /// Shorter workspace rows.
@@ -100,6 +102,25 @@ pub struct WorkspaceShow {
 impl Default for WorkspaceShow {
     fn default() -> Self {
         WorkspaceShow { icon: true, branch: true, changes: true, pull_request: true, status: true }
+    }
+}
+
+/// The status bar's labels that can be hidden; all shown by default.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatusBarShow {
+    pub branch: bool,
+    pub pull_request: bool,
+    pub folder: bool,
+    /// The shown agent's token spend.
+    pub tokens: bool,
+    /// Claude's plan limits.
+    pub usage: bool,
+}
+
+impl Default for StatusBarShow {
+    fn default() -> Self {
+        StatusBarShow { branch: true, pull_request: true, folder: true, tokens: true, usage: true }
     }
 }
 
@@ -169,6 +190,7 @@ impl Default for Settings {
             agent_sort: AgentSort::default(),
             show_agents: true,
             show_status_bar: true,
+            status_bar_show: StatusBarShow::default(),
             workspace_show: WorkspaceShow::default(),
             compact_workspaces: false,
             compact_agents: false,

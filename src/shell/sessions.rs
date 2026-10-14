@@ -185,6 +185,7 @@ impl Shell {
         // ponytail: `herdr machine list` only reads herdr's catalog, so launch waits on it briefly
         let Some(machine) = crate::herdr::machines().ok().and_then(|l| l.into_iter().find(|m| m.id == id)) else { return };
         if crate::herdr::relay(&machine, &self.rt).is_ok() {
+            crate::herdr::show_machine(Some(machine.target.clone()));
             self.machine_label = Some(machine.label);
         }
     }
@@ -514,6 +515,7 @@ impl Shell {
         match crate::herdr::relay(&machine, &self.rt) {
             Ok(socket) => {
                 self.move_to(Some(socket.to_string_lossy().into_owned()), Some(machine.id), cx);
+                crate::herdr::show_machine(Some(machine.target.clone()));
                 self.machine_label = Some(machine.label);
             }
             Err(e) => crate::ui::toast::error(cx, format!("Couldn't reach {}: {e:#}", machine.label)),
@@ -530,6 +532,7 @@ impl Shell {
             s.herdr_machine = machine.clone();
         });
         crate::herdr::set_socket(socket.clone()); // also when the settings could not be saved
+        crate::herdr::show_machine(None); // a machine's switch names it right after
         self.machine_label = None;
         self.client = socket.map_or_else(Client::local, |p| Client::at(p.into()));
         let key = match &machine {

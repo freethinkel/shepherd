@@ -234,9 +234,9 @@ impl Shell {
                             let editing = self.rename_field(&rename_target, cx);
                             let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
                             // a workspace herdr knows no worktree of lives where its panes were opened
-                            let dir = w.worktree.as_ref().map(|t| t.checkout_path.clone()).filter(|d| !d.is_empty()).or_else(|| {
-                                snapshot.as_ref()?.panes.iter().find(|p| p.workspace_id == w.workspace_id)?.cwd.clone()
-                            });
+                            let dir = w.worktree.as_ref().map(|t| t.checkout_path.as_str()).filter(|d| !d.is_empty()).or_else(|| {
+                                snapshot.as_ref()?.panes.iter().find(|p| p.workspace_id == w.workspace_id)?.cwd.as_deref()
+                            }).map(crate::herdr::locate);
                             let git = dir.as_deref().filter(|_| show.branch).and_then(|d| crate::ui::statusbar::git_of(d, cx));
                             // herdr's commits ahead of and behind the upstream, also on a compact row
                             let sync = git.as_ref().filter(|g| g.ahead > 0 || g.behind > 0).map(|g| {

@@ -58,7 +58,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                             s.snapshot.as_ref().is_some_and(|old| old.workspaces.iter().any(|o| o.workspace_id == w.workspace_id && o.agent_status != w.agent_status))
                         }) {
                             if let Some(t) = &w.worktree {
-                                crate::ui::statusbar::refresh_changes(&t.checkout_path, cx);
+                                crate::ui::statusbar::refresh_changes(&crate::herdr::locate(&t.checkout_path), cx);
                             }
                         }
                         s.agents_changed(&snapshot, cx);

@@ -108,9 +108,24 @@ pub struct Shell {
     review_width: f32,
     /// The review panel's edge is being dragged.
     review_drag: bool,
-    /// The branch the review panel shows (its key), while its checks run and the window is key: asked again
-    /// every `REVIEW_POLL`.
+    /// The shown branch (its review's key), while its checks run: asked again every `REVIEW_POLL`.
     review_poll: Option<String>,
+    /// The shown branch's key at the last render and whether its checks ran: when they stop, CI finished.
+    review_last: Option<(String, bool)>,
+    /// The CLI calls the review panel's buttons started and that have not finished, by `Check::command`.
+    review_acting: std::collections::HashSet<String>,
+    /// The pipeline (or workflow) the review panel pages to, picked for a branch's review (its key); else it opens
+    /// on `default_page`.
+    review_page: Option<(String, String)>,
+    /// A two-finger swipe over the review panel's checks in progress: whether it goes across (decided by its first
+    /// clear movement) and how far the fingers have moved.
+    review_swipe: Option<(Option<bool>, f32)>,
+    /// The checks springing home from this offset since then, after a page change, beside the page they left.
+    review_spring: Option<(f32, Instant, Option<String>)>,
+    /// The job whose log the review panel shows under it, for a branch's review (its key).
+    review_log: Option<(String, String)>,
+    /// Asks before the review panel's Merge.
+    merge_confirm: Option<crate::ui::Popup<review::MergeAsk>>,
     /// The review panel shows the whole description, not its first lines.
     review_expanded: bool,
     /// The description's whole height at the last paint: whether it has more than its folded lines.
@@ -151,6 +166,8 @@ pub struct Shell {
     spent_by_tokens: bool,
     /// The status bar's limits popup, at its anchor.
     usage_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
+    /// The status bar's right-click menu of its labels, where it was clicked.
+    statusbar_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     agents_scroll: gpui::ScrollHandle,
     tab_bar: tab_bar::TabBar,
     /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
@@ -369,6 +386,13 @@ impl Shell {
                     review_width: SettingsGlobal::of(cx).settings.review_width,
                     review_drag: false,
                     review_poll: None,
+                    review_last: None,
+                    review_acting: Default::default(),
+                    merge_confirm: None,
+                    review_log: None,
+                    review_page: None,
+                    review_swipe: None,
+                    review_spring: None,
                     review_expanded: false,
                     review_body_h: Default::default(),
                     agent_sort: SettingsGlobal::of(cx).settings.agent_sort,
@@ -383,6 +407,7 @@ impl Shell {
                     pane_menu: None,
                     spent_menu: None,
                     usage_menu: None,
+                    statusbar_menu: None,
                     spent_by_tokens: false,
                     tab_menu: None,
                     worktree_dialog: None,
@@ -792,7 +817,12 @@ impl Shell {
                         .env("HERDR_ACTIVE_WORKSPACE_ID", &p.workspace_id);
                 }
                 if let Some(dir) = crate::ui::statusbar::pane_dir(self.snapshot.as_ref(), pane_id.as_deref()) {
-                    sh.env("HERDR_ACTIVE_PANE_CWD", &dir).current_dir(dir);
+                    // a machine's directory is no place to run in here
+                    let (machine, path) = crate::herdr::split(&dir);
+                    sh.env("HERDR_ACTIVE_PANE_CWD", path);
+                    if machine.is_none() {
+                        sh.current_dir(path);
+                    }
                 }
                 match sh.spawn() {
                     Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
@@ -1002,9 +1032,11 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.pane_menu, window);
         crate::ui::reap_popup(&mut self.spent_menu, window);
         crate::ui::reap_popup(&mut self.usage_menu, window);
+        crate::ui::reap_popup(&mut self.statusbar_menu, window);
         crate::ui::reap_popup(&mut self.tab_menu, window);
         crate::ui::reap_popup(&mut self.worktree_dialog, window);
         crate::ui::reap_popup(&mut self.remove_confirm, window);
+        crate::ui::reap_popup(&mut self.merge_confirm, window);
         crate::ui::reap_popup(&mut self.session_dialog, window);
         crate::ui::reap_popup(&mut self.place_menu, window);
         crate::ui::reap_popup(&mut self.place_edit, window);
@@ -1199,7 +1231,9 @@ impl Render for Shell {
             .children(pane_drop)
             .children(floating);
 
-        let statusbar = SettingsGlobal::of(cx).settings.show_status_bar.then(|| {
+        let show_bar = SettingsGlobal::of(cx).settings.show_status_bar;
+        let shown = (show_bar || self.review_open).then(|| self.shown_review(snapshot.as_ref(), window, cx)).unwrap_or_default();
+        let statusbar = show_bar.then(|| {
             let pane = self.active_pane(window, cx);
             let on_branch = cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.toggle_command_panel(crate::ui::command_panel::Kind::Branches, window, cx)
@@ -1226,12 +1260,21 @@ impl Render for Shell {
                 self.usage_menu.as_ref().is_some_and(|m| m.is_open()).then_some(Item::Usage)
             };
             let on_review = cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_review(cx));
-            crate::ui::statusbar::bar(snapshot.as_ref(), pane.as_deref(), &theme, open, self.review_open, on_branch, on_spent, on_usage, on_review, cx)
+            let show = SettingsGlobal::of(cx).settings.status_bar_show;
+            div()
+                .flex_none()
+                .on_mouse_down(MouseButton::Right, cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    this.statusbar_menu = Some(crate::ui::Popup::new(e.position));
+                    cx.notify();
+                }))
+                .child(crate::ui::statusbar::bar(show, snapshot.as_ref(), pane.as_deref(), shown.review.as_ref(), &theme, open, self.review_open, on_branch, on_spent, on_usage, on_review, window, cx))
         });
         let spring_back = self.pane_spring_back(window);
         let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
         let on_page = settings_page.is_some();
-        let review = (self.review_open && !on_page).then(|| self.render_review(&theme, snapshot.as_ref(), window, cx));
+        // nothing to show outside a repo with a remote, and no PR label to close it from: it waits for one
+        let has_remote = shown.key.is_some() && !matches!(shown.review, Some(crate::ui::review::Review::NoRemote));
+        let review = (self.review_open && !on_page && has_remote).then(|| self.render_review(&theme, &shown, window, cx));
         let root = div()
             .id("root")
             .track_focus(&self.focus)
