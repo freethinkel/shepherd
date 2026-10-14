@@ -1,6 +1,9 @@
 //! The sidebar: its slide, resize and folds, and the agents list's height and sort.
 use super::*;
 
+/// How long the floating sidebar stays after the pointer leaves it.
+const PEEK_LINGER: Duration = Duration::from_millis(200);
+
 impl Shell {
     /// Folds or unfolds a worktree group, tweening from wherever its body is now.
     pub(super) fn toggle_fold(&mut self, id: &str, full: f32, cx: &mut Context<Self>) {
@@ -45,8 +48,49 @@ impl Shell {
         }
     }
 
+    /// The floating sidebar's slide this frame: 0 hidden, 1 shown.
+    pub(super) fn peek_now(&self) -> f32 {
+        self.sidebar_peek.map_or(0., FoldMotion::current)
+    }
+
+    /// The pointer came onto the window's left edge or the floating sidebar (`on`), or left them. It shows at once
+    /// and hides a moment after the pointer leaves, so crossing from the edge to the card doesn't flicker.
+    pub(super) fn hover_peek(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.peek_hovered = on;
+        if on {
+            self.set_peek(true, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PEEK_LINGER).await;
+            let _ = this.update(cx, |shell, cx| {
+                // ponytail: a sidebar menu holds it out; one closed with the pointer elsewhere leaves it out until
+                // the pointer passes over it again
+                let open = |m: Option<bool>| m.unwrap_or(false);
+                let menu = open(shell.ws_menu.as_ref().map(|m| m.is_open()))
+                    || open(shell.view_menu.as_ref().map(|m| m.is_open()))
+                    || open(shell.agents_menu.as_ref().map(|m| m.is_open()))
+                    || open(shell.place_menu.as_ref().map(|m| m.is_open()));
+                if !shell.peek_hovered && !menu {
+                    shell.set_peek(false, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn set_peek(&mut self, open: bool, cx: &mut Context<Self>) {
+        let to = if open { 1. } else { 0. };
+        if self.sidebar_peek.map_or(0., |m| m.to) == to {
+            return;
+        }
+        self.sidebar_peek = Some(FoldMotion { epoch: 0, from: self.peek_now(), to, started: Instant::now() });
+        cx.notify();
+    }
+
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let from = self.sidebar_now();
+        self.sidebar_peek = None;
         self.sidebar_edge = None;
         self.sidebar_open = !self.sidebar_open;
         let open = self.sidebar_open;

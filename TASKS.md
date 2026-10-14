@@ -1,9 +1,2 @@
-- [ ] Command panel.
-- [x] Maybe custom terminal glyph renderer
 - [ ] Make the tabs more fancy - rex
-- [x] Cursor color like accent color;
-- [x] Make the agent status circle bigger
-- [-] Drag and drop tabs and panes
-- [ ] Context menu - create worktree etc
-- [ ] Statusbar with useful data and icons
 - [ ] Check the herdr gpui

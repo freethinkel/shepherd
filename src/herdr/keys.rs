@@ -214,7 +214,7 @@ toggle_sidebar = "cmd+b"
         assert_eq!(chord(&binds, Bind::App("SplitRight")), ["ctrl-a %", "f12 %"]);
         assert_eq!(chord(&binds, Bind::App("NextTab")).len(), 3);
         assert!(chord(&binds, Bind::App("ClosePane")).is_empty(), "empty unbinds");
-        assert_eq!(chord(&binds, Bind::App("ToggleSidebar")), ["cmd-b"]);
+        assert_eq!(chord(&binds, Bind::App("ToggleSidebar")), [crate::bindings::normalize("cmd-b").unwrap()]);
     }
 
     #[test]

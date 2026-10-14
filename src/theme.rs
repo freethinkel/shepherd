@@ -146,10 +146,11 @@ fn ghostty_variant(name: &str, keys: &[(&str, &str)]) -> Option<ThemeVariant> {
     let (bg, fg) = (get("background")?, get("foreground")?);
     let mut ansi = [fg; 16];
     for (_, value) in keys.iter().filter(|(k, _)| *k == "palette") {
-        if let Some((i, c)) = value.split_once('=') {
-            if let (Ok(i), Ok(c)) = (i.trim().parse::<usize>(), c.trim().parse::<Color>()) {
-                if i < 16 { ansi[i] = c }
-            }
+        if let Some((i, c)) = value.split_once('=')
+            && let (Ok(i), Ok(c)) = (i.trim().parse::<usize>(), c.trim().parse::<Color>())
+            && i < 16
+        {
+            ansi[i] = c
         }
     }
     let dark = bg.best_on_color() == Color::WHITE;
@@ -285,9 +286,10 @@ impl Theme {
         }
     }
 
-    /// The window's own fill, translucent over the blurred desktop (Collie's `glass`).
+    /// The window's own fill, translucent over the blurred desktop (Collie's `glass`). Opaque off macOS, where the
+    /// window gets no blur: GNOME shows the windows behind it as they are.
     pub fn glass(&self) -> Hsla {
-        self.surface.opacity(0.80)
+        if cfg!(target_os = "macos") { self.surface.opacity(0.80) } else { self.surface }
     }
 }
 

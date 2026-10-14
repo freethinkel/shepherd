@@ -193,10 +193,10 @@ fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<Po
                     shown = surface_popup;
                     let _ = tx.unbounded_send(PopupEvent::Popup(shown.clone()));
                 }
-                if let (Some(popup), Some((id, view))) = (&surface.popup, &state.popup_view) {
-                    if &popup.terminal_id == id {
-                        send_popup(&mut state.popup_size, view, popup, state.defaults);
-                    }
+                if let (Some(popup), Some((id, view))) = (&surface.popup, &state.popup_view)
+                    && &popup.terminal_id == id
+                {
+                    send_popup(&mut state.popup_size, view, popup, state.defaults);
                 }
                 state.popup = surface.popup;
             }
@@ -324,10 +324,11 @@ pub fn key_event(key: &str, key_char: Option<&str>, mods: &gpui::Modifiers) -> O
         _ => {
             // Option chords macOS composed (Option+B → "∫") go as the text, as Ghostty does by default.
             let text = key_char.filter(|c| !c.is_empty());
-            if mods.alt && !mods.control {
-                if let Some(text) = text.filter(|t| *t != key) {
-                    return Some(PaneInput::TextCommit(text.into()));
-                }
+            if mods.alt
+                && !mods.control
+                && let Some(text) = text.filter(|t| *t != key)
+            {
+                return Some(PaneInput::TextCommit(text.into()));
             }
             let mut chars = key.chars();
             match (chars.next(), chars.next()) {

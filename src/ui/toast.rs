@@ -44,7 +44,7 @@ fn push(cx: &mut App, message: SharedString, error: bool, action: Option<Rc<dyn 
     cx.refresh_windows();
     cx.spawn(async move |cx| {
         cx.background_executor().timer(STAY).await;
-        let _ = cx.update(|cx| close(cx, serial));
+        cx.update(|cx| close(cx, serial));
     })
     .detach();
 }

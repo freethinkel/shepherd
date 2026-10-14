@@ -407,7 +407,7 @@ fn frac(area: &Rect, rect: &Rect) -> Option<Frac> {
 }
 
 /// The tree as sidebar groups: each top-level workspace with the worktrees nested under it.
-pub fn groups<'a>(tree: Vec<(&'a Workspace, Option<bool>)>) -> Vec<(&'a Workspace, Vec<&'a Workspace>)> {
+pub fn groups(tree: Vec<(&Workspace, Option<bool>)>) -> Vec<(&Workspace, Vec<&Workspace>)> {
     let mut out: Vec<(&Workspace, Vec<&Workspace>)> = Vec::new();
     for (w, nest) in tree {
         match (nest, out.last_mut()) {

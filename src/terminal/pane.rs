@@ -5,7 +5,7 @@
 use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement, cell_at};
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
 use super::find::{Link, find_all, hyperlink, link_at};
-use super::keys::{dropped_paths, keystroke_bytes, paste_bytes};
+use super::keys::{app_shortcut, dropped_paths, keystroke_bytes, link_modifier, paste_bytes, search_back};
 use crate::herdr::graphics::PaneImage;
 use crate::herdr::{Client, Mode, PaneInput, Session, SessionEvent};
 use crate::theme::Theme;
@@ -675,7 +675,7 @@ impl PaneTerminal {
                 let k = &e.keystroke;
                 match k.key.as_str() {
                     "escape" => pane.close_search(window, cx),
-                    "g" if k.modifiers.platform => pane.step(!k.modifiers.shift, cx),
+                    "g" if app_shortcut(&k.modifiers) => pane.step(!search_back(&k.modifiers), cx),
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -967,32 +967,31 @@ impl PaneTerminal {
             return;
         }
         let mods = &ks.modifiers;
-        if ks.key == "f" && mods.platform {
+        if ks.key == "f" && app_shortcut(mods) {
             self.open_search(window, cx);
             cx.stop_propagation();
             return;
         }
-        if ks.key == "g" && mods.platform && self.search.is_some() {
-            self.step(!mods.shift, cx);
+        if ks.key == "g" && app_shortcut(mods) && self.search.is_some() {
+            self.step(!search_back(mods), cx);
             cx.stop_propagation();
             return;
         }
-        if ks.key == "v" && mods.platform {
-            match cx.read_from_clipboard() {
-                // ponytail: always bracketed; herdr's frames do not tell us whether the app asked for it.
-                Some(item) => match item.text() {
+        if ks.key == "v" && app_shortcut(mods) {
+            // ponytail: always bracketed; herdr's frames do not tell us whether the app asked for it.
+            if let Some(item) = cx.read_from_clipboard() {
+                match item.text() {
                     // the client shell brackets the paste as the app asked
                     Some(text) if self.session.as_ref().is_some_and(|s| s.shell_input(vec![PaneInput::Paste(text.to_string())])) => {}
                     Some(text) => self.input(&paste_bytes(&text, true), cx),
                     // an image: ctrl-v, the key agent TUIs (Claude Code, Codex) read the clipboard's image on
                     None => self.input(b"\x16", cx),
-                },
-                None => {}
+                }
             }
             cx.stop_propagation();
             return;
         }
-        if ks.key == "c" && mods.platform {
+        if ks.key == "c" && app_shortcut(mods) {
             if let Some(text) = self.emulator.selection_text() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 cx.stop_propagation();
@@ -1049,7 +1048,7 @@ impl PaneTerminal {
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         claim(cx);
-        if let Some((_, _, link)) = self.link_under(event.position).filter(|_| event.modifiers.platform) {
+        if let Some((_, _, link)) = self.link_under(event.position).filter(|_| link_modifier(&event.modifiers)) {
             self.open_link(link, cx);
             return;
         }
@@ -1075,7 +1074,7 @@ impl PaneTerminal {
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.pointer = Some(event.position);
         if !event.dragging() {
-            self.update_hover(event.modifiers.platform, cx);
+            self.update_hover(link_modifier(&event.modifiers), cx);
             return;
         }
         let Some(mut drag) = self.drag else { return };
@@ -1391,7 +1390,7 @@ impl Render for PaneTerminal {
             .on_action(cx.listener(|pane, _: &crate::bindings::FontSizeUp, window, cx| pane.zoom_key(ZOOM_STEP, window, cx)))
             .on_action(cx.listener(|pane, _: &crate::bindings::FontSizeDown, window, cx| pane.zoom_key(1. / ZOOM_STEP, window, cx)))
             .on_action(cx.listener(|pane, _: &crate::bindings::FontSizeReset, window, cx| pane.zoom_key(0., window, cx)))
-            .on_modifiers_changed(cx.listener(|pane, e: &ModifiersChangedEvent, _, cx| pane.update_hover(e.modifiers.platform, cx)))
+            .on_modifiers_changed(cx.listener(|pane, e: &ModifiersChangedEvent, _, cx| pane.update_hover(link_modifier(&e.modifiers), cx)))
             .when(self.hover.is_some(), |el| el.cursor_pointer())
             .child(TerminalElement::new(cx.entity(), focused))
             .child(crate::ui::scrollbar(SharedString::from(format!("scrollbar-{}", self.pane_id)), &self.scrollbar, &theme))

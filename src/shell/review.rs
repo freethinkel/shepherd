@@ -149,7 +149,9 @@ impl Shell {
         let header = div()
             .h(px(TITLEBAR_HEIGHT))
             .flex_none()
-            .px(px(12.))
+            .pl(px(12.))
+            // clear of the window's buttons, which sit over its right end off macOS
+            .pr(px(12. + WINDOW_CONTROLS_W))
             .flex()
             .items_center()
             .gap(px(6.))

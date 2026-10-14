@@ -1,6 +1,22 @@
 //! Keystroke and paste encoding, from Zeron's crates/ui/src/terminal/view.rs (MIT, see assets/NOTICE).
 use gpui::Modifiers;
 
+/// The terminal's own shortcuts (copy, paste, find): Cmd on macOS. Elsewhere Ctrl+Shift, as GNOME Terminal, kitty
+/// and Ghostty have it, since a terminal's Ctrl+letter belongs to the shell.
+pub fn app_shortcut(mods: &Modifiers) -> bool {
+    if cfg!(target_os = "macos") { mods.platform } else { mods.control && mods.shift && !mods.alt && !mods.platform }
+}
+
+/// Cmd+Shift+G steps the search back on macOS; elsewhere Shift is part of the shortcut, so it only goes forward.
+pub fn search_back(mods: &Modifiers) -> bool {
+    cfg!(target_os = "macos") && mods.shift
+}
+
+/// What turns a click into opening a link: Cmd on macOS, Ctrl elsewhere.
+pub fn link_modifier(mods: &Modifiers) -> bool {
+    if cfg!(target_os = "macos") { mods.platform } else { mods.control }
+}
+
 /// Encode a keystroke as PTY bytes. `None` means "not ours" — the event should
 /// fall through (e.g. the platform-primary shortcuts that drive app actions).
 ///

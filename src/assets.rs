@@ -103,6 +103,8 @@ impl gpui::AssetSource for Assets {
             "trash",
             "tuning",
             "widget",
+            "window-maximize",
+            "window-restore",
         ))
     }
 

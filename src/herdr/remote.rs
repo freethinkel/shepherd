@@ -197,10 +197,7 @@ fn bridge_command(session: &str, bridge: &str) -> String {
     )
 }
 
-/// Under Shepherd's caches: short enough for a socket path (104 bytes on macOS).
-fn cache_dir() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Caches/Shepherd")
-}
+use crate::settings::cache_dir;
 
 /// The first 12 characters of an id, for a short directory name.
 fn short(id: &str) -> String {

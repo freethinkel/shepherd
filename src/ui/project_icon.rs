@@ -52,7 +52,7 @@ fn remote_icon(dir: &str, target: &str, path: &str) -> Option<PathBuf> {
     }
     let ext = Path::new(&found).extension().and_then(|e| e.to_str()).unwrap_or("png");
     let name = format!("{:08x}.{ext}", fnv(&format!("{target}:{found}")));
-    let cache = PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/Shepherd/remote-icons");
+    let cache = crate::settings::cache_dir().join("remote-icons");
     let file = cache.join(name);
     if !file.is_file() {
         let out = crate::herdr::ssh(target, &format!("cat {}", crate::herdr::quote(&found))).ok()?;
@@ -83,7 +83,7 @@ fn github_owner(url: &str) -> Option<&str> {
 fn github_avatar(dir: &str) -> Option<PathBuf> {
     let out = crate::herdr::git(dir, &["remote", "get-url", "origin"]).ok()?;
     let owner = github_owner(&String::from_utf8_lossy(&out.stdout))?.to_string();
-    let dir = PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/Shepherd/avatars");
+    let dir = crate::settings::cache_dir().join("avatars");
     let path = dir.join(format!("{owner}.png"));
     if !path.is_file() {
         std::fs::create_dir_all(&dir).ok()?;

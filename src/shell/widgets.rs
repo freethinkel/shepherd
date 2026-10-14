@@ -278,6 +278,59 @@ pub(super) fn titlebar_button(theme: &Theme, id: &'static str, icon: &'static st
         .child(gpui::svg().path(icon).size(px(16.)).text_color(theme.text_muted))
 }
 
+/// Off macOS, the window's own buttons at the titlebar's right end, those the desktop offers: minimize, maximize (or
+/// restore) and close.
+pub(super) fn window_controls(theme: &Theme, window: &Window) -> Option<Div> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let offered = window.window_controls();
+    let maximize = if window.is_maximized() { "icons/window-restore.svg" } else { "icons/window-maximize.svg" };
+    let button = |id, icon| titlebar_button(theme, id, icon).size(px(28.));
+    Some(
+        div()
+            .absolute()
+            .top(px(TRAFFIC_LIGHTS_CENTER - 14.))
+            .right(px(8.))
+            .flex()
+            .gap(px(4.))
+            .when(offered.minimize, |el| el.child(button("window-minimize", "icons/minus.svg").on_click(|_, window, _| window.minimize_window())))
+            .when(offered.maximize, |el| el.child(button("window-maximize", maximize).on_click(|_, window, _| window.zoom_window())))
+            .child(button("window-close", "icons/close.svg").on_click(|_, window, _| window.remove_window())),
+    )
+}
+
+/// Off macOS the window draws its own frame, so its edges and corners resize it, until it's maximized or tiled.
+pub(super) fn resize_edges(window: &Window) -> Vec<Stateful<Div>> {
+    use gpui::{CursorStyle as C, ResizeEdge as E};
+    if cfg!(target_os = "macos") || window.is_maximized() {
+        return Vec::new();
+    }
+    const EDGE: f32 = 5.;
+    const CORNER: f32 = 12.;
+    let strip = |id: &'static str, edge: E, cursor: C| {
+        div()
+            .id(id)
+            .absolute()
+            .occlude()
+            .cursor(cursor)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                cx.stop_propagation();
+                window.start_window_resize(edge);
+            })
+    };
+    vec![
+        strip("resize-top", E::Top, C::ResizeUpDown).top_0().left(px(CORNER)).right(px(CORNER)).h(px(EDGE)),
+        strip("resize-bottom", E::Bottom, C::ResizeUpDown).bottom_0().left(px(CORNER)).right(px(CORNER)).h(px(EDGE)),
+        strip("resize-left", E::Left, C::ResizeLeftRight).left_0().top(px(CORNER)).bottom(px(CORNER)).w(px(EDGE)),
+        strip("resize-right", E::Right, C::ResizeLeftRight).right_0().top(px(CORNER)).bottom(px(CORNER)).w(px(EDGE)),
+        strip("resize-top-left", E::TopLeft, C::ResizeUpLeftDownRight).top_0().left_0().size(px(CORNER)),
+        strip("resize-top-right", E::TopRight, C::ResizeUpRightDownLeft).top_0().right_0().size(px(CORNER)),
+        strip("resize-bottom-left", E::BottomLeft, C::ResizeUpRightDownLeft).bottom_0().left_0().size(px(CORNER)),
+        strip("resize-bottom-right", E::BottomRight, C::ResizeUpLeftDownRight).bottom_0().right_0().size(px(CORNER)),
+    ]
+}
+
 /// A 14 px spinner turning once every 900 ms.
 pub(super) fn spinner(theme: &Theme, id: String) -> impl IntoElement {
     gpui::svg()

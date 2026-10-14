@@ -53,9 +53,11 @@ app_actions! {
     ToggleSecureInput: "Secure keyboard entry",
     CommandPanel: "Command panel",
     AgentsPanel: "Agents",
+    WorkspacesPanel: "Workspaces",
     Quit: "Quit",
 }
 
+#[cfg(target_os = "macos")]
 pub const DEFAULTS: &[(&str, &str)] = &[
     ("NewTab", "cmd-t"),
     ("CloseTab", "cmd-shift-w"),
@@ -92,6 +94,46 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("CommandPanel", "cmd-shift-p"),
     ("AgentsPanel", "cmd-shift-a"),
     ("Quit", "cmd-q"),
+];
+
+/// Off macOS: Ghostty's Linux defaults where it has one. A terminal's Ctrl+letter belongs to the shell, so the app's
+/// chords take Ctrl+Shift, and Super belongs to the desktop.
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULTS: &[(&str, &str)] = &[
+    ("NewTab", "ctrl-shift-t"),
+    ("CloseTab", "ctrl-alt-w"),
+    ("NewWorkspace", "ctrl-shift-n"),
+    ("SplitRight", "ctrl-shift-o"),
+    ("SplitDown", "ctrl-shift-e"),
+    ("ClosePane", "ctrl-shift-w"),
+    ("FocusLeft", "ctrl-alt-left"),
+    ("FocusRight", "ctrl-alt-right"),
+    ("FocusUp", "ctrl-alt-up"),
+    ("FocusDown", "ctrl-alt-down"),
+    ("ToggleZoom", "ctrl-shift-enter"),
+    ("Tab1", "alt-1"),
+    ("Tab2", "alt-2"),
+    ("Tab3", "alt-3"),
+    ("Tab4", "alt-4"),
+    ("Tab5", "alt-5"),
+    ("Tab6", "alt-6"),
+    ("Tab7", "alt-7"),
+    ("Tab8", "alt-8"),
+    ("Tab9", "alt-9"),
+    ("PreviousTab", "ctrl-pageup"),
+    ("NextTab", "ctrl-pagedown"),
+    ("PreviousWorkspace", "ctrl-shift-pageup"),
+    ("NextWorkspace", "ctrl-shift-pagedown"),
+    ("ToggleSidebar", "ctrl-shift-b"),
+    ("ToggleReview", "ctrl-alt-b"),
+    ("FontSizeUp", "ctrl-="),
+    ("FontSizeUp", "ctrl-+"),
+    ("FontSizeDown", "ctrl--"),
+    ("FontSizeReset", "ctrl-0"),
+    ("OpenSettings", "ctrl-,"),
+    ("CommandPanel", "ctrl-shift-p"),
+    ("AgentsPanel", "ctrl-shift-a"),
+    ("Quit", "ctrl-shift-q"),
 ];
 
 fn known(action: &str) -> bool {
@@ -192,6 +234,7 @@ fn menus(secure_input: bool) -> Vec<gpui::Menu> {
             I::separator(),
             I::action("Command Panel", CommandPanel),
             I::action("Agents", AgentsPanel),
+            I::action("Workspaces", WorkspacesPanel),
             I::separator(),
             I::action("Enter Full Screen", ToggleFullScreen),
         ]),
@@ -286,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn defaults_when_the_user_set_nothing() {
         let eff = effective(&user(&[]));
         assert_eq!(chord(&eff, "SplitRight"), Some("cmd-d"));
@@ -294,15 +338,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn defaults_when_the_user_set_nothing() {
+        let eff = effective(&user(&[]));
+        assert_eq!(chord(&eff, "SplitRight"), Some("ctrl-shift-o"));
+        assert_eq!(chord(&eff, "NewTab"), Some("ctrl-shift-t"));
+        assert_eq!(chord(&eff, "OpenSettings"), Some("ctrl-,"));
+    }
+
+    #[test]
     fn a_user_chord_replaces_the_default() {
         let eff = effective(&user(&[("SplitRight", "cmd-shift-right")]));
-        assert_eq!(chord(&eff, "SplitRight"), Some("cmd-shift-right"));
+        assert_eq!(chord(&eff, "SplitRight"), normalize("cmd-shift-right").as_deref());
     }
 
     #[test]
     fn rebinding_takes_the_chord_from_the_old_action() {
-        let eff = effective(&user(&[("NewTab", "cmd-d")]));
-        assert_eq!(chord(&eff, "NewTab"), Some("cmd-d"));
+        let split = DEFAULTS.iter().find(|(a, _)| *a == "SplitRight").unwrap().1;
+        let eff = effective(&user(&[("NewTab", split)]));
+        assert_eq!(chord(&eff, "NewTab"), normalize(split).as_deref());
         assert_eq!(chord(&eff, "SplitRight"), None, "two actions on one chord");
     }
 
@@ -320,8 +374,14 @@ mod tests {
 
     #[test]
     fn chords_written_differently_collide() {
-        // GPUI's unparse writes alt before cmd; the defaults say cmd-alt-left.
-        let eff = effective(&user(&[("NewTab", "alt-cmd-left")]));
+        // the default for FocusLeft (cmd-alt-left, or ctrl-alt-left) with its modifiers the other way round
+        let default = DEFAULTS.iter().find(|(a, _)| *a == "FocusLeft").unwrap().1;
+        let mut parts: Vec<&str> = default.split('-').collect();
+        let key = parts.pop().unwrap();
+        parts.reverse();
+        let swapped = format!("{}-{key}", parts.join("-"));
+        assert_ne!(swapped, default);
+        let eff = effective(&user(&[("NewTab", swapped.as_str())]));
         assert_eq!(chord(&eff, "FocusLeft"), None, "two actions on one chord");
         assert!(chord(&eff, "NewTab").is_some());
     }

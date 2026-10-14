@@ -91,6 +91,7 @@ impl Item {
 pub enum Kind {
     Commands,
     Agents,
+    Workspaces,
     Branches,
     Themes,
     Worktrees,
@@ -101,6 +102,7 @@ impl Kind {
         match self {
             Kind::Commands => "CommandPanel",
             Kind::Agents => "AgentsPanel",
+            Kind::Workspaces => "WorkspacesPanel",
             Kind::Branches => "", // opened from the status bar, no chord
             Kind::Worktrees => "", // opened from a workspace's menu, no chord
             Kind::Themes => "ChangeTheme",
@@ -139,6 +141,7 @@ fn action_icon(name: &str) -> &'static str {
         "ChangeTheme" => "icons/sun.svg",
         "ToggleSecureInput" => "icons/keyboard.svg",
         "AgentsPanel" => "icons/bot.svg",
+        "WorkspacesPanel" => "icons/folder.svg",
         "Quit" => "icons/logout-2.svg",
         _ => "icons/terminal.svg",
     }
@@ -174,6 +177,30 @@ pub(crate) fn agent_icon(agent: &str) -> &'static str {
 
 /// Every action but the panel's own (with its chord in `bindings`) and herdr's plugin actions as (id, title),
 /// then every workspace with a tab to show and every tab, in the sidebar's order.
+/// Every workspace in the sidebar's order, running the tab a click on its row shows: the workspaces panel, and a
+/// section of the command panel.
+pub fn workspace_items(snapshot: Option<&Snapshot>) -> Vec<Item> {
+    let Some(s) = snapshot else { return Vec::new() };
+    let busy = |status: AgentStatus| (!matches!(status, AgentStatus::Idle | AgentStatus::Unknown)).then_some(status);
+    s.workspace_tree()
+        .into_iter()
+        .filter_map(|(w, _)| {
+            let tab = w.active_tab_id.clone().or_else(|| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()))?;
+            let linked = w.worktree.as_ref().is_some_and(|t| t.is_linked_worktree);
+            Some(Item {
+                key: format!("workspace:{}", w.workspace_id),
+                section: Section::Workspaces,
+                icon: if linked { "icons/git-branch.svg" } else { "icons/folder.svg" },
+                label: w.label.clone(),
+                hint: None,
+                chord: None,
+                status: busy(w.agent_status),
+                run: Run::Tab(tab),
+            })
+        })
+        .collect()
+}
+
 pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)], plugin_actions: &[(String, String)]) -> Vec<Item> {
     let busy = |status: AgentStatus| (!matches!(status, AgentStatus::Idle | AgentStatus::Unknown)).then_some(status);
     let mut out: Vec<Item> = ACTIONS
@@ -201,25 +228,8 @@ pub fn items(snapshot: Option<&Snapshot>, bindings: &[(String, String)], plugin_
         run: Run::Herdr(crate::herdr::keys::HerdrCommand { kind: crate::herdr::keys::CommandKind::PluginAction, command: id.clone(), keys: Vec::new() }),
     }));
     let Some(s) = snapshot else { return out };
-    let workspaces: Vec<_> = s.workspace_tree().into_iter().map(|(w, _)| w).collect();
-    for w in &workspaces {
-        // the tab a click on its sidebar row shows
-        let tab = w.active_tab_id.clone().or_else(|| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
-        if let Some(tab) = tab {
-            let linked = w.worktree.as_ref().is_some_and(|t| t.is_linked_worktree);
-            out.push(Item {
-                key: format!("workspace:{}", w.workspace_id),
-                section: Section::Workspaces,
-                icon: if linked { "icons/git-branch.svg" } else { "icons/folder.svg" },
-                label: w.label.clone(),
-                hint: None,
-                chord: None,
-                status: busy(w.agent_status),
-                run: Run::Tab(tab),
-            });
-        }
-    }
-    for w in &workspaces {
+    out.extend(workspace_items(Some(s)));
+    for (w, _) in s.workspace_tree() {
         for t in s.tabs_of(&w.workspace_id) {
             out.push(Item {
                 key: format!("tab:{}", t.tab_id),
@@ -400,12 +410,11 @@ pub fn matched(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
                     _ => prev.map(|(s, j)| (s + bonus(i) - i as i32 + 1, j)),
                 };
             }
-            if k > 0 {
-                if let Some((s, _)) = best[k - 1][i] {
-                    if prev.is_none_or(|(p, _)| s + i as i32 > p) {
-                        prev = Some((s + i as i32, i));
-                    }
-                }
+            if k > 0
+                && let Some((s, _)) = best[k - 1][i]
+                && prev.is_none_or(|(p, _)| s + i as i32 > p)
+            {
+                prev = Some((s + i as i32, i));
             }
         }
         best.push(row);
@@ -458,8 +467,11 @@ fn highlighted(text: &str, query: &str, theme: &Theme) -> StyledText {
     StyledText::new(text.to_string()).with_highlights(ranges)
 }
 
-/// A keystroke the way the macOS menus write it: ⌃⌥⇧⌘ then the key.
+/// A keystroke the way the macOS menus write it: ⌃⌥⇧⌘ then the key. Elsewhere in words, as Settings shows it.
 pub(crate) fn glyphs(keystroke: &str) -> String {
+    if !cfg!(target_os = "macos") {
+        return crate::ui::settings::display_chord(keystroke);
+    }
     let Ok(k) = Keystroke::parse(keystroke) else { return keystroke.to_string() };
     let m = k.modifiers;
     let key = match k.key.as_str() {
@@ -509,12 +521,13 @@ impl Panel {
     pub fn new(kind: Kind, items: Vec<Item>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let items = match kind {
             Kind::Commands => with_recent(items, &crate::settings::SettingsGlobal::of(cx).settings.recent_commands),
-            Kind::Agents | Kind::Branches | Kind::Themes | Kind::Worktrees => items,
+            Kind::Agents | Kind::Workspaces | Kind::Branches | Kind::Themes | Kind::Worktrees => items,
         };
         let theme = Theme::of(cx).clone();
         let placeholder = match kind {
             Kind::Commands => "Search commands, workspaces and tabs",
             Kind::Agents => "Search agents",
+            Kind::Workspaces => "Go to workspace",
             Kind::Branches => "Switch branch",
             Kind::Themes => "Change theme",
             Kind::Worktrees => "Open worktree",
@@ -567,11 +580,15 @@ impl Panel {
         self.selected = (self.selected as isize + by).rem_euclid(n) as usize;
         // the list's children are the rows with a heading before each section; a section's first row brings its
         // heading into view too
-        let child = match self.headings() {
-            true => self.selected + (0..=self.selected).filter(|&r| self.starts_section(r)).count() - self.starts_section(self.selected) as usize,
-            false => self.selected,
+        let (child, heading) = match self.headings() {
+            true => {
+                let child = self.selected + (0..=self.selected).filter(|&r| self.starts_section(r)).count();
+                (child, child - self.starts_section(self.selected) as usize)
+            }
+            false => (self.selected, self.selected),
         };
-        self.scroll.scroll_to_item(child);
+        // a little clear of the list's edges
+        crate::ui::reveal(&self.scroll, heading..=child, 12.);
         cx.notify();
     }
 
@@ -652,6 +669,8 @@ impl Render for Panel {
                 Kind::Commands => ("No results", "Try a command, a workspace or a tab."),
                 Kind::Agents if self.items.is_empty() => ("No agents", "Agents herdr finds in your panes show up here."),
                 Kind::Agents => ("No results", "Try an agent's task or its workspace."),
+                Kind::Workspaces if self.items.is_empty() => ("No workspaces", "herdr's workspaces show up here."),
+                Kind::Workspaces => ("No results", "Try a workspace's name."),
                 Kind::Branches if self.items.is_empty() => ("No branches", "This pane isn't in a git repo."),
                 Kind::Branches => ("No results", "Try a branch name."),
                 Kind::Themes => ("No results", "Try a theme name."),
@@ -886,6 +905,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn chords_read_as_macos_writes_them() {
         assert_eq!(glyphs("cmd-shift-d"), "⇧⌘D");
         assert_eq!(glyphs("alt-cmd-left"), "⌥⌘←");

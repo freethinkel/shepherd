@@ -6,6 +6,7 @@ use serde_json::Value;
 
 /// What the panel shows for a branch.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // one per branch shown; boxing saves nothing
 pub enum Review {
     /// The PR or MR, if the branch has one, and its checks: a GitLab branch's pipeline (its page and own state)
     /// runs without an MR too.
@@ -872,7 +873,7 @@ fn tidy(block: &mut Block) {
         Block::Paragraph { runs } | Block::Heading { runs, .. } => tidy_runs(runs),
         Block::BlockQuote { children } => children.iter_mut().for_each(tidy),
         Block::List { items, .. } => items.iter_mut().flatten().for_each(tidy),
-        Block::Table { header, rows, .. } => header.iter_mut().chain(rows.iter_mut().flatten()).for_each(|cell| tidy_runs(cell)),
+        Block::Table { header, rows, .. } => header.iter_mut().chain(rows.iter_mut().flatten()).for_each(tidy_runs),
         Block::CodeBlock { .. } | Block::Rule => {}
     }
 }

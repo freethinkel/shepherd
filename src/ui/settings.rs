@@ -120,6 +120,11 @@ pub struct SettingsView {
     open_select: Option<crate::ui::Popup<&'static str>>,
     /// The filter at the top of a long select's list.
     select_search: Entity<InputState>,
+    /// The highlighted row of the open select, as an index into the rows shown; Enter picks it.
+    select_cursor: usize,
+    /// Holds the keyboard for a short select's list, which has no search field to.
+    select_focus: FocusHandle,
+    select_scroll: gpui::ScrollHandle,
     /// herdr's `config.toml` as last read or written, or why it could not be.
     herdr_config: Result<HerdrConfig, String>,
     /// Fields for `HERDR_FIELDS`, in order.
@@ -194,8 +199,12 @@ impl SettingsView {
             .collect();
 
         let select_search = field(None, "Search", window, cx);
-        let mut subscriptions = vec![cx.subscribe(&select_search, |_, _, event: &InputEvent, cx| {
+        let mut subscriptions = vec![cx.subscribe(&select_search, |v: &mut Self, search, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
+                // a query highlights its first match; the emptied field of an opening select keeps the current option
+                if !search.read(cx).value().trim().is_empty() {
+                    v.select_cursor = 0;
+                }
                 cx.notify()
             }
         })];
@@ -289,6 +298,9 @@ impl SettingsView {
             herdr_socket,
             open_select: None,
             select_search,
+            select_cursor: 0,
+            select_focus: cx.focus_handle(),
+            select_scroll: gpui::ScrollHandle::new(),
             herdr_config,
             herdr_fields,
             herdr_note: None,
@@ -441,11 +453,16 @@ impl SettingsView {
             .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(14.)).text_color(theme.text_muted))
             .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
                 v.open_select = Some(crate::ui::Popup::new(id));
+                // the list opens on the current option, all of them shown
+                v.select_cursor = current.unwrap_or(0);
+                v.select_scroll.scroll_to_item(v.select_cursor);
                 if searchable {
                     v.select_search.update(cx, |input, cx| {
                         input.set_value("", window, cx);
                         input.focus(window, cx);
                     });
+                } else {
+                    window.focus(&v.select_focus, cx);
                 }
                 cx.notify();
             }));
@@ -453,10 +470,10 @@ impl SettingsView {
         let menu = self.open_select.as_ref().filter(|m| m.value == id).map(|menu| {
             let query = if searchable { self.select_search.read(cx).value().trim().to_lowercase() } else { String::new() };
             let shown: Vec<usize> = (0..labels.len()).filter(|&i| labels[i].to_lowercase().contains(&query)).collect();
-            let first = shown.first().copied();
-            let rows = shown.into_iter().map(|i| {
+            let cursor = self.select_cursor.min(shown.len().saturating_sub(1));
+            let rows = shown.iter().enumerate().map(|(row, &i)| {
                 let pick = pick.clone();
-                crate::shell::row(theme, false, (id, i))
+                crate::shell::row(theme, row == cursor, (id, i))
                     .h(px(28.))
                     .flex_none()
                     .rounded(px(6.))
@@ -464,41 +481,64 @@ impl SettingsView {
                     .children(leading(i))
                     .child(div().flex_1().child(labels[i].clone()))
                     .when(current == Some(i), |el| el.child(gpui::svg().path("icons/check.svg").size(px(14.)).text_color(theme.text_muted)))
-                    .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                        if let Some(m) = v.open_select.as_mut() { m.close() }
+                    .on_mouse_move(cx.listener(move |v, _: &gpui::MouseMoveEvent, _, cx| {
+                        if v.select_cursor != row {
+                            v.select_cursor = row;
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+                        v.close_select(window, cx);
                         pick(i, cx);
-                        cx.notify();
                     }))
             });
             let list = div()
                 .id("select-list")
+                .track_scroll(&self.select_scroll)
                 .max_h(px(320.))
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
                 .children(rows)
-                .when(first.is_none(), |el| el.child(div().px(px(8.)).py(px(6.)).text_color(theme.text_muted).child("No matches")));
+                .when(shown.is_empty(), |el| el.child(div().px(px(8.)).py(px(6.)).text_color(theme.text_muted).child("No matches")));
             let pick = pick.clone();
             let card = crate::shell::menu_card(theme, "select-menu", 240.)
                 .w(px(if searchable { 280. } else { 240. }))
                 .mt(px(4.))
                 .flex()
                 .flex_col()
+                .track_focus(&self.select_focus)
                 .on_mouse_down_out(cx.listener(|v, _, _, cx| {
                     if let Some(m) = v.open_select.as_mut() { m.close() }
                     cx.notify();
                 }))
-                // Enter takes the first match, Escape closes: caught before the field's own bindings.
-                .capture_key_down(cx.listener(move |v, e: &KeyDownEvent, _, cx| match e.keystroke.key.as_str() {
-                    "enter" | "escape" => {
-                        if let Some(m) = v.open_select.as_mut() { m.close() }
-                        if let (Some(i), "enter") = (first, e.keystroke.key.as_str()) {
-                            pick(i, cx);
+                // Up and Down (or Emacs's ctrl-p and ctrl-n, as in the command panel) move the highlight round the
+                // list, Enter picks it, Escape closes: caught before the field's own bindings.
+                .capture_key_down(cx.listener(move |v, e: &KeyDownEvent, window, cx| {
+                    let n = shown.len() as isize;
+                    let ctrl = e.keystroke.modifiers.control;
+                    let key = match e.keystroke.key.as_str() {
+                        "p" if ctrl => "up",
+                        "n" if ctrl => "down",
+                        key => key,
+                    };
+                    match key {
+                        "up" | "down" if n > 0 => {
+                            let by = if key == "up" { -1 } else { 1 };
+                            v.select_cursor = (cursor as isize + by).rem_euclid(n) as usize;
+                            crate::ui::reveal(&v.select_scroll, v.select_cursor..=v.select_cursor, 28.);
+                            cx.notify();
                         }
-                        cx.stop_propagation();
-                        cx.notify();
+                        "enter" => {
+                            v.close_select(window, cx);
+                            if let Some(&i) = shown.get(cursor) {
+                                pick(i, cx);
+                            }
+                        }
+                        "escape" => v.close_select(window, cx),
+                        _ => return,
                     }
-                    _ => {}
+                    cx.stop_propagation();
                 }))
                 // Zeron's popup search: a borderless field on a faint wash, above the list.
                 .when(searchable, |el| {
@@ -522,6 +562,15 @@ impl SettingsView {
             div().child(gpui::deferred(gpui::anchored().snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion("select-menu-in", menu, card))).with_priority(1))
         });
         div().flex_none().flex().flex_col().child(trigger).children(menu)
+    }
+
+    /// Closes the open select and gives the keyboard back to the page, which Escape then closes.
+    fn close_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(m) = self.open_select.as_mut() {
+            m.close()
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     /// The themes of one appearance, each with its colors; picking one sets that appearance's theme.
@@ -851,7 +900,8 @@ pub(crate) fn display_chord(chord: &str) -> String {
         key if key.chars().count() == 1 => key.to_uppercase(),
         key => key[..1].to_uppercase() + &key[1..],
     };
-    [(m.control, "Ctrl"), (m.alt, "Opt"), (m.shift, "Shift"), (m.platform, "Cmd"), (m.function, "Fn")]
+    let (alt, platform) = if cfg!(target_os = "macos") { ("Opt", "Cmd") } else { ("Alt", "Super") };
+    [(m.control, "Ctrl"), (m.alt, alt), (m.shift, "Shift"), (m.platform, platform), (m.function, "Fn")]
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name.to_string()))
         .chain(std::iter::once(key))
@@ -894,16 +944,6 @@ impl Render for SettingsView {
             .bg(theme.wash(0.05))
             .border_r_1()
             .border_color(theme.border)
-            // Zeron's Back: a muted tab at the top of the column, an arrow and the word.
-            .child(
-                div().px(px(8.)).child(
-                    crate::shell::row(&theme, false, "settings-back")
-                        .text_color(theme.text_muted)
-                        .child(gpui::svg().path("icons/arrow-left.svg").size(px(16.)).flex_none().text_color(theme.text_muted))
-                        .child("Back")
-                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Close))),
-                ),
-            )
             .child(div().flex_1().min_h_0().flex().flex_col().gap(px(2.)).px(px(8.)).pt(px(12.)).children(Section::ALL.into_iter().map(
                 |section| {
                     let selected = self.section == section;
@@ -921,7 +961,17 @@ impl Render for SettingsView {
                             cx.notify();
                         }))
                 },
-            )));
+            )))
+            // Back: a muted tab at the foot of the column, where the sidebar keeps New workspace; an arrow and the word.
+            .child(
+                div().flex_none().m(px(8.)).child(
+                    crate::shell::row(&theme, false, "settings-back")
+                        .text_color(theme.text_muted)
+                        .child(gpui::svg().path("icons/arrow-left.svg").size(px(16.)).flex_none().text_color(theme.text_muted))
+                        .child("Back")
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Close))),
+                ),
+            );
 
         let body = match self.section {
             Section::General => div().child(page_header(&theme, "General", "The window and what it shows.")).child(
@@ -1401,9 +1451,17 @@ mod tests {
     use super::display_chord;
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn chords_read_as_zeron_shows_them() {
         assert_eq!(display_chord("cmd-shift-t"), "Shift+Cmd+T");
         assert_eq!(display_chord("ctrl-alt-space"), "Ctrl+Opt+Space");
         assert_eq!(display_chord("cmd-,"), "Cmd+,");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn chords_read_in_words() {
+        assert_eq!(display_chord("ctrl-shift-t"), "Ctrl+Shift+T");
+        assert_eq!(display_chord("ctrl-alt-space"), "Ctrl+Alt+Space");
     }
 }

@@ -102,7 +102,7 @@ pub(crate) fn cached<T: Clone + PartialEq + Send + 'static>(key: &str, ttl: Dura
     cx.spawn(async move |cx| {
         let k = key.clone();
         let fresh = cx.background_spawn(async move { fetch(&k) }).await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             let Some(entry) = cx.default_global::<Cache<T>>().0.get_mut(&key) else { return };
             (entry.fetched, entry.busy) = (Some(Instant::now()), false);
             if fresh.is_some() && entry.value != fresh {
@@ -539,7 +539,7 @@ fn read_remote_spent(target: &str, id: &str) -> Option<Spent> {
     let tail = tails.get_or_insert_default().entry(key).or_insert_with(|| Tail { file, read: 0, seen: Default::default(), spent: Spent::default() });
     add_spent(&String::from_utf8_lossy(&body[..whole]), &mut tail.seen, &mut tail.spent);
     tail.read += whole as u64;
-    Some(tail.spent.clone())
+    Some(tail.spent)
 }
 
 /// What `pane`'s agent session spent so far, refreshed in the background.

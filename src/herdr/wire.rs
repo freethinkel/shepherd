@@ -214,7 +214,7 @@ pub enum ServerMessage {
     GraphicsTransmissionRetired,
     ClientShellSnapshot,
     /// The client shell's view of the shown tab, read only for its popup.
-    PaneSurface(PaneSurfaceFrame),
+    PaneSurface(Box<PaneSurfaceFrame>),
     SemanticNotification,
     ClientShellError { message: String },
     DirectTerminalKeyboardProtocol,

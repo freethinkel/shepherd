@@ -79,11 +79,11 @@ impl Shell {
     pub(super) fn render_floating(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let grid = self.grid_cells(cx);
         let cell_px = self.cell_px(cx);
-        if let (Some((surface, sent)), Some(now)) = (&mut self.popup_surface, grid) {
-            if *sent != (now, cell_px) {
-                surface.resize(now.0, now.1, cell_px);
-                *sent = (now, cell_px);
-            }
+        if let (Some((surface, sent)), Some(now)) = (&mut self.popup_surface, grid)
+            && *sent != (now, cell_px)
+        {
+            surface.resize(now.0, now.1, cell_px);
+            *sent = (now, cell_px);
         }
         let f = self.floating.as_mut()?;
         if !window.is_window_active() {

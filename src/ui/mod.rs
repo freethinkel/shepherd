@@ -180,6 +180,27 @@ impl<T> Popup<T> {
     }
 }
 
+/// Scrolls the least that shows children `ixs` of `scroll`'s list at least `margin` from its top and bottom, so
+/// the rows past a highlight stay in sight and a fade over the edge never covers it; the list's ends still reach
+/// them. Before the list's first layout it only brings the last child into view.
+pub fn reveal(scroll: &gpui::ScrollHandle, ixs: std::ops::RangeInclusive<usize>, margin: f32) {
+    let (Some(first), Some(last)) = (scroll.bounds_for_item(*ixs.start()), scroll.bounds_for_item(*ixs.end())) else {
+        return scroll.scroll_to_item(*ixs.end());
+    };
+    let item = first.union(&last);
+    let view = scroll.bounds();
+    let margin = gpui::px(margin);
+    // child bounds are laid out unscrolled; the offset is negative as the list scrolls down
+    let mut offset = scroll.offset();
+    if item.top() + offset.y < view.top() + margin {
+        offset.y = view.top() + margin - item.top();
+    } else if item.bottom() + offset.y > view.bottom() - margin {
+        offset.y = view.bottom() - margin - item.bottom();
+    }
+    offset.y = offset.y.clamp(-scroll.max_offset().y, gpui::px(0.));
+    scroll.set_offset(offset);
+}
+
 /// Call once per frame: drops a popup whose exit has played, else asks for the next frame while it plays.
 pub fn reap_popup<T>(popup: &mut Option<Popup<T>>, window: &mut gpui::Window) {
     if let Some(closing) = popup.as_ref().and_then(|p| p.closing) {

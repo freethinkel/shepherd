@@ -42,7 +42,10 @@ pub(crate) use tab_bar::agent_favicon;
 
 const TITLEBAR_HEIGHT: f32 = 38.0;
 /// The titlebar's left cluster: traffic lights, then the sidebar toggle at Zeron's `titlebar_cluster_start` (88).
-const TOGGLE_LEFT: f32 = 88.0;
+/// Elsewhere there are no traffic lights, and the toggle starts the row.
+const TOGGLE_LEFT: f32 = if cfg!(target_os = "macos") { 88.0 } else { 12.0 };
+/// What the titlebar's right end keeps clear for the window's buttons, which Shepherd draws itself off macOS.
+const WINDOW_CONTROLS_W: f32 = if cfg!(target_os = "macos") { 0.0 } else { 100.0 };
 /// Centre line of the traffic lights (placed at y 14), measured on a 2x screen; the toggle centres on it, not on the titlebar.
 const TRAFFIC_LIGHTS_CENTER: f32 = 21.25;
 /// The Agents list's least height when dragged: one agent row and a bit.
@@ -94,6 +97,10 @@ pub struct Shell {
     sidebar_open: bool,
     /// The sidebar's width tween while it shows or hides.
     sidebar_motion: Option<FoldMotion>,
+    /// With the sidebar closed, its floating copy's slide in (to 1) or out (to 0).
+    sidebar_peek: Option<FoldMotion>,
+    /// The pointer is on the window's left edge or on the floating sidebar.
+    peek_hovered: bool,
     /// The sidebar's edge is being dragged.
     sidebar_drag: bool,
     /// The drag hit a width limit (-1 min, +1 max) at this instant: the edge nudges past it and springs back.
@@ -280,8 +287,10 @@ impl Shell {
                 traffic_light_position: Some(point(px(14.), px(14.))),
             }),
             app_owns_titlebar_drag: true,
-            window_background: WindowBackgroundAppearance::Blurred,
+            window_background: if cfg!(target_os = "macos") { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque },
             app_id: Some("dev.freethinkel.shepherd".into()),
+            // off macOS the titlebar is Shepherd's own, buttons and all, not the desktop's bar over it
+            window_decorations: (!cfg!(target_os = "macos")).then_some(gpui::WindowDecorations::Client),
             ..Default::default()
         };
         cx.open_window(options, |window, cx| {
@@ -384,6 +393,8 @@ impl Shell {
                     sidebar_width: SettingsGlobal::of(cx).settings.sidebar_width,
                     sidebar_open: SettingsGlobal::of(cx).settings.sidebar_open,
                     sidebar_motion: None,
+                    sidebar_peek: None,
+                    peek_hovered: false,
                     sidebar_drag: false,
                     sidebar_edge: None,
                     review_open: SettingsGlobal::of(cx).settings.review_open,
@@ -548,6 +559,7 @@ impl Shell {
                 crate::ui::command_panel::items(self.snapshot.as_ref(), &bindings, &self.plugin_actions)
             }
             Kind::Agents => crate::ui::command_panel::agent_items(self.snapshot.as_ref(), self.agent_sort, &self.since),
+            Kind::Workspaces => crate::ui::command_panel::workspace_items(self.snapshot.as_ref()),
             Kind::Branches => match dir.as_deref() {
                 Some(d) => crate::ui::command_panel::branch_items(&crate::ui::statusbar::read_branches(d), crate::ui::statusbar::branch_of(d, cx).as_deref()),
                 None => Vec::new(),
@@ -878,7 +890,7 @@ impl Shell {
                         }
                     }
                     Ok(Err(e)) => {
-                        let _ = cx.update(|cx| crate::ui::toast::error(cx, format!("{label}: {e:#}")));
+                        cx.update(|cx| crate::ui::toast::error(cx, format!("{label}: {e:#}")));
                     }
                     Err(_) => {}
                 })
@@ -961,7 +973,8 @@ impl Shell {
             })
             .on_click(|e: &ClickEvent, window, _| {
                 if e.click_count() == 2 {
-                    window.titlebar_double_click();
+                    // macOS does what System Settings says; gpui has no such call elsewhere, so it maximizes
+                    if cfg!(target_os = "macos") { window.titlebar_double_click() } else { window.zoom_window() }
                 }
             })
     }
@@ -996,6 +1009,7 @@ fn reapply_traffic_lights(window: &mut Window) {
 }
 
 /// Turns macOS Secure Keyboard Entry on or off. The system counts enables, so it is called only on a change.
+#[cfg(target_os = "macos")]
 fn secure_input(on: bool) {
     use std::sync::atomic::{AtomicBool, Ordering};
     #[link(name = "Carbon", kind = "framework")]
@@ -1011,6 +1025,10 @@ fn secure_input(on: bool) {
         }
     }
 }
+
+/// No other system has it.
+#[cfg(not(target_os = "macos"))]
+fn secure_input(_: bool) {}
 
 /// The window's last frame and its display, while that display is plugged in and the frame on it.
 fn saved_window(cx: &App) -> Option<(gpui::DisplayId, gpui::WindowBounds)> {
@@ -1086,10 +1104,10 @@ impl Render for Shell {
             _ => (Vec::new(), Vec::new()),
         };
         // herdr caught up with a released divider: its snapshot is the layout again.
-        if let Some((path, ratio)) = &self.settling {
-            if splits.iter().any(|s| &s.path == path && (s.ratio - ratio).abs() < 0.02) {
-                self.settling = None;
-            }
+        if let Some((path, ratio)) = &self.settling
+            && splits.iter().any(|s| &s.path == path && (s.ratio - ratio).abs() < 0.02)
+        {
+            self.settling = None;
         }
         // While a divider moves (or settles), lay the panes out at its ratio, not herdr's last one.
         let live = self.divider.as_ref().map(|d| (d.path.clone(), d.ratio)).or(self.settling.clone());
@@ -1145,11 +1163,13 @@ impl Render for Shell {
         let shown_tab = tab.as_ref().map(|t| t.tab_id.clone());
         let sidebar_w = self.sidebar_now();
         let sliding = self.sidebar_motion.is_some_and(|m| m.animating());
-        if sliding || self.sidebar_nudge().is_some() {
+        let peek = self.peek_now();
+        if sliding || self.sidebar_nudge().is_some() || self.sidebar_peek.is_some_and(|m| m.animating()) {
             window.request_animation_frame();
         }
 
         let sidebar = self.render_sidebar(&theme, &snapshot, &shown_ws, &shown_tab, window, cx);
+        let (docked, peeking) = if sidebar_w > 0. { (Some(sidebar), None) } else { (None, Some(sidebar)) };
 
         let tabbar = self.render_tab_bar(&theme, shown_ws.clone(), shown_tab.clone(), sidebar_w, window, cx);
 
@@ -1269,7 +1289,7 @@ impl Render for Shell {
             .children(floating);
 
         let show_bar = SettingsGlobal::of(cx).settings.show_status_bar;
-        let shown = (show_bar || self.review_open).then(|| self.shown_review(snapshot.as_ref(), window, cx)).unwrap_or_default();
+        let shown = if show_bar || self.review_open { self.shown_review(snapshot.as_ref(), window, cx) } else { Default::default() };
         let statusbar = show_bar.then(|| {
             let pane = self.active_pane(window, cx);
             let on_branch = cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -1321,13 +1341,15 @@ impl Render for Shell {
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(|s, e: &gpui::KeyDownEvent, _, cx| {
                 s.touch(cx);
-                // Cmd+C over a selection in the review panel copies it, not the pane's
+                // Cmd+C (Ctrl+C off macOS) over a selection in the review panel copies it, not the pane's
                 let m = &e.keystroke.modifiers;
-                if m.platform && !(m.shift || m.alt || m.control) && e.keystroke.key == "c" {
-                    if let Some(text) = crate::ui::markdown::selected_text() {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                        cx.stop_propagation();
-                    }
+                let copy = if cfg!(target_os = "macos") { m.platform && !(m.shift || m.alt || m.control) } else { m.control && !(m.alt || m.platform) };
+                if copy
+                    && e.keystroke.key == "c"
+                    && let Some(text) = crate::ui::markdown::selected_text()
+                {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    cx.stop_propagation();
                 }
             }))
             .capture_any_mouse_down(cx.listener(|s, _: &MouseDownEvent, _, cx| s.touch(cx)))
@@ -1377,6 +1399,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
             .on_action(cx.listener(|this, _: &ChangeTheme, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Themes, w, cx)))
             .on_action(cx.listener(|this, _: &AgentsPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Agents, w, cx)))
+            .on_action(cx.listener(|this, _: &WorkspacesPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Workspaces, w, cx)))
             .on_action(cx.listener(|this, c: &crate::herdr::keys::HerdrCommand, w, cx| this.run_herdr_command(c, w, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
                 this.drag_divider(e.position, cx);
@@ -1408,7 +1431,7 @@ impl Render for Shell {
                         .bg(theme.wash(0.05))
                         .border_r_1()
                         .border_color(theme.border)
-                        .child(sidebar),
+                        .children(docked),
                 )
             })
             .map(|el| match settings_page {
@@ -1416,6 +1439,40 @@ impl Render for Shell {
                 None => el.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).child(grid).children(statusbar)),
             })
             .children(review.into_iter().flatten())
+            // The sidebar closed: the window's left edge brings it out floating over the panes, as Arc's does.
+            .when(!self.sidebar_open && sidebar_w == 0. && !on_page, |el| {
+                el.child(
+                    div()
+                        .id("sidebar-peek-edge")
+                        .absolute()
+                        .top(px(TITLEBAR_HEIGHT))
+                        .bottom_0()
+                        .left_0()
+                        .w(px(6.))
+                        .on_hover(cx.listener(|this, on: &bool, _, cx| this.hover_peek(*on, cx))),
+                )
+                .when(peek > 0., |el| {
+                    el.child(
+                        div()
+                            .id("sidebar-peek")
+                            .occlude()
+                            .absolute()
+                            .top(px(6.))
+                            .bottom(px(6.))
+                            .left(px(6. - (self.sidebar_width + 12.) * (1. - peek)))
+                            .w(px(self.sidebar_width))
+                            .opacity(peek)
+                            .overflow_hidden()
+                            .rounded(px(10.))
+                            .bg(theme.card)
+                            .border_1()
+                            .border_color(theme.border)
+                            .shadow_lg()
+                            .on_hover(cx.listener(|this, on: &bool, _, cx| this.hover_peek(*on, cx)))
+                            .children(peeking),
+                    )
+                })
+            })
             // The sidebar's edge: drag to resize, double-click for the default width.
             .when(self.sidebar_open && !sliding && !on_page, |el| {
                 el.child(
@@ -1495,6 +1552,8 @@ impl Render for Shell {
             });
         self.popups(root, &theme, &snapshot, sidebar_w, window, cx)
             .children(spring_back)
+            .children(window_controls(&theme, window))
+            .children(resize_edges(window))
             .child(toasts)
     }
 }

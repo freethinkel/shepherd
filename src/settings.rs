@@ -248,13 +248,40 @@ impl Default for Settings {
     }
 }
 
+fn home() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
+/// Where the settings live: macOS's Application Support, else the XDG config folder.
+#[cfg(target_os = "macos")]
+fn config_dir() -> PathBuf {
+    home().join("Library/Application Support/Shepherd")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn config_dir() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home().join(".config"), PathBuf::from).join("shepherd")
+}
+
+/// Shepherd's caches: macOS's Library/Caches, else the XDG cache folder. Short enough for a socket path under it
+/// (104 bytes on macOS).
+#[cfg(target_os = "macos")]
+pub fn cache_dir() -> PathBuf {
+    home().join("Library/Caches/Shepherd")
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn cache_dir() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME").map_or_else(|| home().join(".cache"), PathBuf::from).join("shepherd")
+}
+
 impl Settings {
     /// `SHEPHERD_SETTINGS_FILE` runs a second Shepherd with its own settings (a demo session, say).
     pub fn path() -> PathBuf {
         if let Some(file) = std::env::var_os("SHEPHERD_SETTINGS_FILE") {
             return file.into();
         }
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Application Support/Shepherd/settings.json")
+        config_dir().join("settings.json")
     }
 
     /// Defaults when the file is missing; defaults and an error naming the file when it cannot be read. The file
@@ -406,7 +433,7 @@ mod tests {
         let mut s = Settings::default();
         s.keys.insert("NewTab".into(), "cmd-n".into());
         s.record_chord("SplitRight", "cmd-n");
-        assert_eq!(s.keys.get("SplitRight").map(String::as_str), Some("cmd-n"));
+        assert_eq!(s.keys.get("SplitRight"), crate::bindings::normalize("cmd-n").as_ref());
         assert_eq!(s.keys.get("NewTab"), None, "NewTab falls back to its default");
     }
 
@@ -505,9 +532,11 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         let (_d, path) = tmp();
-        let mut s = Settings::default();
-        s.font_family = "IoskeleyMonoNL Nerd Font Mono".into();
-        s.herdr_bin = Some("/opt/homebrew/bin/herdr".into());
+        let mut s = Settings {
+            font_family: "IoskeleyMonoNL Nerd Font Mono".into(),
+            herdr_bin: Some("/opt/homebrew/bin/herdr".into()),
+            ..Default::default()
+        };
         s.keys.insert("SplitRight".into(), "cmd-shift-right".into());
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), (s, None));

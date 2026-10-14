@@ -1,6 +1,7 @@
-# Every push to main builds and tests Shepherd.app. When Cargo.toml's version has no release yet, the run tags
-# v<version> and publishes a universal (arm64 + x86_64) Shepherd as a zip and a dmg: bump the version to release.
-# With the signing secrets set the app is signed with the Developer ID and notarized; without them, ad hoc.
+# Every push to main builds and tests Shepherd.app and builds Shepherd for Linux (x86_64 and aarch64). When
+# Cargo.toml's version has no release yet, the run tags v<version> and publishes a universal (arm64 + x86_64)
+# Shepherd as a zip and a dmg, and each Linux architecture as a tar.gz, a .deb and an .rpm: bump the version to
+# release. With the signing secrets set the app is signed with the Developer ID and notarized; without them, ad hoc.
 name: release
 
 on:
@@ -57,10 +58,64 @@ jobs:
             --team-id Z7PK4B5KU2 --keychain "$kc"
           echo "NOTARY_KEYCHAIN=$kc" >> "$GITHUB_ENV"
 
+      - run: make lint
       - run: make test
       - name: Build, sign, notarize
         run: make ${{ env.MACOS_CERT_P12 != '' && 'notarize' || 'dist' }}
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Shepherd-macos
+          path: |
+            target/universal/Shepherd-*.zip
+            target/universal/Shepherd-*.dmg
+
+  linux:
+    strategy:
+      matrix:
+        # the oldest supported Ubuntu: its glibc is the oldest the packages run on
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: echo "ZIG=zig" >> "$GITHUB_ENV"
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev \
+            libvulkan-dev libfontconfig-dev libfreetype-dev libssl-dev libzstd-dev
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+      - uses: Swatinem/rust-cache@v2
+      # the Linux side of cfg'd code: its own key defaults, notifications, paths
+      - run: make lint
+      - run: make test
+      # one build, packed as a tar.gz, a .deb and an .rpm
+      - run: scripts/linux-dist.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Shepherd-linux-${{ runner.arch }}
+          path: target/linux-dist/*
+
+  release:
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the tags, for the release notes
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - name: Release a new version
         run: |
           tag="v$(make -s version)"
@@ -73,12 +128,5 @@ jobs:
               git log --no-merges --format='- %s' ${prev:+"$prev"..}HEAD | grep -vE '^- (docs|release):' || true
               [ -n "$prev" ] && printf '\n**Full Changelog**: %s/compare/%s...%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$prev" "$tag"
             } > "$RUNNER_TEMP/notes.md"
-            gh release create "$tag" target/universal/Shepherd-*.zip target/universal/Shepherd-*.dmg --target "$GITHUB_SHA" --title "$tag" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "$tag" --notes-file "$RUNNER_TEMP/notes.md"
           fi
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Shepherd
-          path: |
-            target/universal/Shepherd-*.zip
-            target/universal/Shepherd-*.dmg

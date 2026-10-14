@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Shepherd
+GenericName=Terminal
+Comment=A window for herdr's workspaces, tabs and coding agents
+Exec=shepherd
+Icon=dev.freethinkel.shepherd
+Terminal=false
+Categories=Development;System;TerminalEmulator;
+StartupWMClass=dev.freethinkel.shepherd

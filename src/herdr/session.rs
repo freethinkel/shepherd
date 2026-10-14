@@ -395,10 +395,10 @@ fn read_frames(stdout: impl Read, errors: std::thread::JoinHandle<String>, tx: U
         let Ok(record) = serde_json::from_str::<Value>(&line) else { continue };
         match record["type"].as_str() {
             Some("terminal.frame") => {
-                if let Ok(bytes) = B64.decode(record["bytes"].as_str().unwrap_or("")) {
-                    if tx.unbounded_send(SessionEvent::Frame(bytes)).is_err() {
-                        return; // the pane view is gone
-                    }
+                if let Ok(bytes) = B64.decode(record["bytes"].as_str().unwrap_or(""))
+                    && tx.unbounded_send(SessionEvent::Frame(bytes)).is_err()
+                {
+                    return; // the pane view is gone
                 }
             }
             Some("terminal.closed") => {
@@ -435,7 +435,7 @@ impl Drop for Session {
         };
         // Closing stdin ends the session cleanly. Waiting for herdr happens off this thread: drops run on
         // GPUI's main thread, several at once on a tab switch. A child that ignores the close is killed.
-        stdin.lock().unwrap().take();
+        stdin.get_mut().unwrap().take();
         let Some(mut child) = child.take() else { return };
         std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_millis(500);

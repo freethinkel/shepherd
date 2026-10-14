@@ -466,10 +466,10 @@ impl gpui::Element for TerminalElement {
             for quad in prepaint.sel_quads.drain(..) {
                 window.paint_quad(quad);
             }
-            if prepaint.cursor_under_text {
-                if let Some(cursor) = prepaint.cursor.take() {
-                    window.paint_quad(cursor);
-                }
+            if prepaint.cursor_under_text
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
             }
             let cell_w = prepaint.cell_w;
             for (ix, segments) in prepaint.lines.iter().enumerate() {

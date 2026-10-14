@@ -1,12 +1,14 @@
-//! Agents that need you: a macOS notification when one starts waiting or finishes out of sight, and a Dock badge
-//! counting those not looked at yet.
+//! Agents that need you: a system notification when one starts waiting or finishes out of sight, and on macOS a
+//! Dock badge counting those not looked at yet.
 use crate::model::{AgentStatus, Pane, Snapshot};
 use gpui::{App, SystemNotification, SystemNotificationAction};
-use objc2::MainThreadMarker;
-use objc2::AllocAnyThread;
+#[cfg(target_os = "macos")]
+use objc2::{AllocAnyThread, MainThreadMarker, runtime::Bool};
+#[cfg(target_os = "macos")]
 use objc2_app_kit::{NSApplication, NSImage};
-use objc2::runtime::Bool;
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSBundle, NSData, NSError, NSString};
+#[cfg(target_os = "macos")]
 use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
 
 /// Waiting for the user, or finished: worth a look.
@@ -37,9 +39,7 @@ pub const APPROVE: &str = "approve";
 /// Posts a notification tagged with the pane, so a click can bring that pane up; `approve` adds a button that
 /// answers the agent from the notification.
 pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool, approve: bool) {
-    // ponytail: outside an .app UNUserNotificationCenter aborts (gpui makes it a no-op), so a bare binary shows none;
-    // `cargo run` goes through scripts/run-bundled.sh, which runs it from inside Shepherd.app.
-    if NSBundle::mainBundle().bundleIdentifier().is_some() {
+    if can_notify() {
         cx.show_system_notification(SystemNotification {
             // macOS replaces a delivered notification with the same tag without a banner: one tag per post
             tag: format!("{pane_id}{TAG_SEP}{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()).into(),
@@ -48,9 +48,26 @@ pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool, a
             actions: approve.then(|| SystemNotificationAction { id: APPROVE.into(), label: "Approve".into() }).into_iter().collect(),
         });
     }
+    // ponytail: macOS only; on Linux the notification daemon plays its own sound, if any
+    #[cfg(target_os = "macos")]
     if sound {
         run(std::process::Command::new("afplay").arg("/System/Library/Sounds/Glass.aiff"));
     }
+    #[cfg(not(target_os = "macos"))]
+    let _ = sound;
+}
+
+/// Whether a notification can be posted at all.
+#[cfg(target_os = "macos")]
+fn can_notify() -> bool {
+    // ponytail: outside an .app UNUserNotificationCenter aborts (gpui makes it a no-op), so a bare binary shows none;
+    // `cargo run` goes through scripts/run-bundled.sh, which runs it from inside Shepherd.app.
+    NSBundle::mainBundle().bundleIdentifier().is_some()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn can_notify() -> bool {
+    true
 }
 
 /// macOS has Shepherd's notifications turned off: none show up, and it will not ask again.
@@ -61,6 +78,7 @@ impl gpui::Global for Denied {}
 /// Asks macOS for notifications at launch; when they are off, sets [`Denied`] and shows a toast that opens Shepherd's
 /// page in System Settings. gpui only asks on the first notification, and posts it before the answer, so that one is
 /// lost and the prompt comes while you are away. Once answered, macOS answers again without a prompt.
+#[cfg(target_os = "macos")]
 pub fn warn_if_denied(cx: &mut App) {
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
         return;
@@ -79,7 +97,7 @@ pub fn warn_if_denied(cx: &mut App) {
         if rx.await != Ok(true) {
             return;
         }
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             cx.set_global(Denied);
             cx.refresh_windows();
             if crate::settings::SettingsGlobal::of(cx).settings.notify_agents {
@@ -91,13 +109,22 @@ pub fn warn_if_denied(cx: &mut App) {
     .detach();
 }
 
+/// Elsewhere nothing asks first.
+#[cfg(not(target_os = "macos"))]
+pub fn warn_if_denied(_: &mut App) {}
+
 /// Shepherd's page in System Settings → Notifications: banners, sounds, and whether they show at all.
+#[cfg(target_os = "macos")]
 pub fn open_system_settings() {
     let id = NSBundle::mainBundle().bundleIdentifier().map_or_else(|| "dev.freethinkel.shepherd".into(), |id| id.to_string());
     run(std::process::Command::new("open").arg(format!("x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={id}")));
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn open_system_settings() {}
+
 /// Runs the command off the main thread and reaps it, so no zombie is left behind.
+#[cfg(target_os = "macos")]
 fn run(command: &mut std::process::Command) {
     if let Ok(mut child) = command.spawn() {
         std::thread::spawn(move || child.wait());
@@ -105,19 +132,27 @@ fn run(command: &mut std::process::Command) {
 }
 
 /// The Dock icon's badge: the count, or none at 0.
+#[cfg(target_os = "macos")]
 pub fn set_badge(count: usize) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
     NSApplication::sharedApplication(mtm).dockTile().setBadgeLabel(label.as_deref());
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn set_badge(_: usize) {}
+
 /// The Dock icon. A bare `cargo run` binary has no bundle to take it from.
+#[cfg(target_os = "macos")]
 pub fn set_app_icon() {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let data = NSData::with_bytes(include_bytes!("../assets/app-icon/Shepherd.icns"));
     let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else { return };
     unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_app_icon() {}
 
 #[cfg(test)]
 mod tests {

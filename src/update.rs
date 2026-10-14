@@ -97,7 +97,7 @@ pub fn start(cx: &mut App) {
     }
     cx.spawn(async move |cx| {
         loop {
-            let _ = cx.update(|cx| check(cx, true));
+            cx.update(|cx| check(cx, true));
             cx.background_executor().timer(EVERY).await;
         }
     })
@@ -114,7 +114,7 @@ pub fn check(cx: &mut App, quiet: bool) {
     set(cx, Updates::Checking);
     cx.spawn(async move |cx| {
         let found = cx.background_spawn(async { latest() }).await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             set(
                 cx,
                 match found {
@@ -141,7 +141,7 @@ pub fn install(release: Release, cx: &mut App) {
     let version = release.version.clone();
     let progress = cx.spawn(async move |cx| {
         while let Some(percent) = rx.next().await {
-            let _ = cx.update(|cx| set(cx, Updates::Downloading { version: version.clone(), percent }));
+            cx.update(|cx| set(cx, Updates::Downloading { version: version.clone(), percent }));
         }
     });
     cx.spawn(async move |cx| {
@@ -152,13 +152,13 @@ pub fn install(release: Release, cx: &mut App) {
         progress.await;
         let done = match zip {
             Ok(zip) => {
-                let _ = cx.update(|cx| set(cx, Updates::Installing));
+                cx.update(|cx| set(cx, Updates::Installing));
                 let target = app.clone();
                 cx.background_spawn(async move { replace(&zip, &target) }).await.and_then(|()| relaunch(&app))
             }
             Err(e) => Err(e),
         };
-        let _ = cx.update(|cx| match done {
+        cx.update(|cx| match done {
             Ok(()) => cx.quit(),
             Err(e) => set(cx, Updates::Failed(format!("{e:#}"), Some(release))),
         });
@@ -347,6 +347,7 @@ mod tests {
     }
 
     /// An ad hoc signed bundle whose `Contents/Resources/which` says which one it is.
+    #[cfg(target_os = "macos")]
     fn fake_app(app: &Path, which: &str) {
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         std::fs::create_dir_all(app.join("Contents/Resources")).unwrap();
@@ -358,6 +359,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")] // ditto and codesign
     fn the_new_app_replaces_the_old_one() {
         let tmp = tempfile::tempdir().unwrap();
         let (apps, build) = (tmp.path().join("Applications"), tmp.path().join("build"));

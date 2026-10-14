@@ -14,13 +14,13 @@ use super::geometric_shapes::inner_stroke_polyline;
 /// Coefficient for approximating a quarter circle with a cubic Bézier.
 const ARC_C: f64 = (std::f64::consts::SQRT_2 - 1.0) * 4.0 / 3.0;
 
-/// 
+/// U+E0B0
 pub fn draw_e0b0(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, _metrics: &Metrics) {
     let (w, h) = (width as f64, height as f64);
     canvas.triangle([pt(0.0, 0.0), pt(w, h / 2.0), pt(0.0, h)], ON);
 }
 
-/// 
+/// U+E0B1
 pub fn draw_e0b1(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, metrics: &Metrics) {
     let (w, h) = (width as f32, height as f32);
     let mut pb = PathBuilder::new();
@@ -33,19 +33,19 @@ pub fn draw_e0b1(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, metrics
     }
 }
 
-/// 
+/// U+E0B2
 pub fn draw_e0b2(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, _metrics: &Metrics) {
     let (w, h) = (width as f64, height as f64);
     canvas.triangle([pt(w, 0.0), pt(0.0, h / 2.0), pt(w, h)], ON);
 }
 
-/// 
+/// U+E0B3
 pub fn draw_e0b3(cp: u32, canvas: &mut Canvas, width: u32, height: u32, metrics: &Metrics) {
     draw_e0b1(cp, canvas, width, height, metrics);
     canvas.flip_horizontal();
 }
 
-/// 
+/// U+E0B4
 pub fn draw_e0b4(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, _metrics: &Metrics) {
     let (w, h) = (width as f64, height as f64);
     let r = w.min(h / 2.0);
@@ -62,7 +62,7 @@ pub fn draw_e0b4(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, _metric
     }
 }
 
-/// 
+/// U+E0B5
 pub fn draw_e0b5(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, metrics: &Metrics) {
     let (w, h) = (width as f64, height as f64);
     let r = w.min(h / 2.0);
@@ -92,63 +92,63 @@ fn cubic_points(out: &mut Vec<(f64, f64)>, p0: (f64, f64), p1: (f64, f64), p2: (
     }
 }
 
-/// 
+/// U+E0B6
 pub fn draw_e0b6(cp: u32, canvas: &mut Canvas, width: u32, height: u32, metrics: &Metrics) {
     draw_e0b4(cp, canvas, width, height, metrics);
     canvas.flip_horizontal();
 }
 
-/// 
+/// U+E0B7
 pub fn draw_e0b7(cp: u32, canvas: &mut Canvas, width: u32, height: u32, metrics: &Metrics) {
     draw_e0b5(cp, canvas, width, height, metrics);
     canvas.flip_horizontal();
 }
 
-/// 
+/// U+E0B8
 pub fn draw_e0b8(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, _metrics: &Metrics) {
     let (w, h) = (width as f64, height as f64);
     canvas.triangle([pt(0.0, 0.0), pt(w, h), pt(0.0, h)], ON);
 }
 
-/// 
+/// U+E0B9
 pub fn draw_e0b9(_cp: u32, canvas: &mut Canvas, _width: u32, _height: u32, metrics: &Metrics) {
     box_drawing::light_diagonal_upper_left_to_lower_right(metrics, canvas);
 }
 
-/// 
+/// U+E0BA
 pub fn draw_e0ba(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, _metrics: &Metrics) {
     let (w, h) = (width as f64, height as f64);
     canvas.triangle([pt(w, 0.0), pt(w, h), pt(0.0, h)], ON);
 }
 
-/// 
+/// U+E0BB
 pub fn draw_e0bb(_cp: u32, canvas: &mut Canvas, _width: u32, _height: u32, metrics: &Metrics) {
     box_drawing::light_diagonal_upper_right_to_lower_left(metrics, canvas);
 }
 
-/// 
+/// U+E0BC
 pub fn draw_e0bc(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, _metrics: &Metrics) {
     let (w, h) = (width as f64, height as f64);
     canvas.triangle([pt(0.0, 0.0), pt(w, 0.0), pt(0.0, h)], ON);
 }
 
-/// 
+/// U+E0BD
 pub fn draw_e0bd(_cp: u32, canvas: &mut Canvas, _width: u32, _height: u32, metrics: &Metrics) {
     box_drawing::light_diagonal_upper_right_to_lower_left(metrics, canvas);
 }
 
-/// 
+/// U+E0BE
 pub fn draw_e0be(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, _metrics: &Metrics) {
     let (w, h) = (width as f64, height as f64);
     canvas.triangle([pt(0.0, 0.0), pt(w, 0.0), pt(w, h)], ON);
 }
 
-/// 
+/// U+E0BF
 pub fn draw_e0bf(_cp: u32, canvas: &mut Canvas, _width: u32, _height: u32, metrics: &Metrics) {
     box_drawing::light_diagonal_upper_left_to_lower_right(metrics, canvas);
 }
 
-/// 
+/// U+E0D2
 pub fn draw_e0d2(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, metrics: &Metrics) {
     let (w, h) = (width as f64, height as f64);
     let t = metrics.box_thickness as f64;
@@ -157,7 +157,7 @@ pub fn draw_e0d2(_cp: u32, canvas: &mut Canvas, width: u32, height: u32, metrics
     canvas.quad([pt(0.0, h), pt(w, h), pt(w / 2.0, h / 2.0 + t / 2.0), pt(0.0, h / 2.0 + t / 2.0)], ON);
 }
 
-/// 
+/// U+E0D4
 pub fn draw_e0d4(cp: u32, canvas: &mut Canvas, width: u32, height: u32, metrics: &Metrics) {
     draw_e0d2(cp, canvas, width, height, metrics);
     canvas.flip_horizontal();

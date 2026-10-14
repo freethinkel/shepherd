@@ -614,8 +614,9 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(2.))
-            // the 28 px `+` sits as far from the right edge as from the top and bottom
-            .pr(px(TAB_TOP))
+            // the 28 px `+` sits as far from the right edge as from the top and bottom, and clear of the window's
+            // buttons while no review panel sits under them
+            .pr(px(TAB_TOP + if self.review_open { 0. } else { WINDOW_CONTROLS_W }))
             // clear the traffic lights and the sidebar toggle once the sidebar no longer sits under them
             .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
             .child(

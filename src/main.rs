@@ -14,6 +14,15 @@ fn main() {
         shepherd::bindings::rebind(cx, &settings.keys);
         cx.set_global(shepherd::settings::SettingsGlobal { settings, error, path });
         cx.on_action(|_: &shepherd::bindings::Quit, cx| cx.quit());
+        // off macOS an app with no windows left has nothing to show: closing the last one quits, as GNOME expects
+        if !cfg!(target_os = "macos") {
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+        }
         shepherd::bindings::init_menu_actions(cx);
         cx.on_action(|_: &shepherd::bindings::OpenSettings, cx| shepherd::shell::Shell::toggle_settings(cx));
         use shepherd::{settings::step_font_size, ui::settings::update};
@@ -31,10 +40,14 @@ fn main() {
         if std::env::var_os("SHEPHERD_SETTINGS").is_some() {
             shepherd::shell::Shell::toggle_settings(cx);
         }
-        // `SHEPHERD_PANEL=commands|agents`: opens that panel once the first snapshot is likely in (screenshots).
+        // `SHEPHERD_PANEL=commands|agents|workspaces`: opens that panel once the first snapshot is likely in (screenshots).
         if let Ok(which) = std::env::var("SHEPHERD_PANEL") {
             use shepherd::ui::command_panel::Kind;
-            let kind = if which == "agents" { Kind::Agents } else { Kind::Commands };
+            let kind = match which.as_str() {
+                "agents" => Kind::Agents,
+                "workspaces" => Kind::Workspaces,
+                _ => Kind::Commands,
+            };
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
                 cx.update(|cx| {

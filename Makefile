@@ -16,7 +16,7 @@ NOTARY_PROFILE ?= shepherd-notary
 NOTARY_KEYCHAIN ?=
 export SIGN_IDENTITY
 
-.PHONY: help build run test app app-debug open install universal dist notarize version ghostty-themes clean
+.PHONY: help build run test lint linux app app-debug open install universal dist notarize version ghostty-themes clean
 
 help: ## This list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
@@ -29,6 +29,15 @@ run: ## Debug app, run from target/debug/Shepherd.app (cargo runner)
 
 test: ## All tests
 	cargo test
+
+lint: ## Clippy, warnings as errors
+	cargo clippy --all-targets -- -D warnings
+
+linux: ## Linux tar.gz, .deb and .rpm for this Mac's architecture, built in Docker, in target/linux-dist
+	docker build -t shepherd-linux -f scripts/linux.Dockerfile scripts
+	# the build goes to a volume: cargo-deb's temp folder can't be cleared on the Mac's bind-mounted target
+	docker run --rm -v "$(CURDIR)":/src -v shepherd-cargo:/root/.cargo/registry -v shepherd-cargo-git:/root/.cargo/git \
+		-v shepherd-target:/target -e CARGO_TARGET_DIR=/target -w /src shepherd-linux scripts/linux-dist.sh
 
 app: ## Release Shepherd.app in target/release
 	scripts/bundle.sh release
