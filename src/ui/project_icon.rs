@@ -88,7 +88,7 @@ fn github_avatar(dir: &str) -> Option<PathBuf> {
     if !path.is_file() {
         std::fs::create_dir_all(&dir).ok()?;
         let url = format!("https://github.com/{owner}.png?size=64");
-        let got = std::process::Command::new("curl").args(["-fsSL", "--max-time", "10", "-o"]).arg(&path).arg(url).status().ok()?;
+        let got = crate::process::command("curl").args(["-fsSL", "--max-time", "10", "-o"]).arg(&path).arg(url).status().ok()?;
         if !got.success() {
             let _ = std::fs::remove_file(&path);
             return None;

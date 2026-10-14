@@ -188,7 +188,7 @@ impl SettingsView {
         let font_size = field(Some(settings.font_size.to_string()), "13", window, cx);
         let line_height = field(Some(format!("{:.1}", settings.line_height)), "1.4", window, cx);
         let herdr_bin = field(settings.herdr_bin.clone(), "herdr on PATH", window, cx);
-        let herdr_socket = field(settings.herdr_socket.clone(), "~/.config/herdr/herdr.sock", window, cx);
+        let herdr_socket = field(settings.herdr_socket.clone(), if cfg!(windows) { r"%APPDATA%\herdr\herdr.sock" } else { "~/.config/herdr/herdr.sock" }, window, cx);
         let herdr_config = HerdrConfig::load(&config_path()).map_err(|e| format!("{e:#}"));
         let herdr_fields: Vec<_> = HERDR_FIELDS
             .iter()

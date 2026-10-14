@@ -49,7 +49,7 @@ impl Shell {
             let Some(panel) = panel.upgrade() else { return };
             match result {
                 Ok(list) => {
-                    let home = std::env::var("HOME").unwrap_or_default();
+                    let home = crate::settings::home().to_string_lossy().into_owned();
                     let items = crate::ui::command_panel::worktree_items(&list, &repo, &home);
                     panel.update(cx, |panel, cx| panel.set_items(items, cx));
                 }

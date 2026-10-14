@@ -14,15 +14,19 @@ pub(super) fn str_list(value: &Value) -> Vec<String> {
     }
 }
 
-/// Where herdr reads it: `HERDR_CONFIG_PATH`, else `$XDG_CONFIG_HOME/herdr`, else `~/.config/herdr`.
+/// Where herdr reads it: `HERDR_CONFIG_PATH`, else in [`dir`].
 pub fn config_path() -> PathBuf {
     if let Some(path) = std::env::var_os("HERDR_CONFIG_PATH") {
         return path.into();
     }
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
-    config.join("herdr/config.toml")
+    dir().join("config.toml")
+}
+
+/// herdr's folder, with its config and its sessions' sockets: `$XDG_CONFIG_HOME/herdr`, else `%APPDATA%\herdr` on
+/// Windows, else `~/.config/herdr`.
+pub(super) fn dir() -> PathBuf {
+    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("APPDATA").filter(|_| cfg!(windows)).map(PathBuf::from));
+    config.unwrap_or_else(|| crate::settings::home().join(".config")).join("herdr")
 }
 
 /// The file as herdr reads it; a missing one is empty, so every key reads as herdr's default.
@@ -147,6 +151,7 @@ enabled = false
         assert!(config.set("onboarding.x", Some(1.into())).is_err(), "a value is not a table");
     }
 
+    #[cfg(unix)] // a symlink on Windows needs developer mode or admin
     #[test]
     fn saving_writes_through_a_symlink() {
         let dir = tempfile::tempdir().unwrap();

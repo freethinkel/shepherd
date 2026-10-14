@@ -248,29 +248,39 @@ impl Default for Settings {
     }
 }
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+pub(crate) fn home() -> PathBuf {
+    std::env::home_dir().unwrap_or_default()
 }
 
-/// Where the settings live: macOS's Application Support, else the XDG config folder.
+/// Where the settings live: macOS's Application Support, Windows' roaming AppData, else the XDG config folder.
 #[cfg(target_os = "macos")]
 fn config_dir() -> PathBuf {
     home().join("Library/Application Support/Shepherd")
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn config_dir() -> PathBuf {
+    std::env::var_os("APPDATA").map_or_else(|| home().join("AppData").join("Roaming"), PathBuf::from).join("Shepherd")
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home().join(".config"), PathBuf::from).join("shepherd")
 }
 
-/// Shepherd's caches: macOS's Library/Caches, else the XDG cache folder. Short enough for a socket path under it
+/// Shepherd's caches: macOS's Library/Caches, Windows' local AppData, else the XDG cache folder. Short enough for a socket path under it
 /// (104 bytes on macOS).
 #[cfg(target_os = "macos")]
 pub fn cache_dir() -> PathBuf {
     home().join("Library/Caches/Shepherd")
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+pub fn cache_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA").map_or_else(|| home().join("AppData").join("Local"), PathBuf::from).join("Shepherd")
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn cache_dir() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME").map_or_else(|| home().join(".cache"), PathBuf::from).join("shepherd")
 }

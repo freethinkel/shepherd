@@ -1,3 +1,5 @@
+// ponytail: the fake herdr listens on a unix socket; Windows runs the unit tests only, a named pipe if it ever needs these
+#![cfg(unix)]
 use serde_json::{Value, json};
 use shepherd::herdr::Client;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

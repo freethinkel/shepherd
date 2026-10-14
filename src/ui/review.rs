@@ -712,7 +712,7 @@ fn failure(tool: &'static str, host: &str, stderr: &str) -> Review {
 /// gh or glab with `args` for the repo at the located `dir`: run there, or for a machine's checkout run here against
 /// its origin (`-R`, an API call's `--hostname`), with this Mac's login, so the host needs neither.
 pub(crate) fn cli(name: &str, args: &[&str], dir: &str) -> std::io::Result<std::process::Output> {
-    let mut cmd = std::process::Command::new(tool(name));
+    let mut cmd = crate::process::command(tool(name));
     cmd.stdin(std::process::Stdio::null());
     let (machine, path) = crate::herdr::split(dir);
     if machine.is_none() {
@@ -731,7 +731,7 @@ pub(crate) fn cli(name: &str, args: &[&str], dir: &str) -> std::io::Result<std::
     } else if !args.iter().any(|a| a == "-R") {
         args.extend(["-R".into(), if name == "gh" { format!("{host}/{repo}") } else { format!("https://{host}/{repo}") }]);
     }
-    cmd.args(args).current_dir(std::env::var_os("HOME").unwrap_or_else(|| "/".into())).output()
+    cmd.args(args).current_dir(std::env::home_dir().unwrap_or_else(|| "/".into())).output()
 }
 
 /// The host and project path of the located `dir`'s origin, asked once per directory.

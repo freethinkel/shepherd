@@ -823,9 +823,8 @@ impl Shell {
             }
             // herdr's `shell`: detached, in the pane's directory, with herdr's socket for the `herdr` CLI
             CommandKind::Shell => {
-                let mut sh = std::process::Command::new("sh");
-                sh.args(["-c", &command.command])
-                    .env("HERDR_SOCKET_PATH", self.client.path())
+                let mut sh = crate::process::shell(&command.command);
+                sh.env("HERDR_SOCKET_PATH", self.client.path())
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());

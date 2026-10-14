@@ -1,3 +1,6 @@
+// a release build on Windows is a windowed app: no console window of its own
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 fn main() {
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     let handle = rt.handle().clone();

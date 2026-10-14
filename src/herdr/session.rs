@@ -24,7 +24,7 @@ pub fn set_binary(path: Option<String>) {
     *BINARY.write().unwrap() = path.filter(|p| !p.trim().is_empty());
 }
 
-/// herdr's API socket (from settings); `None` is `HERDR_SOCKET_PATH`, else `~/.config/herdr/herdr.sock`.
+/// herdr's API socket (from settings); `None` is `HERDR_SOCKET_PATH`, else `herdr.sock` in herdr's folder.
 pub fn set_socket(path: Option<String>) {
     *SOCKET.write().unwrap() = path.filter(|p| !p.trim().is_empty());
 }
@@ -40,10 +40,10 @@ pub(super) fn client_socket() -> PathBuf {
     api.with_file_name(format!("{stem}-client.sock"))
 }
 
-/// herdr's API socket: from settings, else `HERDR_SOCKET_PATH`, else `~/.config/herdr/herdr.sock`.
+/// herdr's API socket: from settings, else `HERDR_SOCKET_PATH`, else `herdr.sock` in herdr's folder.
 fn api_socket() -> PathBuf {
     SOCKET.read().unwrap().clone().map(PathBuf::from).or_else(|| std::env::var_os("HERDR_SOCKET_PATH").map(PathBuf::from)).unwrap_or_else(|| {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config/herdr/herdr.sock")
+        super::config::dir().join("herdr.sock")
     })
 }
 
@@ -53,11 +53,11 @@ pub(super) fn binary() -> String {
 
 /// `herdr` on PATH, else where its installers put it: an app opened from Finder gets launchd's bare PATH.
 fn find_herdr() -> String {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let home = crate::settings::home();
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .chain([home.join(".local/bin"), home.join(".cargo/bin"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()])
-        .map(|dir| dir.join("herdr"))
+        .map(|dir| dir.join(format!("herdr{}", std::env::consts::EXE_SUFFIX)))
         .find(|p| p.is_file())
         .map_or_else(|| "herdr".into(), |p| p.to_string_lossy().into_owned())
 }
@@ -71,9 +71,8 @@ pub fn no_server(err: &anyhow::Error) -> bool {
 }
 
 /// The herdr session whose server listens on `socket`: `Some(None)` for the default one, `Some(Some(name))` for
-/// `herdr --session <name>`, `None` for any other socket.
-fn session_of(socket: &Path, home: &Path) -> Option<Option<String>> {
-    let config = home.join(".config/herdr");
+/// `herdr --session <name>`, `None` for any other socket. `config` is herdr's folder.
+fn session_of(socket: &Path, config: &Path) -> Option<Option<String>> {
     if socket == config.join("herdr.sock") {
         return Some(None);
     }
@@ -85,21 +84,28 @@ fn session_of(socket: &Path, home: &Path) -> Option<Option<String>> {
     }
 }
 
-/// Runs herdr's headless server (`herdr server`) for the socket Shepherd uses, in its own process group so it
-/// outlives Shepherd, as one started from a terminal would. Only herdr's own sessions: a server pointed at another
-/// socket would still load the default session's state, and two servers would share it.
+/// Runs herdr's headless server (`herdr server`) for the socket Shepherd uses, in its own process group (on Windows
+/// detached, with no console) so it outlives Shepherd, as one started from a terminal would. Only herdr's own
+/// sessions: a server pointed at another socket would still load the default session's state, and two servers would
+/// share it.
 pub fn start_server() -> std::io::Result<()> {
-    use std::os::unix::process::CommandExt;
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     let socket = api_socket();
-    let Some(session) = session_of(&socket, &home) else {
+    let Some(session) = session_of(&socket, &super::config::dir()) else {
         return Err(std::io::Error::other(format!("{} is not a herdr session's socket, so Shepherd leaves starting it to you", socket.display())));
     };
     let mut command = Command::new(binary());
     if let Some(name) = session {
         command.args(["--session", &name]);
     }
-    command.arg("server").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
+    command.arg("server").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    #[cfg(windows)]
+    {
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        std::os::windows::process::CommandExt::creation_flags(&mut command, DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
     // Shepherd may itself run inside a herdr pane: the server must not take that pane's context.
     for var in ["HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_SOCKET_PATH", "HERDR_CLIENT_SOCKET_PATH"] {
         command.env_remove(var);
@@ -121,7 +127,7 @@ pub struct SessionInfo {
 
 /// herdr's sessions, from `herdr session list --json`.
 pub fn sessions() -> anyhow::Result<Vec<SessionInfo>> {
-    let out = Command::new(binary()).args(["session", "list", "--json"]).stdin(Stdio::null()).output()?;
+    let out = crate::process::command(binary()).args(["session", "list", "--json"]).stdin(Stdio::null()).output()?;
     anyhow::ensure!(out.status.success(), "herdr session list: {}", String::from_utf8_lossy(&out.stderr).trim());
     parse_sessions(&out.stdout)
 }
@@ -136,8 +142,7 @@ fn parse_sessions(json: &[u8]) -> anyhow::Result<Vec<SessionInfo>> {
 
 /// The name of the herdr session Shepherd talks to: `default`, a named one, or `None` for a socket of its own.
 pub fn current_session() -> Option<String> {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    session_of(&api_socket(), &home).map(|name| name.unwrap_or_else(|| "default".into()))
+    session_of(&api_socket(), &super::config::dir()).map(|name| name.unwrap_or_else(|| "default".into()))
 }
 
 /// herdr's rule for a session's name: ASCII letters, digits, `.`, `_` and `-`.
@@ -148,8 +153,7 @@ pub fn valid_session_name(name: &str) -> bool {
 /// The session `name` where herdr keeps it. herdr has no command to make one: its server makes it on first start,
 /// which Shepherd does when nothing answers on the socket.
 pub fn new_session(name: &str) -> SessionInfo {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let socket = home.join(".config/herdr/sessions").join(name).join("herdr.sock");
+    let socket = super::config::dir().join("sessions").join(name).join("herdr.sock");
     SessionInfo { name: name.into(), running: false, socket_path: socket.to_string_lossy().into_owned(), default: false }
 }
 
@@ -171,7 +175,7 @@ pub fn delete_session(name: &str, running: bool) -> anyhow::Result<()> {
 
 /// `herdr session <args> --json`: its error message when it answers with one.
 fn session_command(args: &[&str]) -> anyhow::Result<()> {
-    let out = Command::new(binary()).arg("session").args(args).arg("--json").stdin(Stdio::null()).output()?;
+    let out = crate::process::command(binary()).arg("session").args(args).arg("--json").stdin(Stdio::null()).output()?;
     let answer: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
     if let Some(message) = answer["error"]["message"].as_str() {
         anyhow::bail!("{message}");
@@ -270,7 +274,7 @@ impl Session {
 
     fn spawn_cli(pane: &str, cols: u16, rows: u16, mode: Mode) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
         let herdr = binary();
-        let mut child = Command::new(&herdr)
+        let mut child = crate::process::command(&herdr)
             .envs(SOCKET.read().unwrap().clone().map(|p| ("HERDR_SOCKET_PATH", p)))
             .args(["terminal", "session", if mode == Mode::Observe { "observe" } else { "control" }, pane])
             .args(["--cols", &cols.to_string(), "--rows", &rows.to_string()])
@@ -457,8 +461,8 @@ mod tests {
 
     #[test]
     fn only_herdrs_own_sessions_are_started() {
-        let home = Path::new("/Users/me");
-        let at = |p: &str| session_of(Path::new(p), home);
+        let config = Path::new("/Users/me/.config/herdr");
+        let at = |p: &str| session_of(Path::new(p), config);
         assert_eq!(at("/Users/me/.config/herdr/herdr.sock"), Some(None));
         assert_eq!(at("/Users/me/.config/herdr/sessions/pets/herdr.sock"), Some(Some("pets".into())));
         assert_eq!(at("/Users/me/.config/herdr/sessions/pets/other.sock"), None);

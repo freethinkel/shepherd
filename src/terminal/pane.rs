@@ -1212,7 +1212,7 @@ fn is_image(path: &Path) -> bool {
 /// A clicked path as a file that exists: `~` is home, a relative path is the pane's shell's.
 fn resolve(path: &str, cwd: &Path) -> Option<PathBuf> {
     let path = match path.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        Some(rest) => std::env::home_dir()?.join(rest),
         None => cwd.join(path),
     };
     path.exists().then_some(path)

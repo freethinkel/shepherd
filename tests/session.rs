@@ -1,3 +1,5 @@
+// ponytail: the fake herdr is a shell script; Windows runs the unit tests only, a .cmd fake if it ever needs these
+#![cfg(unix)]
 use serde_json::{Value, json};
 use shepherd::herdr::{Mode, Session, SessionEvent};
 use std::os::unix::fs::PermissionsExt;

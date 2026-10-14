@@ -403,7 +403,7 @@ fn read_usage(key: &str) -> Option<Vec<Limit>> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into();
     if key == UsageAgent::Codex.key() {
         // ponytail: Codex CLI refreshes this token when it runs; one left stale long enough just hides the limits
-        let home = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from).or_else(|| Some(Path::new(&std::env::var_os("HOME")?).join(".codex")))?;
+        let home = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from).or_else(|| Some(std::env::home_dir()?.join(".codex")))?;
         let auth: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("auth.json")).ok()?).ok()?;
         let mut response = agent
             .get("https://chatgpt.com/backend-api/wham/usage")
@@ -485,7 +485,7 @@ fn read_spent(key: &str) -> Option<Spent> {
     if let Some(target) = machine {
         return read_remote_spent(target, id);
     }
-    let projects = Path::new(&std::env::var_os("HOME")?).join(".claude/projects");
+    let projects = std::env::home_dir()?.join(".claude/projects");
     let file = std::fs::read_dir(projects).ok()?.flatten().map(|d| d.path().join(format!("{id}.jsonl"))).find(|f| f.is_file())?;
     Some(parse_spent(&std::fs::read_to_string(file).ok()?))
 }
@@ -755,7 +755,7 @@ pub fn bar(
     let dir = pane_dir(snapshot, pane_id);
     let git = dir.as_deref().filter(|_| show.branch).and_then(|d| cached(d, GIT_TTL, read_git, cx));
     let usage = show.usage.then(|| usage_of(crate::settings::SettingsGlobal::of(cx).settings.usage_agent, cx)).flatten().filter(|l| !l.is_empty());
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = std::env::home_dir();
     let muted = theme.text_muted.opacity(0.7);
     div()
         .flex_none()

@@ -3,7 +3,7 @@
 //! of Shepherd talks to it as to a local session.
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Mutex;
 
 /// A saved machine, as `herdr machine list --json` lists it.
@@ -49,7 +49,7 @@ pub fn remove_machine(id: &str) -> anyhow::Result<()> {
 }
 
 fn herdr(args: &[&str]) -> anyhow::Result<Vec<u8>> {
-    let out = Command::new(super::session::binary()).args(args).stdin(Stdio::null()).output()?;
+    let out = crate::process::command(super::session::binary()).args(args).stdin(Stdio::null()).output()?;
     anyhow::ensure!(
         out.status.success(),
         "herdr {}: {}",
@@ -87,7 +87,7 @@ pub fn split(dir: &str) -> (Option<&str>, &str) {
 /// `git -C <path> <args>` for a located directory: here, or on its machine over the shared SSH connection.
 pub fn git(dir: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
     match split(dir) {
-        (None, path) => Command::new("git").arg("-C").arg(path).args(args).stdin(Stdio::null()).output(),
+        (None, path) => crate::process::command("git").arg("-C").arg(path).args(args).stdin(Stdio::null()).output(),
         (Some(target), path) => {
             let words: Vec<String> = ["git", "-C", path].iter().chain(args).map(|w| quote(w)).collect();
             ssh(target, &words.join(" "))
@@ -97,7 +97,7 @@ pub fn git(dir: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
 
 /// `script` run by `sh` on the machine at `target` (its login shell may be fish), over the shared SSH connection.
 pub fn ssh(target: &str, script: &str) -> std::io::Result<std::process::Output> {
-    Command::new("ssh").args(ssh_options()).arg("--").arg(target).arg(format!("sh -c {}", quote(script))).stdin(Stdio::null()).output()
+    crate::process::command("ssh").args(ssh_options()).arg("--").arg(target).arg(format!("sh -c {}", quote(script))).stdin(Stdio::null()).output()
 }
 
 /// `word` for the remote shell, as one argument.
@@ -133,7 +133,7 @@ pub fn relay(machine: &Machine, rt: &tokio::runtime::Handle) -> anyhow::Result<P
 
 /// One local connection, carried over SSH to the bridge.
 async fn pipe(stream: super::socket::AsyncStream, target: &str, command: &str) {
-    let Ok(mut ssh) = tokio::process::Command::new("ssh")
+    let Ok(mut ssh) = tokio::process::Command::from(crate::process::command("ssh"))
         .args(ssh_options())
         .arg("--")
         .arg(target)
@@ -161,21 +161,25 @@ async fn pipe(stream: super::socket::AsyncStream, target: &str, command: &str) {
     }
 }
 
-/// Never prompts (there is no terminal); one shared SSH connection per host, as herdr's own machines keep.
+/// Never prompts (there is no terminal); one shared SSH connection per host, as herdr's own machines keep, where
+/// OpenSSH shares them (not on Windows).
 fn ssh_options() -> Vec<String> {
     let control = cache_dir().join("cm-%C");
+    let shared = [
+        "-o".into(), "ControlMaster=auto".into(),
+        "-o".into(), "ControlPersist=600".into(),
+        "-o".into(), format!("ControlPath={}", control.display()),
+    ];
     [
         "-C",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=4",
-        "-o", "ControlMaster=auto",
-        "-o", "ControlPersist=600",
     ]
     .into_iter()
     .map(String::from)
-    .chain(["-o".into(), format!("ControlPath={}", control.display())])
+    .chain(shared.into_iter().filter(|_| !cfg!(windows)))
     .collect()
 }
 
