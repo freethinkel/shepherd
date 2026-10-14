@@ -763,7 +763,11 @@ impl Shell {
             .with_priority(1)
         }))
         .children(self.usage_menu.as_ref().map(|menu| {
-            let card = crate::ui::statusbar::usage_card(theme, cx).on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            let on_settings = cx.listener(|this, _: &ClickEvent, window, cx| {
+                if let Some(m) = this.usage_menu.as_mut() { m.close() }
+                this.open_usage_settings(window, cx);
+            });
+            let card = crate::ui::statusbar::usage_card(theme, on_settings, cx).on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 if let Some(m) = this.usage_menu.as_mut() { m.close() }
                 cx.notify();
             }));
