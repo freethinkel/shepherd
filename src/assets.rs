@@ -92,6 +92,7 @@ impl gpui::AssetSource for Assets {
             "split-columns",
             "status-blocked",
             "status-done",
+            "status-question",
             "status-dot",
             "status-idle",
             "status-unknown",

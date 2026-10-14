@@ -137,6 +137,7 @@ fn action_icon(name: &str) -> &'static str {
         "ToggleReview" => "icons/sidebar-minimalistic-right.svg",
         "OpenSettings" => "icons/settings.svg",
         "ChangeTheme" => "icons/sun.svg",
+        "ToggleSecureInput" => "icons/keyboard.svg",
         "AgentsPanel" => "icons/bot.svg",
         "Quit" => "icons/logout-2.svg",
         _ => "icons/terminal.svg",

@@ -12,7 +12,7 @@ pub enum AgentSort {
     Grouped,
     /// Waiting or done, the longest first; the rest after, in status order.
     Waiting,
-    /// Blocked, working, done, idle: what needs you first. Also what an unknown (old or future) value reads as.
+    /// Blocked, done, working, idle: what needs you first. Also what an unknown (old or future) value reads as.
     #[default]
     #[serde(other)]
     Status,
@@ -106,6 +106,9 @@ pub struct Pane {
     /// The agent's own session, as its herdr integration reports it (Claude's is its transcript's file name).
     #[serde(default)]
     pub agent_session: Option<AgentSession>,
+    /// herdr's counter of agent status changes, higher is more recent; read from the snapshot's `agents`.
+    #[serde(default)]
+    pub state_change_seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -194,7 +197,15 @@ pub struct PaneFrame {
 
 impl Snapshot {
     pub fn from_result(result: &serde_json::Value) -> anyhow::Result<Self> {
-        Ok(Self::deserialize(&result["snapshot"])?)
+        let mut snapshot = Self::deserialize(&result["snapshot"])?;
+        // herdr puts `state_change_seq` on the snapshot's `agents`, not its panes
+        for agent in result["snapshot"]["agents"].as_array().into_iter().flatten() {
+            let (Some(id), Some(seq)) = (agent["pane_id"].as_str(), agent["state_change_seq"].as_u64()) else { continue };
+            if let Some(pane) = snapshot.panes.iter_mut().find(|p| p.pane_id == id) {
+                pane.state_change_seq = seq;
+            }
+        }
+        Ok(snapshot)
     }
 
     pub fn tabs_of(&self, workspace_id: &str) -> Vec<&Tab> {
@@ -226,17 +237,17 @@ impl Snapshot {
         tree
     }
 
-    /// Panes running a detected agent, the ones that need you first (herdr's "priority" sort).
+    /// Panes running a detected agent, the ones that need you first, the latest change first (herdr's "priority" sort).
     pub fn agents(&self) -> Vec<&Pane> {
         let rank = |s: AgentStatus| match s {
             AgentStatus::Blocked => 0,
-            AgentStatus::Working => 1,
-            AgentStatus::Done => 2,
+            AgentStatus::Done => 1,
+            AgentStatus::Working => 2,
             AgentStatus::Idle => 3,
             AgentStatus::Unknown => 4,
         };
         let mut agents: Vec<_> = self.panes.iter().filter(|p| p.agent.is_some()).collect();
-        agents.sort_by_key(|p| rank(p.agent_status));
+        agents.sort_by_key(|p| (rank(p.agent_status), std::cmp::Reverse(p.state_change_seq)));
         agents
     }
 

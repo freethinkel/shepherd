@@ -47,6 +47,8 @@ pub struct Settings {
     pub show_status_bar: bool,
     /// Which of its labels the status bar shows: its right-click menu.
     pub status_bar_show: StatusBarShow,
+    /// Whose plan limits the status bar shows; Usage settings pick it.
+    pub usage_agent: UsageAgent,
     /// What a workspace row shows besides its name: the sidebar `…` menu's Show.
     pub workspace_show: WorkspaceShow,
     /// Shorter workspace rows.
@@ -69,8 +71,43 @@ pub struct Settings {
     pub dock_badge: bool,
     /// A finished selection in a pane goes to the clipboard and clears, as in herdr.
     pub copy_on_select: bool,
+    /// macOS Secure Keyboard Entry while a Shepherd window is in front: other apps cannot read the keys typed.
+    pub secure_input: bool,
+    /// The workspaces sidebar is shown; `⌘B` hides it.
+    pub sidebar_open: bool,
+    /// Worktree groups folded in the sidebar, by workspace id.
+    pub folded: Vec<String>,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
+}
+
+/// An agent whose plan limits Shepherd reads. An unknown (future) value reads as Claude.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UsageAgent {
+    Codex,
+    #[default]
+    #[serde(other)]
+    Claude,
+}
+
+impl UsageAgent {
+    pub const ALL: [UsageAgent; 2] = [UsageAgent::Claude, UsageAgent::Codex];
+
+    /// Its key in the usage cache, and in the settings file.
+    pub fn key(self) -> &'static str {
+        match self {
+            UsageAgent::Claude => "claude",
+            UsageAgent::Codex => "codex",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            UsageAgent::Claude => "Claude",
+            UsageAgent::Codex => "Codex",
+        }
+    }
 }
 
 /// A herdr session's or machine's look in Shepherd, as Arc's spaces have one: `None` keeps herdr's name, or the
@@ -191,6 +228,7 @@ impl Default for Settings {
             show_agents: true,
             show_status_bar: true,
             status_bar_show: StatusBarShow::default(),
+            usage_agent: UsageAgent::default(),
             workspace_show: WorkspaceShow::default(),
             compact_workspaces: false,
             compact_agents: false,
@@ -202,6 +240,9 @@ impl Default for Settings {
             notify_sound: true,
             dock_badge: true,
             copy_on_select: true,
+            secure_input: false,
+            sidebar_open: true,
+            folded: Vec::new(),
             window: None,
         }
     }
@@ -421,10 +462,10 @@ mod tests {
     #[test]
     fn an_unknown_agent_sort_reads_as_status() {
         let (_d, path) = tmp();
-        std::fs::write(&path, r#"{"agent_sort": "workspace", "font_size": 15}"#).unwrap();
+        std::fs::write(&path, r#"{"agent_sort": "workspace", "font_size": 15, "usage_agent": "gemini"}"#).unwrap();
         let (s, err) = Settings::load(&path);
         assert!(err.is_none());
-        assert_eq!((s.agent_sort, s.font_size), (AgentSort::Status, 15.0));
+        assert_eq!((s.agent_sort, s.font_size, s.usage_agent), (AgentSort::Status, 15.0, UsageAgent::Claude));
     }
 
     #[test]

@@ -19,6 +19,7 @@ fn main() {
         use shepherd::{settings::step_font_size, ui::settings::update};
         cx.on_action(|_: &shepherd::bindings::FontSizeUp, cx| update(cx, |s| s.font_size = step_font_size(s.font_size, 1.0)));
         cx.on_action(|_: &shepherd::bindings::FontSizeDown, cx| update(cx, |s| s.font_size = step_font_size(s.font_size, -1.0)));
+        cx.on_action(|_: &shepherd::bindings::ToggleSecureInput, cx| update(cx, |s| s.secure_input = !s.secure_input));
         cx.on_action(|_: &shepherd::bindings::FontSizeReset, cx| {
             update(cx, |s| s.font_size = shepherd::settings::Settings::default().font_size)
         });

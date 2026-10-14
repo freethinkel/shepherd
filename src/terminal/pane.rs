@@ -3,14 +3,13 @@
 //! `GridGeometry` and the selection gestures are adapted from Zeron's crates/ui/src/terminal/panel.rs (MIT, see
 //! assets/NOTICE).
 use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement, cell_at};
-use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, Side};
+use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
 use super::find::{Link, find_all, hyperlink, link_at};
 use super::keys::{dropped_paths, keystroke_bytes, paste_bytes};
+use crate::herdr::graphics::PaneImage;
 use crate::herdr::{Client, Mode, PaneInput, Session, SessionEvent};
 use crate::theme::Theme;
 use crate::ui::Popup;
-use alacritty_terminal::index::Point as GridPoint;
-use alacritty_terminal::selection::SelectionType;
 use gpui::{
     App, AsyncApp, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, Focusable, IntoElement, KeyDownEvent, Modifiers,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
@@ -32,6 +31,8 @@ pub struct GridGeometry {
     pub line_h: f32,
     pub cols: u16,
     pub rows: u16,
+    /// A cell in device pixels, as herdr is told: it sizes Kitty images by it.
+    pub cell_px: (u32, u32),
 }
 
 pub struct GridSnapshot {
@@ -39,6 +40,7 @@ pub struct GridSnapshot {
     pub cursor: Option<CursorSnapshot>,
     /// Search matches on screen: (row, cells, the current one).
     pub marks: Vec<(usize, Range<usize>, bool)>,
+    pub images: Vec<PaneImage>,
 }
 
 /// While true (a divider or the sidebar is being dragged), panes reflow at most every `HELD_RESIZE`, so the
@@ -184,7 +186,12 @@ struct Drag {
 
 pub struct PaneTerminal {
     pane_id: String,
+    /// What is shown: the live grid, or while scrolled back, a local copy of herdr's history.
     emulator: Emulator,
+    /// While `emulator` shows the history copy: the live grid, which herdr's frames keep updating.
+    live: Option<Emulator>,
+    /// The lines scrolled while the history is being read.
+    history_pending: Option<i64>,
     session: Option<Session>,
     /// The session (or the one connecting) only observes: see [`Yielded`].
     observing: bool,
@@ -222,6 +229,8 @@ pub struct PaneTerminal {
     preview: Option<Popup<Preview>>,
     /// Always attaches by taking the terminal over (herdr's popup: whichever window shows it types into it).
     pub takes_over: bool,
+    /// Kitty images herdr shows on the pane (from the window's client shell), drawn over the grid.
+    images: Vec<PaneImage>,
 }
 
 impl PaneTerminal {
@@ -246,6 +255,8 @@ impl PaneTerminal {
         PaneTerminal {
             pane_id,
             emulator: Emulator::new(80, 24),
+            live: None,
+            history_pending: None,
             session: None,
             observing: false,
             held: Vec::new(),
@@ -271,6 +282,7 @@ impl PaneTerminal {
             hover: None,
             preview: None,
             takes_over: false,
+            images: Vec::new(),
         }
         // Attaching waits for the first measured grid (`on_grid_metrics`): herdr resizes the real PTY to
         // whatever size the attach names.
@@ -288,6 +300,16 @@ impl PaneTerminal {
         self.ended.as_deref()
     }
 
+    /// herdr's images on this pane now; returns those it no longer shows, for the window to free.
+    pub fn set_images(&mut self, images: Vec<PaneImage>, cx: &mut Context<Self>) -> Vec<std::sync::Arc<gpui::RenderImage>> {
+        if self.images.is_empty() && images.is_empty() {
+            return Vec::new();
+        }
+        let old = std::mem::replace(&mut self.images, images);
+        cx.notify();
+        old.into_iter().map(|i| i.image).filter(|o| !self.images.iter().any(|i| std::sync::Arc::ptr_eq(&i.image, o))).collect()
+    }
+
     /// Connects off the main thread: herdr's handshake takes tens of milliseconds, and attaching happens while a
     /// frame is laid out (a tab switch attaches every pane it shows).
     fn attach(&mut self, takeover: bool, cx: &mut Context<Self>) {
@@ -300,6 +322,7 @@ impl PaneTerminal {
             return;
         }
         let (cols, rows) = (self.emulator.cols() as u16, self.emulator.rows() as u16);
+        let px = self.geometry.map_or((0, 0), |g| g.cell_px);
         let pane_id = self.pane_id.clone();
         let mode = match (takeover || self.takes_over, yielded(cx)) {
             (true, _) => Mode::Takeover,
@@ -308,7 +331,7 @@ impl PaneTerminal {
         };
         self.observing = mode == Mode::Observe;
         self.attaching = std::time::Instant::now();
-        let spawn = cx.background_executor().spawn(async move { Session::spawn(&pane_id, cols, rows, mode) });
+        let spawn = cx.background_executor().spawn(async move { Session::spawn(&pane_id, cols, rows, px, mode) });
         self._pump = Some(cx.spawn(async move |this, cx| {
             let result = spawn.await;
             let rx = this.update(cx, |pane, cx| {
@@ -317,8 +340,9 @@ impl PaneTerminal {
                     Ok((session, rx)) => {
                         // The grid may have changed size while connecting.
                         let now = (pane.emulator.cols() as u16, pane.emulator.rows() as u16);
-                        if now != (cols, rows) {
-                            session.resize(now.0, now.1);
+                        let now_px = pane.geometry.map_or(px, |g| g.cell_px);
+                        if (now, now_px) != ((cols, rows), px) {
+                            session.resize(now.0, now.1, now_px);
                         }
                         if !pane.observing && !pane.held.is_empty() {
                             session.input(&std::mem::take(&mut pane.held));
@@ -361,6 +385,7 @@ impl PaneTerminal {
             self.refresh_scroll(cx);
         }
         let first = self.geometry.is_none();
+        let rescaled = self.geometry.is_some_and(|g| g.cell_px != geometry.cell_px);
         let (cols, rows) = (geometry.cols, geometry.rows);
         // a client shell's popup is sized by herdr (`SessionEvent::Size`), not by its view
         let sized_by_herdr = self.session.as_ref().is_some_and(Session::is_shell);
@@ -371,13 +396,14 @@ impl PaneTerminal {
         }
         self.geometry = Some(geometry);
         if resized {
+            self.leave_history(); // the copy is wrapped at the old width
             self.emulator.resize(cols, rows);
             self.resized_at = Some(std::time::Instant::now());
         }
         if first && self.session.is_none() && self.ended.is_none() {
             self.attach(false, cx);
-        } else if let (Some(session), true) = (&self.session, resized) {
-            session.resize(cols, rows);
+        } else if let (Some(session), true) = (&self.session, resized || rescaled) {
+            session.resize(cols, rows, geometry.cell_px);
         }
     }
 
@@ -400,6 +426,9 @@ impl PaneTerminal {
                     if pane.scroll_local_until.is_some_and(|t| std::time::Instant::now() < t) {
                         scroll.offset_from_bottom = pane.scroll.offset_from_bottom.min(scroll.max_offset_from_bottom);
                     }
+                    if pane.live.is_some() {
+                        scroll.offset_from_bottom = pane.emulator.display_offset() as u32; // herdr itself stays at its bottom
+                    }
                     if scroll != pane.scroll {
                         pane.scroll = scroll;
                         cx.notify();
@@ -416,10 +445,76 @@ impl PaneTerminal {
     /// Scroll herdr by `delta` lines (positive = up, into history) and move the thumb now, not a round trip later.
     /// `at` is the wheel's (col, row): an app reading the mouse (vim) gets the wheel there, herdr's default is 0,0.
     fn scroll_by(&mut self, delta: i64, at: Option<(u16, u16)>, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else { return };
-        if delta == 0 {
+        if self.session.is_none() || delta == 0 {
             return;
         }
+        if let Some(rest) = self.scroll_locally(delta, cx) {
+            self.scroll_herdr(rest, at, cx);
+        }
+    }
+
+    /// Scrolls through herdr's history without herdr: up from the live bottom reads it once (`pane.read`, at most
+    /// herdr's 1000 lines), then each step is local, as fast as a terminal's own scrollback. Returns the lines left
+    /// to herdr: all of them for an app that takes the wheel, the alternate screen, herdr scrolled already, a
+    /// client-shell popup; those past the lines read.
+    fn scroll_locally(&mut self, delta: i64, cx: &mut Context<Self>) -> Option<i64> {
+        if let Some(pending) = &mut self.history_pending {
+            *pending += delta;
+            return None;
+        }
+        if self.live.is_some() {
+            let target = self.emulator.display_offset() as i64 + delta;
+            if target <= 0 {
+                self.leave_history();
+            } else if target as usize <= self.emulator.history_lines() {
+                self.emulator.scroll_to_offset(target as usize);
+                self.scroll.offset_from_bottom = target as u32;
+            } else {
+                self.leave_history();
+                return Some(target); // herdr scrolls on from its bottom
+            }
+            cx.notify();
+            return None;
+        }
+        let shell = self.session.as_ref().is_some_and(Session::is_shell);
+        let local = delta > 0 && self.scroll.offset_from_bottom == 0 && !self.mouse_capture && !self.emulator.alt_screen() && !shell;
+        let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>().filter(|_| local) else { return Some(delta) };
+        self.history_pending = Some(delta);
+        let (client, pane_id) = (client.clone(), self.pane_id.clone());
+        let size = (self.emulator.cols(), self.emulator.rows());
+        let params = serde_json::json!({"pane_id": pane_id, "source": "recent", "lines": 1000, "format": "ansi", "strip_ansi": false});
+        let call = rt.spawn(async move { client.call("pane.read", params).await });
+        cx.spawn(async move |this, cx| {
+            let text = call.await.ok().and_then(Result::ok).and_then(|r| r["read"]["text"].as_str().map(str::to_owned));
+            let _ = this.update(cx, |pane, cx| {
+                let Some(delta) = pane.history_pending.take() else { return }; // a key or a resize came first
+                // the grid must be the one the history was read at, or its lines land wrong
+                match text.filter(|_| (pane.emulator.cols(), pane.emulator.rows()) == size) {
+                    Some(text) => {
+                        let history = Emulator::with_history(&text, size.0 as u16, size.1 as u16);
+                        pane.live = Some(std::mem::replace(&mut pane.emulator, history));
+                        pane.scroll_by(delta, None, cx);
+                    }
+                    None => pane.scroll_herdr(delta, None, cx),
+                }
+            });
+        })
+        .detach();
+        None
+    }
+
+    /// Back to the live grid: herdr is at its bottom all along.
+    // ponytail: the copy is not refreshed while it is shown; new output shows once you are back at the bottom
+    fn leave_history(&mut self) {
+        self.history_pending = None;
+        if let Some(live) = self.live.take() {
+            self.emulator = live;
+            self.scroll.offset_from_bottom = 0;
+        }
+    }
+
+    fn scroll_herdr(&mut self, delta: i64, at: Option<(u16, u16)>, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else { return };
         session.scroll(delta > 0, delta.unsigned_abs().min(u16::MAX as u64) as u16, at);
         let max = self.scroll.max_offset_from_bottom as i64;
         self.scroll.offset_from_bottom = (self.scroll.offset_from_bottom as i64 + delta).clamp(0, max) as u32;
@@ -440,7 +535,11 @@ impl PaneTerminal {
             }
         }
         let marks = self.search_marks(&lines, cx);
-        Some(GridSnapshot { lines, cursor: self.emulator.cursor(), marks })
+        // herdr places images for its live screen: scrolled back, they move down with the text
+        let back = self.live.as_ref().map_or(0, |_| self.emulator.display_offset() as u16);
+        let images = self.images.iter().map(|i| PaneImage { y: i.y.saturating_add(back), ..i.clone() }).collect();
+        let cursor = if self.live.is_some() { None } else { self.emulator.cursor() };
+        Some(GridSnapshot { lines, cursor, marks, images })
     }
 
     fn search_marks(&self, lines: &[Vec<CellSnapshot>], cx: &App) -> Vec<(usize, Range<usize>, bool)> {
@@ -841,6 +940,10 @@ impl PaneTerminal {
     }
 
     fn input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        if self.live.is_some() || self.history_pending.is_some() {
+            self.leave_history(); // typing goes back to the live bottom, as in a terminal
+            cx.notify();
+        }
         match &self.session {
             Some(session) if !self.observing => session.input(bytes),
             _ if self.ended.is_none() => {
@@ -1195,9 +1298,12 @@ async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionE
                 match event {
                     // Replies (DSR, DA…) are dropped: frames are herdr's re-render, and herdr already
                     // answered the app's own queries.
-                    SessionEvent::Frame(bytes) => drop(pane.emulator.feed(&bytes)),
+                    SessionEvent::Frame(bytes) => drop(pane.live.as_mut().unwrap_or(&mut pane.emulator).feed(&bytes)),
                     SessionEvent::MouseCapture(enabled) => pane.mouse_capture = enabled,
-                    SessionEvent::Size(cols, rows) => pane.emulator.resize(cols, rows),
+                    SessionEvent::Size(cols, rows) => {
+                        pane.leave_history();
+                        pane.emulator.resize(cols, rows)
+                    }
                     SessionEvent::Ended(why) => {
                         pane.ended = Some(why);
                         pane.session = None;
@@ -1337,6 +1443,7 @@ mod tests {
             line_h: 17.0,
             cols,
             rows,
+            cell_px: (16, 34),
         }
     }
 

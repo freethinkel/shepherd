@@ -20,7 +20,7 @@ fn spawn(dir: &Path) -> (Session, Receiver<SessionEvent>) {
         std::env::set_var("HERDR_CLIENT_SOCKET_PATH", dir.join("no-client.sock"));
         std::env::set_var("REC", dir);
     }
-    Session::spawn("w1:p1", 100, 30, Mode::Control).unwrap()
+    Session::spawn("w1:p1", 100, 30, (0, 0), Mode::Control).unwrap()
 }
 
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -53,7 +53,7 @@ cat > "$REC/stdin""#,
     let (session, mut rx) = spawn(dir.path());
     assert!(matches!(next(&mut rx), SessionEvent::Frame(b) if b == b"hello"));
     session.input(b"ls\r");
-    session.resize(120, 40);
+    session.resize(120, 40, (0, 0));
     session.scroll(true, 3, None);
     session.mouse("down", "left", 4, 2, 0);
     drop(session); // closes stdin: the fake's cat ends
@@ -168,7 +168,7 @@ fn socket_session_reports_mouse_capture() {
         (hello, control, input)
     });
     unsafe { std::env::set_var("HERDR_CLIENT_SOCKET_PATH", &path) };
-    let (session, mut rx) = Session::spawn("w1:p1", 100, 30, Mode::Control).unwrap();
+    let (session, mut rx) = Session::spawn("w1:p1", 100, 30, (0, 0), Mode::Control).unwrap();
     assert!(session.knows_mouse_capture());
     assert!(matches!(next(&mut rx), SessionEvent::Frame(b) if b == b"hello"));
     assert!(matches!(next(&mut rx), SessionEvent::MouseCapture(true)));
@@ -189,7 +189,7 @@ fn socket_session_reports_mouse_capture() {
 fn live_echo() {
     let _l = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let pane = std::env::var("SHEPHERD_LIVE_PANE").expect("SHEPHERD_LIVE_PANE");
-    let (session, mut rx) = Session::spawn(&pane, 80, 24, Mode::Control).unwrap();
+    let (session, mut rx) = Session::spawn(&pane, 80, 24, (0, 0), Mode::Control).unwrap();
     session.input(b"echo shepherd-$((6*7))\r");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut seen = Vec::new();
@@ -218,7 +218,7 @@ fn takeover_is_passed_to_herdr() {
         std::env::set_var("HERDR_CLIENT_SOCKET_PATH", dir.path().join("no-client.sock"));
         std::env::set_var("REC", dir.path());
     }
-    let (session, _rx) = Session::spawn("w1:p1", 100, 30, Mode::Takeover).unwrap();
+    let (session, _rx) = Session::spawn("w1:p1", 100, 30, (0, 0), Mode::Takeover).unwrap();
     let args_path = dir.path().join("args");
     let args = (0..50)
         .find_map(|_| {
@@ -241,7 +241,7 @@ fn an_observer_runs_herdrs_observe_session() {
         std::env::set_var("HERDR_CLIENT_SOCKET_PATH", dir.path().join("no-client.sock"));
         std::env::set_var("REC", dir.path());
     }
-    let (session, _rx) = Session::spawn("w1:p1", 100, 30, Mode::Observe).unwrap();
+    let (session, _rx) = Session::spawn("w1:p1", 100, 30, (0, 0), Mode::Observe).unwrap();
     let args_path = dir.path().join("args");
     let args = (0..50)
         .find_map(|_| {
@@ -264,7 +264,7 @@ fn the_configured_binary_is_used_without_the_env_override() {
         std::env::set_var("REC", dir.path());
     }
     shepherd::herdr::set_binary(Some(dir.path().join("herdr").display().to_string()));
-    let (session, _rx) = Session::spawn("w1:p1", 100, 30, Mode::Control).unwrap();
+    let (session, _rx) = Session::spawn("w1:p1", 100, 30, (0, 0), Mode::Control).unwrap();
     let args_path = dir.path().join("args");
     let ran = (0..50).any(|_| {
         std::thread::sleep(Duration::from_millis(20));
@@ -282,7 +282,7 @@ fn the_configured_binary_is_used_without_the_env_override() {
 fn live_mouse_capture() {
     let _l = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let pane = std::env::var("SHEPHERD_LIVE_PANE").expect("SHEPHERD_LIVE_PANE");
-    let (session, mut rx) = Session::spawn(&pane, 80, 24, Mode::Control).unwrap();
+    let (session, mut rx) = Session::spawn(&pane, 80, 24, (0, 0), Mode::Control).unwrap();
     assert!(session.knows_mouse_capture(), "the socket handshake fell back to the CLI");
     session.input(b"printf '\\033[?1000h'; sleep 2; printf '\\033[?1000l'\r");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -308,7 +308,7 @@ fn attach_timing() {
     let pane = std::env::var("SHEPHERD_PERF_PANE").expect("SHEPHERD_PERF_PANE");
     for _ in 0..5 {
         let t0 = std::time::Instant::now();
-        let (session, mut rx) = Session::spawn(&pane, 120, 40, Mode::Control).unwrap();
+        let (session, mut rx) = Session::spawn(&pane, 120, 40, (0, 0), Mode::Control).unwrap();
         let spawned = t0.elapsed();
         let (mut frames, mut bytes, mut first) = (0, 0, None);
         while let Some(event) = recv(&mut rx, Duration::from_millis(300)) {

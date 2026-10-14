@@ -1,6 +1,6 @@
 [package]
 name = "shepherd"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 publish = false
 
@@ -8,7 +8,7 @@ publish = false
 [workspace]
 
 [dependencies]
-alacritty_terminal = "0.26"
+ghostty-vt = { version = "=0.7.0", default-features = false }
 anyhow = "1"
 base64 = "0.22"
 futures = "0.3"
@@ -21,7 +21,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSString"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter"] }
 block2 = "0.6"
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
 gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["font-kit", "runtime_shaders"] }
 serde = { version = "1", features = ["derive"] }
 percent-encoding = "2"

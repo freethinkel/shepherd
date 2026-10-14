@@ -50,6 +50,7 @@ app_actions! {
     FontSizeReset: "Default text size",
     OpenSettings: "Settings",
     ChangeTheme: "Change theme",
+    ToggleSecureInput: "Secure keyboard entry",
     CommandPanel: "Command panel",
     AgentsPanel: "Agents",
     Quit: "Quit",
@@ -147,17 +148,24 @@ pub fn rebind(cx: &mut App, user: &BTreeMap<String, String>) {
     rebind_herdr(cx, &next);
     cx.set_global(ActiveBindings(next));
     // macOS copies menu shortcuts when the menu is set: set it again so it shows (and only fires) the new ones.
-    cx.set_menus(menus());
+    set_menus(cx);
+}
+
+/// Sets the menu bar again, with Secure Keyboard Entry's check as the settings have it.
+pub fn set_menus(cx: &mut App) {
+    let secure = cx.try_global::<crate::settings::SettingsGlobal>().is_some_and(|s| s.settings.secure_input);
+    cx.set_menus(menus(secure));
 }
 
 // Window-management items macOS apps carry; not rebindable, so outside `app_actions!`.
 gpui::actions!(shepherd, [Hide, HideOthers, ShowAll, Minimize, Zoom, ToggleFullScreen]);
 
-fn menus() -> Vec<gpui::Menu> {
+fn menus(secure_input: bool) -> Vec<gpui::Menu> {
     use gpui::{Menu, MenuItem as I, SystemMenuType};
     vec![
         Menu::new("Shepherd").items([
             I::action("Settings…", OpenSettings),
+            I::action("Secure Keyboard Entry", ToggleSecureInput).checked(secure_input),
             I::separator(),
             I::os_submenu("Services", SystemMenuType::Services),
             I::separator(),

@@ -108,6 +108,8 @@ impl Shell {
     pub(super) fn finish_remove_confirm(&mut self, remove: bool, cx: &mut Context<Self>) {
         let Some(confirm) = self.remove_confirm.as_mut().filter(|c| c.is_open()) else { return };
         confirm.close();
+        // the confirm held focus: give it back to herdr's focused pane on the next render
+        self.focused = None;
         let (workspace_id, _, dirty) = confirm.value.clone();
         if remove {
             self.remove_worktree(workspace_id, dirty, cx);

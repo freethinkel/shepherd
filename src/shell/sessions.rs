@@ -645,6 +645,8 @@ impl Shell {
     pub(super) fn finish_delete(&mut self, delete: bool, cx: &mut Context<Self>) {
         let Some(confirm) = self.session_delete.as_mut().filter(|c| c.is_open()) else { return };
         confirm.close();
+        // the confirm held focus: give it back to herdr's focused pane on the next render
+        self.focused = None;
         let place = confirm.value.clone();
         if !delete {
             return cx.notify();

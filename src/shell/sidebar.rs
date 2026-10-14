@@ -3,7 +3,7 @@ use super::*;
 
 impl Shell {
     /// Folds or unfolds a worktree group, tweening from wherever its body is now.
-    pub(super) fn toggle_fold(&mut self, id: &str, full: f32) {
+    pub(super) fn toggle_fold(&mut self, id: &str, full: f32, cx: &mut Context<Self>) {
         let open = !self.folded.contains(id);
         let prev = self.fold_motion.get(id).copied();
         let from = prev.filter(|m| m.animating()).map(FoldMotion::current).unwrap_or(if open { full } else { 0. });
@@ -14,6 +14,10 @@ impl Shell {
         } else {
             self.folded.remove(id);
         }
+        // ponytail: ids of workspaces since closed stay in the list; prune against the snapshot if it grows
+        let mut folded: Vec<String> = self.folded.iter().cloned().collect();
+        folded.sort();
+        save_from_sidebar(cx, |s| s.folded = folded);
     }
 
     /// The sidebar's width this frame: mid tween, or where it rests.
@@ -45,6 +49,8 @@ impl Shell {
         let from = self.sidebar_now();
         self.sidebar_edge = None;
         self.sidebar_open = !self.sidebar_open;
+        let open = self.sidebar_open;
+        save_from_sidebar(cx, |s| s.sidebar_open = open);
         let to = if self.sidebar_open { self.sidebar_width } else { 0. };
         let motion = FoldMotion { epoch: 0, from, to, started: Instant::now() };
         self.sidebar_motion = Some(motion);
@@ -396,7 +402,7 @@ impl Shell {
                                 let id = w.workspace_id.clone();
                                 move |this, _: &ClickEvent, _, cx| {
                                     cx.stop_propagation();
-                                    this.toggle_fold(&id, full);
+                                    this.toggle_fold(&id, full, cx);
                                     cx.notify();
                                 }
                             }));

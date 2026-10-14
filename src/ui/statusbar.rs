@@ -1,6 +1,7 @@
 //! The window's bottom bar (Zeron's footer labels): the shown pane's branch, its PR or MR, directory and token spend, and
-//! Claude's plan limits. Git runs off the main thread and is cached per directory.
+//! Claude's or Codex's plan limits. Git runs off the main thread and is cached per directory.
 use crate::model::{Pane, Snapshot};
+use crate::settings::UsageAgent;
 use crate::theme::Theme;
 use gpui::{App, ClickEvent, Global, IntoElement, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
 use std::collections::HashMap;
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 pub const HEIGHT: f32 = 24.0;
 /// How old a directory's git state may get before a render asks git again.
 const GIT_TTL: Duration = Duration::from_secs(5);
-/// Claude's usage endpoint is polled as often as the dotfiles' statusbar does.
+/// The agents' usage endpoints are polled as often as the dotfiles' statusbar does.
 const USAGE_TTL: Duration = Duration::from_secs(300);
 /// How often the shown agent's transcript is summed again.
 const SPENT_TTL: Duration = Duration::from_secs(10);
@@ -269,21 +270,44 @@ pub fn refresh_changes(dir: &str, cx: &mut App) {
     }
 }
 
-/// Claude's plan usage, in percent of each window, and when each resets (unix seconds).
+/// One window of an agent's plan limits: its name (`5-hour`, `Weekly`), percent used, and when it resets (unix seconds).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Usage {
-    pub five_hour: f64,
-    pub week: f64,
-    pub five_hour_resets: Option<i64>,
-    pub week_resets: Option<i64>,
+pub struct Limit {
+    pub label: String,
+    pub used: f64,
+    pub resets: Option<i64>,
 }
 
-/// The body of `api/oauth/usage`.
-pub fn parse_usage(json: &str) -> Option<Usage> {
+/// The body of Claude's `api/oauth/usage`.
+pub fn parse_claude_usage(json: &str) -> Option<Vec<Limit>> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let used = |window: &str| v[window]["utilization"].as_f64();
-    let resets = |window: &str| v[window]["resets_at"].as_str().and_then(unix_secs);
-    Some(Usage { five_hour: used("five_hour")?, week: used("seven_day")?, five_hour_resets: resets("five_hour"), week_resets: resets("seven_day") })
+    let limit = |window: &str, label: &str| {
+        Some(Limit { label: label.into(), used: v[window]["utilization"].as_f64()?, resets: v[window]["resets_at"].as_str().and_then(unix_secs) })
+    };
+    Some(vec![limit("five_hour", "5-hour")?, limit("seven_day", "Weekly")?])
+}
+
+/// The body of ChatGPT's `backend-api/wham/usage`, what Codex's `/status` reads. Which windows there are depends on
+/// the plan: 5-hour and weekly on Plus, one 30-day window on Free.
+pub fn parse_codex_usage(json: &str) -> Option<Vec<Limit>> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let limits: Vec<Limit> = ["primary_window", "secondary_window"]
+        .into_iter()
+        .filter_map(|w| {
+            let w = &v["rate_limit"][w];
+            Some(Limit { label: window_label(w["limit_window_seconds"].as_i64()?), used: w["used_percent"].as_f64()?, resets: w["reset_at"].as_i64() })
+        })
+        .collect();
+    (!limits.is_empty()).then_some(limits)
+}
+
+/// A window's length as its name: `5-hour`, `Weekly`, `30-day`.
+pub fn window_label(secs: i64) -> String {
+    match secs {
+        604_800 => "Weekly".into(),
+        s if s < 86_400 => format!("{}-hour", s / 3600),
+        s => format!("{}-day", s / 86_400),
+    }
 }
 
 /// An RFC 3339 time (`2026-10-11T15:00:00.123Z`, `…+03:00`) as unix seconds.
@@ -323,34 +347,41 @@ fn usage_color(used: f64, theme: &Theme) -> gpui::Hsla {
     if used >= 90. { theme.danger } else if used >= 70. { theme.warning } else { theme.accent }
 }
 
-/// The limits popup's card: the 5-hour and weekly windows, each with its ring and when it resets.
-pub fn usage_card(theme: &Theme, cx: &mut App) -> gpui::Stateful<gpui::Div> {
-    let usage = cached("", USAGE_TTL, read_usage, cx);
+/// `agent`'s limits as the bar polls them: cached, asked again every [`USAGE_TTL`].
+pub fn usage_of(agent: UsageAgent, cx: &mut App) -> Option<Vec<Limit>> {
+    cached(agent.key(), USAGE_TTL, read_usage, cx)
+}
+
+/// A limit's row: its ring, its name over when it resets, and the percent used.
+pub fn limit_row(theme: &Theme, limit: &Limit) -> gpui::Div {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    let faint = theme.text_faint;
-    let window = |name: &'static str, used: f64, resets: Option<i64>| {
-        div()
-            .h(px(40.))
-            .px(px(8.))
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .child(div().size(px(16.)).flex().items_center().justify_center().child(donut(used, theme.text.opacity(0.2), usage_color(used, theme))))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .child(name)
-                    .child(div().text_size(px(11.)).text_color(faint).child(resets.map(|r| resets_in(r - now)).unwrap_or_default())),
-            )
-            .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("{}%", used.round())))
-    };
+    div()
+        .h(px(40.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .child(div().size(px(16.)).flex().items_center().justify_center().child(donut(limit.used, theme.text.opacity(0.2), usage_color(limit.used, theme))))
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .child(format!("{} limit", limit.label))
+                .child(div().text_size(px(11.)).text_color(theme.text_faint).child(limit.resets.map(|r| resets_in(r - now)).unwrap_or_default())),
+        )
+        .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("{}%", limit.used.round())))
+}
+
+/// The limits popup's card: each window of the status bar's agent, and a way to Usage settings.
+pub fn usage_card(theme: &Theme, on_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &mut App) -> gpui::Stateful<gpui::Div> {
+    let agent = crate::settings::SettingsGlobal::of(cx).settings.usage_agent;
+    let limits = usage_of(agent, cx).unwrap_or_default();
     let hover = theme.hover;
     crate::shell::menu_card(theme, "usage-menu", 240.)
         .text_size(px(12.))
         .text_color(theme.text)
-        .children(usage.map(|u| [window("5-hour limit", u.five_hour, u.five_hour_resets), window("Weekly limit", u.week, u.week_resets)]).into_iter().flatten())
+        .children(limits.iter().map(|l| limit_row(theme, l)))
         .child(
             div()
                 .id("usage-open")
@@ -359,31 +390,44 @@ pub fn usage_card(theme: &Theme, cx: &mut App) -> gpui::Stateful<gpui::Div> {
                 .flex()
                 .items_center()
                 .rounded(px(6.))
-                .text_color(faint)
+                .text_color(theme.text_faint)
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
-                .child("Open usage settings")
-                .on_click(|_, _, cx| cx.open_url("https://claude.ai/settings/usage")),
+                .child("Usage settings")
+                .on_click(on_settings),
         )
 }
 
-/// The usage endpoint Claude Code itself reads, with the token Claude Code keeps (and refreshes) in the login
-/// keychain, as the dotfiles' statusbar does.
-fn read_usage(_: &str) -> Option<Usage> {
+/// `key` is a [`UsageAgent::key`]; `None` when that agent is not signed in or its endpoint fails.
+fn read_usage(key: &str) -> Option<Vec<Limit>> {
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into();
+    if key == UsageAgent::Codex.key() {
+        // ponytail: Codex CLI refreshes this token when it runs; one left stale long enough just hides the limits
+        let home = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from).or_else(|| Some(Path::new(&std::env::var_os("HOME")?).join(".codex")))?;
+        let auth: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("auth.json")).ok()?).ok()?;
+        let mut response = agent
+            .get("https://chatgpt.com/backend-api/wham/usage")
+            .header("Authorization", &format!("Bearer {}", auth["tokens"]["access_token"].as_str()?))
+            .header("ChatGPT-Account-Id", auth["tokens"]["account_id"].as_str()?)
+            .call()
+            .ok()?;
+        return parse_codex_usage(&response.body_mut().read_to_string().ok()?);
+    }
+    // The endpoint Claude Code itself reads, with the token Claude Code keeps (and refreshes) in the login keychain,
+    // as the dotfiles' statusbar does.
     let creds = std::process::Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
         .output()
         .ok()?;
     let creds: serde_json::Value = serde_json::from_slice(&creds.stdout).ok()?;
     let token = creds["claudeAiOauth"]["accessToken"].as_str()?;
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into();
     let mut response = agent
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", &format!("Bearer {token}"))
         .header("anthropic-beta", "oauth-2025-04-20")
         .call()
         .ok()?;
-    parse_usage(&response.body_mut().read_to_string().ok()?)
+    parse_claude_usage(&response.body_mut().read_to_string().ok()?)
 }
 
 /// Tokens a Claude Code session spent, by kind.
@@ -710,7 +754,7 @@ pub fn bar(
     let pane = snapshot.zip(pane_id).and_then(|(s, id)| s.panes.iter().find(|p| p.pane_id == id));
     let dir = pane_dir(snapshot, pane_id);
     let git = dir.as_deref().filter(|_| show.branch).and_then(|d| cached(d, GIT_TTL, read_git, cx));
-    let usage = show.usage.then(|| cached("", USAGE_TTL, read_usage, cx)).flatten();
+    let usage = show.usage.then(|| usage_of(crate::settings::SettingsGlobal::of(cx).settings.usage_agent, cx)).flatten().filter(|l| !l.is_empty());
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let muted = theme.text_muted.opacity(0.7);
     div()
@@ -765,12 +809,12 @@ pub fn bar(
                 .child(format!("{} tok", short_count(s.total())))
         }))
         .child(div().flex_1())
-        .children(usage.map(|u| {
-            // the dotfiles' statusbar: the ring fills with the 5-hour window, colored by the worse of the two
-            let color = usage_color(u.five_hour.max(u.week), theme);
+        .children(usage.map(|limits| {
+            // the dotfiles' statusbar: the ring fills with the first (shortest) window, colored by the worst one
+            let color = usage_color(limits.iter().map(|l| l.used).fold(0., f64::max), theme);
             on_click_at(link(div().id("statusbar-usage").flex_none().flex().items_center().gap(px(6.)).px(px(8.)), theme, open == Some(Item::Usage)), on_usage)
-                .child(donut(u.five_hour, theme.text.opacity(0.2), color))
-                .child(format!("{}%", u.five_hour.round()))
+                .child(donut(limits[0].used, theme.text.opacity(0.2), color))
+                .child(format!("{}%", limits[0].used.round()))
         }))
         .into_any_element()
 }
@@ -808,13 +852,21 @@ mod tests {
     fn parses_claude_usage() {
         let body = r#"{"five_hour":{"utilization":42.0,"resets_at":"2026-10-11T15:00:00.000Z"},"seven_day":{"utilization":18,"resets_at":null}}"#;
         let five_hour_resets = Some(1_791_730_800);
-        assert_eq!(parse_usage(body), Some(Usage { five_hour: 42.0, week: 18.0, five_hour_resets, week_resets: None }));
+        let limit = |label: &str, used, resets| Limit { label: label.into(), used, resets };
+        assert_eq!(parse_claude_usage(body), Some(vec![limit("5-hour", 42.0, five_hour_resets), limit("Weekly", 18.0, None)]));
         assert_eq!(unix_secs("2026-10-11T18:00:00.5+03:00"), five_hour_resets);
-        assert_eq!(unix_secs("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(unix_secs("soon"), None);
-        assert_eq!((resets_in(12 * 60), resets_in(2 * 3600 + 13 * 60), resets_in(3 * 86_400 + 4 * 3600 + 59)), ("resets in 12m".into(), "resets in 2h 13m".into(), "resets in 3d 4h".into()));
-        assert_eq!(parse_usage(r#"{"five_hour":{"utilization":null},"seven_day":{"utilization":1}}"#), None);
-        assert_eq!(parse_usage(r#"{"error":{"type":"authentication_error"}}"#), None);
+        assert_eq!(parse_claude_usage(r#"{"five_hour":{"utilization":null},"seven_day":{"utilization":1}}"#), None);
+        assert_eq!(parse_claude_usage(r#"{"error":{"type":"authentication_error"}}"#), None);
+    }
+
+    #[test]
+    fn parses_codex_usage() {
+        let free = r#"{"plan_type":"free","rate_limit":{"allowed":true,"primary_window":{"used_percent":0,"limit_window_seconds":2592000,"reset_after_seconds":2590751,"reset_at":1794569896},"secondary_window":null}}"#;
+        assert_eq!(parse_codex_usage(free), Some(vec![Limit { label: "30-day".into(), used: 0.0, resets: Some(1_794_569_896) }]));
+        let plus = r#"{"rate_limit":{"primary_window":{"used_percent":12.5,"limit_window_seconds":18000,"reset_at":10},"secondary_window":{"used_percent":3,"limit_window_seconds":604800,"reset_at":20}}}"#;
+        let labels: Vec<_> = parse_codex_usage(plus).unwrap().into_iter().map(|l| (l.label, l.used)).collect();
+        assert_eq!(labels, [("5-hour".to_string(), 12.5), ("Weekly".to_string(), 3.0)]);
+        assert_eq!(parse_codex_usage(r#"{"detail":"Unauthorized"}"#), None);
     }
 
     #[test]

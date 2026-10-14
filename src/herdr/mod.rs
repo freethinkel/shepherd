@@ -1,5 +1,6 @@
 mod client;
 pub mod client_shell;
+pub mod graphics;
 mod config;
 pub mod keys;
 pub mod popup;
@@ -9,6 +10,6 @@ mod wire;
 pub use wire::Rgb;
 pub use client::{Client, EVENT_TYPES};
 pub use config::{HerdrConfig, config_path};
-pub use session::{Mode, Session, SessionEvent, SessionInfo, current_session, delete_session, new_session, no_server, push_host_theme, sessions, valid_session_name, set_binary, set_socket, start_server};
+pub use session::{Mode, Session, SessionEvent, SessionInfo, current_session, delete_session, new_session, no_server, sessions, valid_session_name, set_binary, set_socket, start_server};
 pub use wire::PaneInput;
 pub use remote::{Machine, add_machine, git, locate, machines, quote, relay, remove_machine, rename_machine, show_machine, split, ssh};

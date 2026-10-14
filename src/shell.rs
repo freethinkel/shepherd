@@ -73,8 +73,6 @@ pub struct Shell {
     rt: tokio::runtime::Handle,
     /// herdr's plugin actions as (id, title), for the command panel; read again whenever it opens.
     plugin_actions: Vec<(String, String)>,
-    /// The terminal colors last sent to herdr, so an unchanged theme is not sent again.
-    host_theme: Option<(Vec<crate::herdr::Rgb>, bool)>,
     /// The pane grid's bounds from the last paint, to turn a divider drag into a ratio.
     grid_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     divider: Option<DividerDrag>,
@@ -82,7 +80,6 @@ pub struct Shell {
     settling: Option<(Vec<bool>, f32)>,
     /// The tab or workspace label being edited in place.
     renaming: Option<Rename>,
-    // ponytail: in memory only; persist in settings if folds should survive a restart
     folded: std::collections::HashSet<String>,
     /// A workspace's right-click menu and where it opened.
     ws_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
@@ -94,7 +91,6 @@ pub struct Shell {
     shown_workspace: Option<String>,
     /// Saved in the settings when a drag ends.
     sidebar_width: f32,
-    // ponytail: open/closed in memory only; persist in settings if it should survive a restart
     sidebar_open: bool,
     /// The sidebar's width tween while it shows or hides.
     sidebar_motion: Option<FoldMotion>,
@@ -173,6 +169,8 @@ pub struct Shell {
     /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
     /// actions still dispatch.
     focus: gpui::FocusHandle,
+    /// Holds keyboard focus while a delete or remove confirm is up, for its Enter and Escape.
+    confirm_focus: gpui::FocusHandle,
     /// The Settings page, shown in place of the sidebar and the panes while open.
     settings: Option<(Entity<crate::ui::settings::SettingsView>, Subscription)>,
     /// A pane being dragged by its grip.
@@ -195,7 +193,13 @@ pub struct Shell {
     floating: Option<floating::Floating>,
     popup_watch: gpui::Task<()>,
     /// The client shell's surface and the grid it was last sized to.
-    popup_surface: Option<(crate::herdr::popup::Surface, (u16, u16))>,
+    popup_surface: Option<(crate::herdr::popup::Surface, ((u16, u16), (u32, u32)))>,
+    /// The tab last given herdr's focus (`follow_shown_tab`).
+    focused_tab: Option<String>,
+    /// herdr's Kitty images per pane, as last sent, for panes made after it.
+    pane_images: crate::herdr::graphics::PaneImages,
+    /// Images no pane shows any more: freed from the window's atlas at the next render (a hidden pane never renders).
+    retired_images: Vec<std::sync::Arc<gpui::RenderImage>>,
     /// PoC: the window's herdr client shell for theme, popup and commands (`SHEPHERD_CLIENT_SHELL=1`).
     client_shell: Option<client_shell::ShellView>,
     /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.
@@ -299,6 +303,7 @@ impl Shell {
                     cx.set_global(crate::terminal::pane::Yielded(!active));
                     if active {
                         s.refresh_places(cx); // sessions made or deleted elsewhere
+                        s.push_host_theme(cx);
                     }
                     cx.notify(); // the shown tab's agents count as seen once the window is active
                 })
@@ -367,18 +372,17 @@ impl Shell {
                         .map_or_else(Client::local, |p| Client::at(p.into())),
                     rt: rt.clone(),
                     plugin_actions: Vec::new(),
-                    host_theme: None,
                     grid_bounds: Rc::new(Cell::new(None)),
                     divider: None,
                     settling: None,
                     renaming: None,
-                    folded: Default::default(),
+                    folded: SettingsGlobal::of(cx).settings.folded.iter().cloned().collect(),
                     fold_motion: Default::default(),
                     seam_hover: Default::default(),
                     ws_menu: None,
                     shown_workspace: None,
                     sidebar_width: SettingsGlobal::of(cx).settings.sidebar_width,
-                    sidebar_open: true,
+                    sidebar_open: SettingsGlobal::of(cx).settings.sidebar_open,
                     sidebar_motion: None,
                     sidebar_drag: false,
                     sidebar_edge: None,
@@ -417,6 +421,7 @@ impl Shell {
                     agents_scroll: gpui::ScrollHandle::new(),
                     tab_bar: Default::default(),
                     focus: cx.focus_handle(),
+                    confirm_focus: cx.focus_handle(),
                     settings: None,
                     pane_drop: None,
                     pane_spring_back: None,
@@ -430,6 +435,9 @@ impl Shell {
                     floating: None,
                     popup_watch: gpui::Task::ready(()),
                     popup_surface: None,
+                    focused_tab: None,
+                    pane_images: Default::default(),
+                    retired_images: Vec::new(),
                     client_shell: None,
                     herdr_commands: Vec::new(),
                     command_panes: Vec::new(),
@@ -451,7 +459,6 @@ impl Shell {
                 shell.connect(cx);
                 shell.refresh_places(cx);
                 shell.refresh_plugin_actions(cx);
-                shell.push_host_theme(cx);
                 // Waiting times move on between snapshots.
                 // ponytail: a minute from launch, not from each wait, so a label can lag by up to a minute.
                 cx.spawn(async move |this, cx| loop {
@@ -512,6 +519,16 @@ impl Shell {
         window.focus(&view.focus_handle(cx), cx);
         self.settings = Some((view, close));
         cx.notify();
+    }
+
+    /// Settings on its Usage page, opened if it is not up: the limits popup's way there.
+    pub(crate) fn open_usage_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_none() {
+            self.toggle_settings_here(window, cx);
+        }
+        if let Some((view, _)) = &self.settings {
+            view.update(cx, |v, cx| v.show_usage(cx));
+        }
     }
 
     /// cmd-k (commands) or the agents key: opens that panel over the window, or closes it when it is open.
@@ -659,6 +676,13 @@ impl Shell {
         .detach();
     }
 
+    /// Where a pane of the tab shown landed: its cell metrics are the window's now (a hidden pane keeps those of
+    /// the scale or font it was last drawn at).
+    fn shown_geometry(&self, cx: &App) -> Option<crate::terminal::pane::GridGeometry> {
+        let (snapshot, tab) = (self.snapshot.as_ref()?, self.shown_tab()?);
+        snapshot.panes.iter().filter(|p| p.tab_id == tab.tab_id).find_map(|p| self.panes.get(&p.pane_id)?.read(cx).geometry())
+    }
+
     fn shown_tab(&self) -> Option<crate::model::Tab> {
         self.snapshot.as_ref()?.pick_tab_in(self.selected_tab.as_deref(), self.shown_workspace.as_deref()).cloned()
     }
@@ -743,31 +767,13 @@ impl Shell {
         }
     }
 
-    /// herdr paints the terminals' default colors itself: it is told the theme's.
-    fn push_host_theme(&mut self, cx: &mut Context<Self>) {
-        use crate::herdr::Rgb;
-        let theme = Theme::of(cx);
-        let rgb = |c: gpui::Hsla| {
-            let c = gpui::Rgba::from(c);
-            let u = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
-            Rgb { r: u(c.r), g: u(c.g), b: u(c.b) }
-        };
-        let t = &theme.terminal;
-        let colors: Vec<Rgb> = [t.foreground, t.background].into_iter().chain(t.ansi).map(rgb).collect();
-        let next = Some((colors.clone(), theme.appearance == crate::theme::Appearance::Light));
-        if self.host_theme == next {
-            return;
+    /// herdr paints the terminals' default colors itself: it is told the theme's over the popup watch, which then
+    /// is the client in front again (back from herdr's TUI on another machine, say). The client shell (PoC) does
+    /// this in `sync_client_shell`.
+    fn push_host_theme(&self, cx: &App) {
+        if let Some((surface, _)) = &self.popup_surface {
+            surface.theme(client_shell::host_theme(Theme::of(cx)));
         }
-        self.host_theme = next;
-        let light = theme.appearance == crate::theme::Appearance::Light;
-        let ansi: [Rgb; 16] = colors[2..].try_into().unwrap();
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(e) = crate::herdr::push_host_theme(colors[0], colors[1], ansi, light) {
-                    eprintln!("shepherd: herdr host theme: {e}");
-                }
-            })
-            .detach();
     }
 
     fn refresh_plugin_actions(&mut self, cx: &mut Context<Self>) {
@@ -989,6 +995,23 @@ fn reapply_traffic_lights(window: &mut Window) {
     window.set_window_title("Shepherd");
 }
 
+/// Turns macOS Secure Keyboard Entry on or off. The system counts enables, so it is called only on a change.
+fn secure_input(on: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn EnableSecureEventInput() -> i32;
+        fn DisableSecureEventInput() -> i32;
+    }
+    static ON: AtomicBool = AtomicBool::new(false);
+    if ON.swap(on, Ordering::Relaxed) != on {
+        // SAFETY: no arguments; balanced by `ON`
+        unsafe {
+            if on { EnableSecureEventInput() } else { DisableSecureEventInput() };
+        }
+    }
+}
+
 /// The window's last frame and its display, while that display is plugged in and the frame on it.
 fn saved_window(cx: &App) -> Option<(gpui::DisplayId, gpui::WindowBounds)> {
     let frame = SettingsGlobal::of(cx).settings.window.clone()?;
@@ -1024,8 +1047,13 @@ fn save_from_sidebar(cx: &mut App, change: impl FnOnce(&mut crate::settings::Set
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for image in self.retired_images.drain(..) {
+            let _ = window.drop_image(image);
+        }
         self.sync_badge(window, cx);
         self.mark_seen(window, cx);
+        // any Shepherd window in front, not this one: a window in the back renders too
+        secure_input(SettingsGlobal::of(cx).settings.secure_input && cx.active_window().is_some());
         crate::ui::reap_popup(&mut self.view_menu, window);
         crate::ui::reap_popup(&mut self.agents_menu, window);
         crate::ui::reap_popup(&mut self.ws_menu, window);
@@ -1052,6 +1080,7 @@ impl Render for Shell {
         let tab = self.shown_tab();
         self.shown_workspace = tab.as_ref().map(|t| t.workspace_id.clone());
         self.sync_client_shell(window, cx);
+        self.follow_shown_tab();
         let (mut frames, mut splits) = match (&snapshot, &tab) {
             (Some(s), Some(t)) => (s.pane_frames(&t.tab_id), s.split_frames(&t.tab_id)),
             _ => (Vec::new(), Vec::new()),
@@ -1072,6 +1101,9 @@ impl Render for Shell {
         if let Some(snapshot) = &snapshot {
             remember_shown(&mut self.recent_panes, &shown, |id| snapshot.panes.iter().any(|p| p.pane_id == id));
         }
+        for (_, pane) in self.panes.iter().filter(|(id, _)| !self.recent_panes.contains(id)) {
+            self.retired_images.extend(pane.update(cx, |pane, cx| pane.set_images(Vec::new(), cx)));
+        }
         prune(&mut self.panes, &mut self.focused, &self.recent_panes, |_| false);
         if std::mem::take(&mut self.popup_closed) && !self.panes.values().any(|p| p.read(cx).focus_handle(cx).is_focused(window)) {
             self.focused = None;
@@ -1080,7 +1112,12 @@ impl Render for Shell {
         for f in &shown {
             if !self.panes.contains_key(&f.pane_id) {
                 let id = f.pane_id.clone();
-                self.panes.insert(id.clone(), cx.new(|cx| PaneTerminal::new(id, cx)));
+                let images = self.pane_images.get(&id).cloned().unwrap_or_default();
+                self.panes.insert(id.clone(), cx.new(|cx| {
+                    let mut pane = PaneTerminal::new(id, cx);
+                    pane.set_images(images, cx);
+                    pane
+                }));
             }
             // an open panel keeps its input's focus; a panel run from the command panel opens before this render
             if f.focused && !overlaid && self.focused.as_deref() != Some(f.pane_id.as_str()) {

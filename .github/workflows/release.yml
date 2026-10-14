@@ -29,6 +29,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # libghostty-vt (ghostty-vt-sys) builds with Zig 0.16; ZIG=zig wins over .cargo/config.toml's local path.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: echo "ZIG=zig" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
 
       - name: Signing keychain

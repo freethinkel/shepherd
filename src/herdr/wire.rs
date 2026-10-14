@@ -1,5 +1,5 @@
 //! The slice of herdr's client socket protocol a terminal session needs, from herdr's src/protocol/wire.rs
-//! @ v0.9.3 (Apache-2.0, see assets/NOTICE): length-prefixed bincode-2 (`config::standard()`) messages.
+//! @ v0.9.4 (Apache-2.0, see assets/NOTICE): length-prefixed bincode-2 (`config::standard()`) messages.
 //!
 //! Enums are matched by variant *index*, so every variant before the last one used is listed in herdr's order.
 //! Variants Shepherd never sends or reads are unit placeholders: a placeholder decodes from just the index, so an
@@ -224,7 +224,7 @@ pub enum ServerMessage {
     EndpointControl { kind: String, data: String },
 }
 
-/// herdr's `PaneSurfaceFrame` up to its popup; the fields after it are left unread.
+/// herdr's `PaneSurfaceFrame`: read for its popup and its Kitty graphics.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct PaneSurfaceFrame {
@@ -235,6 +235,92 @@ pub struct PaneSurfaceFrame {
     pub panes: Vec<PaneSurfacePane>,
     pub splits: Vec<PaneSurfaceSplit>,
     pub popup: Option<PopupFrame>,
+    pub graphics: GraphicsScene,
+}
+
+/// herdr's `SurfaceGraphicsScene`: every placement shown on the surface, and only the image bytes this connection
+/// has not been sent yet (herdr sends each image once; a later scene names it by its key).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GraphicsScene {
+    pub assets: Vec<GraphicsAsset>,
+    pub placements: Vec<GraphicsPlacement>,
+    /// Images to keep although nothing shows them now (their pane is in another tab).
+    pub retained_assets: Vec<AssetKey>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GraphicsAsset {
+    pub key: AssetKey,
+    #[serde(deserialize_with = "bytes")]
+    pub data: Vec<u8>,
+}
+
+/// herdr writes image bytes as one byte string (length, then the bytes: `Vec<u8>`'s layout), read at once here
+/// rather than byte by byte.
+fn bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    struct Bytes;
+    impl serde::de::Visitor<'_> for Bytes {
+        type Value = Vec<u8>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("image bytes")
+        }
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Vec<u8>, E> {
+            Ok(v.to_vec())
+        }
+        fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
+            Ok(v)
+        }
+    }
+    d.deserialize_bytes(Bytes)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+pub struct AssetKey {
+    pub source: GraphicsSource,
+    pub image_width: u32,
+    pub image_height: u32,
+    pub format: GraphicsFormat,
+    pub data_len: u64,
+    pub data_fingerprint: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+pub enum GraphicsSource {
+    Terminal { target: GraphicsTarget, image_id: u32 },
+    PaneLayer { pane_id: String, layer_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+pub enum GraphicsTarget {
+    Pane { pane_id: String },
+    Popup { terminal_id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+pub enum GraphicsFormat {
+    Rgb,
+    Rgba,
+    Png,
+}
+
+/// One image on a pane, already clipped to it: cells from the pane's top-left, the part of the image shown there
+/// (`source_*`, image pixels), and a pixel offset into its first cell.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphicsPlacement {
+    pub asset: AssetKey,
+    pub logical_placement_id: u32,
+    pub x: u16,
+    pub y: u16,
+    pub cols: u32,
+    pub rows: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub x_offset: u32,
+    pub y_offset: u32,
+    pub z: i32,
+    pub scrollback_offset: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,6 +407,9 @@ pub struct PopupFrame {
     pub height: Option<PopupSize>,
     pub frame: FrameData,
     pub mouse_reporting: bool,
+    pub sgr_pixel_mouse: bool,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
 }
 
 /// What Shepherd keeps of herdr's popup to lay it out.
@@ -371,8 +460,21 @@ pub fn read_message(r: &mut impl Read) -> io::Result<Option<ServerMessage>> {
     }
     let mut payload = vec![0; len];
     r.read_exact(&mut payload)?;
-    Ok(bincode::serde::decode_from_slice(&payload, bincode::config::standard()).ok().map(|(msg, _)| msg))
+    match bincode::serde::decode_from_slice(&payload, bincode::config::standard()) {
+        Ok((msg, _)) => Ok(Some(msg)),
+        Err(e) => {
+            // a modelled message that does not decode: herdr's layout moved under the same protocol version
+            static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if payload.first().is_some_and(|&i| i <= LAST_MODELLED) && !TOLD.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("shepherd: herdr message {} does not decode, so it is skipped (another herdr version?): {e}", payload[0]);
+            }
+            Ok(None)
+        }
+    }
 }
+
+/// The index of [`ServerMessage`]'s last variant.
+const LAST_MODELLED: u8 = 20;
 
 #[cfg(test)]
 mod tests {
@@ -405,10 +507,25 @@ mod tests {
         assert_eq!(bytes(&ClientMessage::ClientShellHostTheme { update }), [17, 2, 1]);
     }
 
+    /// herdr's scene as bincode lays it out: enum variants as varint indices, the image bytes as length + bytes.
+    #[test]
+    fn decodes_a_graphics_scene() {
+        let target = (0u32, "w:p");
+        let key = ((0u32, target, 7u32), 3u32, 1u32, 2u32, 4u64, 9u64);
+        let scene = (vec![(key, vec![1u8, 2, 3, 4])], Vec::<u8>::new(), Vec::<u8>::new());
+        let bytes = bincode::serde::encode_to_vec(scene, bincode::config::standard()).unwrap();
+        let (scene, _): (GraphicsScene, _) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+        let asset = &scene.assets[0];
+        assert_eq!(asset.data, [1, 2, 3, 4]);
+        assert_eq!((asset.key.image_width, asset.key.image_height, asset.key.format), (3, 1, GraphicsFormat::Png));
+        let GraphicsSource::Terminal { target: GraphicsTarget::Pane { pane_id }, image_id: 7 } = &asset.key.source else { panic!() };
+        assert_eq!(pane_id, "w:p");
+    }
+
     #[test]
     fn decodes_mouse_capture_and_skips_unmodelled_messages() {
         let mut framed = Vec::new();
-        for payload in [vec![8u8, 1, 0], vec![20u8, 0]] {
+        for payload in [vec![8u8, 1, 0], vec![21u8, 0]] {
             framed.extend((payload.len() as u32).to_le_bytes());
             framed.extend(payload);
         }
