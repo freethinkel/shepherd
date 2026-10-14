@@ -134,16 +134,18 @@ impl Shell {
         cx.notify();
     }
 
-    /// The sidebar's rows: workspaces with their worktrees folded under them, the agents list and the update strip.
-    pub(super) fn render_sidebar(
-        &mut self,
+    /// The workspace list's rows for `snapshot`: each workspace with its worktrees folded under it. `live` rows answer
+    /// clicks, renames and drags and show worktrees being made; a swipe's preview of another place draws the same rows
+    /// inert, so the list that slides in is the one that stays when it lands.
+    pub(super) fn workspace_rows(
+        &self,
         theme: &Theme,
-        snapshot: &Option<Snapshot>,
+        snapshot: Option<&Snapshot>,
         shown_ws: &Option<String>,
-        shown_tab: &Option<String>,
-        window: &mut Window,
+        live: bool,
+        active: bool,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> Vec<gpui::AnyElement> {
         // a workspace row's height, one line; a worktree's, which always has a branch line unless compact
         let (ws_h, kid_h) = if SettingsGlobal::of(cx).settings.compact_workspaces { (26., 26.) } else { (32., WS_TWO_LINES) };
         let groups: Vec<(crate::model::Workspace, Vec<crate::model::Workspace>)> = snapshot
@@ -155,6 +157,227 @@ impl Shell {
                     .collect()
             })
             .unwrap_or_default();
+        let ws_row = |w: &crate::model::Workspace, nested: bool, chevron: Option<gpui::AnyElement>, folded: Option<usize>, cx: &mut Context<Self>| {
+            let show = SettingsGlobal::of(cx).settings.workspace_show;
+            let compact = SettingsGlobal::of(cx).settings.compact_workspaces;
+            let selected = shown_ws.as_deref() == Some(w.workspace_id.as_str());
+            let first_tab =
+                snapshot.as_ref().and_then(|s| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
+            let target = w.active_tab_id.clone().or(first_tab);
+            let rename_target = RenameTarget::Workspace(w.workspace_id.clone());
+            let editing = live.then(|| self.rename_field(&rename_target, cx)).flatten();
+            let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
+            // a workspace herdr knows no worktree of lives where its panes were opened
+            let dir = w.worktree.as_ref().map(|t| t.checkout_path.as_str()).filter(|d| !d.is_empty()).or_else(|| {
+                snapshot.as_ref()?.panes.iter().find(|p| p.workspace_id == w.workspace_id)?.cwd.as_deref()
+            }).map(crate::herdr::locate);
+            let git = dir.as_deref().filter(|_| show.branch).and_then(|d| crate::ui::statusbar::git_of(d, cx));
+            // herdr's commits ahead of and behind the upstream, also on a compact row
+            let sync = git.as_ref().filter(|g| g.ahead > 0 || g.behind > 0).map(|g| {
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap(px(3.))
+                    .text_size(px(11.))
+                    .when(g.ahead > 0, |el| el.child(div().text_color(theme.success.opacity(0.8)).child(format!("↑{}", g.ahead))))
+                    .when(g.behind > 0, |el| el.child(div().text_color(theme.danger.opacity(0.8)).child(format!("↓{}", g.behind))))
+            });
+            let branch = git.map(|g| g.branch).filter(|_| !compact);
+            let (sync, sync_inline) = if compact { (None, sync) } else { (sync, None) };
+            // compact rows are the name and its ↑↓ alone: gh and git's diff aren't even asked
+            let (changes, pr) = match dir.as_deref().filter(|_| nested && !compact) {
+                Some(d) => crate::ui::statusbar::changes_of(d, active, cx),
+                None => (None, None),
+            };
+            let changes = changes.filter(|c| show.changes && *c != (0, 0)).map(|(added, removed)| {
+                div()
+                    .flex()
+                    .gap(px(3.))
+                    .when(added > 0, |el| el.child(div().text_color(theme.success.opacity(0.7)).child(format!("+{added}"))))
+                    .when(removed > 0, |el| el.child(div().text_color(theme.danger.opacity(0.7)).child(format!("−{removed}"))))
+            });
+            let pr = pr.filter(|_| show.pull_request);
+            let extras = (changes.is_some() || pr.is_some()).then(|| {
+                div().flex_none().flex().gap(px(4.)).text_size(px(11.)).text_color(theme.text_faint).children(changes).children(pr)
+            });
+            // Zeron's card: the name, and under it the branch with what it changed; one line when compact
+            // a worktree always has its branch line, so a folding group knows its height
+            let two = !compact && (nested || branch.is_some() || extras.is_some());
+            let (inline, below) = if two { (None, extras) } else { (extras, None) };
+            // a repo's own artwork or its monogram; its worktrees, indented under its name, go without
+            // compact, a worktree has no branch line: a branch mark in front of its name tells it apart
+            let icon = if nested {
+                compact.then(|| {
+                    div()
+                        .size(px(14.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(gpui::svg().path("icons/git-branch.svg").size(px(12.)).text_color(theme.text_muted))
+                        .into_any_element()
+                })
+            } else {
+                show.icon.then(|| {
+                    let seed = w.worktree.as_ref().map_or(w.label.as_str(), |t| t.repo_key.as_str());
+                    crate::ui::project_icon::project_icon(&w.label, seed, dir.as_deref(), 14., selected, theme, cx)
+                })
+            };
+            let name = match editing {
+                Some(field) => field.into_any_element(),
+                None => div().min_w_0().truncate().child(w.label.clone()).into_any_element(),
+            };
+            row(theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
+                .h(px(if two { WS_TWO_LINES } else { ws_h }))
+                .when(live, |el| pane_drag::accept_pane_in_workspace(el, &w.workspace_id, theme.accent.opacity(0.15), cx))
+                .when(nested, |el| el.pl(px(if show.icon { 30. } else { 20. })))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .children(icon)
+                                .child(name)
+                                .children(folded.map(|n| count_badge(theme, n)))
+                                .children(sync_inline)
+                                .child(div().flex_1())
+                                .children(inline),
+                        )
+                        .when(two, |el| {
+                            el.child(
+                                div()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .text_size(px(11.))
+                                    .text_color(theme.text_muted)
+                                    .when(show.icon && !nested, |el| el.pl(px(22.)))
+                                    .children(branch.map(|b| {
+                                        div()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .child(gpui::svg().path("icons/git-branch.svg").size(px(11.)).flex_none().text_color(theme.text_muted))
+                                            .child(div().min_w_0().truncate().child(b))
+                                    }))
+                                    .children(sync)
+                                    .child(div().flex_1())
+                                    .children(below),
+                            )
+                        }),
+                )
+                .map(|el| {
+                    if live && self.removing.contains(&w.workspace_id) {
+                        el.text_color(theme.text_faint).child(spinner(theme, format!("ws-removing-{}", w.workspace_id)))
+                    } else {
+                        el.when(show.status, |el| el.child(status_dot(w.agent_status, theme)))
+                    }
+                })
+                .children(chevron)
+                .when(live, |el| {
+                    el.on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                        if e.click_count() == 2 {
+                            this.start_rename(RenameTarget::Workspace(ws_id.clone()), label.clone(), window, cx);
+                            return;
+                        }
+                        this.selected_tab = target.clone();
+                        cx.notify();
+                    }))
+                    .on_mouse_down(MouseButton::Right, cx.listener({
+                        let id = w.workspace_id.clone();
+                        move |this, e: &MouseDownEvent, _, cx| {
+                            this.ws_menu = Some(crate::ui::Popup::new((id.clone(), e.position)));
+                            cx.notify();
+                        }
+                    }))
+                })
+        };
+        groups.into_iter().map(|(w, kids)| {
+            // Pending worktrees join the group of the workspace their dialog was opened on.
+            // herdr opens the worktree's workspace before it answers (hooks still run): once
+            // its checkout shows up, the real row replaces the placeholder.
+            let checked_out = |branch: &str| {
+                let slug = crate::commands::branch_path_slug(branch);
+                kids.iter().any(|k| {
+                    k.worktree.as_ref().is_some_and(|t| {
+                        std::path::Path::new(&t.checkout_path).file_name().is_some_and(|n| *n == *slug)
+                    })
+                })
+            };
+            let pending: Vec<String> = self
+                .pending_worktrees
+                .iter()
+                .filter(|(id, _)| *id == w.workspace_id || kids.iter().any(|k| k.workspace_id == *id))
+                .filter(|(_, branch)| live && !checked_out(branch))
+                .map(|(_, branch)| branch.clone())
+                .collect();
+            if kids.is_empty() && pending.is_empty() {
+                return ws_row(&w, false, None, None, cx).into_any_element();
+            }
+            // A folded group opens while one of its worktrees is being created.
+            let open = !self.folded.contains(&w.workspace_id) || !pending.is_empty();
+            let full = (kids.len() + pending.len()) as f32 * (kid_h + 2.);
+            let tween = self.fold_motion.get(&w.workspace_id).copied().filter(|m| live && m.animating());
+            let chevron = fold_chevron(theme, &w.workspace_id, open, full, tween).when(live, |el| {
+                el.on_click(cx.listener({
+                    let id = w.workspace_id.clone();
+                    move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_fold(&id, full, cx);
+                        cx.notify();
+                    }
+                }))
+            });
+            let header = ws_row(&w, false, Some(chevron.into_any_element()), (!open).then_some(kids.len()), cx);
+            let body = div()
+                .w_full()
+                .flex_none()
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .pt(px(2.))
+                .gap(px(2.))
+                .children(kids.iter().map(|k| ws_row(k, true, None, None, cx).into_any_element()).collect::<Vec<_>>())
+                .children(pending.iter().map(|b| pending_worktree_row(theme, b).h(px(kid_h)).into_any_element()));
+            let body = match tween {
+                None => body.h(px(if open { full } else { 0. })).into_any_element(),
+                // Zeron's disclosure: the height tweens, the rows fade up from 35 % and slide 3 px.
+                Some(m) => body
+                    .with_animation(
+                        SharedString::from(format!("fold-{}-{}", w.workspace_id, m.epoch)),
+                        fold_animation(),
+                        move |el, t| {
+                            let h = m.from + (m.to - m.from) * t;
+                            let reveal = (h / full).clamp(0., 1.);
+                            el.h(px(h)).opacity(0.35 + 0.65 * reveal).relative().top(px(-3. * (1. - reveal)))
+                        },
+                    )
+                    .into_any_element(),
+            };
+            div().flex().flex_col().flex_none().child(header).child(body).into_any_element()
+        }).collect::<Vec<_>>()
+    }
+
+    /// The sidebar's rows: workspaces with their worktrees folded under them, the agents list and the update strip.
+    pub(super) fn render_sidebar(
+        &mut self,
+        theme: &Theme,
+        snapshot: &Option<Snapshot>,
+        shown_ws: &Option<String>,
+        shown_tab: &Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let mut agents = snapshot.as_ref().map(|s| agent_entries(s, self.agent_sort, &self.since)).unwrap_or_default();
         // the section stays while any agent runs, so its menu can turn the filter off again
         let any_agents = !agents.is_empty();
@@ -228,213 +451,7 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .children({
-                        let ws_row = |w: &crate::model::Workspace, nested: bool, chevron: Option<gpui::AnyElement>, folded: Option<usize>, cx: &mut Context<Self>| {
-                            let show = SettingsGlobal::of(cx).settings.workspace_show;
-                            let compact = SettingsGlobal::of(cx).settings.compact_workspaces;
-                            let selected = shown_ws.as_deref() == Some(w.workspace_id.as_str());
-                            let first_tab =
-                                snapshot.as_ref().and_then(|s| s.tabs_of(&w.workspace_id).first().map(|t| t.tab_id.clone()));
-                            let target = w.active_tab_id.clone().or(first_tab);
-                            let rename_target = RenameTarget::Workspace(w.workspace_id.clone());
-                            let editing = self.rename_field(&rename_target, cx);
-                            let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
-                            // a workspace herdr knows no worktree of lives where its panes were opened
-                            let dir = w.worktree.as_ref().map(|t| t.checkout_path.as_str()).filter(|d| !d.is_empty()).or_else(|| {
-                                snapshot.as_ref()?.panes.iter().find(|p| p.workspace_id == w.workspace_id)?.cwd.as_deref()
-                            }).map(crate::herdr::locate);
-                            let git = dir.as_deref().filter(|_| show.branch).and_then(|d| crate::ui::statusbar::git_of(d, cx));
-                            // herdr's commits ahead of and behind the upstream, also on a compact row
-                            let sync = git.as_ref().filter(|g| g.ahead > 0 || g.behind > 0).map(|g| {
-                                div()
-                                    .flex_none()
-                                    .flex()
-                                    .gap(px(3.))
-                                    .text_size(px(11.))
-                                    .when(g.ahead > 0, |el| el.child(div().text_color(theme.success.opacity(0.8)).child(format!("↑{}", g.ahead))))
-                                    .when(g.behind > 0, |el| el.child(div().text_color(theme.danger.opacity(0.8)).child(format!("↓{}", g.behind))))
-                            });
-                            let branch = git.map(|g| g.branch).filter(|_| !compact);
-                            let (sync, sync_inline) = if compact { (None, sync) } else { (sync, None) };
-                            // compact rows are the name and its ↑↓ alone: gh and git's diff aren't even asked
-                            let (changes, pr) = match dir.as_deref().filter(|_| nested && !compact) {
-                                Some(d) => crate::ui::statusbar::changes_of(d, active, cx),
-                                None => (None, None),
-                            };
-                            let changes = changes.filter(|c| show.changes && *c != (0, 0)).map(|(added, removed)| {
-                                div()
-                                    .flex()
-                                    .gap(px(3.))
-                                    .when(added > 0, |el| el.child(div().text_color(theme.success.opacity(0.7)).child(format!("+{added}"))))
-                                    .when(removed > 0, |el| el.child(div().text_color(theme.danger.opacity(0.7)).child(format!("−{removed}"))))
-                            });
-                            let pr = pr.filter(|_| show.pull_request);
-                            let extras = (changes.is_some() || pr.is_some()).then(|| {
-                                div().flex_none().flex().gap(px(4.)).text_size(px(11.)).text_color(theme.text_faint).children(changes).children(pr)
-                            });
-                            // Zeron's card: the name, and under it the branch with what it changed; one line when compact
-                            // a worktree always has its branch line, so a folding group knows its height
-                            let two = !compact && (nested || branch.is_some() || extras.is_some());
-                            let (inline, below) = if two { (None, extras) } else { (extras, None) };
-                            // a repo's own artwork or its monogram; its worktrees, indented under its name, go without
-                            // compact, a worktree has no branch line: a branch mark in front of its name tells it apart
-                            let icon = if nested {
-                                compact.then(|| {
-                                    div()
-                                        .size(px(14.))
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(gpui::svg().path("icons/git-branch.svg").size(px(12.)).text_color(theme.text_muted))
-                                        .into_any_element()
-                                })
-                            } else {
-                                show.icon.then(|| {
-                                    let seed = w.worktree.as_ref().map_or(w.label.as_str(), |t| t.repo_key.as_str());
-                                    crate::ui::project_icon::project_icon(&w.label, seed, dir.as_deref(), 14., selected, theme, cx)
-                                })
-                            };
-                            let name = match editing {
-                                Some(field) => field.into_any_element(),
-                                None => div().min_w_0().truncate().child(w.label.clone()).into_any_element(),
-                            };
-                            row(theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
-                                .h(px(if two { WS_TWO_LINES } else { ws_h }))
-                                .map(|el| pane_drag::accept_pane_in_workspace(el, &w.workspace_id, theme.accent.opacity(0.15), cx))
-                                .when(nested, |el| el.pl(px(if show.icon { 30. } else { 20. })))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(8.))
-                                                .children(icon)
-                                                .child(name)
-                                                .children(folded.map(|n| count_badge(theme, n)))
-                                                .children(sync_inline)
-                                                .child(div().flex_1())
-                                                .children(inline),
-                                        )
-                                        .when(two, |el| {
-                                            el.child(
-                                                div()
-                                                    .min_w_0()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(6.))
-                                                    .text_size(px(11.))
-                                                    .text_color(theme.text_muted)
-                                                    .when(show.icon && !nested, |el| el.pl(px(22.)))
-                                                    .children(branch.map(|b| {
-                                                        div()
-                                                            .min_w_0()
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap(px(4.))
-                                                            .child(gpui::svg().path("icons/git-branch.svg").size(px(11.)).flex_none().text_color(theme.text_muted))
-                                                            .child(div().min_w_0().truncate().child(b))
-                                                    }))
-                                                    .children(sync)
-                                                    .child(div().flex_1())
-                                                    .children(below),
-                                            )
-                                        }),
-                                )
-                                .map(|el| {
-                                    if self.removing.contains(&w.workspace_id) {
-                                        el.text_color(theme.text_faint).child(spinner(theme, format!("ws-removing-{}", w.workspace_id)))
-                                    } else {
-                                        el.when(show.status, |el| el.child(status_dot(w.agent_status, theme)))
-                                    }
-                                })
-                                .children(chevron)
-                                .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                                    if e.click_count() == 2 {
-                                        this.start_rename(RenameTarget::Workspace(ws_id.clone()), label.clone(), window, cx);
-                                        return;
-                                    }
-                                    this.selected_tab = target.clone();
-                                    cx.notify();
-                                }))
-                                .on_mouse_down(MouseButton::Right, cx.listener({
-                                    let id = w.workspace_id.clone();
-                                    move |this, e: &MouseDownEvent, _, cx| {
-                                        this.ws_menu = Some(crate::ui::Popup::new((id.clone(), e.position)));
-                                        cx.notify();
-                                    }
-                                }))
-                        };
-                        groups.into_iter().map(|(w, kids)| {
-                            // Pending worktrees join the group of the workspace their dialog was opened on.
-                            // herdr opens the worktree's workspace before it answers (hooks still run): once
-                            // its checkout shows up, the real row replaces the placeholder.
-                            let checked_out = |branch: &str| {
-                                let slug = crate::commands::branch_path_slug(branch);
-                                kids.iter().any(|k| {
-                                    k.worktree.as_ref().is_some_and(|t| {
-                                        std::path::Path::new(&t.checkout_path).file_name().is_some_and(|n| *n == *slug)
-                                    })
-                                })
-                            };
-                            let pending: Vec<String> = self
-                                .pending_worktrees
-                                .iter()
-                                .filter(|(id, _)| *id == w.workspace_id || kids.iter().any(|k| k.workspace_id == *id))
-                                .filter(|(_, branch)| !checked_out(branch))
-                                .map(|(_, branch)| branch.clone())
-                                .collect();
-                            if kids.is_empty() && pending.is_empty() {
-                                return ws_row(&w, false, None, None, cx).into_any_element();
-                            }
-                            // A folded group opens while one of its worktrees is being created.
-                            let open = !self.folded.contains(&w.workspace_id) || !pending.is_empty();
-                            let full = (kids.len() + pending.len()) as f32 * (kid_h + 2.);
-                            let tween = self.fold_motion.get(&w.workspace_id).copied().filter(|m| m.animating());
-                            let chevron = fold_chevron(theme, &w.workspace_id, open, full, tween).on_click(cx.listener({
-                                let id = w.workspace_id.clone();
-                                move |this, _: &ClickEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_fold(&id, full, cx);
-                                    cx.notify();
-                                }
-                            }));
-                            let header = ws_row(&w, false, Some(chevron.into_any_element()), (!open).then_some(kids.len()), cx);
-                            let body = div()
-                                .w_full()
-                                .flex_none()
-                                .overflow_hidden()
-                                .flex()
-                                .flex_col()
-                                .pt(px(2.))
-                                .gap(px(2.))
-                                .children(kids.iter().map(|k| ws_row(k, true, None, None, cx).into_any_element()).collect::<Vec<_>>())
-                                .children(pending.iter().map(|b| pending_worktree_row(theme, b).h(px(kid_h)).into_any_element()));
-                            let body = match tween {
-                                None => body.h(px(if open { full } else { 0. })).into_any_element(),
-                                // Zeron's disclosure: the height tweens, the rows fade up from 35 % and slide 3 px.
-                                Some(m) => body
-                                    .with_animation(
-                                        SharedString::from(format!("fold-{}-{}", w.workspace_id, m.epoch)),
-                                        fold_animation(),
-                                        move |el, t| {
-                                            let h = m.from + (m.to - m.from) * t;
-                                            let reveal = (h / full).clamp(0., 1.);
-                                            el.h(px(h)).opacity(0.35 + 0.65 * reveal).relative().top(px(-3. * (1. - reveal)))
-                                        },
-                                    )
-                                    .into_any_element(),
-                            };
-                            div().flex().flex_col().flex_none().child(header).child(body).into_any_element()
-                        }).collect::<Vec<_>>()
-                    }),
+                    .children(self.workspace_rows(theme, snapshot.as_ref(), shown_ws, true, active, cx))
             ),
             )
             .child(
