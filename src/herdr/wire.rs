@@ -1,5 +1,5 @@
 //! The slice of herdr's client socket protocol a terminal session needs, from herdr's src/protocol/wire.rs
-//! @ v0.9.3 (Apache-2.0, see assets/NOTICE): length-prefixed bincode-2 (`config::standard()`) messages.
+//! @ v0.9.4 (Apache-2.0, see assets/NOTICE): length-prefixed bincode-2 (`config::standard()`) messages.
 //!
 //! Enums are matched by variant *index*, so every variant before the last one used is listed in herdr's order.
 //! Variants Shepherd never sends or reads are unit placeholders: a placeholder decodes from just the index, so an
@@ -224,7 +224,7 @@ pub enum ServerMessage {
     EndpointControl { kind: String, data: String },
 }
 
-/// herdr's `PaneSurfaceFrame` up to its popup; the fields after it are left unread.
+/// herdr's `PaneSurfaceFrame`: read for its popup and its Kitty graphics.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct PaneSurfaceFrame {
@@ -235,6 +235,73 @@ pub struct PaneSurfaceFrame {
     pub panes: Vec<PaneSurfacePane>,
     pub splits: Vec<PaneSurfaceSplit>,
     pub popup: Option<PopupFrame>,
+    pub graphics: GraphicsScene,
+}
+
+/// herdr's `SurfaceGraphicsScene`: every placement shown on the surface, and only the image bytes this connection
+/// has not been sent yet (herdr sends each image once; a later scene names it by its key).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GraphicsScene {
+    pub assets: Vec<GraphicsAsset>,
+    pub placements: Vec<GraphicsPlacement>,
+    /// Images to keep although nothing shows them now (their pane is in another tab).
+    pub retained_assets: Vec<AssetKey>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GraphicsAsset {
+    pub key: AssetKey,
+    // ponytail: decoded byte by byte (herdr writes it as bytes, the same layout); a bytes visitor if it ever shows
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+pub struct AssetKey {
+    pub source: GraphicsSource,
+    pub image_width: u32,
+    pub image_height: u32,
+    pub format: GraphicsFormat,
+    pub data_len: u64,
+    pub data_fingerprint: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+pub enum GraphicsSource {
+    Terminal { target: GraphicsTarget, image_id: u32 },
+    PaneLayer { pane_id: String, layer_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+pub enum GraphicsTarget {
+    Pane { pane_id: String },
+    Popup { terminal_id: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+pub enum GraphicsFormat {
+    Rgb,
+    Rgba,
+    Png,
+}
+
+/// One image on a pane, already clipped to it: cells from the pane's top-left, the part of the image shown there
+/// (`source_*`, image pixels), and a pixel offset into its first cell.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GraphicsPlacement {
+    pub asset: AssetKey,
+    pub logical_placement_id: u32,
+    pub x: u16,
+    pub y: u16,
+    pub cols: u32,
+    pub rows: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub x_offset: u32,
+    pub y_offset: u32,
+    pub z: i32,
+    pub scrollback_offset: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,6 +388,9 @@ pub struct PopupFrame {
     pub height: Option<PopupSize>,
     pub frame: FrameData,
     pub mouse_reporting: bool,
+    pub sgr_pixel_mouse: bool,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
 }
 
 /// What Shepherd keeps of herdr's popup to lay it out.

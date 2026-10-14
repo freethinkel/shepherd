@@ -162,7 +162,7 @@ pub struct Shell {
     floating: Option<floating::Floating>,
     popup_watch: gpui::Task<()>,
     /// The client shell's surface and the grid it was last sized to.
-    popup_surface: Option<(crate::herdr::popup::Surface, (u16, u16))>,
+    popup_surface: Option<(crate::herdr::popup::Surface, ((u16, u16), (u32, u32)))>,
     /// PoC: the window's herdr client shell for theme, popup and commands (`SHEPHERD_CLIENT_SHELL=1`).
     client_shell: Option<client_shell::ShellView>,
     /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.

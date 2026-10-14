@@ -1,6 +1,9 @@
 //! herdr's popup (a plugin's or a `[[keys.command]]` floating terminal) is no pane: only a client-rendered shell
 //! hears of it, in the pane surfaces herdr sends it. One such connection per session, read only for the popup; the
 //! popup's terminal itself is then controlled like a pane's ([`super::Session`] takes its terminal id).
+//!
+//! The same surfaces carry herdr's Kitty graphics, which attaches never get: the images on the panes of the shell's
+//! tab ([`super::graphics`]), sent once herdr knows the cell size in pixels.
 use super::session::client_socket;
 use super::wire::{self, ClientMessage, HostThemeUpdate, ServerMessage, SurfaceSize};
 pub use super::wire::{PopupSize, PopupSurface};
@@ -15,6 +18,8 @@ pub enum Event {
     Popup(Option<PopupSurface>),
     /// `[[keys.command]]` as herdr runs them (`command.invoke`): (command id, its key labels as in the config).
     Commands(Vec<(String, Vec<String>)>),
+    /// The images on the panes of the shell's tab, when they change (see [`super::graphics`]).
+    Images(super::graphics::PaneImages),
 }
 
 /// The client shell's surface, which herdr lays its focused tab out at while no other client does: kept at
@@ -22,8 +27,10 @@ pub enum Event {
 pub struct Surface(UnixStream);
 
 impl Surface {
-    pub fn resize(&self, cols: u16, rows: u16) {
-        let msg = ClientMessage::ClientShellResize { cell_width_px: 0, cell_height_px: 0, surface_size: SurfaceSize { cols: cols.max(20), rows: rows.max(8) }, pixel_mouse: false };
+    /// `cell_px`: a cell in device pixels, which herdr sizes images by.
+    pub fn resize(&self, cols: u16, rows: u16, (cell_width_px, cell_height_px): (u32, u32)) {
+        let surface_size = SurfaceSize { cols: cols.max(20), rows: rows.max(8) };
+        let msg = ClientMessage::ClientShellResize { cell_width_px, cell_height_px, surface_size, pixel_mouse: false };
         let _ = wire::write_message(&mut &self.0, &msg); // a dead shell is noticed by its reader
     }
 
@@ -36,15 +43,15 @@ impl Surface {
     }
 }
 
-/// The client shell's [`Event`]s, and its [`Surface`] (`cols`×`rows` at first); the stream ends when herdr hangs up
-/// or refuses.
-pub fn watch(cols: u16, rows: u16) -> anyhow::Result<(UnboundedReceiver<Event>, Surface)> {
+/// The client shell's [`Event`]s, and its [`Surface`] (`cols`×`rows` of `cell_px` at first, (0, 0) while unknown);
+/// the stream ends when herdr hangs up or refuses.
+pub fn watch(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(UnboundedReceiver<Event>, Surface)> {
     let mut stream = UnixStream::connect(client_socket())?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let hello = serde_json::json!({
         "generation": 1,
-        "cell_width_px": 0,
-        "cell_height_px": 0,
+        "cell_width_px": cell_px.0,
+        "cell_height_px": cell_px.1,
         "surface_size": {"cols": cols.max(20), "rows": rows.max(8)},
         "pixel_mouse": false,
         "direct_graphics": false,
@@ -68,20 +75,28 @@ pub fn watch(cols: u16, rows: u16) -> anyhow::Result<(UnboundedReceiver<Event>, 
     let (tx, rx) = unbounded();
     std::thread::spawn(move || {
         let mut last = None;
+        let mut graphics = super::graphics::Graphics::default();
         loop {
-            let event = match wire::read_message(&mut stream) {
-                Ok(Some(ServerMessage::PaneSurface(frame))) if frame.popup.as_ref().map(PopupSurface::from) != last => {
-                    last = frame.popup.as_ref().map(PopupSurface::from);
-                    Event::Popup(last.clone())
+            let mut events = Vec::new();
+            match wire::read_message(&mut stream) {
+                Ok(Some(ServerMessage::PaneSurface(mut frame))) => {
+                    events.extend(graphics.apply(std::mem::take(&mut frame.graphics)).map(Event::Images));
+                    let popup = frame.popup.as_ref().map(PopupSurface::from);
+                    if popup != last {
+                        last = popup;
+                        events.push(Event::Popup(last.clone()));
+                    }
                 }
                 Ok(Some(ServerMessage::EndpointControl { kind, data })) if kind == "shell.snapshot.v1" => {
-                    Event::Commands(commands(&data))
+                    events.push(Event::Commands(commands(&data)))
                 }
                 Ok(_) => continue,
                 Err(_) => return,
             };
-            if tx.unbounded_send(event).is_err() {
-                return; // the watcher was dropped: hang up
+            for event in events {
+                if tx.unbounded_send(event).is_err() {
+                    return; // the watcher was dropped: hang up
+                }
             }
         }
     });
@@ -138,9 +153,25 @@ mod tests {
     #[test]
     #[ignore]
     fn live() {
-        let (rx, _surface) = watch(120, 40).unwrap();
+        let (rx, _surface) = watch(120, 40, (0, 0)).unwrap();
         for popup in futures::executor::block_on_stream(rx).take(4) {
             println!("{popup:?}");
+        }
+    }
+
+    /// Live: `PANE=<id> cargo test popup::tests::live_images -- --ignored --nocapture`, then show an image in that pane
+    /// (`kitten icat`, `chafa -f kitty`). Holds the pane as Shepherd does (an attach, which gives herdr the pane's
+    /// pixel size) and prints the images per pane as herdr's scenes change.
+    #[test]
+    #[ignore]
+    fn live_images() {
+        let pane = std::env::var("PANE").unwrap();
+        let _held = super::super::Session::spawn(&pane, 100, 30, (16, 34), super::super::Mode::Control).unwrap();
+        let (rx, _surface) = watch(120, 40, (16, 34)).unwrap();
+        for event in futures::executor::block_on_stream(rx) {
+            if let Event::Images(images) = event {
+                println!("{images:?}");
+            }
         }
     }
 }

@@ -6,6 +6,7 @@ use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, Side};
 use super::find::{Link, find_all, hyperlink, link_at};
 use super::keys::{dropped_paths, keystroke_bytes, paste_bytes};
+use crate::herdr::graphics::PaneImage;
 use crate::herdr::{Client, Mode, PaneInput, Session, SessionEvent};
 use crate::theme::Theme;
 use crate::ui::Popup;
@@ -32,6 +33,8 @@ pub struct GridGeometry {
     pub line_h: f32,
     pub cols: u16,
     pub rows: u16,
+    /// A cell in device pixels, as herdr is told: it sizes Kitty images by it.
+    pub cell_px: (u32, u32),
 }
 
 pub struct GridSnapshot {
@@ -39,6 +42,7 @@ pub struct GridSnapshot {
     pub cursor: Option<CursorSnapshot>,
     /// Search matches on screen: (row, cells, the current one).
     pub marks: Vec<(usize, Range<usize>, bool)>,
+    pub images: Vec<PaneImage>,
 }
 
 /// While true (a divider or the sidebar is being dragged), panes reflow at most every `HELD_RESIZE`, so the
@@ -222,6 +226,10 @@ pub struct PaneTerminal {
     preview: Option<Popup<Preview>>,
     /// Always attaches by taking the terminal over (herdr's popup: whichever window shows it types into it).
     pub takes_over: bool,
+    /// Kitty images herdr shows on the pane (from the window's client shell), drawn over the grid.
+    images: Vec<PaneImage>,
+    /// Images no longer shown, to free from the window's atlas at the next render.
+    retired: Vec<std::sync::Arc<gpui::RenderImage>>,
 }
 
 impl PaneTerminal {
@@ -271,6 +279,8 @@ impl PaneTerminal {
             hover: None,
             preview: None,
             takes_over: false,
+            images: Vec::new(),
+            retired: Vec::new(),
         }
         // Attaching waits for the first measured grid (`on_grid_metrics`): herdr resizes the real PTY to
         // whatever size the attach names.
@@ -288,6 +298,17 @@ impl PaneTerminal {
         self.ended.as_deref()
     }
 
+    /// herdr's images on this pane now; those gone are freed at the next render.
+    pub fn set_images(&mut self, images: Vec<PaneImage>, cx: &mut Context<Self>) {
+        if self.images.is_empty() && images.is_empty() {
+            return;
+        }
+        let old = std::mem::replace(&mut self.images, images);
+        let gone = old.into_iter().map(|i| i.image).filter(|o| !self.images.iter().any(|i| std::sync::Arc::ptr_eq(&i.image, o)));
+        self.retired.extend(gone);
+        cx.notify();
+    }
+
     /// Connects off the main thread: herdr's handshake takes tens of milliseconds, and attaching happens while a
     /// frame is laid out (a tab switch attaches every pane it shows).
     fn attach(&mut self, takeover: bool, cx: &mut Context<Self>) {
@@ -300,6 +321,7 @@ impl PaneTerminal {
             return;
         }
         let (cols, rows) = (self.emulator.cols() as u16, self.emulator.rows() as u16);
+        let px = self.geometry.map_or((0, 0), |g| g.cell_px);
         let pane_id = self.pane_id.clone();
         let mode = match (takeover || self.takes_over, yielded(cx)) {
             (true, _) => Mode::Takeover,
@@ -308,7 +330,7 @@ impl PaneTerminal {
         };
         self.observing = mode == Mode::Observe;
         self.attaching = std::time::Instant::now();
-        let spawn = cx.background_executor().spawn(async move { Session::spawn(&pane_id, cols, rows, mode) });
+        let spawn = cx.background_executor().spawn(async move { Session::spawn(&pane_id, cols, rows, px, mode) });
         self._pump = Some(cx.spawn(async move |this, cx| {
             let result = spawn.await;
             let rx = this.update(cx, |pane, cx| {
@@ -317,8 +339,9 @@ impl PaneTerminal {
                     Ok((session, rx)) => {
                         // The grid may have changed size while connecting.
                         let now = (pane.emulator.cols() as u16, pane.emulator.rows() as u16);
-                        if now != (cols, rows) {
-                            session.resize(now.0, now.1);
+                        let now_px = pane.geometry.map_or(px, |g| g.cell_px);
+                        if (now, now_px) != ((cols, rows), px) {
+                            session.resize(now.0, now.1, now_px);
                         }
                         if !pane.observing && !pane.held.is_empty() {
                             session.input(&std::mem::take(&mut pane.held));
@@ -361,6 +384,7 @@ impl PaneTerminal {
             self.refresh_scroll(cx);
         }
         let first = self.geometry.is_none();
+        let rescaled = self.geometry.is_some_and(|g| g.cell_px != geometry.cell_px);
         let (cols, rows) = (geometry.cols, geometry.rows);
         // a client shell's popup is sized by herdr (`SessionEvent::Size`), not by its view
         let sized_by_herdr = self.session.as_ref().is_some_and(Session::is_shell);
@@ -376,8 +400,8 @@ impl PaneTerminal {
         }
         if first && self.session.is_none() && self.ended.is_none() {
             self.attach(false, cx);
-        } else if let (Some(session), true) = (&self.session, resized) {
-            session.resize(cols, rows);
+        } else if let (Some(session), true) = (&self.session, resized || rescaled) {
+            session.resize(cols, rows, geometry.cell_px);
         }
     }
 
@@ -440,7 +464,7 @@ impl PaneTerminal {
             }
         }
         let marks = self.search_marks(&lines, cx);
-        Some(GridSnapshot { lines, cursor: self.emulator.cursor(), marks })
+        Some(GridSnapshot { lines, cursor: self.emulator.cursor(), marks, images: self.images.clone() })
     }
 
     fn search_marks(&self, lines: &[Vec<CellSnapshot>], cx: &App) -> Vec<(usize, Range<usize>, bool)> {
@@ -1225,6 +1249,9 @@ impl Focusable for PaneTerminal {
 
 impl Render for PaneTerminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for image in self.retired.drain(..) {
+            let _ = window.drop_image(image);
+        }
         let theme = Theme::of(cx).clone();
         if let Some(why) = self.ended.clone() {
             let takeover = needs_takeover(&why);
@@ -1337,6 +1364,7 @@ mod tests {
             line_h: 17.0,
             cols,
             rows,
+            cell_px: (16, 34),
         }
     }
 

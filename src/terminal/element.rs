@@ -19,6 +19,7 @@ use gpui::{
     size,
 };
 
+use crate::herdr::graphics::PaneImage;
 use crate::theme::{Appearance, Theme, rgb_to_hsl};
 
 use super::sprite;
@@ -221,6 +222,8 @@ pub struct TerminalPrepaint {
     /// measured the grid with.
     line_h: Pixels,
     cursor: Option<PaintQuad>,
+    /// herdr's Kitty images, lowest z first, and whether each goes under the text.
+    images: Vec<(Bounds<Pixels>, Arc<RenderImage>, bool)>,
     /// The focused block cursor is opaque, so it goes under the text (whose
     /// cell flips to the background color); the unfocused outline goes over.
     cursor_under_text: bool,
@@ -294,6 +297,7 @@ impl gpui::Element for TerminalElement {
             .em_advance(font_id, font_size)
             .unwrap_or(px(theme.terminal_font_size * 0.6));
         let line_h = px((theme.terminal_font_size * theme.terminal_line_height).round());
+        let scale = window.scale_factor();
 
         let inner_w = f32::from(bounds.size.width) - 2.0 * TERM_PADDING;
         let inner_h = f32::from(bounds.size.height) - 2.0 * TERM_PADDING;
@@ -315,6 +319,7 @@ impl gpui::Element for TerminalElement {
                     line_h: f32::from(line_h),
                     cols,
                     rows,
+                    cell_px: ((f32::from(cell_w) * scale).round() as u32, (f32::from(line_h) * scale).round() as u32),
                 },
                 cx,
             );
@@ -330,6 +335,7 @@ impl gpui::Element for TerminalElement {
                 cell_w,
                 line_h,
                 cursor: None,
+                images: Vec::new(),
                 cursor_under_text: false,
             };
         };
@@ -423,6 +429,12 @@ impl gpui::Element for TerminalElement {
             }
         });
 
+        let images = snapshot
+            .images
+            .iter()
+            .map(|i| (image_bounds(i, origin, cell_w, line_h, scale), i.image.clone(), i.z < 0))
+            .collect();
+
         TerminalPrepaint {
             bg_quads,
             sel_quads,
@@ -435,6 +447,7 @@ impl gpui::Element for TerminalElement {
             cell_w,
             line_h,
             cursor,
+            images,
             cursor_under_text: self.focused,
         }
     }
@@ -460,6 +473,9 @@ impl gpui::Element for TerminalElement {
             }
             for quad in prepaint.sel_quads.drain(..) {
                 window.paint_quad(quad);
+            }
+            for (bounds, image, _) in prepaint.images.iter().filter(|i| i.2) {
+                let _ = window.paint_image(*bounds, Default::default(), image.clone(), 0, false);
             }
             if prepaint.cursor_under_text {
                 if let Some(cursor) = prepaint.cursor.take() {
@@ -490,6 +506,9 @@ impl gpui::Element for TerminalElement {
                     );
                     paint_custom_glyph(glyph, bounds, prepaint.stroke, window, cx);
                 }
+            }
+            for (bounds, image, _) in prepaint.images.drain(..).filter(|i| !i.2) {
+                let _ = window.paint_image(bounds, Default::default(), image, 0, false);
             }
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
@@ -667,6 +686,15 @@ fn fits_grid(ch: char, font_id: gpui::FontId, window: &Window) -> bool {
     })
 }
 
+/// Where a Kitty image lands: its cells from the grid's `origin`, less the device-pixel offset into the first one.
+fn image_bounds(image: &PaneImage, origin: gpui::Point<Pixels>, cell_w: Pixels, line_h: Pixels, scale: f32) -> Bounds<Pixels> {
+    let (dx, dy) = (px(image.x_offset as f32 / scale), px(image.y_offset as f32 / scale));
+    Bounds::new(
+        point(origin.x + cell_w * image.x as f32 + dx, origin.y + line_h * image.y as f32 + dy),
+        size(cell_w * image.cols as f32 - dx, line_h * image.rows as f32 - dy),
+    )
+}
+
 pub struct CustomGlyph {
     col: usize,
     ch: char,
@@ -743,6 +771,23 @@ fn paint_custom_glyph(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_covers_its_cells_less_the_offset_into_the_first() {
+        let image = PaneImage {
+            image: Arc::new(RenderImage::new(Vec::<image::Frame>::new())),
+            x: 2,
+            y: 1,
+            cols: 3,
+            rows: 2,
+            x_offset: 4,
+            y_offset: 0,
+            z: 0,
+        };
+        // 2x display: 4 device pixels are 2 logical ones
+        let b = image_bounds(&image, point(px(10.), px(20.)), px(8.), px(17.), 2.0);
+        assert_eq!(b, Bounds::new(point(px(10. + 16. + 2.), px(20. + 17.)), size(px(24. - 2.), px(34.))));
+    }
 
     #[test]
     fn cube_is_appearance_independent() {

@@ -214,8 +214,9 @@ enum Transport {
 }
 
 impl Session {
-    pub fn spawn(pane: &str, cols: u16, rows: u16, mode: Mode) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
-        match Self::spawn_socket(pane, cols, rows, mode) {
+    /// `cell_px` is a cell in device pixels ((0, 0) while unknown): herdr gives the pane's app the pixel size from it.
+    pub fn spawn(pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), mode: Mode) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
+        match Self::spawn_socket(pane, cols, rows, cell_px, mode) {
             Some(session) => Ok(session),
             None => Self::spawn_cli(pane, cols, rows, mode),
         }
@@ -239,15 +240,15 @@ impl Session {
     }
 
     /// `None` when the socket is not there or speaks another protocol version.
-    fn spawn_socket(pane: &str, cols: u16, rows: u16, mode: Mode) -> Option<(Session, UnboundedReceiver<SessionEvent>)> {
+    fn spawn_socket(pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), mode: Mode) -> Option<(Session, UnboundedReceiver<SessionEvent>)> {
         let mut stream = UnixStream::connect(client_socket()).ok()?;
         stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
         let hello = ClientMessage::TerminalHello {
             version: wire::PROTOCOL_VERSION,
             cols,
             rows,
-            cell_width_px: 0,
-            cell_height_px: 0,
+            cell_width_px: cell_px.0,
+            cell_height_px: cell_px.1,
             pixel_mouse: false,
         };
         wire::write_message(&mut stream, &hello).ok()?;
@@ -304,9 +305,9 @@ impl Session {
         );
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) {
+    pub fn resize(&self, cols: u16, rows: u16, (cell_width_px, cell_height_px): (u32, u32)) {
         self.send(
-            ClientMessage::Resize { cols, rows, cell_width_px: 0, cell_height_px: 0, pixel_mouse: false },
+            ClientMessage::Resize { cols, rows, cell_width_px, cell_height_px, pixel_mouse: false },
             || json!({"type": "terminal.resize", "cols": cols, "rows": rows}),
         );
     }

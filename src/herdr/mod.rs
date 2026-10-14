@@ -1,5 +1,6 @@
 mod client;
 pub mod client_shell;
+pub mod graphics;
 mod config;
 pub mod keys;
 pub mod popup;

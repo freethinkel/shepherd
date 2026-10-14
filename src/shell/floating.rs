@@ -15,13 +15,13 @@ pub(super) struct Floating {
 pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::AsyncApp) {
     loop {
         // the shell's surface sizes herdr's focused tab while no other client does: make it the pane grid
-        let Ok((cols, rows)) = this.update(cx, |s, cx| s.grid_cells(cx).unwrap_or((120, 40))) else { return };
-        let watch = cx.background_executor().spawn(async move { popup::watch(cols, rows) });
+        let Ok(((cols, rows), px)) = this.update(cx, |s, cx| (s.grid_cells(cx).unwrap_or((120, 40)), s.cell_px(cx))) else { return };
+        let watch = cx.background_executor().spawn(async move { popup::watch(cols, rows, px) });
         if let Ok((mut rx, surface)) = watch.await {
             // at once: a shell in front without a theme blanks herdr's (as in `client_shell::shell_loop`)
             let started = this.update(cx, |s, cx| {
                 surface.theme(client_shell::host_theme(Theme::of(cx)));
-                s.popup_surface = Some((surface, (cols, rows)));
+                s.popup_surface = Some((surface, ((cols, rows), px)));
             });
             if started.is_err() {
                 return;
@@ -30,6 +30,7 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
                 let alive = this.update(cx, |s, cx| match event {
                     Event::Popup(surface) => s.show_popup(surface, cx),
                     Event::Commands(commands) => s.herdr_commands = commands,
+                    Event::Images(images) => s.show_images(images, cx),
                 });
                 if alive.is_err() {
                     return;
@@ -38,7 +39,8 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
         }
         let gone = this.update(cx, |s, cx| {
             s.popup_surface = None;
-            s.show_popup(None, cx)
+            s.show_popup(None, cx);
+            s.show_images(Default::default(), cx);
         });
         if gone.is_err() {
             return;
@@ -76,10 +78,11 @@ impl Shell {
     /// The popup's card, centred over the pane grid; a press outside it closes the popup, as Esc in a dialog.
     pub(super) fn render_floating(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let grid = self.grid_cells(cx);
+        let cell_px = self.cell_px(cx);
         if let (Some((surface, sent)), Some(now)) = (&mut self.popup_surface, grid) {
-            if *sent != now {
-                surface.resize(now.0, now.1);
-                *sent = now;
+            if *sent != (now, cell_px) {
+                surface.resize(now.0, now.1, cell_px);
+                *sent = (now, cell_px);
             }
         }
         let f = self.floating.as_mut()?;

@@ -6,6 +6,9 @@
 //! The shell's surface is the window's pane grid, so herdr fits the popup to it; the surface itself is not drawn.
 //! The popup's cells are replayed as ANSI into the popup view's emulator ([`super::SessionEvent`]); its input goes
 //! back as `ClientShellPopupInput`.
+//!
+//! herdr's Kitty graphics reach client shells only (attaches get cells), with the surface: the images on the panes
+//! of the shell's tab go to their views ([`super::graphics`]). herdr sends them once it knows the cell size in pixels.
 use super::popup::Event as PopupEvent;
 use super::session::{SessionEvent, client_socket};
 use super::wire::{self, CellData, ClientMessage, CursorState, FrameData, KeyCode, KeyKind, PaneInput, PopupFrame, PopupSurface, ServerMessage, SurfaceRect, SurfaceSize};
@@ -47,15 +50,16 @@ pub struct ClientShell {
 }
 
 impl ClientShell {
-    /// Handshakes on herdr's client socket and starts reading. `cols`×`rows` is the pane grid. The shell is active:
-    /// herdr sends popups and takes a theme only from an active client shell, and makes it the one in front.
-    pub fn connect(cols: u16, rows: u16) -> anyhow::Result<(Arc<ClientShell>, UnboundedReceiver<PopupEvent>)> {
+    /// Handshakes on herdr's client socket and starts reading. `cols`×`rows` is the pane grid, `cell_px` a cell in
+    /// device pixels ((0, 0) while unknown). The shell is active: herdr sends popups and takes a theme only from an
+    /// active client shell, and makes it the one in front.
+    pub fn connect(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(Arc<ClientShell>, UnboundedReceiver<PopupEvent>)> {
         let mut stream = UnixStream::connect(client_socket())?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         let hello = serde_json::json!({
             "generation": 1,
-            "cell_width_px": 0,
-            "cell_height_px": 0,
+            "cell_width_px": cell_px.0,
+            "cell_height_px": cell_px.1,
             "surface_size": {"cols": cols.max(20), "rows": rows.max(8)},
             "pixel_mouse": false,
             "direct_graphics": false,
@@ -108,13 +112,14 @@ impl ClientShell {
         self.state.lock().unwrap().popup_view = None;
     }
 
-    /// The pane grid, in cells: herdr fits its popup to it.
+    /// The pane grid, in cells, and a cell in device pixels: herdr fits its popup to the grid and sizes images by
+    /// the cell.
     // ponytail: also lays herdr's hidden tabs out at this size while no other client shell is attached (the same as
     // the popup watch in main)
-    pub fn resize(&self, cols: u16, rows: u16) {
+    pub fn resize(&self, cols: u16, rows: u16, cell_px: (u32, u32)) {
         self.send(&ClientMessage::ClientShellResize {
-            cell_width_px: 0,
-            cell_height_px: 0,
+            cell_width_px: cell_px.0,
+            cell_height_px: cell_px.1,
             surface_size: SurfaceSize { cols: cols.max(20), rows: rows.max(8) },
             pixel_mouse: false,
         });
@@ -168,6 +173,7 @@ impl Drop for ClientShell {
 
 fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<PopupEvent>) {
     let mut shown: Option<PopupSurface> = None;
+    let mut graphics = super::graphics::Graphics::default();
     loop {
         let message = match wire::read_message(&mut stream) {
             Ok(Some(message)) => message,
@@ -176,7 +182,10 @@ fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<Po
         };
         match message {
             // ponytail: the whole surface is decoded for its popup; the panes' cells are dropped unread by Shepherd
-            ServerMessage::PaneSurface(surface) => {
+            ServerMessage::PaneSurface(mut surface) => {
+                if let Some(images) = graphics.apply(std::mem::take(&mut surface.graphics)) {
+                    let _ = tx.unbounded_send(PopupEvent::Images(images));
+                }
                 let mut state = state.lock().unwrap();
                 let state = &mut *state;
                 state.boot_id.clone_from(&surface.boot_id);
@@ -499,7 +508,7 @@ mod probe {
         for spec in env("HOLD", "").split(',').filter(|s| !s.is_empty()) {
             let (pane, size) = spec.split_once('=').unwrap();
             let (c, r) = size.split_once('x').unwrap();
-            let (session, rx) = crate::herdr::Session::spawn(pane, c.parse().unwrap(), r.parse().unwrap(), crate::herdr::Mode::Control).unwrap();
+            let (session, rx) = crate::herdr::Session::spawn(pane, c.parse().unwrap(), r.parse().unwrap(), (0, 0), crate::herdr::Mode::Control).unwrap();
             held.push((session, rx));
             println!("holding {pane} at {size}");
         }
@@ -516,7 +525,7 @@ mod live_popup {
     #[test]
     #[ignore]
     fn popup_frames_and_input() {
-        let (shell, rx) = ClientShell::connect(100, 35).unwrap();
+        let (shell, rx) = ClientShell::connect(100, 35, (0, 0)).unwrap();
         let mut rx = futures::executor::block_on_stream(rx);
         let popup = loop {
             if let Some(PopupEvent::Popup(Some(p))) = rx.next() {
@@ -578,7 +587,7 @@ mod input_paths {
         let mut reader = stream.try_clone().unwrap();
         std::thread::spawn(move || while wire::read_message(&mut reader).is_ok() {});
         let shell = Mutex::new(stream);
-        let (session, mut frames) = Session::spawn(&pane, 80, 24, Mode::Control).unwrap();
+        let (session, mut frames) = Session::spawn(&pane, 80, 24, (0, 0), Mode::Control).unwrap();
         let mut emu = crate::terminal::emulator::Emulator::new(80, 24);
         // `RUN`: a command typed into the pane first, e.g. a program that echoes each key after a delay
         if let Ok(run) = std::env::var("RUN") {
@@ -643,7 +652,7 @@ mod focus_tab {
     #[test]
     #[ignore]
     fn answered() {
-        let (shell, events) = ClientShell::connect(80, 24).unwrap();
+        let (shell, events) = ClientShell::connect(80, 24, (0, 0)).unwrap();
         std::thread::sleep(Duration::from_millis(500));
         let start = std::time::Instant::now();
         shell.focus_tab(&std::env::var("TAB").unwrap());
