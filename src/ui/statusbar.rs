@@ -432,10 +432,10 @@ pub fn short_count(n: u64) -> String {
     }
 }
 
-// ponytail: rereads the whole transcript each SPENT_TTL; read on from the last offset if transcripts get huge.
+// ponytail: rereads a local transcript whole each SPENT_TTL; read on from the last offset if transcripts get huge.
 // Subagents' own transcripts (`<session>/subagents/`) aren't counted.
-/// What Claude session `id` spent, from its transcript in any of Claude Code's project folders.
-/// The tokens of the agent session `key` (its id, located: a machine's session is read on that machine).
+/// What the Claude session `key` spent (its id, located): from its transcript in any of Claude Code's project
+/// folders, a machine's read on that machine.
 fn read_spent(key: &str) -> Option<Spent> {
     let (machine, id) = crate::herdr::split(key);
     if let Some(target) = machine {
@@ -446,7 +446,6 @@ fn read_spent(key: &str) -> Option<Spent> {
     Some(parse_spent(&std::fs::read_to_string(file).ok()?))
 }
 
-/// What `pane`'s agent session spent so far, refreshed in the background.
 /// A machine's transcript read so far: its path there, how many bytes of it, and what they added up to.
 struct Tail {
     file: String,
@@ -475,19 +474,31 @@ fn read_remote_spent(target: &str, id: &str) -> Option<Spent> {
             (!file.is_empty()).then_some((file, 0))?
         }
     };
-    let out = crate::herdr::ssh(target, &format!("tail -c +{} {}", read + 1, crate::herdr::quote(&file))).ok()?;
-    if !out.status.success() {
+    // its size first, then what follows what was read
+    let file_q = crate::herdr::quote(&file);
+    let out = crate::herdr::ssh(target, &format!("wc -c < {file_q} && tail -c +{} {file_q}", read + 1)).ok()?;
+    let size = out.stdout.iter().position(|b| *b == b'\n').and_then(|i| Some((i, String::from_utf8_lossy(&out.stdout[..i]).trim().parse::<u64>().ok()?)));
+    let Some((head, size)) = size.filter(|_| out.status.success()) else {
+        // gone, or not ours to read: found afresh next time
+        TAILS.lock().unwrap().get_or_insert_default().remove(&key);
         return None;
+    };
+    if size < read {
+        // rewritten shorter: counted again from its start
+        TAILS.lock().unwrap().get_or_insert_default().remove(&key);
+        return read_remote_spent(target, id);
     }
+    let body = &out.stdout[head + 1..];
     // only whole lines: one being written is read next time
-    let whole = out.stdout.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let whole = body.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
     let mut tails = TAILS.lock().unwrap();
     let tail = tails.get_or_insert_default().entry(key).or_insert_with(|| Tail { file, read: 0, seen: Default::default(), spent: Spent::default() });
-    add_spent(&String::from_utf8_lossy(&out.stdout[..whole]), &mut tail.seen, &mut tail.spent);
+    add_spent(&String::from_utf8_lossy(&body[..whole]), &mut tail.seen, &mut tail.spent);
     tail.read += whole as u64;
     Some(tail.spent.clone())
 }
 
+/// What `pane`'s agent session spent so far, refreshed in the background.
 fn spent_of(pane: &Pane, cx: &mut App) -> Option<Spent> {
     pane.agent_session.as_ref().and_then(|s| cached(&crate::herdr::locate(&s.value), SPENT_TTL, read_spent, cx))
 }
@@ -734,7 +745,7 @@ pub fn bar(
                     .tooltip(crate::shell::tip("Toggle pull request panel", Some("ToggleReview")))
                     .child(format!("{}{}", if pr.gitlab { "!" } else { "#" }, pr.number))
                     .when(pr.state != "open", |el| el.child(div().text_color(theme.text_faint).child(pr.state))),
-                None => link(div().id("statusbar-pr").flex().items_center().gap(px(5.)).px(px(6.)), theme, review_open)
+                None => link(label(theme, "icons/checklist.svg").id("statusbar-pr"), theme, review_open)
                     .tooltip(crate::shell::tip("Toggle pipeline panel", Some("ToggleReview")))
                     .child("CI"),
             };

@@ -370,6 +370,21 @@ fn empty(theme: &Theme, title: impl Into<SharedString>, hint: impl Into<SharedSt
         .into_any_element()
 }
 
+// ponytail: one body remembered; the panel shows one description at a time
+/// `body`'s blocks, parsed once while it stays the same: a drag over it redraws every move.
+fn parsed(body: &str) -> Rc<Vec<crate::ui::review::Block>> {
+    thread_local! {
+        static LAST: std::cell::RefCell<(String, Rc<Vec<crate::ui::review::Block>>)> = Default::default();
+    }
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if last.0 != body {
+            *last = (body.to_string(), Rc::new(markdown(body)));
+        }
+        last.1.clone()
+    })
+}
+
 /// The description, drawn whole: folded, cut to its first lines with their bottom fading out. The heading, or a
 /// click on the folded text (not a drag selecting it), unfolds and folds it. `height` is the whole text's height at
 /// the last paint: a short one has nothing to fold.
@@ -391,7 +406,7 @@ fn description(
         .flex()
         .flex_col()
         .gap(px(6.))
-        .children(crate::ui::markdown::render(&markdown(body), "review-md", theme))
+        .children(crate::ui::markdown::render(&parsed(body), "review-md", theme))
         .child(
             canvas(
                 move |bounds, window, _| {
@@ -967,8 +982,7 @@ fn log_box(theme: &Theme, i: usize, text: Option<&str>, url: Option<String>, win
             None => div().py(px(4.)).flex().justify_center().child(crate::ui::loader::mini_spinner(2., theme.text_faint, window)).into_any_element(),
             Some("") => div().text_size(px(11.)).text_color(theme.text_faint).child("No log yet").into_any_element(),
             Some(text) => {
-                let code = crate::ui::review::Block::CodeBlock { language: None, code: text.to_string() };
-                div().text_size(px(10.5)).line_height(px(15.)).children(crate::ui::markdown::render(&[code], &format!("review-log-{i}"), theme)).into_any_element()
+                div().line_height(px(15.)).child(crate::ui::markdown::code(text, &format!("review-log-{i}"), px(10.5), theme)).into_any_element()
             }
         })
         .into_any_element()

@@ -140,7 +140,9 @@ fn monogram(name: &str, seed: &str, selected: bool, theme: &Theme) -> gpui::Div 
 /// The icon of the project at `dir`, `size` px square: its artwork, looked for once off the main thread, else the
 /// monogram of `name` on `seed`'s tone (and while the artwork loads or if it does not decode).
 pub fn project_icon(name: &str, seed: &str, dir: Option<&str>, size: f32, selected: bool, theme: &Theme, cx: &mut App) -> AnyElement {
-    let art = dir.and_then(|d| super::statusbar::cached(d, Duration::MAX, find_icon, cx));
+    // a machine's lookup can fail on a connection still coming up: asked again now and then, the last find kept
+    let ttl = |d: &str| if crate::herdr::split(d).0.is_some() { Duration::from_secs(300) } else { Duration::MAX };
+    let art = dir.and_then(|d| super::statusbar::cached(d, ttl(d), find_icon, cx));
     let frame = div().size(px(size)).flex_none();
     let mark = {
         let (name, seed, theme) = (name.to_string(), seed.to_string(), theme.clone());

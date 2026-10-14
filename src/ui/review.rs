@@ -452,8 +452,9 @@ fn gitlab_pipeline_jobs(p: &Value, page: &str, repo: Option<&str>, base: &str, p
     ranked.sort();
     let children: Vec<(Value, String)> = ranked.into_iter().map(|(_, i)| std::mem::take(&mut children[i])).collect();
     for (d, name) in &children {
-        let project = d["project"]["fullPath"].as_str().filter(|p| *p != path);
-        gitlab_pipeline_jobs(d, name, project, base, path, now, out);
+        // with its host: glab's own default is gitlab.com
+        let project = d["project"]["fullPath"].as_str().filter(|p| *p != path).map(|p| format!("{base}/{p}"));
+        gitlab_pipeline_jobs(d, name, project.as_deref(), base, path, now, out);
     }
 }
 
@@ -1088,6 +1089,10 @@ mod tests {
         let staged = pages(&jobs);
         assert_eq!(staged, [(ROOT.into(), CheckState::Success), ("repos:web".into(), CheckState::Failed)], "a child's failure is its own page's");
         assert_eq!(default_page(&staged), 1);
+        assert_eq!(jobs[2].command(true, Action::Retry).unwrap().join(" "), "glab ci retry 11", "its own project's needs no -R");
+        let other = json.replace(r#""fullPath":"g/p""#, r#""fullPath":"infra/deploy""#);
+        let jobs = parse_gitlab_jobs(&other, "https://gl", "g/p", 0).unwrap();
+        assert_eq!(jobs[2].command(true, Action::Retry).unwrap().join(" "), "glab ci retry 11 -R https://gl/infra/deploy", "another project's on its host");
     }
 
     #[test]

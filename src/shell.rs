@@ -1275,6 +1275,10 @@ impl Render for Shell {
         // nothing to show outside a repo with a remote, and no PR label to close it from: it waits for one
         let has_remote = shown.key.is_some() && !matches!(shown.review, Some(crate::ui::review::Review::NoRemote));
         let review = (self.review_open && !on_page && has_remote).then(|| self.render_review(&theme, &shown, window, cx));
+        if review.is_none() {
+            // a hidden panel's selection is not Cmd+C's to copy
+            crate::ui::markdown::forget();
+        }
         let root = div()
             .id("root")
             .track_focus(&self.focus)

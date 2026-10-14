@@ -28,17 +28,7 @@ fn block(b: &Block, key: &str, theme: &Theme) -> AnyElement {
             .text_size(px(if *level <= 1 { 15. } else if *level == 2 { 14. } else { 13. }))
             .child(text(runs, key, theme.text, true, theme))
             .into_any_element(),
-        Block::CodeBlock { code, .. } => {
-            let run = InlineRun { text: code.trim_end().to_string(), style: Default::default() };
-            div()
-                .p(px(8.))
-                .rounded(px(6.))
-                .bg(theme.wash(0.05))
-                .overflow_hidden()
-                .text_size(px(11.5))
-                .child(text_in(&[run], key, theme.text_muted, false, theme.font_terminal.clone(), theme))
-                .into_any_element()
-        }
+        Block::CodeBlock { code: c, .. } => code(c, key, px(11.5), theme),
         Block::BlockQuote { children } => div()
             .pl(px(8.))
             .border_l_2()
@@ -87,6 +77,19 @@ fn block(b: &Block, key: &str, theme: &Theme) -> AnyElement {
         }
         Block::Rule => div().h(px(1.)).bg(theme.border).into_any_element(),
     }
+}
+
+/// A code block of `code` in the terminal font at `size`, selectable as a paragraph keyed `key`.
+pub fn code(code: &str, key: &str, size: Pixels, theme: &Theme) -> AnyElement {
+    let run = InlineRun { text: code.trim_end().to_string(), style: Default::default() };
+    div()
+        .p(px(8.))
+        .rounded(px(6.))
+        .bg(theme.wash(0.05))
+        .overflow_hidden()
+        .text_size(size)
+        .child(text_in(&[run], key, theme.text_muted, false, theme.font_terminal.clone(), theme))
+        .into_any_element()
 }
 
 fn text(runs: &[InlineRun], key: &str, color: gpui::Hsla, bold: bool, theme: &Theme) -> AnyElement {
@@ -176,12 +179,20 @@ pub fn frame_reset() -> impl IntoElement {
     canvas(|_, _, _| (), |_, _, _, _| PAINTED.with(|p| p.borrow_mut().clear())).absolute().size_0()
 }
 
-/// The selected text, paragraphs a line apart; `None` when nothing is selected.
+/// Drops the selection and the paint-order list, for when no markdown is shown: nothing is left to copy.
+pub fn forget() {
+    SELECTION.with(|s| s.borrow_mut().take());
+    PAINTED.with(|p| p.borrow_mut().clear());
+}
+
+/// The selected text, paragraphs a line apart; `None` when nothing is selected, or its paragraphs were not all
+/// painted last frame with the text it was made on (a closed log, another PR's description).
 pub fn selected_text() -> Option<String> {
     SELECTION.with(|s| {
         let s = s.borrow();
         let spans = &s.as_ref()?.spans;
-        (!spans.iter().all(|s| s.range.is_empty())).then(|| join(spans))
+        let shown = PAINTED.with(|p| spans.iter().all(|s| p.borrow().iter().any(|e| e.key == s.key && e.text == s.text)));
+        (shown && !spans.iter().all(|s| s.range.is_empty())).then(|| join(spans))
     })
 }
 
@@ -234,7 +245,16 @@ fn paint_selection(window: &mut Window, hitbox: Hitbox, key: &SharedString, text
     for rect in range.map(|r| rects(layout, &r)).unwrap_or_default() {
         window.paint_quad(gpui::fill(rect, wash));
     }
-    PAINTED.with(|p| p.borrow_mut().push(Painted { key: key.clone(), text: text.clone(), layout: layout.clone() }));
+    PAINTED.with(|p| {
+        let mut p = p.borrow_mut();
+        // ponytail: a surface paints frame_reset before its first paragraph; one that forgets grows this every
+        // frame, so it is cut loudly here instead of leaking
+        if p.len() >= 10_000 {
+            debug_assert!(false, "markdown painted without a frame_reset");
+            p.clear();
+        }
+        p.push(Painted { key: key.clone(), text: text.clone(), layout: layout.clone() });
+    });
 
     let (down_key, down_text, down_layout) = (key.clone(), text.clone(), layout.clone());
     window.on_mouse_event(move |e: &MouseDownEvent, phase, window, _| {

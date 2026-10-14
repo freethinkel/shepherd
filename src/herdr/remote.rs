@@ -95,9 +95,9 @@ pub fn git(dir: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
     }
 }
 
-/// `script` run by the shell of the machine at `target`, over the shared SSH connection.
+/// `script` run by `sh` on the machine at `target` (its login shell may be fish), over the shared SSH connection.
 pub fn ssh(target: &str, script: &str) -> std::io::Result<std::process::Output> {
-    Command::new("ssh").args(ssh_options()).arg("--").arg(target).arg(script).stdin(Stdio::null()).output()
+    Command::new("ssh").args(ssh_options()).arg("--").arg(target).arg(format!("sh -c {}", quote(script))).stdin(Stdio::null()).output()
 }
 
 /// `word` for the remote shell, as one argument.
