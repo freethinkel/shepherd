@@ -14,10 +14,22 @@ pub fn keystroke_bytes(
     // Platform-primary combos (Cmd on macOS, the super key elsewhere) belong to
     // the app keymap, never the PTY.
     if mods.platform {
-        // Except Cmd+Backspace: delete to the line's start (Ctrl+U), as Terminal, iTerm2 and Ghostty do.
-        return (key == "backspace").then(|| vec![0x15]);
+        // Except Cmd+Backspace: delete to the line's start (Ctrl+U), and Cmd+Left/Right: to the line's start or end
+        // (Ctrl+A, Ctrl+E), as Terminal, iTerm2 and Ghostty do.
+        return match key {
+            "backspace" => Some(vec![0x15]),
+            "left" => Some(vec![0x01]),
+            "right" => Some(vec![0x05]),
+            _ => None,
+        };
     }
     if mods.alt {
+        // Option+Left/Right: a word back or forward (ESC b, ESC f), which shells and readline know, as Ghostty sends
+        match key {
+            "left" if !mods.shift && !mods.control => return Some(b"\x1bb".to_vec()),
+            "right" if !mods.shift && !mods.control => return Some(b"\x1bf".to_vec()),
+            _ => {}
+        }
         // macOS composes Option chords (Option+B → "∫"); send what was composed, as Ghostty does by default.
         if let Some(text) = key_char.filter(|c| !c.is_empty() && *c != key) {
             return Some(text.as_bytes().to_vec());
@@ -333,7 +345,12 @@ mod tests {
     #[test]
     fn option_without_a_character_is_meta() {
         let alt = Modifiers { alt: true, ..mods() };
-        assert_eq!(keystroke_bytes("left", None, &alt, false), Some(b"\x1b\x1b[D".to_vec()));
+        assert_eq!(keystroke_bytes("up", None, &alt, false), Some(b"\x1b\x1b[A".to_vec()));
+        assert_eq!(keystroke_bytes("left", None, &alt, false), Some(b"\x1bb".to_vec()), "a word back");
+        assert_eq!(keystroke_bytes("right", None, &alt, false), Some(b"\x1bf".to_vec()), "a word forward");
+        let cmd = Modifiers { platform: true, ..mods() };
+        assert_eq!(keystroke_bytes("left", None, &cmd, false), Some(vec![0x01]), "the line's start");
+        assert_eq!(keystroke_bytes("right", None, &cmd, false), Some(vec![0x05]), "the line's end");
     }
 
     #[test]
