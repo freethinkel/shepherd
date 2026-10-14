@@ -229,6 +229,25 @@ fn agents_are_panes_with_an_agent_most_urgent_first() {
 }
 
 #[test]
+fn priority_puts_unread_before_working_and_the_latest_change_first() {
+    let mut value: serde_json::Value = serde_json::from_str(include_str!("fixtures/snapshot.json")).unwrap();
+    value["snapshot"]["agents"] = serde_json::json!([
+        {"pane_id": "w1:p1", "state_change_seq": 5},
+        {"pane_id": "w1:p2", "state_change_seq": 9},
+        {"pane_id": "w1:p3", "state_change_seq": 7},
+    ]);
+    let mut s = Snapshot::from_result(&value).unwrap();
+    for p in &mut s.panes {
+        p.agent = Some("claude".into());
+    }
+    s.panes[0].agent_status = AgentStatus::Working;
+    s.panes[1].agent_status = AgentStatus::Working;
+    s.panes[2].agent_status = AgentStatus::Done;
+    let order: Vec<_> = s.agents().iter().map(|p| p.pane_id.as_str()).collect();
+    assert_eq!(order, ["w1:p3", "w1:p2", "w1:p1"]);
+}
+
+#[test]
 fn grouped_agents_follow_workspace_order_ties_in_status_order() {
     let mut s = fixture();
     for p in &mut s.panes {
