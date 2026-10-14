@@ -30,7 +30,6 @@ pub(super) async fn shell_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
                 conn.theme(host_theme(theme));
                 let theme = Some(theme.terminal.background);
                 s.client_shell = Some(ShellView { conn, size: Some(((cols, rows), px)), theme, active: true });
-                s.shell_tab = None;
                 cx.notify();
             });
             if started.is_err() {
@@ -41,7 +40,6 @@ pub(super) async fn shell_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
                     PopupEvent::Popup(surface) => s.show_popup(surface, cx),
                     PopupEvent::Commands(commands) => s.herdr_commands = commands,
                     PopupEvent::Images(images) => s.show_images(images, cx),
-                    PopupEvent::Ready => cx.notify(), // `follow_shown_tab` waits for it
                 });
                 if alive.is_err() {
                     return;
@@ -67,7 +65,7 @@ pub(super) async fn shell_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
 impl Shell {
     /// Tells herdr what changed since the last render: the grid's size and the theme. Coming back to the window
     /// makes the shell herdr's client in front again, so herdr takes Shepherd's theme back from its TUI.
-    /// The shell's tab follows the tab shown (`follow_shown_tab`, for herdr's images). Not sent on purpose:
+    /// The shell's tab follows the tab shown (`follow_shown_tab`, which herdr's images need). Not sent on purpose:
     /// `ClientShellFocus` (the client in front's focus marks herdr's active tab seen and mutes its notifications).
     pub(super) fn sync_client_shell(&mut self, window: &Window, cx: &App) {
         let cells = self.grid_cells(cx).map(|c| (c, self.cell_px(cx)));
@@ -109,29 +107,6 @@ impl Shell {
     /// herdr gives a popup to the tab in its focus as the popup opens, and only a client shell on that tab gets it.
     /// Shepherd shows tabs on its own, so before a command runs, the shell's tab (and herdr's focus) moves to the shown
     /// one: a popup the command opens comes to this window, and Shepherd's `pane.focus` (an agent seen) keeps it there.
-    /// herdr sends a client shell the Kitty images of its own tab only, so the window's shell (the popup watch, or the
-    /// PoC's) follows the tab shown, and herdr's focus with it.
-    pub(super) fn follow_shown_tab(&mut self, cx: &App) {
-        let Some(tab) = self.shown_tab().map(|t| t.tab_id) else { return };
-        if self.shell_tab.as_ref() == Some(&tab) {
-            return;
-        }
-        if let Some((surface, _)) = &self.popup_surface {
-            if !surface.focus_tab(&tab) {
-                return; // herdr's first surface is still to come: `Ready` renders again
-            }
-        } else if let Some(view) = &self.client_shell {
-            if !view.conn.ready() {
-                return;
-            }
-            let (conn, id) = (view.conn.clone(), tab.clone());
-            cx.background_executor().spawn(async move { conn.focus_tab(&id) }).detach();
-        } else {
-            return;
-        }
-        self.shell_tab = Some(tab);
-    }
-
     pub(super) fn focus_shown_tab(&self, cx: &App) -> Option<gpui::Task<()>> {
         let (conn, tab) = (self.client_shell.as_ref()?.conn.clone(), self.shown_tab()?);
         Some(cx.background_executor().spawn(async move { conn.focus_tab(&tab.tab_id) }))

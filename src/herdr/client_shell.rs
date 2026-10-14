@@ -140,11 +140,6 @@ impl ClientShell {
         let _ = rx.recv_timeout(Duration::from_secs(1));
     }
 
-    /// herdr's first surface came, so endpoint requests (`focus_tab`) can name its run.
-    pub fn ready(&self) -> bool {
-        !self.state.lock().unwrap().boot_id.is_empty()
-    }
-
     pub fn popup_input(&self, terminal_id: &str, events: Vec<PaneInput>) {
         self.send(&ClientMessage::ClientShellPopupInput { terminal_id: terminal_id.into(), events });
     }
@@ -192,9 +187,6 @@ fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<Po
                 let _ = scenes.send(std::mem::take(&mut surface.graphics));
                 let mut state = state.lock().unwrap();
                 let state = &mut *state;
-                if state.boot_id.is_empty() {
-                    let _ = tx.unbounded_send(PopupEvent::Ready);
-                }
                 state.boot_id.clone_from(&surface.boot_id);
                 let surface_popup = surface.popup.as_ref().map(PopupSurface::from);
                 if surface_popup != shown {

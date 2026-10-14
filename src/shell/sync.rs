@@ -107,6 +107,22 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
     }
 }
 
+impl Shell {
+    /// The other way: the tab you show gets herdr's focus, through the public API, which moves every client shell's
+    /// tab with it (herdr's TUI, this window's shell, whose Kitty images are its own tab's only).
+    pub(super) fn follow_shown_tab(&mut self) {
+        let Some(tab) = self.shown_tab().map(|t| t.tab_id) else { return };
+        if self.focused_tab.as_ref() == Some(&tab) {
+            return;
+        }
+        if self.snapshot.as_ref().and_then(|s| s.focused_tab_id.as_ref()) != Some(&tab) {
+            let (client, id) = (self.client.clone(), tab.clone());
+            self.rt.spawn(async move { client.call("tab.focus", json!({"tab_id": id})).await });
+        }
+        self.focused_tab = Some(tab);
+    }
+}
+
 /// herdr's focused tab when its focus moved since the last snapshot (`old`: none yet, or its focused tab).
 fn moved_focus<'a>(old: Option<Option<&str>>, new: Option<&'a str>) -> Option<&'a str> {
     new.filter(|t| old.is_some_and(|o| o != Some(*t)))

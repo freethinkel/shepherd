@@ -22,7 +22,6 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
             let started = this.update(cx, |s, cx| {
                 surface.theme(client_shell::host_theme(Theme::of(cx)));
                 s.popup_surface = Some((surface, ((cols, rows), px)));
-                s.shell_tab = None;
             });
             if started.is_err() {
                 return;
@@ -32,7 +31,6 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
                     Event::Popup(surface) => s.show_popup(surface, cx),
                     Event::Commands(commands) => s.herdr_commands = commands,
                     Event::Images(images) => s.show_images(images, cx),
-                    Event::Ready => cx.notify(), // `follow_shown_tab` waits for it
                 });
                 if alive.is_err() {
                     return;

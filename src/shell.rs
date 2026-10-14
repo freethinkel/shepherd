@@ -163,8 +163,8 @@ pub struct Shell {
     popup_watch: gpui::Task<()>,
     /// The client shell's surface and the grid it was last sized to.
     popup_surface: Option<(crate::herdr::popup::Surface, ((u16, u16), (u32, u32)))>,
-    /// The tab the window's client shell was last pointed at (`follow_shown_tab`).
-    shell_tab: Option<String>,
+    /// The tab last given herdr's focus (`follow_shown_tab`).
+    focused_tab: Option<String>,
     /// herdr's Kitty images per pane, as last sent, for panes made after it.
     pane_images: crate::herdr::graphics::PaneImages,
     /// Images no pane shows any more: freed from the window's atlas at the next render (a hidden pane never renders).
@@ -390,7 +390,7 @@ impl Shell {
                     floating: None,
                     popup_watch: gpui::Task::ready(()),
                     popup_surface: None,
-                    shell_tab: None,
+                    focused_tab: None,
                     pane_images: Default::default(),
                     retired_images: Vec::new(),
                     client_shell: None,
@@ -1011,7 +1011,7 @@ impl Render for Shell {
         let tab = self.shown_tab();
         self.shown_workspace = tab.as_ref().map(|t| t.workspace_id.clone());
         self.sync_client_shell(window, cx);
-        self.follow_shown_tab(cx);
+        self.follow_shown_tab();
         let (mut frames, mut splits) = match (&snapshot, &tab) {
             (Some(s), Some(t)) => (s.pane_frames(&t.tab_id), s.split_frames(&t.tab_id)),
             _ => (Vec::new(), Vec::new()),
