@@ -3,14 +3,12 @@
 //! `GridGeometry` and the selection gestures are adapted from Zeron's crates/ui/src/terminal/panel.rs (MIT, see
 //! assets/NOTICE).
 use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement, cell_at};
-use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, Side};
+use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
 use super::find::{Link, find_all, hyperlink, link_at};
 use super::keys::{dropped_paths, keystroke_bytes, paste_bytes};
 use crate::herdr::{Client, Mode, PaneInput, Session, SessionEvent};
 use crate::theme::Theme;
 use crate::ui::Popup;
-use alacritty_terminal::index::Point as GridPoint;
-use alacritty_terminal::selection::SelectionType;
 use gpui::{
     App, AsyncApp, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, Focusable, IntoElement, KeyDownEvent, Modifiers,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,

@@ -1,6 +1,6 @@
-//! From Zeron's crates/ui/src/terminal/emulator.rs (MIT, see assets/NOTICE).
-//! The terminal emulator core: `alacritty_terminal`'s `Term` + vte's ANSI
-//! `Processor` wrapped as a pure state machine.
+//! Adapted from Zeron's crates/ui/src/terminal/emulator.rs (MIT, see assets/NOTICE).
+//! The terminal emulator core: Ghostty's libghostty-vt (the `ghostty-vt` crate, built from Ghostty's source with
+//! Zig 0.16) wrapped as a pure state machine.
 //!
 //! Bytes in ([`Emulator::feed`] — the decoded `SubscribeTerminal` Data frames),
 //! grid snapshots out ([`Emulator::line`], [`Emulator::cursor`]). No I/O, no
@@ -8,66 +8,47 @@
 //! That split makes the whole escape-sequence surface unit-testable with
 //! scripted byte strings.
 //!
-//! Selection lives here too ([`Emulator::start_selection`] and friends) rather
-//! than in the panel, because `Term` is what knows how to keep anchors on their
-//! text as output scrolls the grid underneath them.
+//! Selection lives here too ([`Emulator::start_selection`] and friends): the
+//! terminal holds the installed selection and keeps it on its text as output
+//! moves the grid; word and line bounds are Ghostty's own rules.
 //!
-//! API notes for the pinned `alacritty_terminal 0.26` / `vte 0.15`:
-//! - `Processor::advance` consumes a byte slice; `Term` implements the
-//!   `vte::ansi::Handler` trait directly, so no event-loop machinery is needed.
-//! - `Term::new` takes any `grid::Dimensions` impl — [`GridSize`] here (the
-//!   crate's own `TermSize` lives in a `term::test` helper module).
-//! - Query responses (DSR/DA/…) surface as `Event::PtyWrite` on the listener;
+//! API notes for the pinned `ghostty-vt 0.7.0` (Ghostty `b40acce`):
+//! - Snapshots read through a `RenderState` (the C API's render path); the
+//!   handles are `!Send`, which suits an emulator living inside a gpui entity.
+//! - Query responses (DSR/DA/…) surface as `Event::PtyWrite` after `vt_write`;
 //!   [`Emulator::feed`] returns them so the panel can write them back.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 
-use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::selection::{Selection, SelectionRange};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{
-    Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb as AnsiRgb,
-};
+use ghostty_vt::render::{CellIterator, RowIterator};
+use ghostty_vt::screen::{CellContentTag, CellWide, GridRef};
+use ghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordBetweenOptions, Selection};
+use ghostty_vt::style::{Style, StyleColor, Underline};
+use ghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace};
+use ghostty_vt::{Error, Event, RenderState, Terminal, TerminalOptions};
 
-/// Grid coordinates and selection granularity, re-exported so the panel and
-/// view speak the emulator's vocabulary without depending on
-/// `alacritty_terminal` directly — the same seam [`CellColor`] draws for
-/// colors.
-pub use alacritty_terminal::index::{Point as GridPoint, Side};
-pub use alacritty_terminal::selection::SelectionType;
+/// A cell in viewport coordinates (row 0 = top). herdr owns scrollback, so the
+/// viewport is the whole local grid and a point needs no history offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GridPoint {
+    pub row: usize,
+    pub col: usize,
+}
 
-/// Scrollback history kept client-side (lines). The engine's replay window is
-/// bounded separately (1 MiB); this only caps what stays scrollable in the UI.
-
-/// Viewport dimensions in cells.
+/// Which half of a cell the pointer is on: a drag starting on a cell's right
+/// half leaves that cell out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GridSize {
-    pub cols: u16,
-    pub rows: u16,
-}
-impl GridSize {
-    pub fn new(cols: u16, rows: u16) -> Self {
-        Self {
-            cols: cols.max(2),
-            rows: rows.max(1),
-        }
-    }
+pub enum Side {
+    Left,
+    Right,
 }
 
-impl Dimensions for GridSize {
-    fn total_lines(&self) -> usize {
-        self.rows as usize
-    }
-    fn screen_lines(&self) -> usize {
-        self.rows as usize
-    }
-    fn columns(&self) -> usize {
-        self.cols as usize
-    }
+/// Selection granularity: a drag, a double-click word, a triple-click row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionType {
+    Simple,
+    Semantic,
+    Lines,
 }
 
 /// A cell's paint color, decoupled from the palette: the view resolves these
@@ -84,32 +65,11 @@ pub enum CellColor {
     Rgb(u8, u8, u8),
 }
 
-fn map_color(color: AnsiColor) -> CellColor {
+fn map_color(color: StyleColor, default: CellColor) -> CellColor {
     match color {
-        AnsiColor::Spec(AnsiRgb { r, g, b }) => CellColor::Rgb(r, g, b),
-        AnsiColor::Indexed(ix) => CellColor::Indexed(ix),
-        AnsiColor::Named(named) => {
-            let ix = named as usize;
-            if ix < 16 {
-                return CellColor::Indexed(ix as u8);
-            }
-            match named {
-                NamedColor::Background => CellColor::Background,
-                // Dim named colors fold onto their base index; the DIM flag
-                // still travels on the cell for paint-time dimming.
-                NamedColor::DimBlack
-                | NamedColor::DimRed
-                | NamedColor::DimGreen
-                | NamedColor::DimYellow
-                | NamedColor::DimBlue
-                | NamedColor::DimMagenta
-                | NamedColor::DimCyan
-                | NamedColor::DimWhite => {
-                    CellColor::Indexed((ix - NamedColor::DimBlack as usize) as u8)
-                }
-                _ => CellColor::Foreground,
-            }
-        }
+        StyleColor::None => default,
+        StyleColor::Palette(ix) => CellColor::Indexed(ix.0),
+        StyleColor::Rgb(c) => CellColor::Rgb(c.r, c.g, c.b),
     }
 }
 
@@ -152,42 +112,48 @@ pub struct CursorSnapshot {
     pub col: usize,
 }
 
-/// Captures `Term` callbacks. Interior-mutable because `EventListener::send_event`
-/// takes `&self`; single-threaded (the emulator lives inside a gpui entity).
-#[derive(Default, Clone)]
-struct EventCapture {
-    events: Rc<RefCell<Vec<Event>>>,
+/// The render-path handles, reused across snapshots. Behind a `RefCell`
+/// because updating them mutates, while snapshots are `&self` reads.
+struct Render {
+    state: RenderState,
+    rows: RowIterator,
+    cells: CellIterator,
 }
 
-impl EventListener for EventCapture {
-    fn send_event(&self, event: Event) {
-        self.events.borrow_mut().push(event);
-    }
+/// The selection being made: its granularity and where it started.
+#[derive(Debug, Clone, Copy)]
+struct Anchor {
+    ty: SelectionType,
+    point: GridPoint,
+    side: Side,
 }
 
 /// The emulator: a pure fold of PTY bytes into a renderable grid.
 pub struct Emulator {
-    term: Term<EventCapture>,
-    parser: Processor,
-    capture: EventCapture,
-    title: Option<String>,
+    term: Terminal,
+    render: RefCell<Render>,
+    anchor: Option<Anchor>,
     bell: bool,
 }
 
 impl Emulator {
     pub fn new(cols: u16, rows: u16) -> Self {
-        let capture = EventCapture::default();
-        let config = Config {
+        let term = Terminal::new(TerminalOptions {
+            cols: cols.max(2),
+            rows: rows.max(1),
             // herdr owns scrollback; scrolling is a terminal.scroll request to it.
-            scrolling_history: 0,
-            ..Config::default()
+            max_scrollback: 0,
+        })
+        .expect("libghostty-vt terminal");
+        let render = Render {
+            state: RenderState::new().expect("libghostty-vt render state"),
+            rows: RowIterator::new().expect("libghostty-vt row iterator"),
+            cells: CellIterator::new().expect("libghostty-vt cell iterator"),
         };
-        let term = Term::new(config, &GridSize::new(cols, rows), capture.clone());
         Self {
             term,
-            parser: Processor::new(),
-            capture,
-            title: None,
+            render: RefCell::new(render),
+            anchor: None,
             bell: false,
         }
     }
@@ -195,13 +161,11 @@ impl Emulator {
     /// Advance the state machine over decoded PTY output. Returns bytes the
     /// terminal wants written back to the PTY (DSR/DA query responses etc.).
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
-        self.parser.advance(&mut self.term, bytes);
+        self.term.vt_write(bytes);
         let mut responses = Vec::new();
-        for event in self.capture.events.borrow_mut().drain(..) {
+        for event in self.term.events() {
             match event {
-                Event::PtyWrite(text) => responses.extend_from_slice(text.as_bytes()),
-                Event::Title(title) => self.title = Some(title),
-                Event::ResetTitle => self.title = None,
+                Event::PtyWrite(bytes) => responses.extend_from_slice(&bytes),
                 Event::Bell => self.bell = true,
                 _ => {}
             }
@@ -210,20 +174,21 @@ impl Emulator {
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.term.resize(GridSize::new(cols, rows));
+        // ponytail: no pixel size; only CSI 14/16 t size reports would want it.
+        let _ = self.term.resize(cols.max(2), rows.max(1), 0, 0);
     }
 
     pub fn cols(&self) -> usize {
-        self.term.columns()
+        self.term.cols().map_or(0, usize::from)
     }
 
     pub fn rows(&self) -> usize {
-        self.term.screen_lines()
+        self.term.rows().map_or(0, usize::from)
     }
 
     /// OSC title, if the running program set one.
     pub fn title(&self) -> Option<&str> {
-        self.title.as_deref()
+        self.term.title().ok().filter(|t| !t.is_empty())
     }
 
     /// True once a BEL arrived; reading clears it.
@@ -233,171 +198,191 @@ impl Emulator {
 
     /// Arrow keys should send SS3 (`ESC O A`) instead of CSI.
     pub fn app_cursor_mode(&self) -> bool {
-        self.term.mode().contains(TermMode::APP_CURSOR)
+        self.term.mode(Mode::DECCKM).unwrap_or(false)
     }
 
     /// Pastes should be wrapped in `ESC [200~` / `ESC [201~`.
     pub fn bracketed_paste_mode(&self) -> bool {
-        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+        self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
     }
 
-    /// Lines scrolled back into history (0 = pinned to the live bottom).
-    pub fn display_offset(&self) -> usize {
-        self.term.grid().display_offset()
-    }
-
-    /// Lines available above the viewport.
+    /// Lines kept above the viewport (always 0: herdr owns history).
     pub fn history_lines(&self) -> usize {
-        self.term.grid().history_size()
-    }
-
-    /// Scroll the view: positive = up into history, negative = toward live.
-    pub fn scroll(&mut self, delta: i32) {
-        self.term.scroll_display(Scroll::Delta(delta));
-    }
-
-    pub fn scroll_to_bottom(&mut self) {
-        self.term.scroll_display(Scroll::Bottom);
-    }
-
-    /// Set the scrollback offset directly (0 = live bottom).
-    pub fn scroll_to_offset(&mut self, offset: usize) {
-        let target = offset.min(self.history_lines());
-        let current = self.display_offset();
-        let delta = (target as i64 - current as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-        self.scroll(delta);
+        self.term.scrollback_rows().unwrap_or(0)
     }
 
     // ---- selection ----
     //
-    // `Term` owns the selection outright, which is what makes this cheap: it
-    // rotates the anchors when output scrolls the grid and drops them on clear
-    // and resize, so a selection tracks live output without any bookkeeping
-    // here. The panel supplies pointer positions; everything below is a thin
-    // translation into grid coordinates.
+    // The terminal owns the installed selection and moves it with its text
+    // as output scrolls the grid. What stays here is the anchor of the one
+    // being made, so each pointer move rebuilds it from anchor to pointer.
+
+    fn grid_ref(&self, point: GridPoint) -> Option<GridRef<'_>> {
+        let (x, y) = (u16::try_from(point.col).ok()?, u32::try_from(point.row).ok()?);
+        self.term.grid_ref(Point::Viewport(PointCoordinate { x, y })).ok()
+    }
+
+    fn point_of(&self, grid_ref: &GridRef<'_>) -> Option<GridPoint> {
+        let c = self.term.point_from_grid_ref(grid_ref, PointSpace::Viewport).ok()??;
+        Some(GridPoint { row: c.y as usize, col: c.x as usize })
+    }
+
+    /// A selection's ends, top-left first.
+    fn bounds(&self, selection: Option<Selection<'_>>) -> Option<(GridPoint, GridPoint)> {
+        let selection = selection?;
+        let (a, b) = (self.point_of(&selection.start())?, self.point_of(&selection.end())?);
+        Some((a.min(b), a.max(b)))
+    }
 
     /// The grid point under a viewport cell (row 0 = top of the visible area).
-    ///
-    /// Viewport rows are what the pointer hits; grid lines are what a selection
-    /// anchors to, and the two differ by the scrollback offset. Anchoring in
-    /// grid space is what lets a selection stay on its text while the view
-    /// scrolls out from under it.
-    pub fn grid_point(&self, viewport_row: usize, col: usize) -> Point {
-        Point::new(
-            Line(viewport_row as i32 - self.display_offset() as i32),
-            Column(col.min(self.cols().saturating_sub(1))),
-        )
+    pub fn grid_point(&self, viewport_row: usize, col: usize) -> GridPoint {
+        GridPoint { row: viewport_row, col: col.min(self.cols().saturating_sub(1)) }
     }
 
     /// Begin a selection. `ty` picks the granularity: [`SelectionType::Simple`]
     /// for a drag, `Semantic` for a double-click word, `Lines` for a triple-
     /// click row.
-    pub fn start_selection(&mut self, ty: SelectionType, point: Point, side: Side) {
-        self.term.selection = Some(Selection::new(ty, point, side));
+    pub fn start_selection(&mut self, ty: SelectionType, point: GridPoint, side: Side) {
+        self.anchor = Some(Anchor { ty, point, side });
+        self.update_selection(point, side);
     }
 
     /// Extend the in-progress selection to `point`. No-op without one.
-    pub fn update_selection(&mut self, point: Point, side: Side) {
-        if let Some(selection) = self.term.selection.as_mut() {
-            selection.update(point, side);
-        }
+    pub fn update_selection(&mut self, point: GridPoint, side: Side) {
+        let Some(anchor) = self.anchor else { return };
+        let range = match anchor.ty {
+            SelectionType::Simple => simple_range((anchor.point, anchor.side), (point, side), self.cols()),
+            // Ghostty's double-click drag: the nearest word from each end toward the other.
+            SelectionType::Semantic => {
+                let word = |from, to| {
+                    let options = SelectWordBetweenOptions::new(self.grid_ref(from)?, self.grid_ref(to)?);
+                    self.bounds(self.term.select_word_between(options).ok()?)
+                };
+                union(word(anchor.point, point), word(point, anchor.point))
+            }
+            SelectionType::Lines => {
+                let line = |at| self.bounds(self.term.select_line(SelectLineOptions::new(self.grid_ref(at)?)).ok()?);
+                union(line(anchor.point), line(point))
+            }
+        };
+        let selection = range.and_then(|(start, end)| Some(Selection::new(self.grid_ref(start)?, self.grid_ref(end)?, false)));
+        let _ = self.term.set_selection(selection.as_ref());
     }
 
     pub fn clear_selection(&mut self) {
-        self.term.selection = None;
+        self.anchor = None;
+        let _ = self.term.set_selection(None);
     }
 
     /// The selected text, or `None` when there is no selection or it covers
     /// nothing (a click without a drag leaves an empty one behind).
     pub fn selection_text(&self) -> Option<String> {
-        self.term.selection_to_string().filter(|s| !s.is_empty())
+        // Ghostty's copy: plain text, soft wraps joined, trailing blanks trimmed.
+        let options = FormatOptions::new().with_unwrap(true).with_trim(true);
+        let bytes = self.term.format_selection_alloc(options).ok()??;
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        // A row selection pastes as a row, line break included (Ghostty's trim drops it).
+        if self.anchor.is_some_and(|a| a.ty == SelectionType::Lines) && !text.is_empty() {
+            text.push('\n');
+        }
+        Some(text).filter(|s| !s.is_empty())
     }
 
     /// Whether a non-empty selection is active — drives the copy action and
     /// the "clear it" branch on the next click.
     pub fn has_selection(&self) -> bool {
-        self.selection_range().is_some()
+        self.term.selection().is_ok_and(|s| s.is_some())
     }
 
-    fn selection_range(&self) -> Option<SelectionRange> {
-        self.term
-            .selection
-            .as_ref()
-            .and_then(|selection| selection.to_range(&self.term))
-    }
-
-    /// Snapshot one viewport row (0 = top) honoring the scrollback offset.
+    /// Snapshot one viewport row (0 = top).
+    // ponytail: snapshots the whole viewport; only hover and tests ask for one row.
     pub fn line(&self, viewport_row: usize) -> Vec<CellSnapshot> {
-        self.line_inner(viewport_row, self.selection_range())
-    }
-
-    /// The shared body of [`Self::line`], taking the selection range as an
-    /// argument so [`Self::lines`] resolves it once per frame rather than once
-    /// per row — `to_range` re-walks the grid for semantic and line selections.
-    fn line_inner(
-        &self,
-        viewport_row: usize,
-        selection: Option<SelectionRange>,
-    ) -> Vec<CellSnapshot> {
-        let offset = self.display_offset() as i32;
-        let line = Line(viewport_row as i32 - offset);
-        let grid = self.term.grid();
-        let row = &grid[line];
-        (0..self.cols())
-            .map(|col| {
-                let cell = &row[Column(col)];
-                CellSnapshot {
-                    ch: cell.c,
-                    fg: map_color(cell.fg),
-                    bg: map_color(cell.bg),
-                    bold: cell.flags.intersects(Flags::BOLD),
-                    dim: cell.flags.intersects(Flags::DIM),
-                    italic: cell.flags.intersects(Flags::ITALIC),
-                    underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-                    inverse: cell.flags.intersects(Flags::INVERSE),
-                    hidden: cell.flags.intersects(Flags::HIDDEN),
-                    wide: cell.flags.intersects(Flags::WIDE_CHAR),
-                    wide_spacer: cell
-                        .flags
-                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-                    selected: selection
-                        .is_some_and(|range| range.contains(Point::new(line, Column(col)))),
-                }
-            })
-            .collect()
+        self.lines().into_iter().nth(viewport_row).unwrap_or_default()
     }
 
     /// All viewport rows, top to bottom.
     pub fn lines(&self) -> Vec<Vec<CellSnapshot>> {
-        let selection = self.selection_range();
-        (0..self.rows())
-            .map(|r| self.line_inner(r, selection))
-            .collect()
+        self.read_lines().unwrap_or_default()
     }
 
-    /// Cursor in viewport coordinates; `None` when hidden or scrolled out.
-    pub fn cursor(&self) -> Option<CursorSnapshot> {
-        let content = self.term.renderable_content();
-        if content.cursor.shape == CursorShape::Hidden {
-            return None;
+    fn read_lines(&self) -> Result<Vec<Vec<CellSnapshot>>, Error> {
+        let mut render = self.render.borrow_mut();
+        let Render { state, rows, cells } = &mut *render;
+        let plain = Style::default();
+        let snapshot = state.update(&self.term)?;
+        let mut lines = Vec::with_capacity(self.rows());
+        {
+            let mut row_iter = rows.update(&snapshot)?;
+            while let Some(row) = row_iter.next() {
+                let selected = row.selection()?.map(|s| s.start_x..=s.end_x);
+                let mut line = Vec::with_capacity(self.cols());
+                let mut cell_iter = cells.update(row)?;
+                while let Some(cell) = cell_iter.next() {
+                    let raw = cell.raw_cell()?;
+                    let style = if cell.has_styling()? { cell.style()? } else { plain };
+                    // An erase with a background set stores the color in the cell, not a style.
+                    let bg = match raw.content_tag()? {
+                        CellContentTag::BgColorPalette => CellColor::Indexed(raw.bg_color_palette()?.0),
+                        CellContentTag::BgColorRgb => {
+                            let c = raw.bg_color_rgb()?;
+                            CellColor::Rgb(c.r, c.g, c.b)
+                        }
+                        _ => map_color(style.bg_color, CellColor::Background),
+                    };
+                    let wide = raw.wide()?;
+                    let col = line.len() as u16;
+                    line.push(CellSnapshot {
+                        // ponytail: the base codepoint only; combining marks are dropped, as alacritty's view did.
+                        ch: char::from_u32(raw.codepoint()?).filter(|&c| c != '\0').unwrap_or(' '),
+                        fg: map_color(style.fg_color, CellColor::Foreground),
+                        bg,
+                        bold: style.bold,
+                        dim: style.faint,
+                        italic: style.italic,
+                        underline: style.underline != Underline::None,
+                        inverse: style.inverse,
+                        hidden: style.invisible,
+                        wide: wide == CellWide::Wide,
+                        wide_spacer: matches!(wide, CellWide::SpacerTail | CellWide::SpacerHead),
+                        selected: selected.as_ref().is_some_and(|r| r.contains(&col)),
+                    });
+                }
+                lines.push(line);
+            }
         }
-        let Point { line, column } = content.cursor.point;
-        let row = line.0 + self.display_offset() as i32;
-        if row < 0 || row >= self.rows() as i32 {
+        snapshot.clean()?;
+        Ok(lines)
+    }
+
+    /// Cursor in viewport coordinates; `None` when hidden.
+    pub fn cursor(&self) -> Option<CursorSnapshot> {
+        if !self.term.is_cursor_visible().ok()? {
             return None;
         }
         Some(CursorSnapshot {
-            row: row as usize,
-            col: column.0,
+            row: self.term.cursor_y().ok()? as usize,
+            col: self.term.cursor_x().ok()? as usize,
         })
+    }
+
+    fn hyperlink(&self, row: usize, col: usize) -> Option<String> {
+        let grid_ref = self.grid_ref(GridPoint { row, col })?;
+        let mut buf = vec![0; 512];
+        let len = match grid_ref.hyperlink_uri(&mut buf) {
+            Err(Error::OutOfSpace { required }) => {
+                buf.resize(required, 0);
+                grid_ref.hyperlink_uri(&mut buf).ok()?
+            }
+            other => other.ok()?,
+        };
+        (len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
     }
 
     /// The OSC 8 hyperlink at a viewport cell: the cells around it on that row with the same URI, and the URI.
     // ponytail: one row, like text links; a hyperlink wrapped onto the next row underlines one row at a time.
     pub fn hyperlink_at(&self, viewport_row: usize, col: usize) -> Option<(std::ops::Range<usize>, String)> {
-        let row = &self.term.grid()[Line(viewport_row as i32 - self.display_offset() as i32)];
-        let uri = row[Column(col)].hyperlink()?.uri().to_string();
-        let same = |c: &usize| row[Column(*c)].hyperlink().is_some_and(|h| h.uri() == uri);
+        let uri = self.hyperlink(viewport_row, col)?;
+        let same = |c: &usize| self.hyperlink(viewport_row, *c).as_ref() == Some(&uri);
         let start = (0..col).rev().take_while(same).last().unwrap_or(col);
         let end = (col + 1..self.cols()).take_while(same).last().unwrap_or(col) + 1;
         Some((start..end, uri))
@@ -419,12 +404,34 @@ impl Emulator {
     }
 }
 
+/// A drag's cells, top-left first: the side of each end says whether its cell is in.
+fn simple_range(a: (GridPoint, Side), b: (GridPoint, Side), cols: usize) -> Option<(GridPoint, GridPoint)> {
+    let ((mut start, start_side), (mut end, end_side)) = if a.0 <= b.0 { (a, b) } else { (b, a) };
+    if start_side == Side::Right {
+        start = if start.col + 1 < cols { GridPoint { col: start.col + 1, ..start } } else { GridPoint { row: start.row + 1, col: 0 } };
+    }
+    if end_side == Side::Left {
+        end = match end.col {
+            0 => GridPoint { row: end.row.checked_sub(1)?, col: cols.saturating_sub(1) },
+            col => GridPoint { col: col - 1, ..end },
+        };
+    }
+    (start <= end).then_some((start, end))
+}
+
+/// The span covering both ranges.
+fn union(a: Option<(GridPoint, GridPoint)>, b: Option<(GridPoint, GridPoint)>) -> Option<(GridPoint, GridPoint)> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.max(b.1))),
+        (a, b) => a.or(b),
+    }
+}
+
 impl std::fmt::Debug for Emulator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Emulator")
             .field("cols", &self.cols())
             .field("rows", &self.rows())
-            .field("display_offset", &self.display_offset())
             .finish()
     }
 }
@@ -537,6 +544,16 @@ mod tests {
         assert_eq!(e.cursor(), Some(CursorSnapshot { row: 0, col: 0 }));
         e.feed(b"fresh");
         assert_eq!(e.row_text(0), "fresh");
+    }
+
+    #[test]
+    fn an_erase_with_a_background_paints_the_erased_cells() {
+        // Ghostty keeps such a background in the cell, not in a style.
+        let mut e = emu(10, 2);
+        e.feed(b"ab\x1b[44m\x1b[K\x1b[48;2;1;2;3m\r\n\x1b[K");
+        assert_eq!(e.line(0)[1].bg, CellColor::Background);
+        assert_eq!(e.line(0)[5].bg, CellColor::Indexed(4));
+        assert_eq!(e.line(1)[0].bg, CellColor::Rgb(1, 2, 3));
     }
 
     #[test]

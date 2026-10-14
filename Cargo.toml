@@ -8,7 +8,7 @@ publish = false
 [workspace]
 
 [dependencies]
-alacritty_terminal = "0.26"
+ghostty-vt = { version = "=0.7.0", default-features = false }
 anyhow = "1"
 base64 = "0.22"
 futures = "0.3"
