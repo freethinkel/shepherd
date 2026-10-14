@@ -444,7 +444,7 @@ impl Shell {
 
     /// Another place's sidebar as a swipe shows it beside this one's: its name, then its workspaces and agents from its
     /// last snapshot, or a word on why there is none.
-    pub(super) fn place_preview(&self, place: &Place, theme: &Theme, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
+    pub(super) fn place_preview(&self, place: &Place, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let settings = SettingsGlobal::of(cx).settings.clone();
         let heading = div().px(px(16.)).pt(px(8.)).pb(px(6.)).text_size(px(11.)).text_color(theme.text_faint).truncate().child(place.look(cx).0);
         let column = div().size_full().flex().flex_col().child(heading);
@@ -455,16 +455,10 @@ impl Shell {
             }
             return column.child(div().px(px(16.)).pt(px(12.)).child(crate::ui::loader::spinner(2.5, window))).into_any_element();
         };
-        let groups = crate::model::groups(snapshot.workspace_tree());
-        let workspaces = div().flex_1().min_h_0().overflow_hidden().px(px(8.)).flex().flex_col().gap(px(2.)).children(groups.into_iter().flat_map(|(w, kids)| {
-            let dir = w.worktree.as_ref().map(|t| t.checkout_path.clone()).filter(|d| !d.is_empty());
-            let seed = w.worktree.as_ref().map_or(w.label.clone(), |t| t.repo_key.clone());
-            let icon = crate::ui::project_icon::project_icon(&w.label, &seed, dir.as_deref(), 14., false, theme, cx);
-            let head = div().h(px(32.)).px(px(8.)).flex().items_center().gap(px(8.)).child(icon).child(div().truncate().child(w.label.clone()));
-            std::iter::once(head.into_any_element()).chain(
-                kids.into_iter().map(|k| div().h(px(32.)).pl(px(30.)).flex().items_center().text_color(theme.text_muted).child(div().truncate().child(k.label.clone())).into_any_element()),
-            )
-        }));
+        // the rows the sidebar draws once the swipe lands, on the tab herdr would show there first
+        let shown_ws = snapshot.pick_tab_in(None, None).map(|t| t.workspace_id.clone());
+        let rows = self.workspace_rows(theme, Some(snapshot), &shown_ws, false, window.is_window_active(), cx);
+        let workspaces = div().flex_1().min_h_0().overflow_hidden().px(px(8.)).flex().flex_col().gap(px(2.)).children(rows);
         let new_workspace = div()
             .flex_none()
             .m(px(8.))
@@ -495,7 +489,11 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .gap(px(2.))
-                .children(super::sidebar::agent_rows(agents, self.agent_sort, settings.compact_agents, None, theme, |row, _| row));
+                .when(agents.is_empty(), |el| {
+                    el.child(div().px(px(8.)).py(px(6.)).text_size(px(11.)).text_color(theme.text_faint).child("Nothing needs you"))
+                })
+                .children(super::sidebar::agent_rows(agents, self.agent_sort, settings.compact_agents, None, theme, |row, _| row))
+                .child(div().flex_none().h(px(4.)));
             [heading.into_any_element(), list.into_any_element()]
         });
         column.child(workspaces).child(new_workspace).children(agents.into_iter().flatten()).into_any_element()
