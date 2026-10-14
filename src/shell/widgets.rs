@@ -4,7 +4,7 @@ use super::*;
 pub(crate) fn status_color(status: AgentStatus, theme: &Theme) -> Option<Hsla> {
     match status {
         AgentStatus::Working => Some(theme.accent),
-        AgentStatus::Blocked => Some(theme.warning),
+        AgentStatus::Blocked => Some(theme.danger),
         AgentStatus::Done => Some(theme.success.opacity(0.9)),
         AgentStatus::Idle | AgentStatus::Unknown => None,
     }
@@ -17,7 +17,7 @@ pub(crate) fn status_dot(status: AgentStatus, theme: &Theme) -> Div {
 
 /// Collie's status dot, filled for an agent state, a faint ring when idle; `Symbols` draws herdr's
 /// `status_indicators = "symbols"` shapes instead (× ◐ ✓ ○, a dashed ring for its `·`), and `Animated` Zeron's: its
-/// 2×3 glyph spinner while the agent works, a check when done, a small dot otherwise. Every style fills the same
+/// 2×3 glyph spinner while the agent works, a check when done, a question mark while it asks, a small dot otherwise. Every style fills the same
 /// 12 px box in the same colors, so switching never shifts a row.
 pub(crate) fn status_icon(status: AgentStatus, style: crate::theme::StatusIcons, theme: &Theme) -> Div {
     use crate::theme::StatusIcons::*;
@@ -28,6 +28,7 @@ pub(crate) fn status_icon(status: AgentStatus, style: crate::theme::StatusIcons,
     let icon = match (style, status) {
         (Animated, AgentStatus::Working) => return el.child(crate::ui::loader::glyph_spinner(2.5, glyph_rows(color, theme))),
         (Animated, AgentStatus::Done) => return el.child(gpui::svg().path("icons/status-done.svg").flex_none().size(px(15.)).text_color(color)),
+        (Animated, AgentStatus::Blocked) => return el.child(gpui::svg().path("icons/status-question.svg").flex_none().size(px(15.)).text_color(color)),
         (Animated, _) => return el.child(div().size(px(7.5)).rounded_full().bg(color)),
         (Dots, AgentStatus::Idle | AgentStatus::Unknown) => "icons/status-idle.svg",
         (Dots, _) => "icons/status-dot.svg",
