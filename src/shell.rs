@@ -163,6 +163,8 @@ pub struct Shell {
     popup_watch: gpui::Task<()>,
     /// The client shell's surface and the grid it was last sized to.
     popup_surface: Option<(crate::herdr::popup::Surface, ((u16, u16), (u32, u32)))>,
+    /// The tab the window's client shell was last pointed at (`follow_shown_tab`).
+    shell_tab: Option<String>,
     /// PoC: the window's herdr client shell for theme, popup and commands (`SHEPHERD_CLIENT_SHELL=1`).
     client_shell: Option<client_shell::ShellView>,
     /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.
@@ -384,6 +386,7 @@ impl Shell {
                     floating: None,
                     popup_watch: gpui::Task::ready(()),
                     popup_surface: None,
+                    shell_tab: None,
                     client_shell: None,
                     herdr_commands: Vec::new(),
                     command_panes: Vec::new(),
@@ -992,6 +995,7 @@ impl Render for Shell {
         let tab = self.shown_tab();
         self.shown_workspace = tab.as_ref().map(|t| t.workspace_id.clone());
         self.sync_client_shell(window, cx);
+        self.follow_shown_tab(cx);
         let (mut frames, mut splits) = match (&snapshot, &tab) {
             (Some(s), Some(t)) => (s.pane_frames(&t.tab_id), s.split_frames(&t.tab_id)),
             _ => (Vec::new(), Vec::new()),

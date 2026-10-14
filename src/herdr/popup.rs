@@ -9,6 +9,7 @@ use super::wire::{self, ClientMessage, HostThemeUpdate, ServerMessage, SurfaceSi
 pub use super::wire::{PopupSize, PopupSurface};
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// What the client shell hears that Shepherd uses.
@@ -24,21 +25,37 @@ pub enum Event {
 
 /// The client shell's surface, which herdr lays its focused tab out at while no other client does: kept at
 /// Shepherd's pane grid, as herdr-gpui keeps its own.
-pub struct Surface(UnixStream);
+pub struct Surface {
+    stream: UnixStream,
+    /// herdr's run, from its surfaces: an endpoint request names it. Empty until the first surface.
+    boot_id: Arc<Mutex<String>>,
+}
 
 impl Surface {
     /// `cell_px`: a cell in device pixels, which herdr sizes images by.
     pub fn resize(&self, cols: u16, rows: u16, (cell_width_px, cell_height_px): (u32, u32)) {
         let surface_size = SurfaceSize { cols: cols.max(20), rows: rows.max(8) };
         let msg = ClientMessage::ClientShellResize { cell_width_px, cell_height_px, surface_size, pixel_mouse: false };
-        let _ = wire::write_message(&mut &self.0, &msg); // a dead shell is noticed by its reader
+        let _ = wire::write_message(&mut &self.stream, &msg); // a dead shell is noticed by its reader
+    }
+
+    /// Points the shell's tab, and with it herdr's focus, at `tab_id`: herdr sends a shell the images of its own tab
+    /// only. `false` (nothing sent) before herdr's first surface.
+    pub fn focus_tab(&self, tab_id: &str) -> bool {
+        let boot_id = self.boot_id.lock().unwrap().clone();
+        if boot_id.is_empty() {
+            return false;
+        }
+        let request = serde_json::json!({"id": "tab.focus", "method": "tab.focus", "params": {"tab_id": tab_id}}).to_string();
+        let _ = wire::write_message(&mut &self.stream, &ClientMessage::ClientShellEndpointRequest { boot_id, request });
+        true
     }
 
     /// Shepherd's colors for herdr's host theme. herdr keeps them with this shell and applies them whenever it is the
     /// client in front again (another client gone, or this one sending), so a TUI's theme does not outlast the TUI.
     pub fn theme(&self, updates: Vec<HostThemeUpdate>) {
         for update in updates {
-            let _ = wire::write_message(&mut &self.0, &ClientMessage::ClientShellHostTheme { update });
+            let _ = wire::write_message(&mut &self.stream, &ClientMessage::ClientShellHostTheme { update });
         }
     }
 }
@@ -71,7 +88,8 @@ pub fn watch(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(Unbou
         anyhow::bail!("herdr refused the client shell: {}", error["message"]);
     }
     stream.set_read_timeout(None)?;
-    let surface = Surface(stream.try_clone()?);
+    let boot_id = Arc::new(Mutex::new(String::new()));
+    let surface = Surface { stream: stream.try_clone()?, boot_id: boot_id.clone() };
     let (tx, rx) = unbounded();
     std::thread::spawn(move || {
         let mut last = None;
@@ -80,6 +98,7 @@ pub fn watch(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(Unbou
             let mut events = Vec::new();
             match wire::read_message(&mut stream) {
                 Ok(Some(ServerMessage::PaneSurface(mut frame))) => {
+                    *boot_id.lock().unwrap() = std::mem::take(&mut frame.boot_id);
                     events.extend(graphics.apply(std::mem::take(&mut frame.graphics)).map(Event::Images));
                     let popup = frame.popup.as_ref().map(PopupSurface::from);
                     if popup != last {

@@ -22,6 +22,7 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
             let started = this.update(cx, |s, cx| {
                 surface.theme(client_shell::host_theme(Theme::of(cx)));
                 s.popup_surface = Some((surface, ((cols, rows), px)));
+                s.shell_tab = None;
             });
             if started.is_err() {
                 return;
