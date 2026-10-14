@@ -279,14 +279,16 @@ pub(super) fn titlebar_button(theme: &Theme, id: &'static str, icon: &'static st
 }
 
 /// Off macOS, the window's own buttons at the titlebar's right end, those the desktop offers: minimize, maximize (or
-/// restore) and close.
+/// restore) and close. Windows clicks them itself, as its caption buttons (maximize's hover brings Snap Layouts).
 pub(super) fn window_controls(theme: &Theme, window: &Window) -> Option<Div> {
     if cfg!(target_os = "macos") {
         return None;
     }
     let offered = window.window_controls();
     let maximize = if window.is_maximized() { "icons/window-restore.svg" } else { "icons/window-maximize.svg" };
-    let button = |id, icon| titlebar_button(theme, id, icon).size(px(28.));
+    let button = |id, icon, area, click: fn(&mut Window)| {
+        titlebar_button(theme, id, icon).size(px(28.)).window_control_area(area).when(!cfg!(windows), |b| b.on_click(move |_, window, _| click(window)))
+    };
     Some(
         div()
             .absolute()
@@ -294,16 +296,17 @@ pub(super) fn window_controls(theme: &Theme, window: &Window) -> Option<Div> {
             .right(px(8.))
             .flex()
             .gap(px(4.))
-            .when(offered.minimize, |el| el.child(button("window-minimize", "icons/minus.svg").on_click(|_, window, _| window.minimize_window())))
-            .when(offered.maximize, |el| el.child(button("window-maximize", maximize).on_click(|_, window, _| window.zoom_window())))
-            .child(button("window-close", "icons/close.svg").on_click(|_, window, _| window.remove_window())),
+            .when(offered.minimize, |el| el.child(button("window-minimize", "icons/minus.svg", WindowControlArea::Min, |w| w.minimize_window())))
+            .when(offered.maximize, |el| el.child(button("window-maximize", maximize, WindowControlArea::Max, |w| w.zoom_window())))
+            .child(button("window-close", "icons/close.svg", WindowControlArea::Close, |w| w.remove_window())),
     )
 }
 
-/// Off macOS the window draws its own frame, so its edges and corners resize it, until it's maximized or tiled.
+/// On Linux the window draws its own frame, so its edges and corners resize it, until it's maximized or tiled.
+/// Windows resizes from its own frame, around the window and along the top.
 pub(super) fn resize_edges(window: &Window) -> Vec<Stateful<Div>> {
     use gpui::{CursorStyle as C, ResizeEdge as E};
-    if cfg!(target_os = "macos") || window.is_maximized() {
+    if cfg!(any(target_os = "macos", windows)) || window.is_maximized() {
         return Vec::new();
     }
     const EDGE: f32 = 5.;
