@@ -9,7 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
+use super::socket::{self, Stream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -206,7 +206,7 @@ pub enum Mode {
 }
 
 enum Transport {
-    Socket(Mutex<UnixStream>),
+    Socket(Mutex<Stream>),
     /// herdr's popup as Shepherd's client shell shows it (PoC, [`super::client_shell`]): frames from its surface,
     /// input as `ClientShellPopupInput`.
     Popup { shell: std::sync::Arc<super::client_shell::ClientShell>, terminal_id: String },
@@ -241,7 +241,7 @@ impl Session {
 
     /// `None` when the socket is not there or speaks another protocol version.
     fn spawn_socket(pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), mode: Mode) -> Option<(Session, UnboundedReceiver<SessionEvent>)> {
-        let mut stream = UnixStream::connect(client_socket()).ok()?;
+        let mut stream = socket::connect(&client_socket()).ok()?;
         stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
         let hello = ClientMessage::TerminalHello {
             version: wire::PROTOCOL_VERSION,
@@ -372,7 +372,7 @@ impl Session {
     }
 }
 
-fn read_socket(mut stream: UnixStream, tx: UnboundedSender<SessionEvent>) {
+fn read_socket(mut stream: Stream, tx: UnboundedSender<SessionEvent>) {
     let why = loop {
         let event = match wire::read_message(&mut stream) {
             Ok(Some(ServerMessage::Terminal(frame))) => SessionEvent::Frame(frame.bytes),

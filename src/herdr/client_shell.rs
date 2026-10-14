@@ -14,7 +14,7 @@ use super::session::{SessionEvent, client_socket};
 use super::wire::{self, CellData, ClientMessage, CursorState, FrameData, KeyCode, KeyKind, PaneInput, PopupFrame, PopupSurface, ServerMessage, SurfaceRect, SurfaceSize};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use std::io::Write as _;
-use std::os::unix::net::UnixStream;
+use super::socket::{self, Stream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
@@ -45,7 +45,7 @@ struct State {
 }
 
 pub struct ClientShell {
-    stream: Mutex<UnixStream>,
+    stream: Mutex<Stream>,
     state: Arc<Mutex<State>>,
 }
 
@@ -54,7 +54,7 @@ impl ClientShell {
     /// device pixels ((0, 0) while unknown). The shell is active: herdr sends popups and takes a theme only from an
     /// active client shell, and makes it the one in front.
     pub fn connect(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(Arc<ClientShell>, UnboundedReceiver<PopupEvent>)> {
-        let mut stream = UnixStream::connect(client_socket())?;
+        let mut stream = socket::connect(&client_socket())?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         let hello = serde_json::json!({
             "generation": 1,
@@ -171,7 +171,7 @@ impl Drop for ClientShell {
     }
 }
 
-fn read(mut stream: UnixStream, state: Arc<Mutex<State>>, tx: UnboundedSender<PopupEvent>) {
+fn read(mut stream: Stream, state: Arc<Mutex<State>>, tx: UnboundedSender<PopupEvent>) {
     let mut shown: Option<PopupSurface> = None;
     let images = tx.clone();
     let scenes = super::graphics::worker(move |i| images.unbounded_send(PopupEvent::Images(i)).is_ok());
@@ -409,7 +409,7 @@ mod probe {
     fn probe() {
         let active = env("ACTIVE", "1") == "1";
         let (cols, rows): (u16, u16) = (env("COLS", "80").parse().unwrap(), env("ROWS", "24").parse().unwrap());
-        let mut stream = UnixStream::connect(client_socket()).unwrap();
+        let mut stream = socket::connect(&client_socket()).unwrap();
         let hello = serde_json::json!({
             "generation": 1, "cell_width_px": 0, "cell_height_px": 0, "surface_size": {"cols": cols, "rows": rows},
             "pixel_mouse": false, "direct_graphics": false, "endpoint_keybindings": false, "mouse_capture": false,
@@ -434,7 +434,7 @@ mod probe {
                 println!("sent focus {f}");
             }
             // PULSE=1: switch the surface on, send the theme, switch it off again
-            let surface = |w: &mut UnixStream, active: bool, id: &str| {
+            let surface = |w: &mut Stream, active: bool, id: &str| {
                 let request = serde_json::json!({"id": id, "method": "client_shell.surface.set", "params": {"active": active}}).to_string();
                 wire::write_message(w, &ClientMessage::ClientShellEndpointRequest { boot_id: boot.lock().unwrap().clone(), request }).unwrap();
             };
@@ -571,7 +571,7 @@ mod input_paths {
     #[test]
     #[ignore]
     fn attach_echo_latency() {
-        let mut stream = UnixStream::connect(client_socket()).unwrap();
+        let mut stream = socket::connect(&client_socket()).unwrap();
         let hello = serde_json::json!({
             "generation": 1, "cell_width_px": 0, "cell_height_px": 0, "surface_size": {"cols": 80, "rows": 24},
             "pixel_mouse": false, "direct_graphics": false, "endpoint_keybindings": false, "mouse_capture": false,

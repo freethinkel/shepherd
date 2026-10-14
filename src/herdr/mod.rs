@@ -6,6 +6,7 @@ pub mod keys;
 pub mod popup;
 mod remote;
 mod session;
+mod socket;
 mod wire;
 pub use wire::Rgb;
 pub use client::{Client, EVENT_TYPES};

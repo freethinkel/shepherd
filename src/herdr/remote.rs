@@ -121,25 +121,18 @@ pub fn relay(machine: &Machine, rt: &tokio::runtime::Handle) -> anyhow::Result<P
     std::fs::create_dir_all(&dir)?;
     let api = dir.join("herdr.sock");
     for (path, bridge) in [(api.clone(), "remote-api-bridge"), (dir.join("herdr-client.sock"), "remote-client-bridge")] {
-        let _ = std::fs::remove_file(&path); // left by an earlier Shepherd
-        let listener = {
-            let _guard = rt.enter();
-            tokio::net::UnixListener::bind(&path)?
-        };
         let (target, command) = (machine.target.clone(), bridge_command(&machine.session, bridge));
-        rt.spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                let (target, command) = (target.clone(), command.clone());
-                tokio::spawn(async move { pipe(stream, &target, &command).await });
-            }
-        });
+        super::socket::listen(&path, rt, move |stream| {
+            let (target, command) = (target.clone(), command.clone());
+            async move { pipe(stream, &target, &command).await }
+        })?;
     }
     relays.insert(machine.id.clone(), api.clone());
     Ok(api)
 }
 
 /// One local connection, carried over SSH to the bridge.
-async fn pipe(stream: tokio::net::UnixStream, target: &str, command: &str) {
+async fn pipe(stream: super::socket::AsyncStream, target: &str, command: &str) {
     let Ok(mut ssh) = tokio::process::Command::new("ssh")
         .args(ssh_options())
         .arg("--")
@@ -154,7 +147,7 @@ async fn pipe(stream: tokio::net::UnixStream, target: &str, command: &str) {
         return;
     };
     let (Some(mut to_ssh), Some(mut from_ssh)) = (ssh.stdin.take(), ssh.stdout.take()) else { return };
-    let (mut read, mut write) = stream.into_split();
+    let (mut read, mut write) = tokio::io::split(stream);
     let up = async {
         let _ = tokio::io::copy(&mut read, &mut to_ssh).await;
         drop(to_ssh); // the bridge sees EOF and ends

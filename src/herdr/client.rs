@@ -2,9 +2,8 @@ use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use super::socket::{AsyncStream, connect_async};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 
 /// Lifecycle events that need no `pane_id` filter (herdr rejects `pane.agent_status_changed` and friends without one,
@@ -43,12 +42,12 @@ impl Client {
     }
 
     // ponytail: one connection per request, like herdr's own CLI; pool if latency ever shows up.
-    /// The write half is returned so the caller keeps it alive: dropping it half-closes the socket.
-    async fn send(&self, method: &str, params: Value) -> anyhow::Result<(OwnedWriteHalf, Lines<BufReader<OwnedReadHalf>>)> {
-        let stream = UnixStream::connect(&self.path)
+    /// The write half is returned so the caller keeps it alive: the connection lasts while both halves do.
+    async fn send(&self, method: &str, params: Value) -> anyhow::Result<(WriteHalf<AsyncStream>, Lines<BufReader<ReadHalf<AsyncStream>>>)> {
+        let stream = connect_async(&self.path)
             .await
             .with_context(|| format!("herdr is not reachable at {}", self.path.display()))?;
-        let (r, mut w) = stream.into_split();
+        let (r, mut w) = tokio::io::split(stream);
         let id = format!("s{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
         let line = json!({"id": id, "method": method, "params": params});
         w.write_all(format!("{line}\n").as_bytes()).await?;

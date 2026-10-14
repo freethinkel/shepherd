@@ -40,6 +40,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter"] }
 block2 = "0.6"
 
+# herdr's named pipes.
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "2.4", features = ["tokio"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["wayland", "x11"] }
 

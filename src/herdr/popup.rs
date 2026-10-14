@@ -8,7 +8,7 @@ use super::session::client_socket;
 use super::wire::{self, ClientMessage, HostThemeUpdate, ServerMessage, SurfaceSize};
 pub use super::wire::{PopupSize, PopupSurface};
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
-use std::os::unix::net::UnixStream;
+use super::socket::{self, Stream};
 use std::time::Duration;
 
 /// What the client shell hears that Shepherd uses.
@@ -24,7 +24,7 @@ pub enum Event {
 
 /// The client shell's surface, which herdr lays its focused tab out at while no other client does: kept at
 /// Shepherd's pane grid, as herdr-gpui keeps its own.
-pub struct Surface(UnixStream);
+pub struct Surface(Stream);
 
 impl Surface {
     /// `cell_px`: a cell in device pixels, which herdr sizes images by.
@@ -47,7 +47,7 @@ impl Surface {
 /// The client shell's [`Event`]s, and its [`Surface`] (`cols`×`rows` of `cell_px` at first, (0, 0) while unknown);
 /// the stream ends when herdr hangs up or refuses.
 pub fn watch(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(UnboundedReceiver<Event>, Surface)> {
-    let mut stream = UnixStream::connect(client_socket())?;
+    let mut stream = socket::connect(&client_socket())?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let hello = serde_json::json!({
         "generation": 1,
