@@ -1,0 +1,57 @@
+# Shepherd from main, built and installed by pacman, which also updates it (Shepherd itself only says when a
+# release is out). `makepkg -si` here builds and installs it.
+pkgname=shepherd-git
+pkgver=r0
+pkgrel=1
+pkgdesc="A window for herdr: workspaces, tabs and every coding agent's status"
+arch=(x86_64 aarch64)
+url="https://github.com/freethinkel/shepherd"
+license=(MIT)
+depends=(gcc-libs glibc vulkan-icd-loader wayland libxkbcommon libxkbcommon-x11 libxcb)
+# libghostty-vt builds with Zig 0.16 exactly
+makedepends=(git rust 'zig>=0.16' 'zig<0.17')
+optdepends=(
+  'xdg-utils: open links and folders'
+  'libpulse: notification sound'
+  'sound-theme-freedesktop: notification sound'
+  'curl: GitHub avatars for projects'
+  'github-cli: pull requests and checks'
+  'glab: merge requests and pipelines'
+)
+provides=(shepherd)
+conflicts=(shepherd)
+source=("shepherd::git+$url.git")
+sha256sums=(SKIP)
+
+pkgver() {
+  cd shepherd
+  printf "%s.r%s.g%s" "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd shepherd
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd shepherd
+  export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
+  # .cargo/config.toml points ZIG at a macOS path; the environment wins
+  export ZIG="$(command -v zig)"
+  cargo build --frozen --release
+}
+
+check() {
+  cd shepherd
+  export RUSTUP_TOOLCHAIN=stable ZIG="$(command -v zig)"
+  cargo test --frozen --release
+}
+
+package() {
+  cd shepherd
+  install -Dm755 target/release/shepherd "$pkgdir/usr/bin/shepherd"
+  install -Dm644 packaging/linux/dev.freethinkel.shepherd.desktop "$pkgdir/usr/share/applications/dev.freethinkel.shepherd.desktop"
+  install -Dm644 assets/app-icon/icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/dev.freethinkel.shepherd.svg"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

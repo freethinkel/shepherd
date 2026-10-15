@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Shepherd
+GenericName=Terminal workspace
+Comment=A window for herdr's workspaces, tabs and coding agents
+Exec=shepherd
+Icon=dev.freethinkel.shepherd
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=herdr;terminal;agents;claude;codex;
+StartupWMClass=dev.freethinkel.shepherd

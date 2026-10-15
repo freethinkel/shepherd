@@ -70,8 +70,16 @@ ZIG=$(command -v zig) cargo build --release
 On Linux the settings live in `~/.config/shepherd` and caches in `~/.cache/shepherd`. The default shortcuts are the
 table above with Ctrl for `⌘` (`Ctrl+T` new tab, `Ctrl+D` split, `Ctrl+W` close pane, `Ctrl+K` command panel), so
 `Ctrl+W`, `Ctrl+D`, `Ctrl+K` and `Ctrl+B` no longer reach the shell; rebind them in Settings if you want them back.
-Copy, paste and find are `Ctrl+Shift+C`/`V`/`F`, and Ctrl+click opens links. There is no Dock badge, Secure Keyboard Entry or self-update; notifications go
-through your notification daemon.
+Copy, paste and find are `Ctrl+Shift+C`/`V`/`F`, and Ctrl+click opens links. There is no Dock badge or Secure Keyboard Entry, and notifications go through your
+notification daemon. Shepherd doesn't update itself on Linux: a release build says when a new version is out and
+opens its page.
+
+On Arch, `packaging/arch/PKGBUILD` builds Shepherd from `main` with the official `rust` and `zig` packages and installs
+it with a desktop entry and icon, so pacman keeps it up to date:
+
+```sh
+cd packaging/arch && makepkg -si
+```
 
 ## License
 
