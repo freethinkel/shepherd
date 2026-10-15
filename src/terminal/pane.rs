@@ -194,6 +194,7 @@ struct Drag {
     /// session cannot say whether the app captures the mouse) both.
     to_app: bool,
     select: bool,
+    button: MouseButton,
 }
 
 pub struct PaneTerminal {
@@ -1069,13 +1070,33 @@ impl PaneTerminal {
         Some((hit.row as u16, hit.col as u16, point, hit.side))
     }
 
-    fn mouse(&self, action: &str, position: gpui::Point<Pixels>, mods: &Modifiers) {
+    fn mouse(&self, action: &str, button: MouseButton, position: gpui::Point<Pixels>, mods: &Modifiers) {
+        let button = match button {
+            MouseButton::Right => "right",
+            MouseButton::Middle => "middle",
+            _ => "left",
+        };
         if let (Some(session), Some((row, col, _, _))) = (&self.session, self.hit(position)) {
-            session.mouse(action, "left", col, row, mouse_mods(mods));
+            session.mouse(action, button, col, row, mouse_mods(mods));
         }
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.button != MouseButton::Left {
+            // Right and middle go to an app that captures the mouse; else (or with Shift, as Ghostty) the right
+            // button is the pane's menu, the shell's
+            let captured = self.mouse_capture && self.session.as_ref().is_some_and(Session::knows_mouse_capture);
+            if !captured || event.modifiers.shift {
+                return;
+            }
+            cx.stop_propagation();
+            window.focus(&self.focus, cx);
+            claim(cx);
+            self.mouse("down", event.button, event.position, &event.modifiers);
+            let drag = Drag { origin: event.position, armed: false, to_app: true, select: false, button: event.button };
+            self.drag = Some(drag);
+            return;
+        }
         window.focus(&self.focus, cx);
         claim(cx);
         if let Some((_, _, link)) = self.link_under(event.position).filter(|_| link_modifier(&event.modifiers)) {
@@ -1089,7 +1110,7 @@ impl PaneTerminal {
         let known = self.session.as_ref().is_some_and(Session::knows_mouse_capture);
         let (to_app, select) = if known { (self.mouse_capture && !shift, !self.mouse_capture || shift) } else { (!shift, true) };
         if to_app {
-            self.mouse("down", event.position, &event.modifiers);
+            self.mouse("down", MouseButton::Left, event.position, &event.modifiers);
         }
         self.emulator.clear_selection();
         let armed = select && event.click_count > 1;
@@ -1097,12 +1118,17 @@ impl PaneTerminal {
             let ty = if event.click_count == 2 { SelectionType::Semantic } else { SelectionType::Lines };
             self.emulator.start_selection(ty, point, side);
         }
-        self.drag = Some(Drag { origin: event.position, armed, to_app, select });
+        self.drag = Some(Drag { origin: event.position, armed, to_app, select, button: MouseButton::Left });
         cx.notify();
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.pointer = Some(event.position);
+        // gpui's `dragging` is the left button's only
+        if let Some(drag) = self.drag.filter(|d| d.button != MouseButton::Left) {
+            self.mouse("drag", drag.button, event.position, &event.modifiers);
+            return;
+        }
         if !event.dragging() {
             self.update_hover(link_modifier(&event.modifiers), cx);
             self.report_hover(event);
@@ -1110,7 +1136,7 @@ impl PaneTerminal {
         }
         let Some(mut drag) = self.drag else { return };
         if drag.to_app {
-            self.mouse("drag", event.position, &event.modifiers);
+            self.mouse("drag", drag.button, event.position, &event.modifiers);
         }
         if !drag.select {
             return;
@@ -1137,15 +1163,15 @@ impl PaneTerminal {
         let captured = self.mouse_capture && self.session.as_ref().is_some_and(Session::knows_mouse_capture);
         let cell = self.hit(event.position).map(|(row, col, _, _)| (row, col)).filter(|_| captured && !event.modifiers.shift);
         if cell.is_some() && cell != self.hover_cell {
-            self.mouse("move", event.position, &event.modifiers);
+            self.mouse("move", MouseButton::Left, event.position, &event.modifiers);
         }
         self.hover_cell = cell;
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(drag) = self.drag.take() else { return };
+        let Some(drag) = self.drag.take().filter(|d| d.button == event.button) else { return };
         if drag.to_app {
-            self.mouse("up", event.position, &event.modifiers);
+            self.mouse("up", drag.button, event.position, &event.modifiers);
         }
         if !drag.armed || !crate::settings::SettingsGlobal::of(cx).settings.copy_on_select {
             return;
@@ -1423,6 +1449,12 @@ impl Render for PaneTerminal {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_mouse_up))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             // files from Finder: their paths, pasted
             .on_drop(cx.listener(|pane, paths: &ExternalPaths, window, cx| {
