@@ -18,6 +18,8 @@ optdepends=(
   'github-cli: pull requests and checks'
   'glab: merge requests and pipelines'
 )
+# makepkg's LTO flags turn C dependencies (ring) into bitcode rust-lld cannot link
+options=(!lto)
 provides=(shepherd)
 conflicts=(shepherd)
 source=("shepherd::git+$url.git")
