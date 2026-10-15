@@ -40,6 +40,7 @@ pub(super) async fn shell_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
                     PopupEvent::Popup(surface) => s.show_popup(surface, cx),
                     PopupEvent::Commands(commands) => s.herdr_commands = commands,
                     PopupEvent::Images(images) => s.show_images(images, cx),
+                    PopupEvent::Clipboard(text) => cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)),
                 });
                 if alive.is_err() {
                     return;

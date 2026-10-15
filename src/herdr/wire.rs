@@ -204,7 +204,8 @@ pub enum ServerMessage {
     Graphics,
     ServerShutdown { reason: Option<String> },
     Notify,
-    Clipboard,
+    /// An app's OSC 52 copy, base64, sent to the client in front.
+    Clipboard { data: String },
     WindowTitle,
     ReloadSoundConfig,
     /// True while the controlled pane's app asks for mouse reporting.

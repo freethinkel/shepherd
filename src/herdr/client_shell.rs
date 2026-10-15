@@ -200,6 +200,11 @@ fn read(mut stream: Stream, state: Arc<Mutex<State>>, tx: UnboundedSender<PopupE
                 }
                 state.popup = surface.popup;
             }
+            ServerMessage::Clipboard { data } => {
+                if let Some(text) = super::popup::clipboard(&data) {
+                    let _ = tx.unbounded_send(PopupEvent::Clipboard(text));
+                }
+            }
             ServerMessage::EndpointControl { kind, data } if kind == "shell.snapshot.v1" => {
                 let _ = tx.unbounded_send(PopupEvent::Commands(super::popup::commands(&data)));
             }

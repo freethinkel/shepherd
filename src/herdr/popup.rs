@@ -21,6 +21,8 @@ pub enum Event {
     Commands(Vec<(String, Vec<String>)>),
     /// The images on the panes of the shell's tab, when they change (see [`super::graphics`]).
     Images(super::graphics::PaneImages),
+    /// Text a pane's app copied (OSC 52), which herdr hands the client in front.
+    Clipboard(String),
 }
 
 /// The client shell's surface, which herdr lays its focused tab out at while no other client does: kept at
@@ -111,6 +113,7 @@ pub fn watch(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(Unbou
                         events.push(Event::Popup(last.clone()));
                     }
                 }
+                Ok(Some(ServerMessage::Clipboard { data })) => events.extend(clipboard(&data).map(Event::Clipboard)),
                 Ok(Some(ServerMessage::EndpointControl { kind, data })) if kind == "shell.snapshot.v1" => {
                     events.push(Event::Commands(commands(&data)))
                 }
@@ -125,6 +128,12 @@ pub fn watch(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(Unbou
         }
     });
     Ok((rx, surface))
+}
+
+/// OSC 52's base64 as text; `None` for bytes that are not.
+pub(super) fn clipboard(data: &str) -> Option<String> {
+    use base64::Engine;
+    String::from_utf8(base64::engine::general_purpose::STANDARD.decode(data).ok()?).ok()
 }
 
 pub(super) fn commands(snapshot: &str) -> Vec<(String, Vec<String>)> {
