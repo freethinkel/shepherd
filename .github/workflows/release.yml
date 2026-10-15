@@ -106,11 +106,16 @@ jobs:
 
   windows:
     strategy:
+      # one architecture failing leaves the other to finish
+      fail-fast: false
       matrix:
         include:
-          - { runner: windows-latest, arch: x86_64 }
-          - { runner: windows-11-arm, arch: aarch64 }
-    runs-on: ${{ matrix.runner }}
+          - { arch: x86_64, target: x86_64-pc-windows-msvc }
+          # cross-built: Zig crashes building libghostty-vt on the windows-11-arm runner (0xc0000005); not checked or
+          # tested itself, and the release goes out without it if it fails
+          - { arch: aarch64, target: aarch64-pc-windows-msvc, cross: true }
+    runs-on: windows-latest
+    continue-on-error: ${{ matrix.cross == true }}
     defaults:
       run:
         shell: bash
@@ -119,6 +124,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: ${{ matrix.target }}
       # Zig finds the runner's MSVC and Windows SDK for libghostty-vt
       - uses: mlugg/setup-zig@v2
         with:
@@ -139,13 +145,15 @@ jobs:
           echo "GHOSTTY_SOURCE_DIR=$(cygpath -w "$tmp/$(field root)")" >> "$GITHUB_ENV"
       # the Windows side of cfg'd code: named pipes, paths, its window chrome
       - run: cargo clippy --all-targets -- -D warnings
+        if: ${{ !matrix.cross }}
       - run: cargo test
-      - run: cargo build --release
+        if: ${{ !matrix.cross }}
+      - run: cargo build --release --target ${{ matrix.target }}
       # no make on the runner: Cargo.toml's version as scripts/linux-dist.sh reads it
       - run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           mkdir -p target/windows-dist
-          7z a "target/windows-dist/Shepherd-$version-windows-${{ matrix.arch }}.zip" ./target/release/shepherd.exe
+          7z a "target/windows-dist/Shepherd-$version-windows-${{ matrix.arch }}.zip" ./target/${{ matrix.target }}/release/shepherd.exe
       - uses: actions/upload-artifact@v4
         with:
           name: Shepherd-windows-${{ matrix.arch }}
@@ -153,6 +161,8 @@ jobs:
 
   release:
     needs: [macos, linux, windows]
+    # Windows aarch64 may fail (it is cross-built): the step below still requires the x86_64 zip
+    if: ${{ !cancelled() && needs.macos.result == 'success' && needs.linux.result == 'success' }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -166,6 +176,7 @@ jobs:
           merge-multiple: true
       - name: Release a new version
         run: |
+          ls dist/*-windows-x86_64.zip >/dev/null
           tag="v$(make -s version)"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "$tag is already released"
