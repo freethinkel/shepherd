@@ -328,7 +328,7 @@ impl Shell {
                 // say): the client used last sizes the panes, so Shepherd lets go; a key or click takes them back.
                 cx.spawn(async move |this, cx| loop {
                     cx.background_executor().timer(Duration::from_secs(5)).await;
-                    let idle = mac_idle() > IDLE_YIELD;
+                    let idle = mac_idle() > IDLE_YIELD || screen_locked();
                     let alive = this.update(cx, |_, cx| {
                         if idle && !cx.try_global::<crate::terminal::pane::Yielded>().is_some_and(|y| y.0) {
                             cx.set_global(crate::terminal::pane::Yielded(true));
@@ -1041,6 +1041,43 @@ fn mac_idle() -> Duration {
 #[cfg(not(target_os = "macos"))]
 fn mac_idle() -> Duration {
     Duration::ZERO
+}
+
+/// The Mac's screen is locked (Ctrl+Cmd+Q, the lid closed): gone at once, no idle minute to wait out.
+#[cfg(target_os = "macos")]
+fn screen_locked() -> bool {
+    use std::ffi::c_void;
+    type Ref = *const c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGSessionCopyCurrentDictionary() -> Ref;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFDictionaryGetValue(dict: Ref, key: Ref) -> Ref;
+        fn CFStringCreateWithCString(alloc: Ref, s: *const std::ffi::c_char, encoding: u32) -> Ref;
+        fn CFBooleanGetValue(b: Ref) -> bool;
+        fn CFRelease(r: Ref);
+    }
+    const UTF8: u32 = 0x0800_0100;
+    // SAFETY: CoreFoundation calls on objects created here and released here; the value is borrowed from the dict
+    unsafe {
+        let session = CGSessionCopyCurrentDictionary();
+        if session.is_null() {
+            return false;
+        }
+        let key = CFStringCreateWithCString(std::ptr::null(), c"CGSSessionScreenIsLocked".as_ptr(), UTF8);
+        let value = CFDictionaryGetValue(session, key);
+        let locked = !value.is_null() && CFBooleanGetValue(value);
+        CFRelease(key);
+        CFRelease(session);
+        locked
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn screen_locked() -> bool {
+    false
 }
 
 /// Turns macOS Secure Keyboard Entry on or off. The system counts enables, so it is called only on a change.
