@@ -324,6 +324,21 @@ impl Shell {
                     }
                 })
                 .detach();
+                // The Mac left alone with Shepherd still in front (you went on to herdr's TUI over ssh, from a phone
+                // say): the client used last sizes the panes, so Shepherd lets go; a key or click takes them back.
+                cx.spawn(async move |this, cx| loop {
+                    cx.background_executor().timer(Duration::from_secs(5)).await;
+                    let idle = mac_idle() > IDLE_YIELD;
+                    let alive = this.update(cx, |_, cx| {
+                        if idle && !cx.try_global::<crate::terminal::pane::Yielded>().is_some_and(|y| y.0) {
+                            cx.set_global(crate::terminal::pane::Yielded(true));
+                        }
+                    });
+                    if alive.is_err() {
+                        return;
+                    }
+                })
+                .detach();
                 // A click on a notification brings its agent's tab up; Approve answers the agent and leaves Shepherd
                 // where it is.
                 let this = cx.entity().downgrade();
@@ -1006,6 +1021,27 @@ fn remember_shown(recent: &mut Vec<String>, shown: &[PaneFrame], live: impl Fn(&
 /// moves them back only when it becomes key; setting the title (hidden) re-applies `traffic_light_position`.
 fn reapply_traffic_lights(window: &mut Window) {
     window.set_window_title("Shepherd");
+}
+
+/// How long the Mac may sit without a key or a pointer move before Shepherd gives its panes' size away.
+// ponytail: a guess at "gone to another device"; a phone attaching sooner keeps Shepherd's size until then
+const IDLE_YIELD: Duration = Duration::from_secs(60);
+
+/// Since the last key, click or pointer move anywhere on the Mac, not only in Shepherd.
+#[cfg(target_os = "macos")]
+fn mac_idle() -> Duration {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
+    }
+    // SAFETY: plain values: kCGEventSourceStateHIDSystemState, kCGAnyInputEventType
+    let secs = unsafe { CGEventSourceSecondsSinceLastEventType(1, u32::MAX) };
+    Duration::try_from_secs_f64(secs).unwrap_or_default()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mac_idle() -> Duration {
+    Duration::ZERO
 }
 
 /// Turns macOS Secure Keyboard Entry on or off. The system counts enables, so it is called only on a change.
