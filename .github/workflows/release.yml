@@ -125,6 +125,18 @@ jobs:
           version: 0.16.0
       - run: echo "ZIG=zig" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+      # ghostty-vt-sys downloads Ghostty's source itself, and on Windows its native-tls refuses the CDN's chain
+      # ("unable to find any user-specified roots"): curl fetches the tarball its GHOSTTY.lock pins, checked against
+      # the lock's sha256, and the build takes the extracted tree
+      - run: |
+          cargo fetch
+          lock=$(ls "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/ghostty-vt-sys-*/GHOSTTY.lock | head -1)
+          field() { sed -n "s/^$1 = //p" "$lock"; }
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          curl -fsSL "$(field url)" -o "$tmp/ghostty.tar.gz"
+          echo "$(field sha256)  $tmp/ghostty.tar.gz" | sha256sum -c -
+          tar -xzf "$tmp/ghostty.tar.gz" -C "$tmp"
+          echo "GHOSTTY_SOURCE_DIR=$(cygpath -w "$tmp/$(field root)")" >> "$GITHUB_ENV"
       # the Windows side of cfg'd code: named pipes, paths, its window chrome
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
