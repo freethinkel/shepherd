@@ -1,8 +1,8 @@
-# Every push to main builds and tests Shepherd.app and builds Shepherd for Linux (x86_64 and aarch64) and Windows
-# (x86_64). When Cargo.toml's version has no release yet, the run tags v<version> and publishes a universal (arm64 +
-# x86_64) Shepherd as a zip and a dmg, each Linux architecture as a tar.gz, a .deb and an .rpm, and Windows as a zip
-# with the exe: bump the version to release. With the signing secrets set the app is signed with the Developer ID and
-# notarized; without them, ad hoc. The Windows exe is not signed.
+# Every push to main builds and tests Shepherd.app and builds Shepherd for Linux and Windows (x86_64 and aarch64
+# each). When Cargo.toml's version has no release yet, the run tags v<version> and publishes a universal (arm64 +
+# x86_64) Shepherd as a zip and a dmg, each Linux architecture as a tar.gz, a .deb and an .rpm, and each Windows
+# architecture as a zip with the exe: bump the version to release. With the signing secrets set the app is signed
+# with the Developer ID and notarized; without them, ad hoc. The Windows exe is not signed.
 name: release
 
 on:
@@ -105,7 +105,12 @@ jobs:
           path: target/linux-dist/*
 
   windows:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - { runner: windows-latest, arch: x86_64 }
+          - { runner: windows-11-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         shell: bash
@@ -128,10 +133,10 @@ jobs:
       - run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           mkdir -p target/windows-dist
-          7z a "target/windows-dist/Shepherd-$version-windows-x86_64.zip" ./target/release/shepherd.exe
+          7z a "target/windows-dist/Shepherd-$version-windows-${{ matrix.arch }}.zip" ./target/release/shepherd.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: Shepherd-windows
+          name: Shepherd-windows-${{ matrix.arch }}
           path: target/windows-dist/*
 
   release:
