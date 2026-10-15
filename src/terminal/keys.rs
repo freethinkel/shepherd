@@ -122,6 +122,23 @@ pub fn keystroke_bytes(
     }
 }
 
+/// Enter under the kitty keyboard protocol the pane's app asked for (`flags`, from herdr): with Shift, Ctrl or Option
+/// it is `CSI 13;<mods> u`, which the legacy `\r` has no room for (Claude Code's Shift+Enter newline); plain Enter
+/// too once the app asks for every key as an escape code. `None`: the legacy encoding.
+pub fn kitty_enter(key: &str, mods: &Modifiers, flags: u16) -> Option<Vec<u8>> {
+    const DISAMBIGUATE: u16 = 1;
+    const ALL_AS_ESCAPES: u16 = 8;
+    if key != "enter" || mods.platform || flags & DISAMBIGUATE == 0 {
+        return None;
+    }
+    let m = 1 + u8::from(mods.shift) + 2 * u8::from(mods.alt) + 4 * u8::from(mods.control);
+    match m {
+        1 if flags & ALL_AS_ESCAPES != 0 => Some(b"\x1b[13u".to_vec()),
+        1 => None,
+        m => Some(format!("\x1b[13;{m}u").into_bytes()),
+    }
+}
+
 /// Ctrl-key encoding (caret notation).
 fn control_bytes(key: &str) -> Option<Vec<u8>> {
     let mut chars = key.chars();
@@ -325,6 +342,18 @@ mod tests {
             keystroke_bytes("c", None, &alt_ctrl, false),
             Some(vec![0x1b, 0x03])
         );
+    }
+
+    #[test]
+    fn enter_with_modifiers_under_kitty_keyboard() {
+        let shift = Modifiers { shift: true, ..mods() };
+        let ctrl = Modifiers { control: true, ..mods() };
+        assert_eq!(kitty_enter("enter", &shift, 1), Some(b"\x1b[13;2u".to_vec()));
+        assert_eq!(kitty_enter("enter", &ctrl, 1), Some(b"\x1b[13;5u".to_vec()));
+        assert_eq!(kitty_enter("enter", &mods(), 1), None);
+        assert_eq!(kitty_enter("enter", &mods(), 1 | 8), Some(b"\x1b[13u".to_vec()));
+        assert_eq!(kitty_enter("enter", &shift, 0), None, "no kitty protocol: legacy \\r");
+        assert_eq!(kitty_enter("a", &shift, 1), None);
     }
 
     #[test]

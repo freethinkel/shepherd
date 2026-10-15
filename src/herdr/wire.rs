@@ -217,7 +217,8 @@ pub enum ServerMessage {
     PaneSurface(Box<PaneSurfaceFrame>),
     SemanticNotification,
     ClientShellError { message: String },
-    DirectTerminalKeyboardProtocol,
+    /// The kitty keyboard flags the controlled pane's app asked for (0: legacy keys).
+    DirectTerminalKeyboardProtocol { flags: u16, modify_other_keys_level: u8 },
     ClientShellKeyboardReportAll,
     ClientShellEndpointResponseChunk { boot_id: String, request_id: String, final_chunk: bool, data: Vec<u8> },
     PaneSurfacePatch,

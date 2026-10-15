@@ -5,7 +5,7 @@
 use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement, cell_at};
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
 use super::find::{Link, find_all, hyperlink, link_at};
-use super::keys::{app_shortcut, dropped_paths, keystroke_bytes, link_modifier, paste_bytes, search_back};
+use super::keys::{app_shortcut, dropped_paths, keystroke_bytes, kitty_enter, link_modifier, paste_bytes, search_back};
 use crate::herdr::graphics::PaneImage;
 use crate::herdr::{Client, Mode, PaneInput, Session, SessionEvent};
 use crate::theme::Theme;
@@ -215,6 +215,8 @@ pub struct PaneTerminal {
     drag: Option<Drag>,
     /// The pane's app asks for mouse reporting (from herdr; false until it says otherwise).
     mouse_capture: bool,
+    /// The kitty keyboard flags the pane's app asked for (from herdr; 0, legacy keys, until it says otherwise).
+    keyboard_flags: u16,
     scroll: ScrollState,
     /// A `pane.get` is out; `scroll_stale` asks for one more when it lands.
     scroll_fetching: bool,
@@ -277,6 +279,7 @@ impl PaneTerminal {
             wheel_acc: 0.0,
             drag: None,
             mouse_capture: false,
+            keyboard_flags: 0,
             scroll: ScrollState::default(),
             scroll_fetching: false,
             scroll_stale: false,
@@ -359,6 +362,7 @@ impl PaneTerminal {
                         }
                         pane.session = Some(session);
                         pane.mouse_capture = false;
+                        pane.keyboard_flags = 0;
                         pane.ended = None;
                         Some(rx)
                     }
@@ -1019,7 +1023,8 @@ impl PaneTerminal {
             }
             return;
         }
-        if let Some(bytes) = keystroke_bytes(&ks.key, ks.key_char.as_deref(), mods, false) {
+        let bytes = kitty_enter(&ks.key, mods, self.keyboard_flags).or_else(|| keystroke_bytes(&ks.key, ks.key_char.as_deref(), mods, false));
+        if let Some(bytes) = bytes {
             self.input(&bytes, cx);
             cx.stop_propagation();
         }
@@ -1325,6 +1330,7 @@ async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionE
                     // answered the app's own queries.
                     SessionEvent::Frame(bytes) => drop(pane.live.as_mut().unwrap_or(&mut pane.emulator).feed(&bytes)),
                     SessionEvent::MouseCapture(enabled) => pane.mouse_capture = enabled,
+                    SessionEvent::KeyboardFlags(flags) => pane.keyboard_flags = flags,
                     SessionEvent::Size(cols, rows) => {
                         pane.leave_history();
                         pane.emulator.resize(cols, rows)
