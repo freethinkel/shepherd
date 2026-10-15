@@ -152,10 +152,15 @@ pub fn reveal_offset(s: ScrollState, line: usize, rows: usize) -> Option<u32> {
 }
 
 /// Cmd+F: herdr's whole history is searched (`pane.read`) to step through; matches on screen come from the grid.
+/// What herdr's `pane.read` gives at most (it caps `lines`, with no paging), so what search sees of a history.
+const READ_LINES: u32 = 1000;
+
 struct Search {
     input: Entity<InputState>,
     /// Matches in herdr's history: line from the oldest one, char range.
     hits: Vec<(usize, Range<usize>)>,
+    /// The history is longer than herdr reads (`READ_LINES`): only its newest lines were searched.
+    partial: bool,
     current: Option<usize>,
     _events: Subscription,
     _read: Option<Task<()>>,
@@ -588,7 +593,7 @@ impl PaneTerminal {
                 InputEvent::PressEnter { shift, .. } => pane.step(!shift, cx),
                 _ => {}
             });
-            self.search = Some(Search { input, hits: Vec::new(), current: None, _events: events, _read: None });
+            self.search = Some(Search { input, hits: Vec::new(), partial: false, current: None, _events: events, _read: None });
         }
         if let Some(search) = &self.search {
             search.input.update(cx, |input, cx| {
@@ -617,17 +622,22 @@ impl PaneTerminal {
         let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>().filter(|_| !query.is_empty()) else { return };
         let (client, pane_id) = (client.clone(), self.pane_id.clone());
         let read = rt.spawn(async move {
-            let read = client.call("pane.read", serde_json::json!({"pane_id": pane_id, "source": "recent", "lines": u32::MAX})).await;
+            let read = client.call("pane.read", serde_json::json!({"pane_id": pane_id, "source": "recent", "lines": READ_LINES})).await;
             let text = read.ok().and_then(|r| r["read"]["text"].as_str().map(str::to_owned)).unwrap_or_default();
             let lines = text.lines().enumerate();
-            lines.flat_map(|(i, l)| find_all(&l.chars().collect::<Vec<_>>(), &query).into_iter().map(move |r| (i, r))).collect::<Vec<_>>()
+            let hits = lines.flat_map(|(i, l)| find_all(&l.chars().collect::<Vec<_>>(), &query).into_iter().map(move |r| (i, r)));
+            (text.lines().count(), hits.collect::<Vec<_>>())
         });
         search._read = Some(cx.spawn(async move |this, cx| {
-            let Ok(hits) = read.await else { return };
+            let Ok((read, hits)) = read.await else { return };
             let _ = this.update(cx, |pane, cx| {
                 let s = pane.scroll;
                 let bottom = (s.max_offset_from_bottom - s.offset_from_bottom.min(s.max_offset_from_bottom)) as usize + pane.emulator.rows();
+                // herdr reads the newest lines: the first one read is this far from the oldest
+                let skipped = (s.max_offset_from_bottom as usize + pane.emulator.rows()).saturating_sub(read);
+                let hits: Vec<_> = hits.into_iter().map(|(line, chars)| (line + skipped, chars)).collect();
                 let Some(search) = &mut pane.search else { return };
+                search.partial = skipped > 0;
                 search.current = hits.iter().rposition(|(line, _)| *line < bottom).or(hits.len().checked_sub(1));
                 search.hits = hits;
                 pane.reveal(cx);
@@ -665,6 +675,7 @@ impl PaneTerminal {
             _ if search.input.read(cx).value().is_empty() => String::new(),
             _ => "No results".into(),
         };
+        let count = if search.partial && !count.is_empty() { format!("{count} · last {READ_LINES}") } else { count };
         div()
             .id("search")
             .absolute()
