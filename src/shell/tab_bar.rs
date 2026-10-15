@@ -629,6 +629,10 @@ impl Shell {
                     .child(
                         div()
                             .id("tabbar")
+                            // GPUI tells Windows the control area of every hitbox under the pointer, scroll-only
+                            // blockers included: without blocking here a press on a tab is the drag strip's, and
+                            // Windows moves the window. The bar still scrolls, being the blocker.
+                            .when(cfg!(windows), |el| el.occlude())
                             .size_full()
                             .flex()
                             .items_center()
@@ -675,6 +679,7 @@ impl Shell {
                         .rounded(px(8.))
                         .text_size(px(19.))
                         .block_mouse_except_scroll()
+                        .when(cfg!(windows), |el| el.occlude()) // as the tabs, off the drag strip
                         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.new_tab(ws.clone(), cx))),
                 )
