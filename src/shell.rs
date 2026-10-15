@@ -995,7 +995,12 @@ fn reapply_traffic_lights(window: &mut Window) {
     window.set_window_title("Shepherd");
 }
 
+/// Secure Keyboard Entry is macOS's; elsewhere there is nothing to turn on.
+#[cfg(not(target_os = "macos"))]
+fn secure_input(_on: bool) {}
+
 /// Turns macOS Secure Keyboard Entry on or off. The system counts enables, so it is called only on a change.
+#[cfg(target_os = "macos")]
 fn secure_input(on: bool) {
     use std::sync::atomic::{AtomicBool, Ordering};
     #[link(name = "Carbon", kind = "framework")]
@@ -1323,7 +1328,7 @@ impl Render for Shell {
                 s.touch(cx);
                 // Cmd+C over a selection in the review panel copies it, not the pane's
                 let m = &e.keystroke.modifiers;
-                if m.platform && !(m.shift || m.alt || m.control) && e.keystroke.key == "c" {
+                if crate::platform::terminal_chord(&e.keystroke.key, m) == Some("c") {
                     if let Some(text) = crate::ui::markdown::selected_text() {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                         cx.stop_propagation();

@@ -4,6 +4,7 @@ pub mod commands;
 pub mod herdr;
 pub mod model;
 pub mod notify;
+pub mod platform;
 pub mod settings;
 pub mod shell;
 pub mod terminal;

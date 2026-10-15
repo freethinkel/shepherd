@@ -675,7 +675,7 @@ impl PaneTerminal {
                 let k = &e.keystroke;
                 match k.key.as_str() {
                     "escape" => pane.close_search(window, cx),
-                    "g" if k.modifiers.platform => pane.step(!k.modifiers.shift, cx),
+                    _ if crate::platform::terminal_chord(&k.key, &k.modifiers) == Some("g") => pane.step(!(cfg!(target_os = "macos") && k.modifiers.shift), cx),
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -736,7 +736,7 @@ impl PaneTerminal {
             }
             // a folder goes to Finder, not the editor
             if path.is_dir() {
-                let _ = tokio::process::Command::new("open").arg(&path).status().await;
+                let _ = tokio::process::Command::new(crate::platform::OPEN).arg(&path).status().await;
                 return None;
             }
             if is_nvim(editor.as_deref()) {
@@ -967,17 +967,18 @@ impl PaneTerminal {
             return;
         }
         let mods = &ks.modifiers;
-        if ks.key == "f" && mods.platform {
+        let chord = crate::platform::terminal_chord(&ks.key, mods);
+        if chord == Some("f") {
             self.open_search(window, cx);
             cx.stop_propagation();
             return;
         }
-        if ks.key == "g" && mods.platform && self.search.is_some() {
-            self.step(!mods.shift, cx);
+        if chord == Some("g") && self.search.is_some() {
+            self.step(!(cfg!(target_os = "macos") && mods.shift), cx);
             cx.stop_propagation();
             return;
         }
-        if ks.key == "v" && mods.platform {
+        if chord == Some("v") {
             match cx.read_from_clipboard() {
                 // ponytail: always bracketed; herdr's frames do not tell us whether the app asked for it.
                 Some(item) => match item.text() {
@@ -992,7 +993,7 @@ impl PaneTerminal {
             cx.stop_propagation();
             return;
         }
-        if ks.key == "c" && mods.platform {
+        if chord == Some("c") {
             if let Some(text) = self.emulator.selection_text() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 cx.stop_propagation();
@@ -1049,7 +1050,7 @@ impl PaneTerminal {
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         claim(cx);
-        if let Some((_, _, link)) = self.link_under(event.position).filter(|_| event.modifiers.platform) {
+        if let Some((_, _, link)) = self.link_under(event.position).filter(|_| crate::platform::link_modifier(&event.modifiers)) {
             self.open_link(link, cx);
             return;
         }
@@ -1075,7 +1076,7 @@ impl PaneTerminal {
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.pointer = Some(event.position);
         if !event.dragging() {
-            self.update_hover(event.modifiers.platform, cx);
+            self.update_hover(crate::platform::link_modifier(&event.modifiers), cx);
             return;
         }
         let Some(mut drag) = self.drag else { return };
@@ -1243,7 +1244,7 @@ pub fn editor_argv(editor: Option<&str>, path: &Path, line: Option<u32>, col: Op
     if let Some(code) = installed("cursor").or_else(|| installed("code")) {
         return vec![code, "-g".into(), target];
     }
-    vec!["open".into(), path.display().to_string()]
+    vec![crate::platform::OPEN.into(), path.display().to_string()]
 }
 
 /// Whether the editor command runs nvim, which opens in a pane instead of its own window.
@@ -1391,7 +1392,7 @@ impl Render for PaneTerminal {
             .on_action(cx.listener(|pane, _: &crate::bindings::FontSizeUp, window, cx| pane.zoom_key(ZOOM_STEP, window, cx)))
             .on_action(cx.listener(|pane, _: &crate::bindings::FontSizeDown, window, cx| pane.zoom_key(1. / ZOOM_STEP, window, cx)))
             .on_action(cx.listener(|pane, _: &crate::bindings::FontSizeReset, window, cx| pane.zoom_key(0., window, cx)))
-            .on_modifiers_changed(cx.listener(|pane, e: &ModifiersChangedEvent, _, cx| pane.update_hover(e.modifiers.platform, cx)))
+            .on_modifiers_changed(cx.listener(|pane, e: &ModifiersChangedEvent, _, cx| pane.update_hover(crate::platform::link_modifier(&e.modifiers), cx)))
             .when(self.hover.is_some(), |el| el.cursor_pointer())
             .child(TerminalElement::new(cx.entity(), focused))
             .child(crate::ui::scrollbar(SharedString::from(format!("scrollbar-{}", self.pane_id)), &self.scrollbar, &theme))

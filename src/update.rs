@@ -47,7 +47,7 @@ impl Updates {
     /// The line under "Shepherd <version>" in Settings → About.
     pub fn line(&self) -> String {
         match self {
-            Updates::Unknown => "A herdr client for macOS".into(),
+            Updates::Unknown => if cfg!(target_os = "macos") { "A herdr client for macOS" } else { "A herdr client for Linux" }.into(),
             Updates::Checking => "Checking for updates…".into(),
             Updates::UpToDate => "Up to date".into(),
             Updates::Available(r) => format!("Shepherd {} is available", r.version),
@@ -347,6 +347,7 @@ mod tests {
     }
 
     /// An ad hoc signed bundle whose `Contents/Resources/which` says which one it is.
+    #[cfg(target_os = "macos")]
     fn fake_app(app: &Path, which: &str) {
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         std::fs::create_dir_all(app.join("Contents/Resources")).unwrap();
@@ -358,6 +359,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")] // ditto and codesign
     fn the_new_app_replaces_the_old_one() {
         let tmp = tempfile::tempdir().unwrap();
         let (apps, build) = (tmp.path().join("Applications"), tmp.path().join("build"));

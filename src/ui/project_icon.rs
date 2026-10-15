@@ -78,12 +78,12 @@ fn github_owner(url: &str) -> Option<&str> {
     (!owner.is_empty() && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then_some(owner)
 }
 
-// ponytail: downloaded once and kept; delete ~/Library/Caches/Shepherd/avatars to pick up a changed avatar.
+// ponytail: downloaded once and kept; delete the cache's avatars folder to pick up a changed avatar.
 /// The GitHub avatar of the owner of the located `dir`'s origin, downloaded once into Shepherd's caches.
 fn github_avatar(dir: &str) -> Option<PathBuf> {
     let out = crate::herdr::git(dir, &["remote", "get-url", "origin"]).ok()?;
     let owner = github_owner(&String::from_utf8_lossy(&out.stdout))?.to_string();
-    let dir = PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/Shepherd/avatars");
+    let dir = crate::platform::cache_dir().join("avatars");
     let path = dir.join(format!("{owner}.png"));
     if !path.is_file() {
         std::fs::create_dir_all(&dir).ok()?;

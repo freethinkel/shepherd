@@ -413,13 +413,8 @@ fn read_usage(key: &str) -> Option<Vec<Limit>> {
             .ok()?;
         return parse_codex_usage(&response.body_mut().read_to_string().ok()?);
     }
-    // The endpoint Claude Code itself reads, with the token Claude Code keeps (and refreshes) in the login keychain,
-    // as the dotfiles' statusbar does.
-    let creds = std::process::Command::new("/usr/bin/security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
-        .output()
-        .ok()?;
-    let creds: serde_json::Value = serde_json::from_slice(&creds.stdout).ok()?;
+    // The endpoint Claude Code itself reads, with the token Claude Code keeps (and refreshes).
+    let creds: serde_json::Value = serde_json::from_slice(&claude_credentials()?).ok()?;
     let token = creds["claudeAiOauth"]["accessToken"].as_str()?;
     let mut response = agent
         .get("https://api.anthropic.com/api/oauth/usage")
@@ -428,6 +423,23 @@ fn read_usage(key: &str) -> Option<Vec<Limit>> {
         .call()
         .ok()?;
     parse_claude_usage(&response.body_mut().read_to_string().ok()?)
+}
+
+/// Claude Code's sign-in, as it keeps it: in the login keychain on macOS, as the dotfiles' statusbar reads it;
+/// in `~/.claude/.credentials.json` (under `CLAUDE_CONFIG_DIR` when set) elsewhere.
+#[cfg(target_os = "macos")]
+fn claude_credentials() -> Option<Vec<u8>> {
+    let out = std::process::Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .output()
+        .ok()?;
+    Some(out.stdout)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn claude_credentials() -> Option<Vec<u8>> {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from).or_else(|| Some(Path::new(&std::env::var_os("HOME")?).join(".claude")))?;
+    std::fs::read(dir.join(".credentials.json")).ok()
 }
 
 /// Tokens a Claude Code session spent, by kind.

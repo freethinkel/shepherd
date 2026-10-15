@@ -460,6 +460,10 @@ fn highlighted(text: &str, query: &str, theme: &Theme) -> StyledText {
 
 /// A keystroke the way the macOS menus write it: ⌃⌥⇧⌘ then the key.
 pub(crate) fn glyphs(keystroke: &str) -> String {
+    // the ⌃⌥⇧⌘ glyphs are macOS's; elsewhere chords read as words
+    if !cfg!(target_os = "macos") {
+        return crate::ui::settings::display_chord(keystroke);
+    }
     let Ok(k) = Keystroke::parse(keystroke) else { return keystroke.to_string() };
     let m = k.modifiers;
     let key = match k.key.as_str() {
@@ -886,6 +890,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn chords_read_as_macos_writes_them() {
         assert_eq!(glyphs("cmd-shift-d"), "⇧⌘D");
         assert_eq!(glyphs("alt-cmd-left"), "⌥⌘←");

@@ -56,6 +56,23 @@ make help     # everything else
 
 `make app` signs with the Developer ID certificate in your keychain if it finds one, and ad hoc otherwise. Releases come from CI: bumping `version` in `Cargo.toml` on `main` builds, signs, notarizes and publishes a new release.
 
+### Linux
+
+Shepherd also builds on Linux (Wayland or X11) from source. You need Rust, Zig 0.16 and herdr, plus the usual GPUI
+system libraries (Vulkan, xkbcommon, Wayland/X11, fontconfig). `.cargo/config.toml` points `ZIG` at a macOS path,
+so set it yourself:
+
+```sh
+ZIG=$(command -v zig) cargo build --release
+./target/release/shepherd
+```
+
+On Linux the settings live in `~/.config/shepherd` and caches in `~/.cache/shepherd`. The default shortcuts are the
+table above with Ctrl for `⌘` (`Ctrl+T` new tab, `Ctrl+D` split, `Ctrl+W` close pane, `Ctrl+K` command panel), so
+`Ctrl+W`, `Ctrl+D`, `Ctrl+K` and `Ctrl+B` no longer reach the shell; rebind them in Settings if you want them back.
+Copy, paste and find are `Ctrl+Shift+C`/`V`/`F`, and Ctrl+click opens links. There is no Dock badge, Secure Keyboard Entry or self-update; notifications go
+through your notification daemon.
+
 ## License
 
 MIT, see [LICENSE](LICENSE). Code and assets taken from Zeron (MIT) and the Geist fonts (SIL OFL 1.1) are listed in [assets/NOTICE](assets/NOTICE).

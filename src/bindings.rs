@@ -56,6 +56,7 @@ app_actions! {
     Quit: "Quit",
 }
 
+#[cfg(target_os = "macos")]
 pub const DEFAULTS: &[(&str, &str)] = &[
     ("NewTab", "cmd-t"),
     ("CloseTab", "cmd-shift-w"),
@@ -92,6 +93,47 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("CommandPanel", "cmd-shift-p"),
     ("AgentsPanel", "cmd-shift-a"),
     ("Quit", "cmd-q"),
+];
+
+/// Linux's defaults: macOS's with Ctrl for Cmd (Super belongs to the window manager). Ctrl+W, D, K and B no longer
+/// reach the shell; Ctrl+Shift+C, V, F and G stay free for the terminal's copy, paste and find.
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULTS: &[(&str, &str)] = &[
+    ("NewTab", "ctrl-t"),
+    ("CloseTab", "ctrl-shift-w"),
+    ("NewWorkspace", "ctrl-shift-n"),
+    ("SplitRight", "ctrl-d"),
+    ("SplitDown", "ctrl-shift-d"),
+    ("ClosePane", "ctrl-w"),
+    ("FocusLeft", "ctrl-alt-left"),
+    ("FocusRight", "ctrl-alt-right"),
+    ("FocusUp", "ctrl-alt-up"),
+    ("FocusDown", "ctrl-alt-down"),
+    ("ToggleZoom", "ctrl-shift-enter"),
+    ("Tab1", "ctrl-1"),
+    ("Tab2", "ctrl-2"),
+    ("Tab3", "ctrl-3"),
+    ("Tab4", "ctrl-4"),
+    ("Tab5", "ctrl-5"),
+    ("Tab6", "ctrl-6"),
+    ("Tab7", "ctrl-7"),
+    ("Tab8", "ctrl-8"),
+    ("Tab9", "ctrl-9"),
+    ("PreviousTab", "ctrl-{"),
+    ("NextTab", "ctrl-}"),
+    ("PreviousWorkspace", "ctrl-up"),
+    ("NextWorkspace", "ctrl-down"),
+    ("ToggleSidebar", "ctrl-b"),
+    ("ToggleReview", "ctrl-alt-b"),
+    ("FontSizeUp", "ctrl-="),
+    ("FontSizeUp", "ctrl-+"),
+    ("FontSizeDown", "ctrl--"),
+    ("FontSizeReset", "ctrl-0"),
+    ("OpenSettings", "ctrl-,"),
+    ("CommandPanel", "ctrl-k"),
+    ("CommandPanel", "ctrl-shift-p"),
+    ("AgentsPanel", "ctrl-shift-a"),
+    ("Quit", "ctrl-q"),
 ];
 
 fn known(action: &str) -> bool {
@@ -286,6 +328,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn linux_defaults_leave_the_terminal_its_chords() {
+        let eff = effective(&user(&[]));
+        assert_eq!(chord(&eff, "SplitRight"), Some("ctrl-d"));
+        assert_eq!(chord(&eff, "NewTab"), Some("ctrl-t"));
+        for key in ["c", "v", "f", "g"] {
+            let taken = normalize(&format!("ctrl-shift-{key}")).unwrap();
+            assert!(!eff.iter().any(|(_, k)| *k == taken), "ctrl-shift-{key} is the terminal's");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
     fn defaults_when_the_user_set_nothing() {
         let eff = effective(&user(&[]));
         assert_eq!(chord(&eff, "SplitRight"), Some("cmd-d"));
@@ -296,13 +351,14 @@ mod tests {
     #[test]
     fn a_user_chord_replaces_the_default() {
         let eff = effective(&user(&[("SplitRight", "cmd-shift-right")]));
-        assert_eq!(chord(&eff, "SplitRight"), Some("cmd-shift-right"));
+        assert_eq!(chord(&eff, "SplitRight"), normalize("cmd-shift-right").as_deref());
     }
 
     #[test]
     fn rebinding_takes_the_chord_from_the_old_action() {
-        let eff = effective(&user(&[("NewTab", "cmd-d")]));
-        assert_eq!(chord(&eff, "NewTab"), Some("cmd-d"));
+        let split = DEFAULTS.iter().find(|(a, _)| *a == "SplitRight").unwrap().1;
+        let eff = effective(&user(&[("NewTab", split)]));
+        assert_eq!(chord(&eff, "NewTab"), normalize(split).as_deref());
         assert_eq!(chord(&eff, "SplitRight"), None, "two actions on one chord");
     }
 
@@ -319,9 +375,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn chords_written_differently_collide() {
         // GPUI's unparse writes alt before cmd; the defaults say cmd-alt-left.
         let eff = effective(&user(&[("NewTab", "alt-cmd-left")]));
+        assert_eq!(chord(&eff, "FocusLeft"), None, "two actions on one chord");
+        assert!(chord(&eff, "NewTab").is_some());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn chords_written_differently_collide() {
+        // GPUI's unparse writes ctrl before alt; the defaults say ctrl-alt-left either way.
+        let eff = effective(&user(&[("NewTab", "alt-ctrl-left")]));
         assert_eq!(chord(&eff, "FocusLeft"), None, "two actions on one chord");
         assert!(chord(&eff, "NewTab").is_some());
     }

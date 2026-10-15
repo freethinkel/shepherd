@@ -16,11 +16,6 @@ gpui = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b11
 gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "103f13da91ff2c7c52941bdc2b1910f29716dc19" }
 zeron-theme = { git = "https://github.com/zeronsh/comet", rev = "9e17e401710412adca91fe485886d65aa2d7e3eb" }
 zeron-markdown = { git = "https://github.com/zeronsh/comet", rev = "9e17e401710412adca91fe485886d65aa2d7e3eb" }
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSImage", "NSResponder"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSString"] }
-objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter"] }
-block2 = "0.6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["font-kit", "runtime_shaders"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +28,18 @@ ureq = "3.4.2"
 toml_edit = "0.25"
 emojis = "0.9.0"
 unicode-width = "0.2"
+
+# AppKit for notifications, the Dock badge and the app icon.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSString"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter"] }
+block2 = "0.6"
+
+# gpui's Linux backends; its workspace leaves them off by default.
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["font-kit", "wayland", "x11"] }
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["test-support"] }

@@ -851,7 +851,8 @@ pub(crate) fn display_chord(chord: &str) -> String {
         key if key.chars().count() == 1 => key.to_uppercase(),
         key => key[..1].to_uppercase() + &key[1..],
     };
-    [(m.control, "Ctrl"), (m.alt, "Opt"), (m.shift, "Shift"), (m.platform, "Cmd"), (m.function, "Fn")]
+    let (alt, platform) = if cfg!(target_os = "macos") { ("Opt", "Cmd") } else { ("Alt", "Super") };
+    [(m.control, "Ctrl"), (m.alt, alt), (m.shift, "Shift"), (m.platform, platform), (m.function, "Fn")]
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name.to_string()))
         .chain(std::iter::once(key))
@@ -966,13 +967,14 @@ impl Render for SettingsView {
                                 |_, _: &ClickEvent, _, cx| update(cx, |s| s.copy_on_select = !s.copy_on_select),
                             ))),
                     )
-                    .child(
+                    // Secure Keyboard Entry is macOS's
+                    .when(cfg!(target_os = "macos"), |el| el.child(
                         card_row(&theme, false)
                             .child(row_text(&theme, "Secure keyboard entry", "While Shepherd is in front, other apps cannot read what you type."))
                             .child(toggle(&theme, "secure-input", settings.secure_input).on_click(cx.listener(
                                 |_, _: &ClickEvent, _, cx| update(cx, |s| s.secure_input = !s.secure_input),
                             ))),
-                    ),
+                    )),
             ),
             Section::Terminal => div()
                 .child(page_header(&theme, "Terminal", "The font every pane draws with."))
@@ -1004,9 +1006,11 @@ impl Render for SettingsView {
                         .child(
                             card_row(&theme, false)
                                 .child(row_text(&theme, "Editor", if crate::terminal::pane::is_nvim(settings.editor.as_deref()) {
-                                    "Cmd+click on file:line opens it in Neovim, in a pane to the right."
-                                } else {
+                                    if cfg!(target_os = "macos") { "Cmd+click on file:line opens it in Neovim, in a pane to the right." } else { "Ctrl+click on file:line opens it in Neovim, in a pane to the right." }
+                                } else if cfg!(target_os = "macos") {
                                     "Cmd+click on file:line opens it in this editor."
+                                } else {
+                                    "Ctrl+click on file:line opens it in this editor."
                                 }))
                                 .child(self.editor_select(&theme, settings.editor.as_deref(), cx)),
                         ),
@@ -1051,7 +1055,11 @@ impl Render for SettingsView {
                 let shepherd_rows: [(&'static str, &'static str, bool, fn(&mut crate::settings::Settings)); 3] = [
                     (
                         "Notify when an agent needs you",
-                        "A macOS notification when an agent you are not looking at waits for you or finishes.",
+                        if cfg!(target_os = "macos") {
+                            "A macOS notification when an agent you are not looking at waits for you or finishes."
+                        } else {
+                            "A desktop notification when an agent you are not looking at waits for you or finishes."
+                        },
                         settings.notify_agents,
                         |s| s.notify_agents = !s.notify_agents,
                     ),
@@ -1068,13 +1076,14 @@ impl Render for SettingsView {
                 let sounds = herdr.bool("ui.sound.enabled", true);
                 div()
                     .child(page_header(&theme, "Notifications", "When an agent waits for you or finishes."))
-                    .child(card(&theme).children(shepherd_rows.into_iter().enumerate().map(|(i, (title, description, on, flip))| {
+                    // the Dock is macOS's
+                    .child(card(&theme).children(shepherd_rows.into_iter().filter(|(title, ..)| cfg!(target_os = "macos") || *title != "Dock badge").enumerate().map(|(i, (title, description, on, flip))| {
                         card_row(&theme, i == 0)
                             .child(row_text(&theme, title, description))
                             .child(toggle(&theme, SharedString::from(format!("notify-{i}")), on).on_click(cx.listener(
                                 move |_, _: &ClickEvent, _, cx| update(cx, flip),
                             )))
-                    })).child({
+                    })).when(cfg!(target_os = "macos"), |el| el.child({
                         let denied = cx.has_global::<crate::notify::Denied>();
                         let text = if denied {
                             row_text(&theme, "Turned off in macOS", "macOS blocks Shepherd's notifications, so none show up. Allow them in System Settings.")
@@ -1086,7 +1095,7 @@ impl Render for SettingsView {
                             action(&theme, "notify-system-settings", "Open System Settings")
                                 .on_click(|_: &ClickEvent, _, _| crate::notify::open_system_settings()),
                         )
-                    }))
+                    })))
                     .child(section_label(&theme, "In herdr's terminal app"))
                     .child(
                         card(&theme)
@@ -1401,9 +1410,18 @@ mod tests {
     use super::display_chord;
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn chords_read_as_zeron_shows_them() {
         assert_eq!(display_chord("cmd-shift-t"), "Shift+Cmd+T");
         assert_eq!(display_chord("ctrl-alt-space"), "Ctrl+Opt+Space");
         assert_eq!(display_chord("cmd-,"), "Cmd+,");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn chords_read_as_linux_writes_them() {
+        assert_eq!(display_chord("ctrl-shift-t"), "Ctrl+Shift+T");
+        assert_eq!(display_chord("ctrl-alt-space"), "Ctrl+Alt+Space");
+        assert_eq!(display_chord("super-,"), "Super+,");
     }
 }

@@ -254,7 +254,7 @@ impl Settings {
         if let Some(file) = std::env::var_os("SHEPHERD_SETTINGS_FILE") {
             return file.into();
         }
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Library/Application Support/Shepherd/settings.json")
+        crate::platform::config_dir().join("settings.json")
     }
 
     /// Defaults when the file is missing; defaults and an error naming the file when it cannot be read. The file
@@ -406,7 +406,7 @@ mod tests {
         let mut s = Settings::default();
         s.keys.insert("NewTab".into(), "cmd-n".into());
         s.record_chord("SplitRight", "cmd-n");
-        assert_eq!(s.keys.get("SplitRight").map(String::as_str), Some("cmd-n"));
+        assert_eq!(s.keys.get("SplitRight").map(String::as_str), crate::bindings::normalize("cmd-n").as_deref());
         assert_eq!(s.keys.get("NewTab"), None, "NewTab falls back to its default");
     }
 
