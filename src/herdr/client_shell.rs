@@ -305,8 +305,19 @@ fn color(out: &mut Vec<u8>, packed: u32, base: u8) {
 /// gpui's keystroke as herdr's semantic key; `None` for the platform chords that drive Shepherd itself.
 pub fn key_event(key: &str, key_char: Option<&str>, mods: &gpui::Modifiers) -> Option<PaneInput> {
     if mods.platform {
-        // Cmd+Backspace: delete to the line's start (Ctrl+U), as in the attach path
-        return (key == "backspace").then(|| PaneInput::TextCommit("\x15".into()));
+        // Cmd+Backspace: delete to the line's start (Ctrl+U), Cmd+Left/Right: to its start or end (Ctrl+A, Ctrl+E),
+        // as in the attach path
+        let text = match key {
+            "backspace" => "\x15",
+            "left" => "\x01",
+            "right" => "\x05",
+            _ => return None,
+        };
+        return Some(PaneInput::TextCommit(text.into()));
+    }
+    // Option+Left/Right: a word back or forward (ESC b, ESC f), as Ghostty sends them
+    if mods.alt && !mods.shift && !mods.control && matches!(key, "left" | "right") {
+        return Some(PaneInput::TextCommit(if key == "left" { "\x1bb" } else { "\x1bf" }.into()));
     }
     let code = match key {
         "enter" => KeyCode::Enter,
@@ -393,6 +404,11 @@ mod tests {
         assert!(matches!(key_event("c", Some("c"), &ctrl), Some(PaneInput::Key { code: KeyCode::Char('c'), modifiers: 2, generated_text: None, .. })));
         assert!(matches!(key_event("enter", None, &none), Some(PaneInput::Key { code: KeyCode::Enter, .. })));
         assert!(matches!(key_event("b", Some("∫"), &alt), Some(PaneInput::TextCommit(t)) if t == "∫"));
+        // as Ghostty sends them, not as the kitty or legacy encoding of an arrow would
+        assert!(matches!(key_event("left", None, &alt), Some(PaneInput::TextCommit(t)) if t == "\x1bb"));
+        let cmd = gpui::Modifiers { platform: true, ..Default::default() };
+        assert!(matches!(key_event("right", None, &cmd), Some(PaneInput::TextCommit(t)) if t == "\x05"));
+        assert!(key_event("j", Some("j"), &cmd).is_none());
         assert!(key_event("q", Some("q"), &gpui::Modifiers { platform: true, ..Default::default() }).is_none());
     }
 }

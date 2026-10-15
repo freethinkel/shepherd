@@ -965,11 +965,27 @@ impl PaneTerminal {
         crate::shell::modal("image-preview", preview, window, card)
     }
 
-    fn input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+    /// A key as herdr's semantic event over the window's client shell (see [`TypingShell`]), which encodes it for
+    /// the app's keyboard protocol; false: the pane is not one to type into that way (see [`Self::input`]).
+    fn type_key(&mut self, event: PaneInput, cx: &mut Context<Self>) -> bool {
+        let controlled = self.session.is_some() && !self.observing;
+        if !controlled || !cx.try_global::<TypingShell>().is_some_and(|t| t.0.pane_input(&self.pane_id, vec![event])) {
+            return false;
+        }
+        self.typed(cx);
+        true
+    }
+
+    /// Typing goes back to the live bottom, as in a terminal.
+    fn typed(&mut self, cx: &mut Context<Self>) {
         if self.live.is_some() || self.history_pending.is_some() {
-            self.leave_history(); // typing goes back to the live bottom, as in a terminal
+            self.leave_history();
             cx.notify();
         }
+    }
+
+    fn input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        self.typed(cx);
         match &self.session {
             Some(session) if !self.observing => {
                 if !cx.try_global::<TypingShell>().is_some_and(|t| t.0.type_into(&self.pane_id, bytes)) {
@@ -1033,6 +1049,12 @@ impl PaneTerminal {
                 session.shell_input(vec![event]);
                 cx.stop_propagation();
             }
+            return;
+        }
+        if let Some(event) = crate::herdr::client_shell::key_event(&ks.key, ks.key_char.as_deref(), mods)
+            && self.type_key(event, cx)
+        {
+            cx.stop_propagation();
             return;
         }
         let bytes = kitty_enter(&ks.key, mods, self.keyboard_flags).or_else(|| keystroke_bytes(&ks.key, ks.key_char.as_deref(), mods, false));

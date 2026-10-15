@@ -47,11 +47,16 @@ impl Surface {
     /// false: send them over the attach (herdr drops a shell's keys for a pane it does not show).
     // ponytail: a key typed as herdr moves the shell to another tab, before its surface says so, is lost
     pub fn type_into(&self, pane_id: &str, bytes: &[u8]) -> bool {
-        let Ok(text) = std::str::from_utf8(bytes) else { return false };
+        std::str::from_utf8(bytes).is_ok_and(|text| self.pane_input(pane_id, vec![PaneInput::TextCommit(text.into())]))
+    }
+
+    /// The same for keys as herdr's semantic events, which herdr encodes for the pane app's keyboard protocol (kitty
+    /// keys, modifyOtherKeys, or legacy), as Ghostty would.
+    pub fn pane_input(&self, pane_id: &str, events: Vec<PaneInput>) -> bool {
         if !self.viewed.lock().unwrap().iter().any(|p| p == pane_id) {
             return false;
         }
-        let msg = ClientMessage::ClientShellPaneInput { pane_id: pane_id.into(), events: vec![PaneInput::TextCommit(text.into())] };
+        let msg = ClientMessage::ClientShellPaneInput { pane_id: pane_id.into(), events };
         wire::write_message(&mut &self.stream, &msg).is_ok()
     }
 
