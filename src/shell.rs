@@ -200,7 +200,7 @@ pub struct Shell {
     floating: Option<floating::Floating>,
     popup_watch: gpui::Task<()>,
     /// The client shell's surface and the grid it was last sized to.
-    popup_surface: Option<(crate::herdr::popup::Surface, ((u16, u16), (u32, u32)))>,
+    popup_surface: Option<(std::sync::Arc<crate::herdr::popup::Surface>, ((u16, u16), (u32, u32)))>,
     /// The tab last given herdr's focus (`follow_shown_tab`).
     focused_tab: Option<String>,
     /// herdr's Kitty images per pane, as last sent, for panes made after it.
@@ -321,6 +321,21 @@ impl Shell {
                 cx.observe_global::<crate::terminal::pane::Yielded>(|s: &mut Shell, cx| {
                     for pane in s.panes.values() {
                         pane.update(cx, |p, cx| p.follow_yield(cx));
+                    }
+                })
+                .detach();
+                // The Mac left alone with Shepherd still in front (you went on to herdr's TUI over ssh, from a phone
+                // say): the client used last sizes the panes, so Shepherd lets go; a key or click takes them back.
+                cx.spawn(async move |this, cx| loop {
+                    cx.background_executor().timer(Duration::from_secs(5)).await;
+                    let idle = mac_idle() > IDLE_YIELD;
+                    let alive = this.update(cx, |_, cx| {
+                        if idle && !cx.try_global::<crate::terminal::pane::Yielded>().is_some_and(|y| y.0) {
+                            cx.set_global(crate::terminal::pane::Yielded(true));
+                        }
+                    });
+                    if alive.is_err() {
+                        return;
                     }
                 })
                 .detach();
@@ -1005,6 +1020,27 @@ fn remember_shown(recent: &mut Vec<String>, shown: &[PaneFrame], live: impl Fn(&
 /// moves them back only when it becomes key; setting the title (hidden) re-applies `traffic_light_position`.
 fn reapply_traffic_lights(window: &mut Window) {
     window.set_window_title("Shepherd");
+}
+
+/// How long the Mac may sit without a key or a pointer move before Shepherd gives its panes' size away.
+// ponytail: a guess at "gone to another device"; a phone attaching sooner keeps Shepherd's size until then
+const IDLE_YIELD: Duration = Duration::from_secs(60);
+
+/// Since the last key, click or pointer move anywhere on the Mac, not only in Shepherd.
+#[cfg(target_os = "macos")]
+fn mac_idle() -> Duration {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
+    }
+    // SAFETY: plain values: kCGEventSourceStateHIDSystemState, kCGAnyInputEventType
+    let secs = unsafe { CGEventSourceSecondsSinceLastEventType(1, u32::MAX) };
+    Duration::try_from_secs_f64(secs).unwrap_or_default()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mac_idle() -> Duration {
+    Duration::ZERO
 }
 
 /// Turns macOS Secure Keyboard Entry on or off. The system counts enables, so it is called only on a change.

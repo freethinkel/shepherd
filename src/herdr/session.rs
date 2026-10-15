@@ -189,6 +189,8 @@ pub enum SessionEvent {
     Frame(Vec<u8>),
     /// Whether the pane's app asks for mouse reporting (socket sessions only).
     MouseCapture(bool),
+    /// The kitty keyboard flags the pane's app asked for (socket sessions only).
+    KeyboardFlags(u16),
     /// The grid herdr renders the terminal at (a client shell's popup only): the frames that follow are this size.
     Size(u16, u16),
     /// The stream is over: herdr's reason, its stderr, or why it could not run.
@@ -381,6 +383,7 @@ fn read_socket(mut stream: Stream, tx: UnboundedSender<SessionEvent>) {
         let event = match wire::read_message(&mut stream) {
             Ok(Some(ServerMessage::Terminal(frame))) => SessionEvent::Frame(frame.bytes),
             Ok(Some(ServerMessage::MouseCapture { enabled, .. })) => SessionEvent::MouseCapture(enabled),
+            Ok(Some(ServerMessage::DirectTerminalKeyboardProtocol { flags, .. })) => SessionEvent::KeyboardFlags(flags),
             Ok(Some(ServerMessage::ServerShutdown { reason })) => break reason.unwrap_or_else(|| "the terminal closed".into()),
             Ok(_) => continue,
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break "herdr closed the connection".into(),

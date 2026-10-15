@@ -21,6 +21,8 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
             // at once: a shell in front without a theme blanks herdr's (as in `client_shell::shell_loop`)
             let started = this.update(cx, |s, cx| {
                 surface.theme(client_shell::host_theme(Theme::of(cx)));
+                let surface = std::sync::Arc::new(surface);
+                cx.set_global(crate::terminal::pane::TypingShell(surface.clone()));
                 s.popup_surface = Some((surface, ((cols, rows), px)));
             });
             if started.is_err() {
@@ -39,6 +41,9 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
         }
         let gone = this.update(cx, |s, cx| {
             s.popup_surface = None;
+            if cx.has_global::<crate::terminal::pane::TypingShell>() {
+                cx.remove_global::<crate::terminal::pane::TypingShell>();
+            }
             s.show_popup(None, cx);
             s.show_images(Default::default(), cx);
         });

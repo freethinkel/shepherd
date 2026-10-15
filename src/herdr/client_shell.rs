@@ -595,8 +595,13 @@ mod input_paths {
             std::thread::sleep(Duration::from_secs(1));
             drain(&mut frames, &mut emu);
         }
+        // what Shepherd types through: the popup watch, once its surface names the pane
+        let (_events, watch) = super::super::popup::watch(80, 24, (0, 0)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        println!("pane {pane}");
         for _ in 0..2 {
             bench("attach Input", &mut frames, &mut emu, |c| session.input(c.as_bytes()));
+            bench("popup::Surface::type_into", &mut frames, &mut emu, |c| assert!(watch.type_into(&pane, c.as_bytes())));
             bench("ClientShellPaneInput", &mut frames, &mut emu, |c| {
                 let input = ClientMessage::ClientShellPaneInput { pane_id: pane.clone(), events: vec![PaneInput::TextCommit(c.into())] };
                 wire::write_message(&mut *shell.lock().unwrap(), &input).unwrap();

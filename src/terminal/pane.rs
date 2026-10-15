@@ -5,7 +5,7 @@
 use super::element::{SELECTION_DRAG_THRESHOLD, TERM_LINE_HEIGHT, TerminalElement, cell_at};
 use super::emulator::{CellSnapshot, CursorSnapshot, Emulator, GridPoint, SelectionType, Side};
 use super::find::{Link, find_all, hyperlink, link_at};
-use super::keys::{app_shortcut, dropped_paths, keystroke_bytes, link_modifier, paste_bytes, search_back};
+use super::keys::{app_shortcut, dropped_paths, keystroke_bytes, kitty_enter, link_modifier, paste_bytes, search_back};
 use crate::herdr::graphics::PaneImage;
 use crate::herdr::{Client, Mode, PaneInput, Session, SessionEvent};
 use crate::theme::Theme;
@@ -72,6 +72,13 @@ pub fn claim(cx: &mut App) {
 pub struct ShellConnection(pub std::sync::Arc<crate::herdr::client_shell::ClientShell>);
 
 impl gpui::Global for ShellConnection {}
+
+/// The window's popup watch, which also carries typing to the panes it shows (see [`Surface::type_into`]).
+///
+/// [`Surface::type_into`]: crate::herdr::popup::Surface::type_into
+pub struct TypingShell(pub std::sync::Arc<crate::herdr::popup::Surface>);
+
+impl gpui::Global for TypingShell {}
 
 /// herdr's socket for per-pane queries (scroll position); absent in tests.
 pub struct PaneQueries(pub Client, pub tokio::runtime::Handle);
@@ -208,6 +215,8 @@ pub struct PaneTerminal {
     drag: Option<Drag>,
     /// The pane's app asks for mouse reporting (from herdr; false until it says otherwise).
     mouse_capture: bool,
+    /// The kitty keyboard flags the pane's app asked for (from herdr; 0, legacy keys, until it says otherwise).
+    keyboard_flags: u16,
     scroll: ScrollState,
     /// A `pane.get` is out; `scroll_stale` asks for one more when it lands.
     scroll_fetching: bool,
@@ -225,6 +234,8 @@ pub struct PaneTerminal {
     /// The pointer, and the link under it while Cmd is held: (row, cells).
     pointer: Option<gpui::Point<Pixels>>,
     hover: Option<(usize, Range<usize>)>,
+    /// The cell a hover was last reported in to an app that captures the mouse: one report per cell crossed.
+    hover_cell: Option<(u16, u16)>,
     /// The image a Cmd+click opened, in a dialog over the window until Esc, Space or a click outside it.
     preview: Option<Popup<Preview>>,
     /// Always attaches by taking the terminal over (herdr's popup: whichever window shows it types into it).
@@ -268,6 +279,7 @@ impl PaneTerminal {
             wheel_acc: 0.0,
             drag: None,
             mouse_capture: false,
+            keyboard_flags: 0,
             scroll: ScrollState::default(),
             scroll_fetching: false,
             scroll_stale: false,
@@ -280,6 +292,7 @@ impl PaneTerminal {
             search: None,
             pointer: None,
             hover: None,
+            hover_cell: None,
             preview: None,
             takes_over: false,
             images: Vec::new(),
@@ -349,6 +362,7 @@ impl PaneTerminal {
                         }
                         pane.session = Some(session);
                         pane.mouse_capture = false;
+                        pane.keyboard_flags = 0;
                         pane.ended = None;
                         Some(rx)
                     }
@@ -945,7 +959,11 @@ impl PaneTerminal {
             cx.notify();
         }
         match &self.session {
-            Some(session) if !self.observing => session.input(bytes),
+            Some(session) if !self.observing => {
+                if !cx.try_global::<TypingShell>().is_some_and(|t| t.0.type_into(&self.pane_id, bytes)) {
+                    session.input(bytes)
+                }
+            }
             _ if self.ended.is_none() => {
                 self.held.extend_from_slice(bytes);
                 claim(cx);
@@ -1005,7 +1023,8 @@ impl PaneTerminal {
             }
             return;
         }
-        if let Some(bytes) = keystroke_bytes(&ks.key, ks.key_char.as_deref(), mods, false) {
+        let bytes = kitty_enter(&ks.key, mods, self.keyboard_flags).or_else(|| keystroke_bytes(&ks.key, ks.key_char.as_deref(), mods, false));
+        if let Some(bytes) = bytes {
             self.input(&bytes, cx);
             cx.stop_propagation();
         }
@@ -1075,6 +1094,7 @@ impl PaneTerminal {
         self.pointer = Some(event.position);
         if !event.dragging() {
             self.update_hover(link_modifier(&event.modifiers), cx);
+            self.report_hover(event);
             return;
         }
         let Some(mut drag) = self.drag else { return };
@@ -1098,6 +1118,17 @@ impl PaneTerminal {
             self.emulator.update_selection(point, side);
             cx.notify();
         }
+    }
+
+    /// A move with no button held goes to an app that captures the mouse (herdr drops it unless the app asked for
+    /// any-motion reporting); Shift keeps the mouse for a selection, as on a press.
+    fn report_hover(&mut self, event: &MouseMoveEvent) {
+        let captured = self.mouse_capture && self.session.as_ref().is_some_and(Session::knows_mouse_capture);
+        let cell = self.hit(event.position).map(|(row, col, _, _)| (row, col)).filter(|_| captured && !event.modifiers.shift);
+        if cell.is_some() && cell != self.hover_cell {
+            self.mouse("move", event.position, &event.modifiers);
+        }
+        self.hover_cell = cell;
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1299,6 +1330,7 @@ async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionE
                     // answered the app's own queries.
                     SessionEvent::Frame(bytes) => drop(pane.live.as_mut().unwrap_or(&mut pane.emulator).feed(&bytes)),
                     SessionEvent::MouseCapture(enabled) => pane.mouse_capture = enabled,
+                    SessionEvent::KeyboardFlags(flags) => pane.keyboard_flags = flags,
                     SessionEvent::Size(cols, rows) => {
                         pane.leave_history();
                         pane.emulator.resize(cols, rows)
