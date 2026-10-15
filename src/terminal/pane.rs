@@ -225,6 +225,8 @@ pub struct PaneTerminal {
     /// The pointer, and the link under it while Cmd is held: (row, cells).
     pointer: Option<gpui::Point<Pixels>>,
     hover: Option<(usize, Range<usize>)>,
+    /// The cell a hover was last reported in to an app that captures the mouse: one report per cell crossed.
+    hover_cell: Option<(u16, u16)>,
     /// The image a Cmd+click opened, in a dialog over the window until Esc, Space or a click outside it.
     preview: Option<Popup<Preview>>,
     /// Always attaches by taking the terminal over (herdr's popup: whichever window shows it types into it).
@@ -280,6 +282,7 @@ impl PaneTerminal {
             search: None,
             pointer: None,
             hover: None,
+            hover_cell: None,
             preview: None,
             takes_over: false,
             images: Vec::new(),
@@ -1075,6 +1078,7 @@ impl PaneTerminal {
         self.pointer = Some(event.position);
         if !event.dragging() {
             self.update_hover(link_modifier(&event.modifiers), cx);
+            self.report_hover(event);
             return;
         }
         let Some(mut drag) = self.drag else { return };
@@ -1098,6 +1102,17 @@ impl PaneTerminal {
             self.emulator.update_selection(point, side);
             cx.notify();
         }
+    }
+
+    /// A move with no button held goes to an app that captures the mouse (herdr drops it unless the app asked for
+    /// any-motion reporting); Shift keeps the mouse for a selection, as on a press.
+    fn report_hover(&mut self, event: &MouseMoveEvent) {
+        let captured = self.mouse_capture && self.session.as_ref().is_some_and(Session::knows_mouse_capture);
+        let cell = self.hit(event.position).map(|(row, col, _, _)| (row, col)).filter(|_| captured && !event.modifiers.shift);
+        if cell.is_some() && cell != self.hover_cell {
+            self.mouse("move", event.position, &event.modifiers);
+        }
+        self.hover_cell = cell;
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
