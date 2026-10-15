@@ -14,7 +14,10 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
             rt.spawn(async move { c.subscribe(EVENT_TYPES, &panes).await })
         };
         let mut rx = match sub.await.expect("tokio") {
-            Ok(rx) => rx,
+            Ok(rx) => {
+                check_protocol(&this, &rt, &client, cx).await;
+                rx
+            }
             Err(err) => {
                 let no_server = crate::herdr::no_server(&err);
                 if no_server && Instant::now() >= next_start {
@@ -105,6 +108,25 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
             }
         }
     }
+}
+
+/// Asks the server which protocol it speaks. A change of verdict is told once, as a toast; the verdict stays in
+/// [`crate::herdr::OutdatedServer`] for the panes whose connection it breaks.
+async fn check_protocol(this: &gpui::WeakEntity<Shell>, rt: &tokio::runtime::Handle, client: &Client, cx: &mut gpui::AsyncApp) {
+    let c = client.clone();
+    let Ok(Ok(pong)) = rt.spawn(async move { c.call("ping", json!({})).await }).await else { return };
+    let mismatch = crate::herdr::protocol_mismatch(&pong);
+    let _ = this.update(cx, |_, cx| {
+        let before = cx.try_global::<crate::herdr::OutdatedServer>().and_then(|o| o.0.clone());
+        if before == mismatch {
+            return;
+        }
+        if let Some(why) = &mismatch {
+            crate::ui::toast::error(cx, why.clone());
+        }
+        cx.set_global(crate::herdr::OutdatedServer(mismatch));
+        cx.refresh_windows();
+    });
 }
 
 impl Shell {

@@ -1346,6 +1346,10 @@ impl Render for PaneTerminal {
                 .text_color(theme.text_muted)
                 .text_sm()
                 .child(why)
+                // a server on another protocol is why: say so, and how to fix it
+                .children(cx.try_global::<crate::herdr::OutdatedServer>().and_then(|o| o.0.clone()).map(|outdated| {
+                    div().max_w(px(420.)).text_center().text_color(theme.danger).child(outdated)
+                }))
                 .child(
                     div()
                         .id("reattach")
