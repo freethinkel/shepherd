@@ -5,10 +5,11 @@
 //! The same surfaces carry herdr's Kitty graphics, which attaches never get: the images on the panes of the shell's
 //! tab ([`super::graphics`]), sent once herdr knows the cell size in pixels.
 use super::session::client_socket;
-use super::wire::{self, ClientMessage, HostThemeUpdate, ServerMessage, SurfaceSize};
+use super::wire::{self, ClientMessage, HostThemeUpdate, PaneInput, ServerMessage, SurfaceSize};
 pub use super::wire::{PopupSize, PopupSurface};
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// What the client shell hears that Shepherd uses.
@@ -24,14 +25,32 @@ pub enum Event {
 
 /// The client shell's surface, which herdr lays its focused tab out at while no other client does: kept at
 /// Shepherd's pane grid, as herdr-gpui keeps its own.
-pub struct Surface(UnixStream);
+pub struct Surface {
+    stream: UnixStream,
+    /// The panes herdr lays out on this shell's surface (its full surfaces name them, patches never change them);
+    /// none while herdr's popup is up, which takes the shell's keys.
+    viewed: Arc<Mutex<Vec<String>>>,
+}
 
 impl Surface {
     /// `cell_px`: a cell in device pixels, which herdr sizes images by.
     pub fn resize(&self, cols: u16, rows: u16, (cell_width_px, cell_height_px): (u32, u32)) {
         let surface_size = SurfaceSize { cols: cols.max(20), rows: rows.max(8) };
         let msg = ClientMessage::ClientShellResize { cell_width_px, cell_height_px, surface_size, pixel_mouse: false };
-        let _ = wire::write_message(&mut &self.0, &msg); // a dead shell is noticed by its reader
+        let _ = wire::write_message(&mut &self.stream, &msg); // a dead shell is noticed by its reader
+    }
+
+    /// Sends typed bytes to `pane_id` over this shell, if it shows the pane: herdr draws their echo at once, where
+    /// an attach's input waits out its 16 ms render cadence (~6 ms against ~21 ms, `client_shell::input_paths`).
+    /// false: send them over the attach (herdr drops a shell's keys for a pane it does not show).
+    // ponytail: a key typed as herdr moves the shell to another tab, before its surface says so, is lost
+    pub fn type_into(&self, pane_id: &str, bytes: &[u8]) -> bool {
+        let Ok(text) = std::str::from_utf8(bytes) else { return false };
+        if !self.viewed.lock().unwrap().iter().any(|p| p == pane_id) {
+            return false;
+        }
+        let msg = ClientMessage::ClientShellPaneInput { pane_id: pane_id.into(), events: vec![PaneInput::TextCommit(text.into())] };
+        wire::write_message(&mut &self.stream, &msg).is_ok()
     }
 
 
@@ -39,7 +58,7 @@ impl Surface {
     /// client in front again (another client gone, or this one sending), so a TUI's theme does not outlast the TUI.
     pub fn theme(&self, updates: Vec<HostThemeUpdate>) {
         for update in updates {
-            let _ = wire::write_message(&mut &self.0, &ClientMessage::ClientShellHostTheme { update });
+            let _ = wire::write_message(&mut &self.stream, &ClientMessage::ClientShellHostTheme { update });
         }
     }
 }
@@ -72,7 +91,8 @@ pub fn watch(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(Unbou
         anyhow::bail!("herdr refused the client shell: {}", error["message"]);
     }
     stream.set_read_timeout(None)?;
-    let surface = Surface(stream.try_clone()?);
+    let viewed = Arc::new(Mutex::new(Vec::new()));
+    let surface = Surface { stream: stream.try_clone()?, viewed: viewed.clone() };
     let (tx, rx) = unbounded();
     std::thread::spawn(move || {
         let mut last = None;
@@ -84,6 +104,8 @@ pub fn watch(cols: u16, rows: u16, cell_px: (u32, u32)) -> anyhow::Result<(Unbou
                 Ok(Some(ServerMessage::PaneSurface(mut frame))) => {
                     let _ = scenes.send(std::mem::take(&mut frame.graphics));
                     let popup = frame.popup.as_ref().map(PopupSurface::from);
+                    *viewed.lock().unwrap() =
+                        if popup.is_some() { Vec::new() } else { frame.panes.iter().map(|p| p.pane_id.clone()).collect() };
                     if popup != last {
                         last = popup;
                         events.push(Event::Popup(last.clone()));

@@ -73,6 +73,13 @@ pub struct ShellConnection(pub std::sync::Arc<crate::herdr::client_shell::Client
 
 impl gpui::Global for ShellConnection {}
 
+/// The window's popup watch, which also carries typing to the panes it shows (see [`Surface::type_into`]).
+///
+/// [`Surface::type_into`]: crate::herdr::popup::Surface::type_into
+pub struct TypingShell(pub std::sync::Arc<crate::herdr::popup::Surface>);
+
+impl gpui::Global for TypingShell {}
+
 /// herdr's socket for per-pane queries (scroll position); absent in tests.
 pub struct PaneQueries(pub Client, pub tokio::runtime::Handle);
 
@@ -948,7 +955,11 @@ impl PaneTerminal {
             cx.notify();
         }
         match &self.session {
-            Some(session) if !self.observing => session.input(bytes),
+            Some(session) if !self.observing => {
+                if !cx.try_global::<TypingShell>().is_some_and(|t| t.0.type_into(&self.pane_id, bytes)) {
+                    session.input(bytes)
+                }
+            }
             _ if self.ended.is_none() => {
                 self.held.extend_from_slice(bytes);
                 claim(cx);

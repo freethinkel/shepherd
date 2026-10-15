@@ -200,7 +200,7 @@ pub struct Shell {
     floating: Option<floating::Floating>,
     popup_watch: gpui::Task<()>,
     /// The client shell's surface and the grid it was last sized to.
-    popup_surface: Option<(crate::herdr::popup::Surface, ((u16, u16), (u32, u32)))>,
+    popup_surface: Option<(std::sync::Arc<crate::herdr::popup::Surface>, ((u16, u16), (u32, u32)))>,
     /// The tab last given herdr's focus (`follow_shown_tab`).
     focused_tab: Option<String>,
     /// herdr's Kitty images per pane, as last sent, for panes made after it.
