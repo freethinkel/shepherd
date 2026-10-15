@@ -84,6 +84,20 @@ fn play_sound() {
     }
 }
 
+/// Brings Shepherd in front, after a click on its notification. macOS activates the app. Linux has no app to
+/// activate (gpui's `activate` does nothing there), so the window asks: an xdg-activation request on Wayland, which
+/// the compositor grants when it focuses on activation (Hyprland's `misc:focus_on_activate`), or `_NET_ACTIVE_WINDOW`
+/// on X11.
+pub fn bring_forward(cx: &mut App) {
+    if cfg!(target_os = "macos") {
+        cx.activate(true);
+        return;
+    }
+    if let Some(window) = cx.windows().into_iter().find_map(|w| w.downcast::<crate::shell::Shell>()) {
+        let _ = window.update(cx, |_, window, _| window.activate_window());
+    }
+}
+
 /// macOS has Shepherd's notifications turned off: none show up, and it will not ask again.
 pub struct Denied;
 

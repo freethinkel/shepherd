@@ -330,7 +330,7 @@ impl Shell {
                         }
                     });
                     if !approve {
-                        cx.activate(true);
+                        crate::notify::bring_forward(cx);
                     }
                 });
                 cx.observe_window_bounds(window, |s: &mut Shell, window, cx| {
