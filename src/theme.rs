@@ -78,6 +78,8 @@ pub struct Theme {
     pub terminal_line_height: f32,
     /// How agent status is drawn (the settings' Status icons).
     pub status_icons: StatusIcons,
+    /// The window lets the desktop through (the settings' Translucent window): its fill is `glass`.
+    pub translucent: bool,
     pub terminal: TerminalPalette,
 }
 
@@ -264,6 +266,7 @@ impl Theme {
             terminal_font_size: font.size,
             terminal_line_height: font.line_height,
             status_icons: StatusIcons::Dots,
+            translucent: cfg!(target_os = "macos"),
             terminal: TerminalPalette {
                 background: color(v.terminal.background),
                 foreground: color(v.terminal.foreground),
@@ -286,10 +289,10 @@ impl Theme {
         }
     }
 
-    /// The window's own fill, translucent over the blurred desktop (Collie's `glass`). Opaque off macOS, where the
-    /// window gets no blur: GNOME shows the windows behind it as they are.
+    /// The window's own fill, translucent over the blurred desktop (Collie's `glass`) when the window is
+    /// translucent; else opaque, as a desktop that does not blur (GNOME) would show the windows behind as they are.
     pub fn glass(&self) -> Hsla {
-        if cfg!(target_os = "macos") { self.surface.opacity(0.80) } else { self.surface }
+        if self.translucent { self.surface.opacity(0.80) } else { self.surface }
     }
 }
 

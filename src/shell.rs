@@ -291,7 +291,7 @@ impl Shell {
                 traffic_light_position: Some(point(px(14.), px(14.))),
             }),
             app_owns_titlebar_drag: true,
-            window_background: if cfg!(target_os = "macos") { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque },
+            window_background: window_background(SettingsGlobal::of(cx).settings.translucent_window),
             app_id: Some("dev.freethinkel.shepherd".into()),
             // off macOS the titlebar is Shepherd's own, buttons and all, not the desktop's bar over it
             window_decorations: (!cfg!(target_os = "macos")).then_some(gpui::WindowDecorations::Client),
@@ -1056,6 +1056,11 @@ fn remember_shown(recent: &mut Vec<String>, shown: &[PaneFrame], live: impl Fn(&
     }
     recent.retain(|id| live(id));
     recent.truncate(KEPT_PANES);
+}
+
+/// The window's background for the Translucent window setting: blurred where the system or compositor blurs.
+pub(crate) fn window_background(translucent: bool) -> WindowBackgroundAppearance {
+    if translucent { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque }
 }
 
 /// AppKit lays the traffic lights out again while the window is inactive (a screen recorder takes focus), and gpui
