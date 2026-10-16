@@ -345,7 +345,7 @@ impl Shell {
                 .detach();
                 // A click on a notification brings its agent's tab up; Approve answers the agent and leaves Shepherd
                 // where it is.
-                let this = cx.entity().downgrade();
+                let (this, handle) = (cx.entity().downgrade(), window.window_handle());
                 cx.on_system_notification_response(move |response, cx| {
                     let approve = response.action_id.as_deref() == Some(crate::notify::APPROVE);
                     let _ = this.update(cx, |s, cx| {
@@ -358,7 +358,14 @@ impl Shell {
                         }
                     });
                     if !approve {
-                        cx.activate(true);
+                        // gpui's app-level activate does nothing on Linux and the BSDs: the window requests activation
+                        // itself (xdg-activation on Wayland, _NET_ACTIVE_WINDOW on X11), which the compositor may grant
+                        // or answer by marking the window for attention
+                        if cfg!(any(target_os = "macos", windows)) {
+                            cx.activate(true);
+                        } else {
+                            let _ = handle.update(cx, |_, window, _| window.activate_window());
+                        }
                     }
                 });
                 cx.observe_window_bounds(window, |s: &mut Shell, window, cx| {
