@@ -1427,6 +1427,9 @@ impl Render for PaneTerminal {
         if let Some(why) = self.ended.clone() {
             let takeover = needs_takeover(&why);
             return div()
+                // keeps the pane focused, so the app's shortcuts still reach their handlers
+                .track_focus(&self.focus)
+                .on_mouse_down(MouseButton::Left, cx.listener(|pane, _, window, cx| window.focus(&pane.focus, cx)))
                 .size_full()
                 .flex()
                 .flex_col()
