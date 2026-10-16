@@ -76,6 +76,10 @@ pub struct Settings {
     /// The window lets the desktop show through: blurred on macOS, and elsewhere as the compositor does it. On by
     /// default on macOS only, where it is how Shepherd has always looked.
     pub translucent_window: bool,
+    /// Off macOS and Windows: the window's own minimize, maximize and close at the titlebar's right end. Off (when
+    /// the window manager provides its own controls or tiles windows), the tabs take their room; the edges still
+    /// resize the window, and a right-click on the titlebar opens the window manager's menu.
+    pub window_buttons: bool,
     /// The workspaces sidebar is shown; `⌘B` hides it.
     pub sidebar_open: bool,
     /// Worktree groups folded in the sidebar, by workspace id.
@@ -245,6 +249,7 @@ impl Default for Settings {
             copy_on_select: true,
             secure_input: false,
             translucent_window: cfg!(target_os = "macos"),
+            window_buttons: true,
             sidebar_open: true,
             folded: Vec::new(),
             window: None,
@@ -403,6 +408,13 @@ mod tests {
         let on: Settings = serde_json::from_str(r#"{"translucent_window": true}"#).unwrap();
         let theme = on.theme(WindowAppearance::Dark);
         assert!(theme.glass().a < theme.surface.a, "the fill lets the desktop through");
+    }
+
+    #[test]
+    fn the_window_buttons_show_by_default() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert!(s.window_buttons);
+        assert!(!serde_json::from_str::<Settings>(r#"{"window_buttons": false}"#).unwrap().window_buttons);
     }
 
     fn tmp() -> (tempfile::TempDir, std::path::PathBuf) {

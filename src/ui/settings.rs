@@ -1128,7 +1128,21 @@ impl Render for SettingsView {
                                 .child(toggle(&theme, "translucent-window", settings.translucent_window).on_click(cx.listener(
                                     |_, _: &ClickEvent, _, cx| update(cx, |s| s.translucent_window = !s.translucent_window),
                                 ))),
-                        ),
+                        )
+                        // Shepherd draws them on Linux and the BSDs; macOS and Windows have their own
+                        .when(!cfg!(any(target_os = "macos", windows)), |el| {
+                            el.child(
+                                card_row(&theme, false)
+                                    .child(row_text(
+                                        &theme,
+                                        "Window buttons",
+                                        "Minimize, maximize and close at the titlebar's right end. Hide them when your window manager provides its own controls or tiles windows.",
+                                    ))
+                                    .child(toggle(&theme, "window-buttons", settings.window_buttons).on_click(cx.listener(
+                                        |_, _: &ClickEvent, _, cx| update(cx, |s| s.window_buttons = !s.window_buttons),
+                                    ))),
+                            )
+                        }),
                     )
             }
             Section::Notifications => {
