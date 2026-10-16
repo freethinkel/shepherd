@@ -29,9 +29,14 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
             rt.spawn(async move { c.subscribe(EVENT_TYPES, &panes).await })
         };
         let mut rx = match sub.await.expect("tokio") {
-            Ok(rx) => rx,
+            Ok(rx) => {
+                check_protocol(&this, &rt, &client, cx).await;
+                rx
+            }
             Err(err) => {
                 let no_server = crate::herdr::no_server(&err);
+                // a server that answers but won't subscribe may speak another protocol: its ping says which
+                let outdated = if no_server { None } else { check_protocol(&this, &rt, &client, cx).await };
                 if no_server && Instant::now() >= next_start {
                     match crate::herdr::start_server() {
                         Ok(()) => (spawned, start_error, next_start) = (Some(Instant::now()), None, Instant::now() + Duration::from_secs(10)),
@@ -42,6 +47,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                     }
                 }
                 let message = match (&start_error, spawned) {
+                    _ if outdated.is_some() => outdated.unwrap_or_default(),
                     (Some(e), _) if no_server => e.clone(),
                     (None, Some(at)) if no_server && at.elapsed() < Duration::from_secs(10) => "Starting herdr…".into(),
                     _ => format!("{err:#}"),
@@ -125,6 +131,28 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
             }
         }
     }
+}
+
+/// Asks the server which protocol it speaks, and returns the complaint when it is not Shepherd's. A change of
+/// verdict is told once, as a toast; the verdict stays in [`crate::herdr::OutdatedServer`] for the panes whose
+/// connection it breaks. No answer to the ping changes nothing.
+async fn check_protocol(this: &gpui::WeakEntity<Shell>, rt: &tokio::runtime::Handle, client: &Client, cx: &mut gpui::AsyncApp) -> Option<String> {
+    let c = client.clone();
+    let Ok(Ok(pong)) = rt.spawn(async move { c.call("ping", json!({})).await }).await else { return None };
+    let mismatch = crate::herdr::protocol_mismatch(&pong);
+    let told = mismatch.clone();
+    let _ = this.update(cx, |_, cx| {
+        let before = cx.try_global::<crate::herdr::OutdatedServer>().and_then(|o| o.0.clone());
+        if before == mismatch {
+            return;
+        }
+        if let Some(why) = &mismatch {
+            crate::ui::toast::error(cx, why.clone());
+        }
+        cx.set_global(crate::herdr::OutdatedServer(mismatch));
+        cx.refresh_windows();
+    });
+    told
 }
 
 impl Shell {
