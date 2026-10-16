@@ -2,7 +2,7 @@
 use super::*;
 
 /// Subscribe, then snapshot; every event (coalesced) triggers another snapshot. Reconnects forever.
-pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, client: Client, cx: &mut gpui::AsyncApp) {
+pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, client: Client, resync: std::sync::Arc<tokio::sync::Notify>, cx: &mut gpui::AsyncApp) {
     // When nothing listens on the socket, Shepherd starts herdr's server itself: again after 10 s if it never came
     // up, after a minute if it could not be run at all.
     let (mut next_start, mut spawned, mut start_error) = (Instant::now(), None::<Instant>, None::<String>);
@@ -101,7 +101,11 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                 break; // panes came or went: follow the new set's agents
             }
             // ponytail: refetch the whole snapshot per event burst; incremental apply only if this shows up in profiles.
-            let Some(event) = rx.recv().await else {
+            let event = tokio::select! {
+                event = rx.recv() => event,
+                _ = resync.notified() => Some(serde_json::Value::Null),
+            };
+            let Some(event) = event else {
                 break; // server gone or events_lost: resubscribe
             };
             cx.background_executor().timer(Duration::from_millis(30)).await;

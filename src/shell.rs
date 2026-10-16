@@ -198,6 +198,8 @@ pub struct Shell {
     since: crate::model::Since,
     /// The loop that keeps the window in step with herdr; replacing it (a switch of session) stops the last one.
     sync: gpui::Task<()>,
+    /// Wakes the sync loop for a fresh snapshot without an event: a command named a tab or pane herdr no longer has.
+    resync: std::sync::Arc<tokio::sync::Notify>,
     /// herdr's popup over the panes, and the client shell that hears of it.
     floating: Option<floating::Floating>,
     popup_watch: gpui::Task<()>,
@@ -473,6 +475,7 @@ impl Shell {
                     resize_hold: gpui::Task::ready(()),
                     since: Default::default(),
                     sync: gpui::Task::ready(()),
+                    resync: Default::default(),
                     floating: None,
                     popup_watch: gpui::Task::ready(()),
                     popup_surface: None,
@@ -540,16 +543,16 @@ impl Shell {
 
     /// Follows herdr over `self.client` from scratch: its snapshot and the subscription that refreshes it.
     fn connect(&mut self, cx: &mut Context<Self>) {
-        let (client, rt) = (self.client.clone(), self.rt.clone());
+        let (client, rt, resync) = (self.client.clone(), self.rt.clone(), self.resync.clone());
         if crate::mock::dir().is_some() {
             // the fixture: its one snapshot (sync_loop), no popups, no pane queries
-            self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await);
+            self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, resync, cx).await);
             self.floating = None;
             self.popup_watch = gpui::Task::ready(());
             return;
         }
         cx.set_global(PaneQueries(client.clone(), rt.clone()));
-        self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await);
+        self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, resync, cx).await);
         self.floating = None;
         self.popup_watch = if crate::herdr::client_shell::enabled() {
             cx.spawn(async move |this, cx| client_shell::shell_loop(this, cx).await)
@@ -707,6 +710,8 @@ impl Shell {
         }
         self.send_then(command, cx, |shell, result, cx| match result {
             Ok(value) => then(shell, &value, cx),
+            // the window was behind herdr (a tab closed elsewhere, a double click): catch up instead of complaining
+            Err(err) if stale(&err) => shell.resync.notify_one(),
             Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),
         });
     }
@@ -1017,6 +1022,11 @@ impl Shell {
                 }
             })
     }
+}
+
+/// herdr's answer to a command on something it no longer has (`tab_not_found: …`, `pane_not_found: …`).
+fn stale(err: &anyhow::Error) -> bool {
+    err.to_string().split(':').next().is_some_and(|code| code.ends_with("_not_found"))
 }
 
 /// Keep views of the `kept` panes; focus is forgotten with its view so a recreated one gets keyboard focus again.
@@ -1657,9 +1667,17 @@ impl Render for Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::{KEPT_PANES, prune, remember_shown};
+    use super::{KEPT_PANES, prune, remember_shown, stale};
     use crate::model::{Frac, PaneFrame};
     use std::collections::HashMap;
+
+    #[test]
+    fn a_vanished_target_is_stale_other_errors_are_not() {
+        assert!(stale(&anyhow::anyhow!("tab_not_found: tab wAB:t1P not found")));
+        assert!(stale(&anyhow::anyhow!("pane_not_found: pane  not found")));
+        assert!(!stale(&anyhow::anyhow!("herdr is not reachable at /tmp/herdr.sock")));
+        assert!(!stale(&anyhow::anyhow!("invalid_params: not_found in a message")));
+    }
 
     fn shown(ids: &[&str]) -> Vec<PaneFrame> {
         let frame = Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
