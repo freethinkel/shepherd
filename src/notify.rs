@@ -48,13 +48,58 @@ pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool, a
             actions: approve.then(|| SystemNotificationAction { id: APPROVE.into(), label: "Approve".into() }).into_iter().collect(),
         });
     }
-    // ponytail: macOS only; on Linux the notification daemon plays its own sound, if any
     #[cfg(target_os = "macos")]
     if sound {
         run(std::process::Command::new("afplay").arg("/System/Library/Sounds/Glass.aiff"));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    if sound {
+        play_theme_sound();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = sound;
+}
+
+/// The freedesktop sound theme's `complete`, the sound of a finished task. gpui posts the notification without
+/// hints, so the notification server can't be asked to play it (`sound-name`): it plays here, through libcanberra's
+/// `canberra-gtk-play` (which follows the user's sound theme), else, when that isn't installed, the theme's own file
+/// through `paplay` (PulseAudio, or PipeWire's stand-in for it). With neither, nothing plays. A thread starts the
+/// player and waits for it, so it is reaped.
+#[cfg(target_os = "linux")]
+fn play_theme_sound() {
+    use std::process::{Command, Stdio};
+    let home = std::env::home_dir();
+    let dirs = data_dirs(std::env::var_os("XDG_DATA_HOME").as_deref(), std::env::var_os("XDG_DATA_DIRS").as_deref(), home.as_deref());
+    let file = theme_sound(&dirs, "complete");
+    std::thread::spawn(move || {
+        let quiet = |c: &mut Command| -> std::io::Result<std::process::Child> { c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() };
+        let child = match quiet(Command::new("canberra-gtk-play").args(["--id", "complete", "--description", "Shepherd"])) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match file {
+                Some(file) => quiet(Command::new("paplay").arg(file)),
+                None => return,
+            },
+            started => started,
+        };
+        if let Ok(mut child) = child {
+            let _ = child.wait();
+        }
+    });
+}
+
+/// The folders XDG keeps data in, the user's first: `$XDG_DATA_HOME` (else `~/.local/share`), then
+/// `$XDG_DATA_DIRS` (else `/usr/local/share` and `/usr/share`). Relative entries are not paths XDG allows: skipped.
+#[cfg(target_os = "linux")]
+fn data_dirs(data_home: Option<&std::ffi::OsStr>, data_dirs: Option<&std::ffi::OsStr>, home: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let user = data_home.filter(|d| !d.is_empty()).map(PathBuf::from).filter(|d| d.is_absolute()).or_else(|| home.map(|h| h.join(".local/share")));
+    let shared = data_dirs.filter(|d| !d.is_empty()).unwrap_or("/usr/local/share:/usr/share".as_ref());
+    user.into_iter().chain(std::env::split_paths(shared).filter(|d| d.is_absolute())).collect()
+}
+
+/// The freedesktop theme's file for the sound `name`, in the first data folder that has it.
+#[cfg(target_os = "linux")]
+fn theme_sound(dirs: &[std::path::PathBuf], name: &str) -> Option<std::path::PathBuf> {
+    dirs.iter().map(|d| d.join(format!("sounds/freedesktop/stereo/{name}.oga"))).find(|p| p.is_file())
 }
 
 /// Whether a notification can be posted at all.
@@ -123,7 +168,7 @@ pub fn open_system_settings() {
 #[cfg(not(target_os = "macos"))]
 pub fn open_system_settings() {}
 
-/// Runs the command off the main thread and reaps it, so no zombie is left behind.
+/// Starts the command and waits for it on a thread of its own, so it is reaped and no zombie is left behind.
 #[cfg(target_os = "macos")]
 fn run(command: &mut std::process::Command) {
     if let Ok(mut child) = command.spawn() {
@@ -169,6 +214,29 @@ mod tests {
 
     fn ids(old: &Snapshot, new: &Snapshot) -> Vec<String> {
         arrivals(old, new).map(|p| p.pane_id.clone()).collect()
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_data_folders_are_the_users_then_the_shared_ones_absolute_only() {
+        use std::path::{Path, PathBuf};
+        let home = Some(Path::new("/home/u"));
+        let dirs = |h: Option<&str>, d: Option<&str>| data_dirs(h.map(std::ffi::OsStr::new), d.map(std::ffi::OsStr::new), home);
+        let p = |s: &str| PathBuf::from(s);
+        assert_eq!(dirs(None, None), [p("/home/u/.local/share"), p("/usr/local/share"), p("/usr/share")]);
+        assert_eq!(dirs(Some("/data"), Some("/opt/share:rel:/usr/share")), [p("/data"), p("/opt/share"), p("/usr/share")]);
+        assert_eq!(dirs(Some("rel"), Some("")), [p("/home/u/.local/share"), p("/usr/local/share"), p("/usr/share")]);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_theme_sound_is_the_first_folders_that_has_it() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let sound = b.path().join("sounds/freedesktop/stereo/complete.oga");
+        std::fs::create_dir_all(sound.parent().unwrap()).unwrap();
+        std::fs::write(&sound, b"").unwrap();
+        assert_eq!(theme_sound(&[a.path().into(), b.path().into()], "complete"), Some(sound));
+        assert_eq!(theme_sound(&[a.path().into()], "complete"), None);
     }
 
     #[test]
