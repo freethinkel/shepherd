@@ -80,3 +80,27 @@ mesa-vulkan-drivers = "*"
 # gpui is slow unoptimized (Zeron and Collie do the same).
 [profile.dev.package."*"]
 opt-level = 2
+
+# freethinkel/zui@continuous-corners: three Metal drawables (with zui's two, a live window resize blocks in
+# next_drawable and stutters as it starts) and Apple's continuous corners. Every zui crate is patched, so gpui-base
+# and Shepherd share one gpui.
+[patch."https://github.com/zeronsh/zui"]
+collections = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+derive_refineable = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+gpui = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+gpui_linux = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+gpui_macos = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+gpui_macros = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+gpui_platform = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+gpui_shared_string = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+gpui_util = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+gpui_web = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+gpui_wgpu = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+gpui_windows = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+http_client = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+media = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+perf = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+refineable = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+scheduler = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+sum_tree = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
+util_macros = { git = "https://github.com/freethinkel/zui", rev = "216b6c51d8d0dea0fbd62e5eceb17fd1d30707a0" }
