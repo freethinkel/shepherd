@@ -411,6 +411,8 @@ impl PaneTerminal {
         let sized_by_herdr = self.session.as_ref().is_some_and(Session::is_shell);
         let resized = !sized_by_herdr && (self.emulator.cols() != cols as usize || self.emulator.rows() != rows as usize);
         let held = cx.try_global::<GridHold>().is_some_and(|hold| hold.0);
+        // the scrollbar follows the pane every frame, not the grid it held back
+        self.scrollbar.0.bounds.set(geometry.bounds);
         if !first && resized && held && self.resized_at.is_some_and(|at| at.elapsed() < HELD_RESIZE) {
             return; // a drag is under way and the grid just reflowed: the next frame (or the drop) catches up
         }

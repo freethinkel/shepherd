@@ -192,7 +192,12 @@ impl Emulator {
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         // ponytail: no pixel size; only CSI 14/16 t size reports would want it.
+        // No reflow: herdr repaints the whole grid at the new size, and until then a reflow shows its frame at the
+        // old width rewrapped (Ghostty reflows only under wraparound).
+        let wrap = self.term.mode(Mode::WRAPAROUND).unwrap_or(true);
+        let _ = self.term.set_mode(Mode::WRAPAROUND, false);
         let _ = self.term.resize(cols.max(2), rows.max(1), 0, 0);
+        let _ = self.term.set_mode(Mode::WRAPAROUND, wrap);
     }
 
     pub fn cols(&self) -> usize {
@@ -674,6 +679,16 @@ mod tests {
         assert_eq!(e.rows(), 3);
         assert_eq!(e.row_text(0), "keepme");
         assert_eq!(e.row_text(1), "second");
+    }
+
+    #[test]
+    fn resize_clips_rows_instead_of_rewrapping_them() {
+        // herdr's frames place every row with CUP; its repaint at the new size follows the resize
+        let mut e = emu(6, 3);
+        e.feed(b"\x1b[1;1Habcdef\x1b[2;1Hgh");
+        e.resize(4, 3);
+        assert_eq!((e.row_text(0).as_str(), e.row_text(1).as_str()), ("abcd", "gh"));
+        assert!(e.term.mode(Mode::WRAPAROUND).unwrap());
     }
 
     #[test]

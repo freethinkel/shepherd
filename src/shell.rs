@@ -192,6 +192,8 @@ pub struct Shell {
     /// The window's frame not saved yet, and the save it waits for: half a second after the last move, closing or quitting.
     frame: Option<WindowFrame>,
     frame_save: gpui::Task<()>,
+    /// Lets the panes' grids go 120 ms after the window last changed size (`GridHold` while it does).
+    resize_hold: gpui::Task<()>,
     /// Since when each agent has had its status: how long the waiting ones have waited.
     since: crate::model::Since,
     /// The loop that keeps the window in step with herdr; replacing it (a switch of session) stops the last one.
@@ -364,6 +366,18 @@ impl Shell {
                         cx.background_executor().timer(Duration::from_millis(500)).await;
                         let _ = this.update(cx, |s, cx| s.save_frame(cx));
                     });
+                    // a live resize reflows the panes as a divider drag does, not one SIGWINCH per frame
+                    cx.set_global(GridHold(true));
+                    s.resize_hold = cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_millis(120)).await;
+                        let _ = this.update(cx, |s, cx| {
+                            // a drag or the sidebar's fold owns the hold now
+                            if s.divider.is_none() && !s.sidebar_drag && !s.review_drag && s.sidebar_motion.is_none() {
+                                cx.set_global(GridHold(false));
+                                cx.refresh_windows();
+                            }
+                        });
+                    });
                 })
                 .detach();
                 cx.on_app_quit(|s: &mut Shell, cx| {
@@ -456,6 +470,7 @@ impl Shell {
                     badge: 0,
                     frame: None,
                     frame_save: gpui::Task::ready(()),
+                    resize_hold: gpui::Task::ready(()),
                     since: Default::default(),
                     sync: gpui::Task::ready(()),
                     floating: None,
