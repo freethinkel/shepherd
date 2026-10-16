@@ -131,6 +131,9 @@ pub(crate) fn fetching<T: 'static>(key: &str, cx: &mut App) -> bool {
 
 /// A CLI by name, found in Homebrew's folders first: an app opened from Finder gets launchd's PATH, without them.
 pub(crate) fn tool(name: &str) -> String {
+    if let Some(path) = crate::mock::tool(name) {
+        return path;
+    }
     ["/opt/homebrew/bin", "/usr/local/bin"].into_iter().map(|d| format!("{d}/{name}")).find(|p| Path::new(p).is_file()).unwrap_or(name.into())
 }
 

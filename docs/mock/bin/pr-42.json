@@ -1,0 +1,23 @@
+{
+  "number": 42,
+  "title": "Review panel: the branch's PR with its checks and their logs",
+  "state": "OPEN",
+  "isDraft": false,
+  "url": "https://github.com/freethinkel/shepherd/pull/42",
+  "author": {"login": "freethinkel"},
+  "body": "`⌥⌘B` opens the review panel: the shown branch's PR (gh) or MR (glab) with its description, checks or pipeline jobs and their logs.\n\n- Checks poll while any of them runs\n- A failed job's log tails in the panel; **Retry** reruns its run's failed jobs\n- Works for SSH machines too, through `-R`\n\nCloses #37.",
+  "baseRefName": "main",
+  "mergeable": "MERGEABLE",
+  "reviewDecision": "APPROVED",
+  "latestReviews": [{"author": {"login": "shepherd-bot"}, "state": "APPROVED"}],
+  "reviewRequests": [],
+  "autoMergeRequest": null,
+  "statusCheckRollup": [
+    {"__typename": "CheckRun", "name": "lint", "workflowName": "ci", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-10-16T08:30:12Z", "completedAt": "2026-10-16T08:33:48Z", "detailsUrl": "https://github.com/freethinkel/shepherd/actions/runs/38758693539/job/1"},
+    {"__typename": "CheckRun", "name": "test", "workflowName": "ci", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-10-16T08:30:12Z", "completedAt": "2026-10-16T08:36:05Z", "detailsUrl": "https://github.com/freethinkel/shepherd/actions/runs/38758693539/job/2"},
+    {"__typename": "CheckRun", "name": "macos", "workflowName": "release", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-10-16T08:30:30Z", "completedAt": "2026-10-16T08:48:02Z", "detailsUrl": "https://github.com/freethinkel/shepherd/actions/runs/38758693539/job/3"},
+    {"__typename": "CheckRun", "name": "linux (x86_64)", "workflowName": "release", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-10-16T08:30:30Z", "completedAt": "2026-10-16T08:41:17Z", "detailsUrl": "https://github.com/freethinkel/shepherd/actions/runs/38758693539/job/4"},
+    {"__typename": "CheckRun", "name": "linux (aarch64)", "workflowName": "release", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-10-16T08:30:30Z", "completedAt": "2026-10-16T08:43:51Z", "detailsUrl": "https://github.com/freethinkel/shepherd/actions/runs/38758693539/job/5"},
+    {"__typename": "CheckRun", "name": "windows (x86_64)", "workflowName": "release", "status": "IN_PROGRESS", "conclusion": null, "startedAt": "@AGO@", "completedAt": null, "detailsUrl": "https://github.com/freethinkel/shepherd/actions/runs/38758693539/job/6"}
+  ]
+}

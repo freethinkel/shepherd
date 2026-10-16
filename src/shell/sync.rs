@@ -6,6 +6,21 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
     // When nothing listens on the socket, Shepherd starts herdr's server itself: again after 10 s if it never came
     // up, after a minute if it could not be run at all.
     let (mut next_start, mut spawned, mut start_error) = (Instant::now(), None::<Instant>, None::<String>);
+    // a fixture (`SHEPHERD_MOCK`) is the one snapshot there is
+    if let Some((snapshot, waited)) = crate::mock::snapshot() {
+        let _ = this.update(cx, |s, cx| {
+            let now = Instant::now();
+            snapshot.track(&mut s.since, now);
+            for (id, secs) in waited {
+                if let Some((_, at)) = s.since.get_mut(&id) {
+                    *at = now.checked_sub(Duration::from_secs(secs)).unwrap_or(now);
+                }
+            }
+            (s.snapshot, s.error, s.connecting) = (Some(snapshot), None, None);
+            cx.notify();
+        });
+        return;
+    }
     // the panes whose agent status the subscription follows: herdr only sends that per pane
     let mut watched: Vec<String> = Vec::new();
     loop {

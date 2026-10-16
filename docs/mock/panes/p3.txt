@@ -1,0 +1,11 @@
+\e[2m❯\e[0m git log --oneline -6
+\e[33m8f2c1a0\e[0m review: retry failed jobs
+\e[33m3b9e7d2\e[0m review: tail a failed job's log
+\e[33mc41d55e\e[0m review: checks by workflow
+\e[33m07e9b13\e[0m review: the branch's PR
+\e[33m9a0f4c8\e[0m ui: check icons and spinner
+\e[33m2d6e8a1\e[0m sidebar: fold worktree groups
+\e[2m❯\e[0m git push -u origin review-panel
+\e[2mbranch 'review-panel' set up to track\e[0m
+\e[2m'origin/review-panel'.\e[0m
+\e[2m❯\e[0m 

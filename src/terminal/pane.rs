@@ -332,6 +332,9 @@ impl PaneTerminal {
     /// Connects off the main thread: herdr's handshake takes tens of milliseconds, and attaching happens while a
     /// frame is laid out (a tab switch attaches every pane it shows).
     fn attach(&mut self, takeover: bool, cx: &mut Context<Self>) {
+        if crate::mock::pane_text(&self.pane_id).is_some() {
+            return; // the fixture's text is laid out by `on_grid_metrics`; there is no herdr to attach to
+        }
         // herdr's popup comes with the client shell's surface, when there is one
         if let Some(ShellConnection(shell)) = cx.try_global::<ShellConnection>().filter(|_| self.takes_over) {
             let (session, rx) = Session::over_popup(shell.clone(), &self.pane_id);
@@ -417,6 +420,17 @@ impl PaneTerminal {
             return; // a drag is under way and the grid just reflowed: the next frame (or the drop) catches up
         }
         self.geometry = Some(geometry);
+        // the fixture's text (`SHEPHERD_MOCK`), laid out afresh at every size: there is no herdr to redraw it
+        if let Some(text) = crate::mock::pane_text(&self.pane_id) {
+            if first || resized {
+                self.emulator = Emulator::new(cols, rows);
+                self.emulator.feed(&text);
+                // ponytail: an Instant a day ahead never comes due, so no loader covers the fixture
+                self.attaching = std::time::Instant::now() + std::time::Duration::from_secs(86_400);
+                cx.notify();
+            }
+            return;
+        }
         if resized {
             self.leave_history(); // the copy is wrapped at the old width
             self.emulator.resize(cols, rows);

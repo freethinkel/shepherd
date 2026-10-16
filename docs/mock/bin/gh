@@ -1,0 +1,13 @@
+#!/bin/sh
+# The fixture's gh (SHEPHERD_MOCK): the review-panel branch has PR #42, the others none; the viewer is freethinkel.
+# @NOW@ and @AGO@ in pr-42.json become the current time and five minutes before, so the running check reads right.
+dir=$(dirname "$0")
+case "$1 $2" in
+  "api user") echo freethinkel ;;
+  "pr view")
+    case "$3" in
+      review-panel) sed -e "s/@NOW@/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" -e "s/@AGO@/$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ)/" "$dir/pr-42.json" ;;
+      *) echo "no pull requests found for branch \"$3\"" >&2; exit 1 ;;
+    esac ;;
+  *) exit 1 ;;
+esac

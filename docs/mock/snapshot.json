@@ -1,0 +1,573 @@
+{
+ "snapshot": {
+  "focused_workspace_id": "w3",
+  "focused_tab_id": "w3:t1",
+  "focused_pane_id": "p1",
+  "workspaces": [
+   {
+    "workspace_id": "w1",
+    "label": "shepherd",
+    "number": 1,
+    "active_tab_id": "w1:t1",
+    "agent_status": "working",
+    "worktree": {
+     "repo_key": "shepherd",
+     "is_linked_worktree": false,
+     "checkout_path": "$HOME/.cache/shepherd-mock/Developer/pet/shepherd"
+    }
+   },
+   {
+    "workspace_id": "w2",
+    "label": "sidebar-polish",
+    "number": 2,
+    "active_tab_id": "w2:t1",
+    "agent_status": "blocked",
+    "worktree": {
+     "repo_key": "shepherd",
+     "is_linked_worktree": true,
+     "checkout_path": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/sidebar-polish"
+    }
+   },
+   {
+    "workspace_id": "w3",
+    "label": "review-panel",
+    "number": 3,
+    "active_tab_id": "w3:t1",
+    "agent_status": "done",
+    "worktree": {
+     "repo_key": "shepherd",
+     "is_linked_worktree": true,
+     "checkout_path": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel"
+    }
+   },
+   {
+    "workspace_id": "w4",
+    "label": "collie",
+    "number": 4,
+    "active_tab_id": "w4:t1",
+    "agent_status": "working",
+    "worktree": {
+     "repo_key": "collie",
+     "is_linked_worktree": false,
+     "checkout_path": "$HOME/.cache/shepherd-mock/Developer/pet/collie"
+    }
+   },
+   {
+    "workspace_id": "w5",
+    "label": "voice-local-models",
+    "number": 5,
+    "active_tab_id": "w5:t1",
+    "agent_status": "working",
+    "worktree": {
+     "repo_key": "collie",
+     "is_linked_worktree": true,
+     "checkout_path": "$HOME/.cache/shepherd-mock/Developer/worktrees/collie/voice-local-models"
+    }
+   },
+   {
+    "workspace_id": "w6",
+    "label": "herdr",
+    "number": 6,
+    "active_tab_id": "w6:t1",
+    "agent_status": "blocked",
+    "worktree": {
+     "repo_key": "herdr",
+     "is_linked_worktree": false,
+     "checkout_path": "$HOME/.cache/shepherd-mock/Developer/pet/herdr"
+    }
+   },
+   {
+    "workspace_id": "w7",
+    "label": "kuzyo",
+    "number": 7,
+    "active_tab_id": "w7:t1",
+    "agent_status": "idle",
+    "worktree": null
+   }
+  ],
+  "tabs": [
+   {
+    "tab_id": "w1:t1",
+    "workspace_id": "w1",
+    "label": "claude",
+    "number": 1,
+    "agent_status": "working"
+   },
+   {
+    "tab_id": "w2:t1",
+    "workspace_id": "w2",
+    "label": "claude",
+    "number": 1,
+    "agent_status": "blocked"
+   },
+   {
+    "tab_id": "w3:t1",
+    "workspace_id": "w3",
+    "label": "claude",
+    "number": 1,
+    "agent_status": "done"
+   },
+   {
+    "tab_id": "w3:t2",
+    "workspace_id": "w3",
+    "label": "tests",
+    "number": 2,
+    "agent_status": "idle"
+   },
+   {
+    "tab_id": "w3:t3",
+    "workspace_id": "w3",
+    "label": "zsh",
+    "number": 3,
+    "agent_status": "idle"
+   },
+   {
+    "tab_id": "w4:t1",
+    "workspace_id": "w4",
+    "label": "opencode",
+    "number": 1,
+    "agent_status": "working"
+   },
+   {
+    "tab_id": "w5:t1",
+    "workspace_id": "w5",
+    "label": "claude",
+    "number": 1,
+    "agent_status": "working"
+   },
+   {
+    "tab_id": "w6:t1",
+    "workspace_id": "w6",
+    "label": "codex",
+    "number": 1,
+    "agent_status": "blocked"
+   },
+   {
+    "tab_id": "w7:t1",
+    "workspace_id": "w7",
+    "label": "codex",
+    "number": 1,
+    "agent_status": "idle"
+   }
+  ],
+  "panes": [
+   {
+    "pane_id": "p1",
+    "tab_id": "w3:t1",
+    "workspace_id": "w3",
+    "terminal_id": "term-p1",
+    "agent_status": "done",
+    "agent": "claude",
+    "terminal_title_stripped": "Review panel: checks and their logs",
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel"
+   },
+   {
+    "pane_id": "p2",
+    "tab_id": "w3:t1",
+    "workspace_id": "w3",
+    "terminal_id": "term-p2",
+    "agent_status": "idle",
+    "agent": null,
+    "terminal_title_stripped": null,
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel"
+   },
+   {
+    "pane_id": "p3",
+    "tab_id": "w3:t1",
+    "workspace_id": "w3",
+    "terminal_id": "term-p3",
+    "agent_status": "idle",
+    "agent": null,
+    "terminal_title_stripped": null,
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel"
+   },
+   {
+    "pane_id": "p10",
+    "tab_id": "w3:t2",
+    "workspace_id": "w3",
+    "terminal_id": "term-p10",
+    "agent_status": "idle",
+    "agent": null,
+    "terminal_title_stripped": null,
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel"
+   },
+   {
+    "pane_id": "p11",
+    "tab_id": "w3:t3",
+    "workspace_id": "w3",
+    "terminal_id": "term-p11",
+    "agent_status": "idle",
+    "agent": null,
+    "terminal_title_stripped": null,
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/review-panel"
+   },
+   {
+    "pane_id": "p4",
+    "tab_id": "w2:t1",
+    "workspace_id": "w2",
+    "terminal_id": "term-p4",
+    "agent_status": "blocked",
+    "agent": "claude",
+    "terminal_title_stripped": "Allow edit to src/shell/sidebar.rs?",
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/sidebar-polish",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/shepherd/sidebar-polish"
+   },
+   {
+    "pane_id": "p5",
+    "tab_id": "w6:t1",
+    "workspace_id": "w6",
+    "terminal_id": "term-p5",
+    "agent_status": "blocked",
+    "agent": "codex",
+    "terminal_title_stripped": "Run cargo test in herdr?",
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/pet/herdr",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/pet/herdr"
+   },
+   {
+    "pane_id": "p6",
+    "tab_id": "w1:t1",
+    "workspace_id": "w1",
+    "terminal_id": "term-p6",
+    "agent_status": "working",
+    "agent": "claude",
+    "terminal_title_stripped": "Fold worktree groups with motion",
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/pet/shepherd",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/pet/shepherd"
+   },
+   {
+    "pane_id": "p7",
+    "tab_id": "w4:t1",
+    "workspace_id": "w4",
+    "terminal_id": "term-p7",
+    "agent_status": "working",
+    "agent": "opencode",
+    "terminal_title_stripped": "Port the switch component",
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/pet/collie",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/pet/collie"
+   },
+   {
+    "pane_id": "p8",
+    "tab_id": "w5:t1",
+    "workspace_id": "w5",
+    "terminal_id": "term-p8",
+    "agent_status": "working",
+    "agent": "claude",
+    "terminal_title_stripped": "Parakeet on Linux: load the model lazily",
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/collie/voice-local-models",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/worktrees/collie/voice-local-models"
+   },
+   {
+    "pane_id": "p9",
+    "tab_id": "w7:t1",
+    "workspace_id": "w7",
+    "terminal_id": "term-p9",
+    "agent_status": "idle",
+    "agent": "codex",
+    "terminal_title_stripped": "",
+    "cwd": "$HOME/.cache/shepherd-mock/Developer/infra/kuzyo",
+    "foreground_cwd": "$HOME/.cache/shepherd-mock/Developer/infra/kuzyo"
+   }
+  ],
+  "layouts": [
+   {
+    "tab_id": "w3:t1",
+    "zoomed": false,
+    "focused_pane_id": "p1",
+    "area": {
+     "x": 0,
+     "y": 0,
+     "width": 200,
+     "height": 50
+    },
+    "panes": [
+     {
+      "pane_id": "p1",
+      "focused": true,
+      "rect": {
+       "x": 0,
+       "y": 0,
+       "width": 118,
+       "height": 50
+      }
+     },
+     {
+      "pane_id": "p2",
+      "focused": false,
+      "rect": {
+       "x": 119,
+       "y": 0,
+       "width": 81,
+       "height": 24
+      }
+     },
+     {
+      "pane_id": "p3",
+      "focused": false,
+      "rect": {
+       "x": 119,
+       "y": 25,
+       "width": 81,
+       "height": 25
+      }
+     }
+    ],
+    "splits": [
+     {
+      "id": "split_1_root",
+      "direction": "right",
+      "ratio": 0.595,
+      "rect": {
+       "x": 0,
+       "y": 0,
+       "width": 200,
+       "height": 50
+      }
+     },
+     {
+      "id": "split_1_1",
+      "direction": "down",
+      "ratio": 0.5,
+      "rect": {
+       "x": 119,
+       "y": 0,
+       "width": 81,
+       "height": 50
+      }
+     }
+    ]
+   },
+   {
+    "tab_id": "w3:t2",
+    "zoomed": false,
+    "focused_pane_id": "p10",
+    "area": {
+     "x": 0,
+     "y": 0,
+     "width": 200,
+     "height": 50
+    },
+    "panes": [
+     {
+      "pane_id": "p10",
+      "focused": true,
+      "rect": {
+       "x": 0,
+       "y": 0,
+       "width": 200,
+       "height": 50
+      }
+     }
+    ],
+    "splits": []
+   },
+   {
+    "tab_id": "w3:t3",
+    "zoomed": false,
+    "focused_pane_id": "p11",
+    "area": {
+     "x": 0,
+     "y": 0,
+     "width": 200,
+     "height": 50
+    },
+    "panes": [
+     {
+      "pane_id": "p11",
+      "focused": true,
+      "rect": {
+       "x": 0,
+       "y": 0,
+       "width": 200,
+       "height": 50
+      }
+     }
+    ],
+    "splits": []
+   },
+   {
+    "tab_id": "w1:t1",
+    "zoomed": false,
+    "focused_pane_id": "p6",
+    "area": {
+     "x": 0,
+     "y": 0,
+     "width": 200,
+     "height": 50
+    },
+    "panes": [
+     {
+      "pane_id": "p6",
+      "focused": true,
+      "rect": {
+       "x": 0,
+       "y": 0,
+       "width": 200,
+       "height": 50
+      }
+     }
+    ],
+    "splits": []
+   },
+   {
+    "tab_id": "w2:t1",
+    "zoomed": false,
+    "focused_pane_id": "p4",
+    "area": {
+     "x": 0,
+     "y": 0,
+     "width": 200,
+     "height": 50
+    },
+    "panes": [
+     {
+      "pane_id": "p4",
+      "focused": true,
+      "rect": {
+       "x": 0,
+       "y": 0,
+       "width": 200,
+       "height": 50
+      }
+     }
+    ],
+    "splits": []
+   },
+   {
+    "tab_id": "w4:t1",
+    "zoomed": false,
+    "focused_pane_id": "p7",
+    "area": {
+     "x": 0,
+     "y": 0,
+     "width": 200,
+     "height": 50
+    },
+    "panes": [
+     {
+      "pane_id": "p7",
+      "focused": true,
+      "rect": {
+       "x": 0,
+       "y": 0,
+       "width": 200,
+       "height": 50
+      }
+     }
+    ],
+    "splits": []
+   },
+   {
+    "tab_id": "w5:t1",
+    "zoomed": false,
+    "focused_pane_id": "p8",
+    "area": {
+     "x": 0,
+     "y": 0,
+     "width": 200,
+     "height": 50
+    },
+    "panes": [
+     {
+      "pane_id": "p8",
+      "focused": true,
+      "rect": {
+       "x": 0,
+       "y": 0,
+       "width": 200,
+       "height": 50
+      }
+     }
+    ],
+    "splits": []
+   },
+   {
+    "tab_id": "w6:t1",
+    "zoomed": false,
+    "focused_pane_id": "p5",
+    "area": {
+     "x": 0,
+     "y": 0,
+     "width": 200,
+     "height": 50
+    },
+    "panes": [
+     {
+      "pane_id": "p5",
+      "focused": true,
+      "rect": {
+       "x": 0,
+       "y": 0,
+       "width": 200,
+       "height": 50
+      }
+     }
+    ],
+    "splits": []
+   },
+   {
+    "tab_id": "w7:t1",
+    "zoomed": false,
+    "focused_pane_id": "p9",
+    "area": {
+     "x": 0,
+     "y": 0,
+     "width": 200,
+     "height": 50
+    },
+    "panes": [
+     {
+      "pane_id": "p9",
+      "focused": true,
+      "rect": {
+       "x": 0,
+       "y": 0,
+       "width": 200,
+       "height": 50
+      }
+     }
+    ],
+    "splits": []
+   }
+  ],
+  "agents": [
+   {
+    "pane_id": "p4",
+    "state_change_seq": 12
+   },
+   {
+    "pane_id": "p5",
+    "state_change_seq": 11
+   },
+   {
+    "pane_id": "p1",
+    "state_change_seq": 10
+   },
+   {
+    "pane_id": "p6",
+    "state_change_seq": 9
+   },
+   {
+    "pane_id": "p7",
+    "state_change_seq": 8
+   },
+   {
+    "pane_id": "p8",
+    "state_change_seq": 7
+   },
+   {
+    "pane_id": "p9",
+    "state_change_seq": 1
+   }
+  ]
+ },
+ "waited": {
+  "p4": 260,
+  "p5": 75,
+  "p1": 720
+ }
+}

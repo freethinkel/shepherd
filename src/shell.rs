@@ -541,6 +541,13 @@ impl Shell {
     /// Follows herdr over `self.client` from scratch: its snapshot and the subscription that refreshes it.
     fn connect(&mut self, cx: &mut Context<Self>) {
         let (client, rt) = (self.client.clone(), self.rt.clone());
+        if crate::mock::dir().is_some() {
+            // the fixture: its one snapshot (sync_loop), no popups, no pane queries
+            self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await);
+            self.floating = None;
+            self.popup_watch = gpui::Task::ready(());
+            return;
+        }
         cx.set_global(PaneQueries(client.clone(), rt.clone()));
         self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, cx).await);
         self.floating = None;
@@ -695,6 +702,9 @@ impl Shell {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Shell, &serde_json::Value, &mut Context<Shell>) + 'static,
     ) {
+        if crate::mock::dir().is_some() {
+            return; // a fixture takes no commands
+        }
         self.send_then(command, cx, |shell, result, cx| match result {
             Ok(value) => then(shell, &value, cx),
             Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),

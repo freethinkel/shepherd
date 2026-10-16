@@ -1,0 +1,19 @@
+\e[2m❯\e[0m make test
+\e[1;32m   Compiling\e[0m shepherd v1.3.0
+\e[1;32m    Finished\e[0m test profile in 41.08s
+\e[1;32m     Running\e[0m unittests src/lib.rs
+
+running 212 tests
+test model::nests_worktrees ... \e[32mok\e[0m
+test model::sorts_by_status ... \e[32mok\e[0m
+test review::retries_failed_jobs ... \e[32mok\e[0m
+test review::tails_the_log ... \e[32mok\e[0m
+test review::reads_gitlab_jobs ... \e[32mok\e[0m
+test sync::follows_herdrs_focus ... \e[32mok\e[0m
+test pane::waits_for_its_size ... \e[32mok\e[0m
+test sprite::draws_box_drawing ... \e[32mok\e[0m
+\e[2m... 204 more\e[0m
+
+test result: \e[32mok\e[0m. 212 passed; 0 failed
+
+\e[2m❯\e[0m 

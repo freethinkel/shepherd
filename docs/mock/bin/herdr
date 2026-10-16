@@ -1,0 +1,7 @@
+#!/bin/sh
+# The fixture's herdr (SHEPHERD_HERDR): the sessions bar lists one session on the mock socket and one machine.
+case "$1 $2" in
+  "session list") printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s","default":true}]}\n' "$HERDR_SOCKET_PATH" ;;
+  "machine list") echo '[{"id":"m1","label":"kuzyo","target":"kuzyo","session":"default","enabled":true}]' ;;
+  *) exit 1 ;;
+esac

@@ -5,6 +5,7 @@ pub mod assets;
 pub mod bindings;
 pub mod commands;
 pub mod herdr;
+pub mod mock;
 pub mod model;
 pub mod notify;
 pub mod process;

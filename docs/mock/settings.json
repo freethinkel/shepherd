@@ -1,0 +1,18 @@
+{
+  "theme_light": "nord",
+  "theme_dark": "nord",
+  "appearance": "dark",
+  "font_size": 13,
+  "sidebar_width": 236,
+  "review_open": true,
+  "review_width": 320,
+  "compact_workspaces": true,
+  "compact_agents": true,
+  "status_icons": "dots",
+  "status_bar_show": {"usage": false, "tokens": false},
+  "notify_agents": false,
+  "notify_sound": false,
+  "dock_badge": false,
+  "place_looks": {"$HOME/.cache/shepherd-mock/xdg/herdr/herdr.sock": {"name": "home", "icon": "⌂"}, "machine:m1": {"icon": "☁"}},
+  "window": {"display": "$DISPLAY", "x": 120, "y": 90, "width": 1360, "height": 850}
+}
