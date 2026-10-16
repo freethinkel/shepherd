@@ -16,7 +16,7 @@ NOTARY_PROFILE ?= shepherd-notary
 NOTARY_KEYCHAIN ?=
 export SIGN_IDENTITY
 
-.PHONY: help build run test lint linux app app-debug open install universal dist notarize version ghostty-themes clean
+.PHONY: help build run test lint linux app app-debug open install universal dist notarize version ghostty-themes deploy-site clean
 
 help: ## This list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
@@ -98,6 +98,13 @@ ghostty-themes: ## Re-import Ghostty's themes into assets/themes/ghostty.conf
 	  echo "# Regenerate: make ghostty-themes"; \
 	  for f in "$(GHOSTTY_THEMES)"/*; do printf '\n[%s]\n' "$$(basename "$$f")"; \
 	    grep -E '^(palette|background|foreground|selection-background) =' "$$f"; done; } > assets/themes/ghostty.conf
+
+# shepherd.freethinkel.dev: the static site in site/, served by Caddy in kuzyo's pets container (infra/kuzyo pets/shepherd).
+SITE_HOST ?= kuzyo
+deploy-site: ## rsync site/ to shepherd.freethinkel.dev
+	# ponytail: Cloudflare caches css/js/images for hours; a content hash in the query makes the fresh HTML fetch fresh files
+	for f in style.css site.js assets/screenshot.webp; do sed -i '' "s|$$f?v=[0-9a-f]*|$$f?v=$$(md5 -q site/$$f | cut -c1-8)|" site/index.html; done
+	rsync -rlpv --delete site/ $(SITE_HOST):/srv/pets/shepherd/site/
 
 version: ## Cargo.toml's version
 	@echo $(VERSION)

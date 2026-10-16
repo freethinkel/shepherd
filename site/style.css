@@ -1,0 +1,179 @@
+/* Nord (the app's own theme): polar night ground, snow storm text, one frost accent. Geist, as Zeron. Dark only. */
+:root {
+  --bg: #242933;
+  --bg-raise: #2e3440;
+  --ink: #eceff4;
+  --dim: #a9b3c5;
+  --faint: #6f7a90;
+  --line: #3b4252;
+  --line-soft: #333a49;
+  --accent: #88c0d0;
+  --accent-hi: #8fbcbb;
+  --accent-ink: #2e3440;
+  --sans: "Geist", system-ui, -apple-system, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; }
+html { background: var(--bg); scroll-behavior: smooth; overflow-x: hidden; }
+body {
+  font: 16px/1.55 var(--sans);
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+a { color: inherit; text-decoration: none; }
+img { display: block; max-width: 100%; height: auto; }
+h1, h2, h3 { font-weight: 600; letter-spacing: -0.025em; text-wrap: balance; }
+
+.wrap { max-width: 1140px; margin: 0 auto; padding: 0 32px; }
+
+/* ── nav ── */
+nav { position: relative; z-index: 50; }
+.nav-inner { display: flex; align-items: center; gap: 24px; height: 68px; }
+.logo { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+.logo-mark { width: 32px; height: 32px; border-radius: 8px; }
+nav .links { margin-left: auto; display: flex; align-items: center; gap: 16px; font-size: 14px; }
+.gh-icon { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); padding: 6px; transition: color .15s; }
+.gh-icon:hover { color: var(--ink); }
+.gh-stars { font-size: 13.5px; font-variant-numeric: tabular-nums; }
+
+/* ── buttons ── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  font-size: 14.5px; font-weight: 500; padding: 11px 20px; white-space: nowrap;
+  background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 9px; cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.btn:hover { background: var(--accent-hi); }
+.btn.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); }
+.btn.ghost:hover { color: var(--ink); border-color: var(--faint); background: transparent; }
+.btn.small { height: 34px; padding: 0 14px; font-size: 13px; }
+
+/* ── hero ── */
+.hero { position: relative; overflow: hidden; }
+/* a field of dim terminal glyphs, drawn once by site.js, fading out towards the edges */
+.glyphs {
+  position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;
+  -webkit-mask: radial-gradient(ellipse 70% 90% at 50% 40%, #000 20%, transparent 100%);
+  mask: radial-gradient(ellipse 70% 90% at 50% 40%, #000 20%, transparent 100%);
+}
+.hero-grid { position: relative; z-index: 1; text-align: center; padding: 80px 32px 56px; }
+.hero-copy { max-width: 760px; margin: 0 auto; }
+/* one paragraph: the bold lead in --ink, the rest in --dim */
+.hero h1 { font-size: clamp(24px, 2.6vw, 32px); font-weight: 500; letter-spacing: -0.025em; line-height: 1.45; color: var(--dim); }
+.hero h1 b { display: block; font-weight: 600; color: var(--ink); }
+.hero .cta-row { margin-top: 32px; display: flex; align-items: center; justify-content: center; gap: 12px 22px; flex-wrap: wrap; }
+/* the hero keeps its own snow-white button and quiet text link */
+.hero .btn { height: 40px; padding: 0 18px; font-size: 15.5px; background: var(--ink); color: var(--accent-ink); border-radius: 10px; }
+.hero .btn:hover { background: #d8dee9; }
+.hero .btn[data-download-os]::before {
+  content: ""; width: 16px; height: 16px; background: currentColor;
+  -webkit-mask: var(--os-icon) no-repeat center / contain; mask: var(--os-icon) no-repeat center / contain;
+}
+.btn[data-download-os="macos"] { --os-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M16.4 12.7c0-2.6 2.1-3.8 2.2-3.9-1.2-1.8-3.1-2-3.7-2-1.6-.2-3.1.9-3.9.9-.8 0-2-.9-3.4-.9-1.7 0-3.3 1-4.2 2.6-1.8 3.1-.5 7.8 1.3 10.3.9 1.3 1.9 2.7 3.2 2.6 1.3-.1 1.8-.8 3.4-.8 1.6 0 2 .8 3.4.8 1.4 0 2.3-1.3 3.1-2.5 1-1.4 1.4-2.8 1.4-2.9-.1 0-2.8-1.1-2.8-4.2zM13.9 5.1c.7-.9 1.2-2.1 1.1-3.3-1 0-2.3.7-3 1.6-.7.8-1.3 2-1.1 3.2 1.1.1 2.3-.6 3-1.5z'/%3E%3C/svg%3E"); }
+.btn[data-download-os="windows"] { --os-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 5.5l7.5-1v7H3zm8.5-1.2L21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zm8.5 0H21V21l-9.5-1.4z'/%3E%3C/svg%3E"); }
+.btn[data-download-os="linux"] { --os-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2c-2.4 0-4 1.9-4 4.6 0 1.3.2 2.2-.5 3.4-1 1.6-2.5 3.7-2.5 5.8 0 .6.1 1.1.3 1.6-.6.3-1.3.8-1.3 1.6 0 1.1 1.5 1.5 2.6 1.9.5.2 1 .9 1.9 1 .9.1 1.8-.3 2.2-.9h2.6c.4.6 1.3 1 2.2.9.9-.1 1.4-.8 1.9-1 1.1-.4 2.6-.8 2.6-1.9 0-.8-.7-1.3-1.3-1.6.2-.5.3-1 .3-1.6 0-2.1-1.5-4.2-2.5-5.8-.7-1.2-.5-2.1-.5-3.4C16 3.9 14.4 2 12 2zm-1.5 4.2c.5 0 .8.6.8 1.3s-.3 1.2-.8 1.2-.8-.5-.8-1.2.3-1.3.8-1.3zm3 0c.5 0 .8.6.8 1.3s-.3 1.2-.8 1.2-.8-.5-.8-1.2.3-1.3.8-1.3zM12 9.3l1.8 1-1.8 1.3-1.8-1.3zm-2.3 2.8c.6.6 1.5 1 2.3 1s1.7-.4 2.3-1c1 1.4 1.9 3.1 1.9 4.6 0 .9-.3 1.7-.8 2.3H9c-.5-.6-.8-1.4-.8-2.3 0-1.5.9-3.2 1.5-4.6z'/%3E%3C/svg%3E"); }
+.hero .text-link { font-size: 15.5px; font-weight: 500; color: var(--dim); transition: color .15s; }
+.hero .text-link:hover { color: var(--ink); }
+.hero-note { margin-top: 26px; font-size: 14px; color: var(--faint); }
+
+/* ── shot ── */
+/* the capture carries its own rounded corners and shadow on a transparent ground, so it sits straight on the page */
+.shot { padding: 20px 0 0; }
+.shot .wrap { max-width: 1240px; }
+.shot img { width: 100%; }
+
+/* ── panel: intro, features in a hairline grid, keys ── */
+.panel-sect { padding-top: 88px; }
+.p-copy h2 { font-size: clamp(26px, 3vw, 34px); }
+.p-copy p { margin-top: 16px; max-width: 520px; font-size: 16.5px; line-height: 1.6; color: var(--dim); }
+.p-intro { padding-bottom: 44px; }
+.features {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--line); border-left: 1px solid var(--line);
+}
+.feature { padding: 28px 26px 30px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+/* the mono caption voice, as Zeron's gallery captions */
+.tag { display: block; font-family: var(--mono); font-size: 12px; letter-spacing: 0.02em; color: var(--accent); opacity: .85; }
+.feature h3 { margin-top: 12px; font-size: 17.5px; letter-spacing: -0.02em; }
+.feature p { margin-top: 10px; font-size: 15px; line-height: 1.6; color: var(--dim); }
+
+.panel-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 56px; padding: 72px 0 0; }
+.panel-row .p-copy p + p { margin-top: 12px; }
+.keys { display: grid; grid-template-columns: max-content 1fr; align-self: center; border-top: 1px solid var(--line); }
+.keys dt, .keys dd { padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 15px; }
+.keys dt { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; padding-right: 32px; }
+/* keycaps: a raised pill per key, modifiers drawn as masks so no font decides how ⌘ looks */
+.keys kbd {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 26px; height: 26px; padding: 0 7px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg-raise); box-shadow: 0 1px 0 var(--line);
+  font: 500 12.5px/1 var(--mono); color: var(--ink);
+}
+.keys kbd[data-k] { font-size: 0; color: var(--dim); }
+.keys kbd[data-k]::before { content: ""; width: 13px; height: 13px; background: currentColor; -webkit-mask: var(--k) no-repeat center / contain; mask: var(--k) no-repeat center / contain; }
+.keys kbd[data-k="cmd"] { --k: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3'/%3E%3C/svg%3E"); }
+.keys kbd[data-k="shift"] { --k: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 18v-6H5l7-7 7 7h-4v6H9z'/%3E%3C/svg%3E"); }
+.keys kbd[data-k="alt"] { --k: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4h6l6 16h6M14 4h7'/%3E%3C/svg%3E"); }
+.keys kbd[data-k="return"] { --k: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 10l-5 5 5 5M20 4v7a4 4 0 0 1-4 4H4'/%3E%3C/svg%3E"); }
+.keys kbd[data-k="up"] { --k: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 19V5m-7 7 7-7 7 7'/%3E%3C/svg%3E"); }
+.keys kbd[data-k="down"] { --k: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 5v14m7-7-7 7-7-7'/%3E%3C/svg%3E"); }
+.keys kbd[data-k="arrows"] { --k: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20'/%3E%3C/svg%3E"); }
+.keys dt i { font-style: normal; color: var(--faint); margin: 0 5px; }
+.keys dd { color: var(--dim); }
+
+/* ── downloads: centered lede, then hairline rows with a lead column and a list of builds ── */
+.downloads { padding: 120px 0 0; }
+.downloads .wrap { scroll-margin-top: 40px; }
+.dl-lede { text-align: center; }
+.dl-lede h2 { font-size: clamp(30px, 3.6vw, 40px); }
+.dl-lede .sub { margin: 16px auto 0; max-width: 540px; font-size: 16.5px; line-height: 1.6; color: var(--dim); }
+.version { color: var(--ink); }
+.dl-rows { margin-top: 56px; border-bottom: 1px solid var(--line); }
+.dl-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 36px; padding: 44px 0; border-top: 1px solid var(--line); }
+.dl-lead h3 { font-size: 22px; letter-spacing: -0.02em; }
+.dl-lead p { margin-top: 10px; font-size: 16px; line-height: 1.6; color: var(--faint); }
+.dl-list { list-style: none; padding: 0; }
+.dl-list li { display: flex; align-items: center; gap: 14px; padding: 10px 0; }
+.dl-list li + li { border-top: 1px solid var(--line-soft); }
+.dl-name { font-size: 16px; font-weight: 500; }
+.dl-meta { font-family: var(--mono); font-size: 12px; letter-spacing: 0.02em; color: var(--faint); white-space: nowrap; }
+.dl-list .btn { margin-left: auto; padding: 9px 15px; font-size: 14px; }
+.pair { margin-left: auto; display: flex; gap: 8px; }
+.pair .btn { margin-left: 0; }
+.download-foot { margin-top: 26px; display: flex; gap: 22px; flex-wrap: wrap; font-size: 14px; }
+.download-foot a { color: var(--dim); transition: color .15s; }
+.download-foot a:hover { color: var(--ink); }
+
+/* ── closing, footer ── */
+.closing { margin: 140px 0 80px; }
+.closing h2 { font-size: clamp(32px, 4.4vw, 48px); letter-spacing: -0.03em; }
+.closing p { margin-top: 18px; max-width: 520px; font-size: 17.5px; line-height: 1.6; color: var(--dim); }
+.closing .cta-row { margin-top: 36px; display: flex; gap: 14px; flex-wrap: wrap; }
+footer { padding: 28px 0 44px; }
+.footer-inner { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; font-size: 14px; color: var(--faint); }
+.footer-inner .right { margin-left: auto; display: flex; align-items: center; gap: 22px; }
+.footer-note { flex-basis: 100%; font-size: 12.5px; }
+footer a:hover { color: var(--dim); }
+
+@media (max-width: 860px) {
+  .features { grid-template-columns: 1fr 1fr; }
+  .panel-row, .dl-row { grid-template-columns: 1fr; gap: 24px; }
+  .keys { align-self: start; }
+}
+@media (max-width: 600px) {
+  .wrap { padding: 0 20px; }
+  .nav-inner { height: 58px; }
+  .hero-grid { padding: 44px 20px 32px; text-align: left; }
+  .hero-copy { margin: 0; }
+  .hero .cta-row { justify-content: flex-start; }
+  .panel-sect { padding-top: 64px; }
+  .features { grid-template-columns: 1fr; }
+  .downloads { padding: 84px 0 0; }
+  .dl-rows { margin-top: 36px; }
+  .dl-row { padding: 32px 0; }
+  .dl-list li { flex-wrap: wrap; row-gap: 8px; }
+  .closing { margin: 80px 0 56px; }
+  footer { padding: 20px 0 32px; }
+}
