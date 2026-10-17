@@ -21,7 +21,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
         });
         return;
     }
-    // the panes whose agent status the subscription follows: herdr only sends that per pane
+    // the agents' panes, whose status the subscription follows: herdr only sends that per pane
     let mut watched: Vec<String> = Vec::new();
     loop {
         let sub = {
@@ -71,7 +71,9 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                 let mut panes = None;
                 match update {
                     Ok(snapshot) => {
-                        let mut ids: Vec<String> = snapshot.panes.iter().map(|p| p.pane_id.clone()).collect();
+                        // herdr polls each watched pane for its status: only the panes with an agent are worth it, and
+                        // one found later (pane.agent_detected) changes the set
+                        let mut ids: Vec<String> = snapshot.panes.iter().filter(|p| p.agent.is_some()).map(|p| p.pane_id.clone()).collect();
                         ids.sort(); // a reorder (a dragged tab) is the same set
                         panes = Some(ids);
                         // a workspace's agent that starts or stops has likely edited its worktree
@@ -105,7 +107,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
             };
             if let Some(panes) = panes.filter(|p| *p != watched) {
                 watched = panes;
-                break; // panes came or went: follow the new set's agents
+                break; // agents came or went: follow the new set
             }
             // ponytail: the whole snapshot per event burst, but for a burst that changes nothing it holds (Claude Code's
             // title spinner); apply pane_updated's pane in place if the remaining snapshots show up in profiles.
