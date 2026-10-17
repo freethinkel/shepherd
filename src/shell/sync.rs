@@ -76,6 +76,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                                 crate::ui::statusbar::refresh_changes(&crate::herdr::locate(&t.checkout_path), cx);
                             }
                         }
+                        crate::analytics::seen(snapshot.panes.iter().filter_map(|p| p.agent.as_deref()));
                         s.agents_changed(&snapshot, cx);
                         // herdr's focus moved (its TUI, another window, a command): Shepherd shows the same tab. Only a
                         // move counts, so a snapshot taken before your own switch reached herdr does not undo it.
