@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(emu.row_text(0), "xy");
         assert_eq!(emu.row_text(1).trim_end(), "你");
         // red is the host's default foreground here: it goes back as default
-        let x = emu.line(0)[0];
+        let x = emu.line(0)[0].clone();
         assert!(x.bold && x.fg == crate::terminal::emulator::CellColor::Foreground);
         assert_eq!(emu.cursor().map(|c| (c.row, c.col)), Some((0, 1)));
     }

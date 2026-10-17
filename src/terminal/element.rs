@@ -590,8 +590,11 @@ fn shape_row(
             thickness: px(1.0),
             wavy: false,
         });
-        let len = ch.len_utf8();
-        seg.text.push(ch);
+        // a cell's whole grapheme cluster (a flag, a skin tone, a letter and its marks) shapes together, on its column
+        let mut buf = [0; 4];
+        let text = cell.cluster.as_deref().filter(|_| !cell.hidden).unwrap_or_else(|| ch.encode_utf8(&mut buf));
+        let len = text.len();
+        seg.text.push_str(text);
         seg.cols.extend(std::iter::repeat_n(col, len));
         // every run is `mono` but for weight and style: comparing those spares a font clone and compare per cell
         match seg.runs.last_mut() {
@@ -666,10 +669,11 @@ fn snap_to_cells(line: &mut ShapedLine, cols: &[usize], seg_col: usize, cell_w: 
     let mut runs = line.runs.clone();
     let mut cluster = (usize::MAX, px(0.));
     for glyph in runs.iter_mut().flat_map(|run| run.glyphs.iter_mut()) {
-        if glyph.index != cluster.0 {
-            cluster = (glyph.index, glyph.position.x);
-        }
+        // a combining mark is its own glyph at its own index, but on its letter's column
         let col = cols.get(glyph.index).copied().unwrap_or(seg_col);
+        if col != cluster.0 {
+            cluster = (col, glyph.position.x);
+        }
         glyph.position.x = cell_w * (col - seg_col) as f32 + (glyph.position.x - cluster.1);
     }
     **line = Arc::new(gpui::LineLayout {

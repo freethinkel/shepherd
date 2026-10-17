@@ -74,9 +74,12 @@ fn map_color(color: StyleColor, default: CellColor) -> CellColor {
 }
 
 /// One rendered cell: char + colors + the flags paint cares about.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CellSnapshot {
     pub ch: char,
+    /// The whole grapheme cluster, `ch` first, when the cell holds more than `ch`: a flag, a skin tone, a ZWJ
+    /// sequence, a letter and its combining marks.
+    pub cluster: Option<std::sync::Arc<str>>,
     pub fg: CellColor,
     pub bg: CellColor,
     pub bold: bool,
@@ -371,7 +374,8 @@ impl Emulator {
                     let raw = cell.raw_cell()?;
                     let style = if cell.has_styling()? { cell.style()? } else { plain };
                     // An erase with a background set stores the color in the cell, not a style.
-                    let bg = match raw.content_tag()? {
+                    let tag = raw.content_tag()?;
+                    let bg = match tag {
                         CellContentTag::BgColorPalette => CellColor::Indexed(raw.bg_color_palette()?.0),
                         CellContentTag::BgColorRgb => {
                             let c = raw.bg_color_rgb()?;
@@ -381,9 +385,17 @@ impl Emulator {
                     };
                     let wide = raw.wide()?;
                     let col = line.len() as u16;
+                    let cluster = match tag {
+                        CellContentTag::CodepointGrapheme => {
+                            let mut text = String::new();
+                            cell.graphemes_utf8(&mut text)?;
+                            Some(text.into())
+                        }
+                        _ => None,
+                    };
                     line.push(CellSnapshot {
-                        // ponytail: the base codepoint only; combining marks are dropped, as alacritty's view did.
                         ch: char::from_u32(raw.codepoint()?).filter(|&c| c != '\0').unwrap_or(' '),
+                        cluster,
                         fg: map_color(style.fg_color, CellColor::Foreground),
                         bg,
                         bold: style.bold,
@@ -520,6 +532,17 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_keeps_its_whole_grapheme_cluster() {
+        let mut e = emu(20, 2);
+        e.feed("e\u{301}x🇺🇦👍🏽".as_bytes());
+        let line = e.line(0);
+        assert_eq!((line[0].ch, line[0].cluster.as_deref()), ('e', Some("e\u{301}")));
+        assert_eq!(line[1].cluster, None);
+        assert_eq!(line[2].cluster.as_deref(), Some("🇺🇦"));
+        assert_eq!(line[4].cluster.as_deref(), Some("👍🏽"));
+    }
+
+    #[test]
     fn plain_text_lands_on_row_zero() {
         let mut e = emu(20, 5);
         e.feed(b"hello");
@@ -556,7 +579,7 @@ mod tests {
         // After reset: defaults.
         assert_eq!(line[4].fg, CellColor::Foreground);
         // Bold + blue background segment starts at col 10 ("red plain " = 10).
-        let bold_cell = line[10];
+        let bold_cell = &line[10];
         assert!(bold_cell.bold);
         assert_eq!(bold_cell.bg, CellColor::Indexed(4));
     }
@@ -575,13 +598,13 @@ mod tests {
     fn inverse_and_hidden_resolve_in_display_colors() {
         let mut e = emu(10, 2);
         e.feed(b"\x1b[7mI\x1b[0m\x1b[8mH");
-        let inv = e.line(0)[0];
+        let inv = e.line(0)[0].clone();
         assert!(inv.inverse);
         assert_eq!(
             inv.display_colors(),
             (CellColor::Background, CellColor::Foreground)
         );
-        let hid = e.line(0)[1];
+        let hid = e.line(0)[1].clone();
         assert!(hid.hidden);
         let (fg, bg) = hid.display_colors();
         assert_eq!(fg, bg, "hidden text paints foreground as background");
