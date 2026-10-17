@@ -491,7 +491,6 @@ pub fn short_count(n: u64) -> String {
     }
 }
 
-// ponytail: rereads a local transcript whole each SPENT_TTL; read on from the last offset if transcripts get huge.
 // Subagents' own transcripts (`<session>/subagents/`) aren't counted.
 /// What the Claude session `key` spent (its id, located): from its transcript in any of Claude Code's project
 /// folders, a machine's read on that machine.
@@ -500,17 +499,59 @@ fn read_spent(key: &str) -> Option<Spent> {
     if let Some(target) = machine {
         return read_remote_spent(target, id);
     }
-    let projects = std::env::home_dir()?.join(".claude/projects");
-    let file = std::fs::read_dir(projects).ok()?.flatten().map(|d| d.path().join(format!("{id}.jsonl"))).find(|f| f.is_file())?;
-    Some(parse_spent(&std::fs::read_to_string(file).ok()?))
+    read_local_spent(id)
 }
 
-/// A machine's transcript read so far: its path there, how many bytes of it, and what they added up to.
+// ponytail: one tail per session ever shown, never dropped; the lock is held while a transcript is read, so a first
+// read of a huge one holds up the others
+/// The tokens of the session `id` here: its transcript (up to 100 MB) is found once, then read on from where the last
+/// read stopped, not whole each [`SPENT_TTL`].
+fn read_local_spent(id: &str) -> Option<Spent> {
+    static TAILS: std::sync::Mutex<Option<HashMap<String, Tail>>> = std::sync::Mutex::new(None);
+    let mut tails = TAILS.lock().unwrap();
+    let tails = tails.get_or_insert_default();
+    if !tails.contains_key(id) {
+        let projects = std::env::home_dir()?.join(".claude/projects");
+        let file = std::fs::read_dir(projects).ok()?.flatten().map(|d| d.path().join(format!("{id}.jsonl"))).find(|f| f.is_file())?;
+        tails.insert(id.into(), Tail::new(file.to_string_lossy().into()));
+    }
+    let tail = tails.get_mut(id)?;
+    if read_on(tail).is_none() {
+        tails.remove(id); // gone: found afresh next time
+        return None;
+    }
+    Some(tail.spent)
+}
+
+/// Adds what was written to `tail`'s local file since it was last read; one rewritten shorter is counted again.
+fn read_on(tail: &mut Tail) -> Option<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(&tail.file).ok()?;
+    if file.metadata().ok()?.len() < tail.read {
+        *tail = Tail::new(std::mem::take(&mut tail.file));
+    }
+    file.seek(SeekFrom::Start(tail.read)).ok()?;
+    let mut body = Vec::new();
+    file.read_to_end(&mut body).ok()?;
+    // only whole lines: one being written is read next time
+    let whole = body.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    add_spent(&String::from_utf8_lossy(&body[..whole]), &mut tail.seen, &mut tail.spent);
+    tail.read += whole as u64;
+    Some(())
+}
+
+/// A transcript read so far: its path (on its machine), how many bytes of it, and what they added up to.
 struct Tail {
     file: String,
     read: u64,
     seen: std::collections::HashSet<String>,
     spent: Spent,
+}
+
+impl Tail {
+    fn new(file: String) -> Self {
+        Tail { file, read: 0, seen: Default::default(), spent: Spent::default() }
+    }
 }
 
 // ponytail: one tail per session ever shown, never dropped
@@ -551,7 +592,7 @@ fn read_remote_spent(target: &str, id: &str) -> Option<Spent> {
     // only whole lines: one being written is read next time
     let whole = body.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
     let mut tails = TAILS.lock().unwrap();
-    let tail = tails.get_or_insert_default().entry(key).or_insert_with(|| Tail { file, read: 0, seen: Default::default(), spent: Spent::default() });
+    let tail = tails.get_or_insert_default().entry(key).or_insert_with(|| Tail::new(file));
     add_spent(&String::from_utf8_lossy(&body[..whole]), &mut tail.seen, &mut tail.spent);
     tail.read += whole as u64;
     Some(tail.spent)
@@ -899,6 +940,19 @@ mod tests {
         add_spent(&[line("a", 10), line("a", 10)].join("\n"), &mut seen, &mut tail);
         add_spent(&[line("a", 10), line("b", 5)].join("\n"), &mut seen, &mut tail);
         assert_eq!(tail, spent);
+        // a local one is read on from where the last read stopped; a line still being written waits for its end
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, format!("{}\n{}", line("a", 10), &line("b", 5)[..20])).unwrap();
+        let mut local = Tail::new(path.to_string_lossy().into());
+        read_on(&mut local).unwrap();
+        assert_eq!(local.spent.answers, 1);
+        std::fs::write(&path, format!("{}\n{}\n{}\n", line("a", 10), line("b", 5), line("a", 10))).unwrap();
+        read_on(&mut local).unwrap();
+        assert_eq!(local.spent, spent);
+        std::fs::write(&path, format!("{}\n", line("b", 5))).unwrap(); // rewritten shorter: counted afresh
+        read_on(&mut local).unwrap();
+        assert_eq!((local.spent.answers, local.spent.output), (1, 5));
         assert_eq!(short_count(999), "999");
         assert_eq!(short_count(1234), "1.2k");
         assert_eq!(short_count(5_600_000), "5.6M");
