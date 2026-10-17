@@ -17,6 +17,22 @@ fn parses_snapshot() {
 }
 
 #[test]
+fn only_a_pane_update_that_changes_nothing_shown_is_held() {
+    let s = fixture();
+    let update = |title: &str, status: &str| {
+        serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": {
+            "pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "terminal_id": "term_b", "agent_status": status,
+            "focused": true, "cwd": "/tmp/demo", "revision": 8, "agent": "claude",
+            "terminal_title": format!("◐ {title}"), "terminal_title_stripped": title}}})
+    };
+    assert!(s.holds(&update("fixing tests", "working")));
+    assert!(!s.holds(&update("fixing more tests", "working")));
+    assert!(!s.holds(&update("fixing tests", "done")));
+    assert!(!s.holds(&serde_json::json!({"event": "tab_focused", "data": {}})));
+    assert!(!s.holds(&serde_json::Value::Null)); // a resync
+}
+
+#[test]
 fn pane_frames_are_fractions_of_the_tab_area() {
     let frames = fixture().pane_frames("w1:t1");
     assert_eq!(frames.len(), 2);

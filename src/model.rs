@@ -208,6 +208,16 @@ impl Snapshot {
         Ok(snapshot)
     }
 
+    /// Whether herdr's `event` leaves this snapshot as it is: a `pane_updated` whose pane reads here as it does in
+    /// the event. Claude Code's title spinner sends one a few times a second, with only the unstripped title changed.
+    pub fn holds(&self, event: &serde_json::Value) -> bool {
+        event["event"] == "pane_updated"
+            && Pane::deserialize(&event["data"]["pane"]).is_ok_and(|new| {
+                // herdr puts the seq on the snapshot's `agents` only
+                self.panes.iter().any(|old| *old == Pane { state_change_seq: old.state_change_seq, ..new.clone() })
+            })
+    }
+
     pub fn tabs_of(&self, workspace_id: &str) -> Vec<&Tab> {
         // herdr lists tabs in their order; `number` is the tab's id and stays put when `tab.move` reorders them
         self.tabs.iter().filter(|t| t.workspace_id == workspace_id).collect()

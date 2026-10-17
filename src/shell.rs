@@ -1057,8 +1057,9 @@ fn prune<S>(surfaces: &mut HashMap<String, S>, focused: &mut Option<String>, kep
     }
 }
 
-/// How many panes keep their views once their tab is hidden: each holds a herdr session that keeps streaming.
-const KEPT_PANES: usize = 24;
+/// How many panes keep their views once their tab is hidden: each holds a herdr session that keeps streaming, and
+/// herdr renders every one of them (24 kept two fifths of herdr's CPU busy on panes out of sight).
+const KEPT_PANES: usize = 6;
 
 /// Puts the `shown` panes first in `recent`, drops panes herdr no longer has, and keeps the newest `KEPT_PANES`:
 /// switching back to a recent tab shows its panes at once instead of attaching to herdr again.

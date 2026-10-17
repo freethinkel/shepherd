@@ -63,7 +63,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                 continue;
             }
         };
-        loop {
+        'snapshots: loop {
             let c = client.clone();
             let result = rt.spawn(async move { c.call("session.snapshot", json!({})).await }).await.expect("tokio");
             let update = result.and_then(|r| Snapshot::from_result(&r));
@@ -107,27 +107,33 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                 watched = panes;
                 break; // panes came or went: follow the new set's agents
             }
-            // ponytail: refetch the whole snapshot per event burst; incremental apply only if this shows up in profiles.
-            let event = tokio::select! {
-                event = rx.recv() => event,
-                _ = resync.notified() => Some(serde_json::Value::Null),
-            };
-            let Some(event) = event else {
-                break; // server gone or events_lost: resubscribe
-            };
-            cx.background_executor().timer(Duration::from_millis(30)).await;
-            let mut focused = event["event"] == "pane.focused";
-            while let Ok(event) = rx.try_recv() {
-                focused |= event["event"] == "pane.focused";
-            }
-            // ponytail: herdr's events do not name the client; a focus change Shepherd did not just cause is
-            // another client's (its TUI in a terminal, over ssh), and the client used last sizes the panes
-            if focused {
-                let _ = this.update(cx, |s, cx| {
-                    if s.touched.elapsed() > Duration::from_secs(2) {
+            // ponytail: the whole snapshot per event burst, but for a burst that changes nothing it holds (Claude Code's
+            // title spinner); apply pane_updated's pane in place if the remaining snapshots show up in profiles.
+            loop {
+                let event = tokio::select! {
+                    event = rx.recv() => event,
+                    _ = resync.notified() => Some(serde_json::Value::Null),
+                };
+                let Some(event) = event else {
+                    break 'snapshots; // server gone or events_lost: resubscribe
+                };
+                cx.background_executor().timer(Duration::from_millis(30)).await;
+                let mut burst = vec![event];
+                while let Ok(event) = rx.try_recv() {
+                    burst.push(event);
+                }
+                // ponytail: herdr's events do not name the client; a focus change Shepherd did not just cause is
+                // another client's (its TUI in a terminal, over ssh), and the client used last sizes the panes
+                let focused = burst.iter().any(|e| e["event"] == "pane_focused");
+                let held = this.update(cx, |s, cx| {
+                    if focused && s.touched.elapsed() > Duration::from_secs(2) {
                         cx.set_global(crate::terminal::pane::Yielded(true));
                     }
+                    s.snapshot.as_ref().is_some_and(|snap| burst.iter().all(|e| snap.holds(e)))
                 });
+                if !held.unwrap_or(false) {
+                    break;
+                }
             }
         }
     }
