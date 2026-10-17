@@ -150,7 +150,7 @@ impl Shell {
                             .border_color(theme.border)
                             .child(title),
                     )
-                    .child(div().flex_1().min_h_0().child(view)),
+                    .child(div().flex_1().min_h_0().child(view.cached(gpui::StyleRefinement::default().size_full()))),
             ),
         )
     }

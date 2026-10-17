@@ -1360,7 +1360,8 @@ impl Render for Shell {
                             }),
                         )
                         .child(
-                            div().size_full().relative().child(pane.clone()).when(focused, |el| {
+                            // cached: a frame the pane did not cause (a spinner, a hover elsewhere) reuses its grid
+                            div().size_full().relative().child(pane.clone().cached(gpui::StyleRefinement::default().size_full())).when(focused, |el| {
                                 // ponytail: overlay, not a border on the container, which shrank the grid by 1px
                                 el.child(div().absolute().inset_0().border_1().border_color(ring))
                             }),

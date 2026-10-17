@@ -1,7 +1,9 @@
 //! Zeron's loaders (`crates/ui/src/loaders.rs`): the gradient matrix spinner, a 3×3 grid tinted per row with a pulse
 //! travelling up it, and its 2×3 variant for compact slots, with the pulse running round the edge: in one color, or
 //! (an agent at work) a tint per row.
-use gpui::{AnimationExt as _, Div, Hsla, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui::{App, Div, EntityId, Hsla, ParentElement, Styled, Window, canvas, div, px};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -18,7 +20,10 @@ const GRACE: Duration = Duration::from_millis(300);
 
 /// Whether a wait since `since` has gone on long enough to show a loader; asks for frames until it has.
 pub fn due(since: Instant, window: &mut Window) -> bool {
-    window.request_animation_frame();
+    // a wait that starts later (the fixture's panes) asks none yet
+    if since <= Instant::now() {
+        request_slow_frame(window);
+    }
     since.elapsed() >= GRACE
 }
 
@@ -32,12 +37,36 @@ pub fn mini_spinner(cell: f32, tint: Hsla, window: &mut Window) -> Div {
     grid(cell, 3, 2, |_, _| tint, ring, window)
 }
 
-/// Zeron's `mini_glyph_spinner`, an agent at work: [`mini_spinner`] with a tint per row, for a slot with no window to
-/// ask frames of. Its own animation asks for them, so each copy runs from when it first showed.
-pub fn glyph_spinner(cell: f32, rows: [Hsla; 3]) -> impl IntoElement {
-    div().with_animation("glyph-spinner", gpui::Animation::new(Duration::from_secs_f32(PERIOD)).repeat(), move |el, t| {
-        el.child(cells(cell, 3, 2, |row, _| rows[row], ring, t, AGENT_DIM))
+/// A spinner's pace: ~15 fps, not the display's 120, since every frame redraws the window and that cost a core for a
+/// few dots.
+const SLOW_FRAME: Duration = Duration::from_millis(66);
+
+thread_local! {
+    static SLOW: RefCell<HashSet<EntityId>> = RefCell::default();
+}
+
+/// Redraw the view being drawn in [`SLOW_FRAME`], where `request_animation_frame` redraws it on the display's next.
+pub fn request_slow_frame(window: &Window) {
+    SLOW.with(|s| s.borrow_mut().insert(window.current_view()));
+}
+
+/// For the app's life: every [`SLOW_FRAME`] the views that asked for one are redrawn.
+pub fn drive_slow_frames(cx: &mut App) {
+    cx.spawn(async move |cx| loop {
+        cx.background_executor().timer(SLOW_FRAME).await;
+        let views = SLOW.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        if !views.is_empty() {
+            cx.update(|cx| views.into_iter().for_each(|view| cx.notify(view)));
+        }
     })
+    .detach();
+}
+
+/// Zeron's `mini_glyph_spinner`, an agent at work: [`mini_spinner`] with a tint per row, for a slot with no window: it
+/// asks its slow frames as it is laid out.
+pub fn glyph_spinner(cell: f32, rows: [Hsla; 3]) -> Div {
+    cells(cell, 3, 2, |row, _| rows[row], ring, periods(), AGENT_DIM)
+        .child(canvas(|_, window, _| request_slow_frame(window), |_, _, _, _| {}).absolute())
 }
 
 /// The 2×3 spinners' phases: clockwise round the edge from the top left.
@@ -47,9 +76,14 @@ fn ring(row: usize, col: usize) -> f32 {
 }
 
 fn grid(cell: f32, rows: usize, cols: usize, tint: impl Fn(usize, usize) -> Hsla, phase: impl Fn(usize, usize) -> f32, window: &mut Window) -> Div {
-    window.request_animation_frame();
+    request_slow_frame(window);
+    cells(cell, rows, cols, tint, phase, periods(), DIM)
+}
+
+/// The periods since the first spinner showed: every spinner on one clock.
+fn periods() -> f32 {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
-    cells(cell, rows, cols, tint, phase, EPOCH.get_or_init(Instant::now).elapsed().as_secs_f32() / PERIOD, DIM)
+    EPOCH.get_or_init(Instant::now).elapsed().as_secs_f32() / PERIOD
 }
 
 /// The cells at `t` periods in, resting at `dim`.

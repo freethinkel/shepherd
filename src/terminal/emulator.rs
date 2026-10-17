@@ -20,7 +20,7 @@
 
 use std::cell::RefCell;
 
-use ghostty_vt::render::{CellIterator, RowIterator};
+use ghostty_vt::render::{CellIterator, Dirty, RowIterator};
 use ghostty_vt::screen::{CellContentTag, CellWide, GridRef, Screen};
 use ghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordBetweenOptions, Selection};
 use ghostty_vt::style::{Style, StyleColor, Underline};
@@ -118,6 +118,8 @@ struct Render {
     state: RenderState,
     rows: RowIterator,
     cells: CellIterator,
+    /// The rows as last read: a row Ghostty did not mark dirty since is taken from here, not read cell by cell again.
+    lines: Vec<Vec<CellSnapshot>>,
 }
 
 /// The selection being made: its granularity and where it started.
@@ -166,6 +168,7 @@ impl Emulator {
             state: RenderState::new().expect("libghostty-vt render state"),
             rows: RowIterator::new().expect("libghostty-vt row iterator"),
             cells: CellIterator::new().expect("libghostty-vt cell iterator"),
+            lines: Vec::new(),
         };
         Self {
             term,
@@ -345,14 +348,23 @@ impl Emulator {
 
     fn read_lines(&self) -> Result<Vec<Vec<CellSnapshot>>, Error> {
         let mut render = self.render.borrow_mut();
-        let Render { state, rows, cells } = &mut *render;
+        let Render { state, rows, cells, lines: cache } = &mut *render;
         let plain = Style::default();
         let snapshot = state.update(&self.term)?;
+        let full = snapshot.dirty()? == Dirty::Full;
         let mut lines = Vec::with_capacity(self.rows());
         {
             let mut row_iter = rows.update(&snapshot)?;
             while let Some(row) = row_iter.next() {
                 let selected = row.selection()?.map(|s| s.start_x..=s.end_x);
+                // the selection is taken afresh for a clean row too: a changed one may leave the row clean
+                if let Some(mut line) = cache.get(lines.len()).filter(|l| !full && l.len() == self.cols() && !row.dirty().unwrap_or(true)).cloned() {
+                    for (col, cell) in line.iter_mut().enumerate() {
+                        cell.selected = selected.as_ref().is_some_and(|r| r.contains(&(col as u16)));
+                    }
+                    lines.push(line);
+                    continue;
+                }
                 let mut line = Vec::with_capacity(self.cols());
                 let mut cell_iter = cells.update(row)?;
                 while let Some(cell) = cell_iter.next() {
@@ -389,6 +401,7 @@ impl Emulator {
             }
         }
         snapshot.clean()?;
+        cache.clone_from(&lines);
         Ok(lines)
     }
 
@@ -488,6 +501,22 @@ mod tests {
 
     fn emu(cols: u16, rows: u16) -> Emulator {
         Emulator::new(cols, rows)
+    }
+
+    #[test]
+    fn a_reread_takes_changed_rows_and_the_selection_afresh() {
+        let mut e = emu(10, 3);
+        e.feed(b"one\r\ntwo\r\nthree");
+        assert_eq!(e.row_text(1), "two");
+        e.feed(b"\x1b[2;1HTWO");
+        assert_eq!((e.row_text(0), e.row_text(1)), ("one".into(), "TWO".into()));
+        e.start_selection(SelectionType::Simple, e.grid_point(0, 0), Side::Left);
+        e.update_selection(e.grid_point(0, 2), Side::Right);
+        assert!(e.line(0)[1].selected);
+        e.clear_selection();
+        assert!(!e.line(0)[1].selected);
+        e.resize(6, 3);
+        assert_eq!(e.line(0).len(), 6);
     }
 
     #[test]
