@@ -5,7 +5,7 @@ use super::*;
 pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, client: Client, resync: std::sync::Arc<tokio::sync::Notify>, cx: &mut gpui::AsyncApp) {
     // When nothing listens on the socket, Shepherd starts herdr's server itself: again after 10 s if it never came
     // up, after a minute if it could not be run at all.
-    let (mut next_start, mut spawned, mut start_error) = (Instant::now(), None::<Instant>, None::<String>);
+    let (mut next_start, mut spawned, mut start_error, mut downloaded) = (Instant::now(), None::<Instant>, None::<String>, false);
     // a fixture (`SHEPHERD_MOCK`) is the one snapshot there is
     if let Some((snapshot, waited)) = crate::mock::snapshot() {
         let _ = this.update(cx, |s, cx| {
@@ -38,10 +38,20 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                 // a server that answers but won't subscribe may speak another protocol: its ping says which
                 let outdated = if no_server { None } else { check_protocol(&this, &rt, &client, cx).await };
                 if no_server && Instant::now() >= next_start {
-                    match crate::herdr::start_server() {
+                    // no herdr anywhere: Shepherd downloads it, once a launch, then starts it
+                    let fetched = if crate::herdr::missing() && !std::mem::replace(&mut downloaded, true) {
+                        let _ = this.update(cx, |s, cx| {
+                            s.error = Some("Downloading herdr…".into());
+                            cx.notify()
+                        });
+                        rt.spawn_blocking(crate::herdr::install).await.expect("tokio").map(drop).map_err(|e| format!("herdr isn't installed and Shepherd couldn't download it: {e:#}"))
+                    } else {
+                        Ok(())
+                    };
+                    match fetched.and_then(|()| crate::herdr::start_server().map_err(|e| format!("herdr isn't running and Shepherd couldn't start it: {e}"))) {
                         Ok(()) => (spawned, start_error, next_start) = (Some(Instant::now()), None, Instant::now() + Duration::from_secs(10)),
                         Err(e) => {
-                            start_error = Some(format!("herdr isn't running and Shepherd couldn't start it: {e}. Install herdr or set its path in Settings."));
+                            start_error = Some(format!("{e}. Install herdr or set its path in Settings."));
                             next_start = Instant::now() + Duration::from_secs(60);
                         }
                     }
