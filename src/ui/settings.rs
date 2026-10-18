@@ -1397,7 +1397,8 @@ impl Render for SettingsView {
                 let button = match &updates {
                     Updates::Available(r) => {
                         let r = r.clone();
-                        action(&theme, "update-app", format!("Update to {}", r.version))
+                        let label = if updater::notifies() { format!("Open {}", r.version) } else { format!("Update to {}", r.version) };
+                        action(&theme, "update-app", label)
                             .on_click(move |_: &ClickEvent, _, cx| updater::install(r.clone(), cx))
                     }
                     _ => action(&theme, "check-updates", "Check for Updates").on_click(|_: &ClickEvent, _, cx| updater::check(cx, false)),
@@ -1406,7 +1407,7 @@ impl Render for SettingsView {
                     card(&theme).child(
                         card_row(&theme, true)
                             .child(row_text(&theme, format!("Shepherd {}", env!("CARGO_PKG_VERSION")), updates.line()))
-                            .when(updater::app_bundle().is_some(), |row| row.child(button.when(updates.busy(), |b| b.opacity(0.5)))),
+                            .when(updater::checks(), |row| row.child(button.when(updates.busy(), |b| b.opacity(0.5)))),
                     ),
                 )
             }

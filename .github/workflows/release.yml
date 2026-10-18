@@ -97,8 +97,10 @@ jobs:
       # the Linux side of cfg'd code: its own key defaults, notifications, paths
       - run: make lint
       - run: make test
-      # one build, packed as a tar.gz, a .deb and an .rpm
+      # one build, packed as a tar.gz, a .deb and an .rpm; it tells of new releases (src/update.rs)
       - run: scripts/linux-dist.sh
+        env:
+          SHEPHERD_UPDATE_CHECK: 1
       - uses: actions/upload-artifact@v4
         with:
           name: Shepherd-linux-${{ runner.arch }}
@@ -148,7 +150,10 @@ jobs:
         if: ${{ !matrix.cross }}
       - run: cargo test
         if: ${{ !matrix.cross }}
+      # it tells of new releases (src/update.rs)
       - run: cargo build --release --target ${{ matrix.target }}
+        env:
+          SHEPHERD_UPDATE_CHECK: 1
       # no make on the runner: Cargo.toml's version as scripts/linux-dist.sh reads it
       - run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
