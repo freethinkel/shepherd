@@ -451,7 +451,7 @@ impl Shell {
                             }),
                         ))
                         .when_some(checkout, |el, path| {
-                            el.child(row(theme, false, "ws-menu-reveal").h(px(28.)).rounded(px(6.)).child("Reveal in Finder").on_pick(at, 
+                            el.child(row(theme, false, "ws-menu-reveal").h(px(28.)).rounded(px(6.)).child(if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Show in file manager" }).on_pick(at, 
                                 cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     if let Some(m) = this.ws_menu.as_mut() { m.close() }
                                     cx.reveal_path(std::path::Path::new(&path));
