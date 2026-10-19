@@ -44,8 +44,16 @@ const TITLEBAR_HEIGHT: f32 = 38.0;
 /// The titlebar's left cluster: traffic lights, then the sidebar toggle at Zeron's `titlebar_cluster_start` (88).
 /// Elsewhere there are no traffic lights, and the toggle starts the row.
 const TOGGLE_LEFT: f32 = if cfg!(target_os = "macos") { 88.0 } else { 12.0 };
-/// What the titlebar's right end keeps clear for the window's buttons, which Shepherd draws itself off macOS.
-const WINDOW_CONTROLS_W: f32 = if cfg!(target_os = "macos") { 0.0 } else { 100.0 };
+/// Whether the window's own buttons are drawn: off macOS, unless Settings turned them off (Windows clicks them as
+/// its caption buttons, so they stay there).
+fn window_buttons(cx: &App) -> bool {
+    !cfg!(target_os = "macos") && (cfg!(windows) || SettingsGlobal::of(cx).settings.window_buttons)
+}
+
+/// What the titlebar's right end keeps clear for the window's buttons, while they are drawn.
+fn window_controls_w(cx: &App) -> f32 {
+    if window_buttons(cx) { 100.0 } else { 0.0 }
+}
 /// Centre line of the traffic lights (placed at y 14), measured on a 2x screen; the toggle centres on it, not on the titlebar.
 const TRAFFIC_LIGHTS_CENTER: f32 = 21.25;
 /// The Agents list's least height when dragged: one agent row and a bit.
@@ -291,7 +299,7 @@ impl Shell {
                 traffic_light_position: Some(point(px(14.), px(14.))),
             }),
             app_owns_titlebar_drag: true,
-            window_background: if cfg!(target_os = "macos") { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque },
+            window_background: window_background(SettingsGlobal::of(cx).settings.translucent_window),
             app_id: Some("dev.freethinkel.shepherd".into()),
             // off macOS the titlebar is Shepherd's own, buttons and all, not the desktop's bar over it
             window_decorations: (!cfg!(target_os = "macos")).then_some(gpui::WindowDecorations::Client),
@@ -1016,6 +1024,11 @@ impl Shell {
             .on_mouse_down_out(move |_, _, _| out.set(false))
             .on_mouse_up(MouseButton::Left, move |_, _, _| up.set(false))
             .on_mouse_down(MouseButton::Left, move |_, _, _| down.set(true))
+            // where Shepherd draws its own titlebar (Wayland, X11), a right-click opens the window manager's window
+            // menu, as a titlebar of its own would: minimize and the rest, with or without the window buttons
+            .when(!cfg!(any(target_os = "macos", windows)), |el| {
+                el.on_mouse_down(MouseButton::Right, |e: &MouseDownEvent, window, _| window.show_window_menu(e.position))
+            })
             .on_mouse_move(move |e: &MouseMoveEvent, window, _| {
                 if moved.get() && e.pressed_button == Some(MouseButton::Left) {
                     moved.set(false);
@@ -1056,6 +1069,11 @@ fn remember_shown(recent: &mut Vec<String>, shown: &[PaneFrame], live: impl Fn(&
     }
     recent.retain(|id| live(id));
     recent.truncate(KEPT_PANES);
+}
+
+/// The window's background for the Translucent window setting: blurred where the system or compositor blurs.
+pub(crate) fn window_background(translucent: bool) -> WindowBackgroundAppearance {
+    if translucent { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque }
 }
 
 /// AppKit lays the traffic lights out again while the window is inactive (a screen recorder takes focus), and gpui
@@ -1666,7 +1684,7 @@ impl Render for Shell {
             });
         self.popups(root, &theme, &snapshot, sidebar_w, window, cx)
             .children(spring_back)
-            .children(window_controls(&theme, window))
+            .when(window_buttons(cx), |el| el.children(window_controls(&theme, window)))
             .children(resize_edges(window))
             .child(toasts)
     }

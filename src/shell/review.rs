@@ -151,7 +151,7 @@ impl Shell {
             .flex_none()
             .pl(px(12.))
             // clear of the window's buttons, which sit over its right end off macOS
-            .pr(px(12. + WINDOW_CONTROLS_W))
+            .pr(px(12. + window_controls_w(cx)))
             .flex()
             .items_center()
             .gap(px(6.))

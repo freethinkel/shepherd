@@ -73,6 +73,13 @@ pub struct Settings {
     pub copy_on_select: bool,
     /// macOS Secure Keyboard Entry while a Shepherd window is in front: other apps cannot read the keys typed.
     pub secure_input: bool,
+    /// The window lets the desktop show through: blurred on macOS, and elsewhere as the compositor does it. On by
+    /// default on macOS only, where it is how Shepherd has always looked.
+    pub translucent_window: bool,
+    /// Off macOS and Windows: the window's own minimize, maximize and close at the titlebar's right end. Off (when
+    /// the window manager provides its own controls or tiles windows), the tabs take their room; the edges still
+    /// resize the window, and a right-click on the titlebar opens the window manager's menu.
+    pub window_buttons: bool,
     /// The workspaces sidebar is shown; `⌘B` hides it.
     pub sidebar_open: bool,
     /// Worktree groups folded in the sidebar, by workspace id.
@@ -241,6 +248,8 @@ impl Default for Settings {
             dock_badge: true,
             copy_on_select: true,
             secure_input: false,
+            translucent_window: cfg!(target_os = "macos"),
+            window_buttons: true,
             sidebar_open: true,
             folded: Vec::new(),
             window: None,
@@ -350,7 +359,7 @@ impl Settings {
     }
 
     pub fn theme(&self, system: WindowAppearance) -> Theme {
-        Theme { status_icons: self.status_icons, ..Theme::resolve(&self.theme_light, &self.theme_dark, self.appearance, system, &self.font()) }
+        Theme { status_icons: self.status_icons, translucent: self.translucent_window, ..Theme::resolve(&self.theme_light, &self.theme_dark, self.appearance, system, &self.font()) }
     }
 
     /// The old single family as the light and dark themes: its variant of each appearance it has.
@@ -390,6 +399,23 @@ impl SettingsGlobal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_is_translucent_by_default_on_macos_only() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.translucent_window, cfg!(target_os = "macos"));
+        assert_eq!(s.theme(WindowAppearance::Dark).translucent, s.translucent_window);
+        let on: Settings = serde_json::from_str(r#"{"translucent_window": true}"#).unwrap();
+        let theme = on.theme(WindowAppearance::Dark);
+        assert!(theme.glass().a < theme.surface.a, "the fill lets the desktop through");
+    }
+
+    #[test]
+    fn the_window_buttons_show_by_default() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert!(s.window_buttons);
+        assert!(!serde_json::from_str::<Settings>(r#"{"window_buttons": false}"#).unwrap().window_buttons);
+    }
 
     fn tmp() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
