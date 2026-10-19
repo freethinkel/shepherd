@@ -9,12 +9,12 @@ It's written in Rust on [GPUI](https://github.com/zeronsh/zui) and styled after 
 ## What it does
 
 - The sidebar lists workspaces. A repo's worktrees fold under it with their branch, changes against main and PR state. Right-click creates, opens or removes a worktree.
-- Under the sidebar, herdr sessions and saved SSH machines sit in a bar, as Arc's spaces. A two-finger swipe goes to the next one.
+- Under the sidebar, herdr sessions and saved SSH machines sit in a bar, like Arc's spaces. A two-finger swipe goes to the next one.
 - The agents list at the bottom shows every agent herdr detects in any workspace, with its status (working, blocked, done, idle), the task in its title and how long it has waited. Click one to jump to its pane.
 - When an agent you can't see starts waiting or finishes, macOS shows a notification and the Dock icon counts it until you look at that tab. Approve on the notification answers the agent without opening Shepherd.
 - Tabs show the agent or shell running in them. Drag tabs to reorder them. Drag a pane by its grip onto another pane to split or swap, or onto a tab to move it there.
 - Dividers between panes snap to the cell grid herdr lays out, and the terminal reflows while you drag.
-- The terminal draws ligatures, Kitty images and box drawing on its own. Scrollback is read from herdr once and scrolled locally. `⌘`-click opens links, files, folders and images.
+- The terminal draws ligatures, Kitty images and box drawing on its own. Shepherd reads scrollback from herdr once and scrolls it locally. `⌘`-click opens links, files, folders and images.
 - herdr's own `[keys]` work in Shepherd, and its popups float over the panes.
 - `⌥⌘B` opens the review panel: the branch's PR (gh) or MR (glab) with its description, checks or pipeline jobs and their logs. It works for SSH machines too.
 - `⌘K` opens a command panel with every action, workspace and tab. `⇧⌘A` opens the agents panel.
@@ -35,18 +35,12 @@ sudo apt install ./shepherd_<version>-1_<arch>.deb       # Debian, Ubuntu
 tar -xzf Shepherd-<version>-linux-<arch>.tar.gz -C ~/.local   # anywhere else: bin, .desktop file and icon
 ```
 
-It draws with Vulkan, so it needs a Vulkan driver (`mesa-vulkan-drivers`, which the packages recommend). There's no
-Dock badge, Secure Keyboard Entry or self-update on Linux: release builds only tell of a new release in the sidebar,
-and a click opens its page; settings live in `~/.config/shepherd`. A click on a notification requests
-activation for the window; compositors may grant it or mark the window for attention. The notification sound is the
-freedesktop sound theme's, played by `canberra-gtk-play`, or `paplay` where that is missing.
-Settings → Appearance can make the window translucent (whether it is blurred depends on your compositor), or hide its
-own buttons when the window manager provides its own controls or tiles windows. A right-click on the titlebar opens the
-window manager's window menu.
+It draws with Vulkan, so it needs a Vulkan driver (`mesa-vulkan-drivers`, which the packages recommend). Linux gets no Dock badge, Secure Keyboard Entry or self-update: release builds only say in the sidebar that a new release is out, and a click opens its page. Settings live in `~/.config/shepherd`. Clicking a notification asks the compositor to raise the window. Some do, others only mark it for attention. The notification sound comes from the freedesktop sound theme, played by `canberra-gtk-play`, or by `paplay` if that's missing.
+Settings → Appearance can make the window translucent (your compositor decides whether it's blurred), or hide Shepherd's window buttons when the window manager has its own or tiles windows. Right-clicking the titlebar opens the window manager's window menu.
 
 ### Requirements
 
-Shepherd needs macOS 14 or later (or Linux) and herdr. It talks to the herdr server over `~/.config/herdr/herdr.sock`, so herdr has to be installed and running. You can point it at another binary or socket in Settings.
+Shepherd needs macOS 14 or later, or Linux. It talks to the herdr server over `~/.config/herdr/herdr.sock` and starts the server if nothing answers there. If herdr isn't installed, Shepherd downloads the build for your system from herdr.dev, checks its SHA-256 and puts it in `~/.local/bin`, as herdr's `install.sh` does. You can point it at another binary or socket in Settings.
 
 ## Keys
 
@@ -65,11 +59,11 @@ Shepherd needs macOS 14 or later (or Linux) and herdr. It talks to the herdr ser
 | `⌘=`, `⌘-`, `⌘0` | Text size up, down, default |
 | `⌘,` | Settings |
 
-Every binding can be changed in Settings.
+You can rebind any of them in Settings.
 
 ## Build
 
-You need a recent stable Rust toolchain, Xcode's command line tools and [Zig 0.16](https://ziglang.org/download/), which builds libghostty-vt. Put `zig` on your `PATH` and run with `ZIG=zig`, or point `ZIG` at the binary: `.cargo/config.toml` holds a local path that only fits one machine.
+You need a recent stable Rust toolchain, Xcode's command line tools and [Zig 0.16](https://ziglang.org/download/), which builds libghostty-vt. Put `zig` on your `PATH` and run with `ZIG=zig`, or point `ZIG` at the binary. The path in `.cargo/config.toml` only fits one machine.
 
 ```sh
 make run      # debug build, run as Shepherd.app
@@ -82,7 +76,7 @@ make linux    # Linux tar.gz, deb and rpm in target/linux-dist, built in Docker
 make help     # everything else
 ```
 
-`make app` signs with the Developer ID certificate in your keychain if it finds one, and ad hoc otherwise. Releases come from CI: bumping `version` in `Cargo.toml` on `main` builds, signs, notarizes and publishes a new release.
+`make app` signs with the Developer ID certificate in your keychain if it finds one, and ad hoc otherwise. CI makes the releases. Bumping `version` in `Cargo.toml` on `main` builds, signs, notarizes and publishes one.
 
 ## License
 
