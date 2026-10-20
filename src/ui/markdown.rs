@@ -6,28 +6,73 @@
 //! order); a drag anchored in one resolves against that list into a span per paragraph, washed under its glyphs.
 use crate::theme::Theme;
 use crate::ui::review::{Block, InlineRun, runs_text};
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, Bounds, CursorStyle, DispatchPhase, Font, FontStyle, FontWeight, Hitbox, HitboxBehavior, InteractiveText, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, SharedString, StrikethroughStyle, Styled, StyledText,
-    TextLayout, TextRun, UnderlineStyle, Window, canvas, div, point, px, size,
+    AnyElement, App, Bounds, CursorStyle, DispatchPhase, Font, FontStyle, FontWeight, Hitbox, HitboxBehavior, Hsla, InteractiveElement,
+    InteractiveText, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, SharedString,
+    StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText, TextLayout, TextRun, UnderlineStyle, Window, canvas, div, point, px,
+    size,
 };
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
+use std::path::PathBuf;
+use std::rc::Rc;
+use zeron_markdown::parser::InlineImage;
+use zeron_syntax::HighlightKind;
+
+/// How a surface draws its markdown: the review panel's compact way by default; the reader's as a document, with
+/// its images and its own way to follow links.
+#[derive(Clone, Default)]
+pub struct Look {
+    /// A document's type scale and spacing, and its code colored by syntax.
+    pub document: bool,
+    /// An image's file here, by its source; `None` (or no file yet) keeps its alt text.
+    pub image: Option<Rc<dyn Fn(&str) -> Option<PathBuf>>>,
+    /// Follows a clicked link; `None` opens it in the browser.
+    pub link: Option<Rc<dyn Fn(&str, &mut Window, &mut App)>>,
+}
 
 /// `blocks`, keyed under `key` (their paragraphs' selection keys and element ids start with it). A view of them
 /// paints one [`frame_reset`] before the first, however many times it renders some.
 pub fn render(blocks: &[Block], key: &str, theme: &Theme) -> Vec<AnyElement> {
-    blocks.iter().enumerate().map(|(i, b)| block(b, &format!("{key}-{i}"), theme)).collect()
+    render_with(blocks, key, theme, &Look::default())
 }
 
-fn block(b: &Block, key: &str, theme: &Theme) -> AnyElement {
+/// `blocks` drawn the `look` way.
+pub fn render_with(blocks: &[Block], key: &str, theme: &Theme, look: &Look) -> Vec<AnyElement> {
+    // a paragraph of images without alt text has nothing to show where images are not drawn
+    let shown = |b: &Block| look.image.is_some() || !matches!(b, Block::Paragraph { runs } if runs_text(runs).trim().is_empty());
+    blocks.iter().enumerate().filter(|(_, b)| shown(b)).map(|(i, b)| block(b, &format!("{key}-{i}"), theme, look)).collect()
+}
+
+fn block(b: &Block, key: &str, theme: &Theme, look: &Look) -> AnyElement {
+    let body = if look.document { theme.text } else { theme.text_muted };
     match b {
-        Block::Paragraph { runs } => text(runs, key, theme.text_muted, false, theme),
+        Block::Paragraph { runs } if look.image.is_some() && runs.iter().any(|r| r.style.image.is_some()) => figure(runs, key, body, theme, look),
+        Block::Paragraph { runs } => text(runs, key, body, false, theme, look),
+        // GitHub's scale: the top two levels ruled off below
+        Block::Heading { level, runs } if look.document => {
+            let size = match level {
+                1 => 26.,
+                2 => 21.,
+                3 => 17.,
+                _ => 15.,
+            };
+            div()
+                .pt(px(if *level <= 2 { 14. } else { 8. }))
+                .text_size(px(size))
+                .line_height(px(size * 1.3))
+                .when(*level <= 2, |el| el.pb(px(6.)).border_b_1().border_color(theme.border))
+                .child(text(runs, key, theme.text, true, theme, look))
+                .into_any_element()
+        }
         Block::Heading { level, runs } => div()
             .pt(px(4.))
             .text_size(px(if *level <= 1 { 15. } else if *level == 2 { 14. } else { 13. }))
-            .child(text(runs, key, theme.text, true, theme))
+            .child(text(runs, key, theme.text, true, theme, look))
             .into_any_element(),
+        Block::CodeBlock { code: c, language } if look.document => highlighted(c, language.as_deref(), key, theme),
         Block::CodeBlock { code: c, .. } => code(c, key, px(11.5), theme),
         Block::BlockQuote { children } => div()
             .pl(px(8.))
@@ -36,14 +81,16 @@ fn block(b: &Block, key: &str, theme: &Theme) -> AnyElement {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .children(children.iter().enumerate().map(|(i, b)| block(b, &format!("{key}-{i}"), theme)))
+            .children(children.iter().enumerate().map(|(i, b)| block(b, &format!("{key}-{i}"), theme, look)))
             .into_any_element(),
         Block::List { ordered_start, items } => div()
             .flex()
             .flex_col()
             .gap(px(4.))
             .children(items.iter().enumerate().map(|(i, item)| {
-                let marker = ordered_start.map_or("•".to_string(), |n| format!("{}.", n + i as u64));
+                // a task's box is its marker
+                let task = matches!(item.first(), Some(Block::Paragraph { runs }) if runs.first().is_some_and(|r| r.style.task.is_some()));
+                let marker = if task { String::new() } else { ordered_start.map_or("•".to_string(), |n| format!("{}.", n + i as u64)) };
                 div()
                     .flex()
                     .gap(px(6.))
@@ -55,15 +102,15 @@ fn block(b: &Block, key: &str, theme: &Theme) -> AnyElement {
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .children(item.iter().enumerate().map(|(j, b)| block(b, &format!("{key}-{i}-{j}"), theme))),
+                            .children(item.iter().enumerate().map(|(j, b)| block(b, &format!("{key}-{i}-{j}"), theme, look))),
                     )
             }))
             .into_any_element(),
         Block::Table { header, rows, .. } => {
             let row = |cells: &[Vec<InlineRun>], r: usize, head: bool| {
                 div().flex().border_t_1().border_color(theme.border).children(cells.iter().enumerate().map(|(c, cell)| {
-                    let color = if head { theme.text } else { theme.text_muted };
-                    div().flex_1().min_w_0().px(px(6.)).py(px(4.)).child(text(cell, &format!("{key}-{r}-{c}"), color, head, theme))
+                    let color = if head { theme.text } else { body };
+                    div().flex_1().min_w_0().px(px(6.)).py(px(4.)).child(text(cell, &format!("{key}-{r}-{c}"), color, head, theme, look))
                 }))
             };
             div()
@@ -88,61 +135,226 @@ pub fn code(code: &str, key: &str, size: Pixels, theme: &Theme) -> AnyElement {
         .bg(theme.wash(0.05))
         .overflow_hidden()
         .text_size(size)
-        .child(text_in(&[run], key, theme.text_muted, false, theme.font_terminal.clone(), theme))
+        .child(text_in(&[run], key, theme.text_muted, false, theme.font_terminal.clone(), theme, None, &Look::default()))
         .into_any_element()
 }
 
-fn text(runs: &[InlineRun], key: &str, color: gpui::Hsla, bold: bool, theme: &Theme) -> AnyElement {
-    text_in(runs, key, color, bold, theme.font_ui.clone(), theme)
+/// A fenced block in the terminal font, colored by its language's syntax (Zeron's tree-sitter grammars); one it
+/// does not know stays plain.
+fn highlighted(source: &str, language: Option<&str>, key: &str, theme: &Theme) -> AnyElement {
+    let source = source.trim_end();
+    let mut runs = Vec::new();
+    let mut colors = Vec::new();
+    let mut at = 0;
+    let mut push = |range: Range<usize>, color: Hsla| {
+        if !range.is_empty() {
+            runs.push(InlineRun { text: source[range].to_string(), style: Default::default() });
+            colors.push(color);
+        }
+    };
+    for (range, kind) in syntax(source, language).iter() {
+        if range.start < at || range.end > source.len() {
+            continue; // overlapping or stale: the plain text covers it
+        }
+        push(at..range.start, theme.text);
+        push(range.clone(), syntax_color(*kind, theme));
+        at = range.end;
+    }
+    push(at..source.len(), theme.text);
+    div()
+        .p(px(12.))
+        .rounded(px(8.))
+        .bg(theme.wash(0.05))
+        .overflow_hidden()
+        .text_size(px(12.5))
+        .line_height(px(19.))
+        .child(text_in(&runs, key, theme.text, false, theme.font_terminal.clone(), theme, Some(&colors), &Look::default()))
+        .into_any_element()
 }
 
-/// One paragraph: its runs styled, its links clickable, selectable.
-fn text_in(runs: &[InlineRun], key: &str, color: gpui::Hsla, bold: bool, family: SharedString, theme: &Theme) -> AnyElement {
-    let flat: SharedString = runs_text(runs).into();
+// ponytail: the cache empties whole at 256 blocks; an LRU if switching between big documents ever re-highlights visibly.
+/// `source`'s highlight spans, from the start of `source`, kept per block text and language.
+fn syntax(source: &str, language: Option<&str>) -> Rc<Vec<(Range<usize>, HighlightKind)>> {
+    thread_local! {
+        static DONE: RefCell<HashMap<(String, Option<String>), Rc<Vec<(Range<usize>, HighlightKind)>>>> = RefCell::new(HashMap::new());
+    }
+    let key = (source.to_string(), language.map(str::to_string));
+    if let Some(spans) = DONE.with(|d| d.borrow().get(&key).cloned()) {
+        return spans;
+    }
+    let request = zeron_syntax::HighlightRequest { source, path: None, fence_tag: language };
+    let mut spans = Vec::new();
+    if let Ok(doc) = zeron_syntax::highlight(request) {
+        let mut start = 0;
+        for (line, line_spans) in source.split('\n').zip(&doc.lines) {
+            spans.extend(line_spans.iter().map(|s| (start + s.range.start..start + s.range.end, s.kind)));
+            start += line.len() + 1;
+        }
+    }
+    let spans = Rc::new(spans);
+    DONE.with(|d| {
+        let mut d = d.borrow_mut();
+        if d.len() >= 256 {
+            d.clear();
+        }
+        d.insert(key, spans.clone());
+    });
+    spans
+}
+
+/// A syntax kind in the terminal theme's ANSI colors, so code reads as it does in the panes.
+fn syntax_color(kind: HighlightKind, theme: &Theme) -> Hsla {
+    let ansi = &theme.terminal.ansi;
+    match kind {
+        HighlightKind::Comment => theme.text_faint,
+        HighlightKind::Keyword => ansi[5],
+        HighlightKind::String | HighlightKind::StringSpecial | HighlightKind::MarkupRaw => ansi[2],
+        HighlightKind::Escape => ansi[6],
+        HighlightKind::Number | HighlightKind::Boolean | HighlightKind::Constant => ansi[3],
+        HighlightKind::Type | HighlightKind::TypeBuiltin | HighlightKind::Constructor => ansi[6],
+        HighlightKind::Function | HighlightKind::FunctionBuiltin | HighlightKind::Macro | HighlightKind::MarkupHeading => ansi[4],
+        HighlightKind::Property | HighlightKind::Attribute | HighlightKind::Tag | HighlightKind::Label | HighlightKind::VariableSpecial => ansi[1],
+        HighlightKind::Operator | HighlightKind::Punctuation | HighlightKind::Embedded => theme.text_muted,
+        HighlightKind::MarkupLink | HighlightKind::MarkupReference => theme.accent,
+        HighlightKind::Invalid => theme.danger,
+        _ => theme.text,
+    }
+}
+
+/// A paragraph with images: each drawn (a linked one clickable), the text between them as text.
+fn figure(runs: &[InlineRun], key: &str, color: Hsla, theme: &Theme, look: &Look) -> AnyElement {
+    let mut parts: Vec<AnyElement> = Vec::new();
+    let mut words: Vec<InlineRun> = Vec::new();
+    for run in runs.iter().chain([&InlineRun { text: String::new(), style: Default::default() }]) {
+        let last = run.text.is_empty() && run.style.image.is_none();
+        if (run.style.image.is_some() || last) && !runs_text(&words).trim().is_empty() {
+            parts.push(text(&words, &format!("{key}-{}", parts.len()), color, false, theme, look));
+        }
+        match &run.style.image {
+            Some(image) => {
+                words.clear();
+                parts.push(picture(image, &run.text, &format!("{key}-image-{}", parts.len()), theme, look));
+            }
+            None if !last => words.push(run.clone()),
+            None => {}
+        }
+    }
+    div().flex().flex_wrap().items_center().gap(px(4.)).children(parts).into_any_element()
+}
+
+/// An image at its own size, no wider than the column; its alt text until (or unless) it is fetched.
+fn picture(image: &InlineImage, alt: &str, key: &str, theme: &Theme, look: &Look) -> AnyElement {
+    let alt: SharedString = alt.to_string().into();
+    let Some(path) = look.image.as_ref().and_then(|file| file(&image.source)) else {
+        return div().text_color(theme.text_faint).child(alt).into_any_element();
+    };
+    let shown = gpui::img(path).max_w_full().with_fallback({
+        let (alt, faint) = (alt.clone(), theme.text_faint);
+        move || div().text_color(faint).child(alt.clone()).into_any_element()
+    });
+    match (image.link.clone(), look.link.clone()) {
+        (Some(url), Some(follow)) => div()
+            .id(SharedString::from(key.to_string()))
+            .cursor_pointer()
+            .child(shown)
+            .on_click(move |_, window, cx| follow(&url, window, cx))
+            .into_any_element(),
+        _ => shown.into_any_element(),
+    }
+}
+
+fn text(runs: &[InlineRun], key: &str, color: Hsla, bold: bool, theme: &Theme, look: &Look) -> AnyElement {
+    text_in(runs, key, color, bold, theme.font_ui.clone(), theme, None, look)
+}
+
+/// One paragraph: its runs styled (`colors`, one a run, in place of `color`), its links clickable, selectable.
+#[allow(clippy::too_many_arguments)]
+fn text_in(
+    runs: &[InlineRun],
+    key: &str,
+    color: Hsla,
+    bold: bool,
+    family: SharedString,
+    theme: &Theme,
+    colors: Option<&[Hsla]>,
+    look: &Look,
+) -> AnyElement {
+    let mut flat = String::new();
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
-    let mut at = 0;
-    let text_runs: Vec<TextRun> = runs
-        .iter()
-        .map(|r| {
-            let s = &r.style;
-            let range = at..at + r.text.len();
-            at = range.end;
-            if let Some(url) = &s.link {
-                links.push((range, url.clone()));
-            }
-            TextRun {
-                len: r.text.len(),
-                font: Font {
-                    // Geist has no bold: semibold reads as it
-                    weight: if bold || s.bold { FontWeight::SEMIBOLD } else { FontWeight::NORMAL },
-                    style: if s.italic { FontStyle::Italic } else { FontStyle::Normal },
-                    ..gpui::font(if s.code { theme.font_terminal.clone() } else { family.clone() })
-                },
-                color: if s.link.is_some() { theme.accent } else { color },
-                background_color: s.code.then(|| theme.wash(0.06)),
-                underline: s.link.is_some().then(|| UnderlineStyle { thickness: px(1.), color: Some(theme.accent.opacity(0.5)), wavy: false }),
-                strikethrough: s.strikethrough.then(|| StrikethroughStyle { thickness: px(1.), color: None }),
-            }
-        })
-        .collect();
+    let mut code: Vec<Range<usize>> = Vec::new();
+    let mut text_runs: Vec<TextRun> = Vec::new();
+    let plain = |len: usize| TextRun { len, font: gpui::font(family.clone()), color, background_color: None, underline: None, strikethrough: None };
+    for (i, r) in runs.iter().enumerate() {
+        let color = colors.and_then(|c| c.get(i).copied()).unwrap_or(color);
+        let s = &r.style;
+        // a code run sits between thin spaces inside its background, apart from the words around it
+        let start = flat.len();
+        if s.code {
+            flat.push_str(PAD);
+            text_runs.push(plain(PAD.len()));
+        }
+        let range = flat.len()..flat.len() + r.text.len();
+        flat.push_str(&r.text);
+        if let Some(url) = &s.link {
+            links.push((range, url.clone()));
+        }
+        text_runs.push(TextRun {
+            len: r.text.len(),
+            font: Font {
+                // Geist has no bold: semibold reads as it
+                weight: if bold || s.bold { FontWeight::SEMIBOLD } else { FontWeight::NORMAL },
+                style: if s.italic { FontStyle::Italic } else { FontStyle::Normal },
+                ..gpui::font(if s.code { INLINE_MONO.into() } else { family.clone() })
+            },
+            color: if s.link.is_some() || s.code { theme.accent } else { color },
+            background_color: None,
+            underline: s.link.is_some().then(|| UnderlineStyle { thickness: px(1.), color: Some(theme.accent.opacity(0.5)), wavy: false }),
+            strikethrough: s.strikethrough.then(|| StrikethroughStyle { thickness: px(1.), color: None }),
+        });
+        if s.code {
+            flat.push_str(PAD);
+            text_runs.push(plain(PAD.len()));
+            code.push(start..flat.len());
+        }
+    }
+    let flat: SharedString = flat.into();
     let styled = StyledText::new(flat.clone()).with_runs(text_runs);
     let layout = styled.layout().clone();
     let wash = theme.accent.opacity(0.25);
+    let pill = theme.accent.opacity(0.1);
     let key: SharedString = key.to_string().into();
     let underlay = {
         let key = key.clone();
         canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-            move |_, hitbox, window, _| paint_selection(window, hitbox, &key, &flat, &layout, wash),
+            move |_, hitbox, window, _| {
+                // a code run's background, rounded (a run's own background is square), a little inside its line
+                for rect in code.iter().flat_map(|r| rects(&layout, r)) {
+                    let rect = Bounds::new(point(rect.left(), rect.top() + px(2.)), size(rect.size.width, rect.size.height - px(4.)));
+                    window.paint_quad(gpui::fill(rect, pill).corner_radii(px(4.)));
+                }
+                paint_selection(window, hitbox, &key, &flat, &layout, wash)
+            },
         )
         .absolute()
         .size_full()
     };
     let urls: Vec<String> = links.iter().map(|(_, url)| url.clone()).collect();
     let ranges = links.into_iter().map(|(range, _)| range).collect();
-    let text = InteractiveText::new(gpui::ElementId::Name(key), styled).on_click(ranges, move |ix, _, cx: &mut App| cx.open_url(&urls[ix]));
+    let follow = look.link.clone();
+    let text = InteractiveText::new(gpui::ElementId::Name(key), styled).on_click(ranges, move |ix, window, cx: &mut App| match &follow {
+        Some(follow) => follow(&urls[ix], window, cx),
+        None => cx.open_url(&urls[ix]),
+    });
     div().relative().cursor(CursorStyle::IBeam).child(underlay).child(text).into_any_element()
 }
+
+/// The thin space either side of a code run, inside its background; copies leave it out.
+const PAD: &str = "\u{2009}";
+
+/// Geist Mono with its glyphs at 88% (`assets/fonts/ShepherdInlineMono.ttf`): a line has one font size, so inline
+/// code looks smaller by its font.
+const INLINE_MONO: &str = "Shepherd Inline Mono";
 
 /// One painted paragraph, registered per frame in paint order.
 struct Painted {
@@ -179,9 +391,15 @@ pub fn frame_reset() -> impl IntoElement {
     canvas(|_, _, _| (), |_, _, _, _| PAINTED.with(|p| p.borrow_mut().clear())).absolute().size_0()
 }
 
-/// Drops the selection and the paint-order list, for when no markdown is shown: nothing is left to copy.
-pub fn forget() {
-    SELECTION.with(|s| s.borrow_mut().take());
+/// Drops a selection made in the markdown keyed under `key`, and the paint-order list, for when that markdown is no
+/// longer shown: nothing of it is left to copy. Another surface's selection stays, its paragraphs painted again.
+pub fn forget(key: &str) {
+    SELECTION.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.as_ref().is_some_and(|s| s.anchor_key.starts_with(key)) {
+            s.take();
+        }
+    });
     PAINTED.with(|p| p.borrow_mut().clear());
 }
 
@@ -197,7 +415,17 @@ pub fn selected_text() -> Option<String> {
 }
 
 fn join(spans: &[Span]) -> String {
-    spans.iter().map(|s| &s.text[s.range.clone()]).collect::<Vec<_>>().join("\n")
+    spans.iter().map(|s| s.text[s.range.clone()].replace(PAD, "")).collect::<Vec<_>>().join("\n")
+}
+
+/// Selects every paragraph painted last frame under keys starting `key`, for Cmd+A.
+pub fn select_all(key: &str) {
+    let spans: Vec<Span> = PAINTED.with(|p| {
+        p.borrow().iter().filter(|e| e.key.starts_with(key)).map(|e| Span { key: e.key.clone(), range: 0..e.text.len(), text: e.text.clone() }).collect()
+    });
+    let Some(first) = spans.first() else { return };
+    let anchor_key = first.key.clone();
+    SELECTION.with(|s| *s.borrow_mut() = Some(Selection { anchor_key, anchor: 0, dragging: false, spans }));
 }
 
 /// The spans between `(paragraph, byte)` points `a` and `b` over `painted` (key, text), either way round.
@@ -366,6 +594,9 @@ mod tests {
         assert_eq!(join(&spans), "st\nsecond\nth");
         assert_eq!(spans.iter().map(|s| s.key.as_ref()).collect::<Vec<_>>(), ["a", "b", "c"]);
         assert!(resolve(&painted, (1, 2), (1, 2)).is_empty());
+        // a code run's padding stays out of a copy
+        let code: SharedString = format!("run {PAD}cargo{PAD} now").into();
+        assert_eq!(join(&[Span { key: "d".into(), range: 0..code.len(), text: code }]), "run cargo now");
     }
 
     #[test]
@@ -373,5 +604,16 @@ mod tests {
         assert_eq!(word("fix the login_bug.", 10), 8..17);
         assert_eq!(word("a + b", 2), 2..3);
         assert_eq!(word("a  b", 2), 2..2);
+    }
+
+    #[test]
+    fn highlights_land_on_their_lines() {
+        let source = "let a = 1;\nfn go() {}";
+        let spans = syntax(source, Some("rust"));
+        let at = |text: &str| spans.iter().find(|(r, _)| &source[r.clone()] == text).map(|(_, k)| *k);
+        assert_eq!(at("let"), Some(HighlightKind::Keyword));
+        assert_eq!(at("fn"), Some(HighlightKind::Keyword));
+        assert_eq!(at("go"), Some(HighlightKind::Function));
+        assert!(syntax(source, Some("no-such-language")).is_empty());
     }
 }

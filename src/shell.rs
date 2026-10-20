@@ -1468,7 +1468,7 @@ impl Render for Shell {
         let review = (self.review_open && !on_page && has_remote).then(|| self.render_review(&theme, &shown, window, cx));
         if review.is_none() {
             // a hidden panel's selection is not Cmd+C's to copy
-            crate::ui::markdown::forget();
+            crate::ui::markdown::forget("review-");
         }
         let root = div()
             .id("root")

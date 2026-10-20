@@ -70,6 +70,42 @@ pub fn show_machine(target: Option<String>) {
     *SHOWN.lock().unwrap() = target;
 }
 
+/// The SSH target of the machine shown; `None` while a local session is.
+pub fn shown_machine() -> Option<String> {
+    SHOWN.lock().unwrap().clone()
+}
+
+/// `path` as the machine at `target` has it, from a shell in `cwd` (`~/` is its home): the absolute path and
+/// whether it is a folder; `None` when nothing is there.
+pub fn find_file(target: &str, cwd: &str, path: &str) -> Option<(String, bool)> {
+    found(&ssh(target, &find_script(cwd, path)).ok()?.stdout)
+}
+
+/// The script [`find_file`] runs: `d` or `f` and the path, or nothing.
+fn find_script(cwd: &str, path: &str) -> String {
+    format!(
+        "p={}; case \"$p\" in '~/'*) p=\"$HOME/${{p#??}}\";; /*) ;; *) p={}/\"$p\";; esac; \
+         if [ -d \"$p\" ]; then echo \"d$p\"; elif [ -e \"$p\" ]; then echo \"f$p\"; fi",
+        quote(path),
+        quote(cwd)
+    )
+}
+
+fn found(out: &[u8]) -> Option<(String, bool)> {
+    let line = String::from_utf8_lossy(out).trim_end_matches('\n').to_string();
+    let (kind, path) = line.split_at_checked(1)?;
+    (!path.is_empty()).then(|| (path.to_string(), kind == "d"))
+}
+
+/// The file at `path` on the machine at `target`.
+pub fn read_file(target: &str, path: &str) -> std::io::Result<Vec<u8>> {
+    let out = ssh(target, &format!("cat -- {}", quote(path)))?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+    }
+    Ok(out.stdout)
+}
+
 /// A directory of the place shown, as the rest of Shepherd keeps it: a machine's path is that machine's, and git
 /// reaches it over SSH.
 pub fn locate(path: &str) -> String {
@@ -217,6 +253,21 @@ mod tests {
         let command = bridge_command("agents", "remote-client-bridge");
         assert!(command.contains("--session agents remote-client-bridge"));
         assert!(command.contains("\"$HOME/.local/bin/herdr\""));
+    }
+
+    #[test]
+    fn a_clicked_path_is_found_from_the_shells_folder() {
+        let dir = std::env::temp_dir().join(format!("shepherd-find-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/it's.md"), "# hi").unwrap();
+        let cwd = dir.to_str().unwrap();
+        let run = |path: &str| found(&std::process::Command::new("sh").arg("-c").arg(find_script(cwd, path)).output().unwrap().stdout);
+        assert_eq!(run("docs/it's.md"), Some((format!("{cwd}/docs/it's.md"), false)));
+        assert_eq!(run(&format!("{cwd}/docs")), Some((format!("{cwd}/docs"), true)));
+        assert_eq!(run("nope.md"), None);
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(run("~/"), Some((format!("{home}/"), true)));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

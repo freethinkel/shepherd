@@ -864,8 +864,12 @@ pub use zeron_markdown::{Block, InlineRun};
 pub fn markdown(text: &str) -> Vec<Block> {
     let mut blocks: Vec<Block> = zeron_markdown::parse_full(&strip_comments(text)).blocks.iter().map(|b| b.block.clone()).collect();
     blocks.iter_mut().for_each(tidy);
-    blocks.retain(|b| !matches!(b, Block::Paragraph { runs } if runs_text(runs).trim().is_empty()));
+    blocks.retain(|b| !matches!(b, Block::Paragraph { runs } if runs_text(runs).trim().is_empty() && !has_image(runs)));
     blocks
+}
+
+fn has_image(runs: &[InlineRun]) -> bool {
+    runs.iter().any(|r| r.style.image.is_some())
 }
 
 fn tidy(block: &mut Block) {
@@ -890,7 +894,7 @@ fn tidy_runs(runs: &mut Vec<InlineRun>) {
             }
         }
     }
-    runs.retain(|r| !r.text.is_empty());
+    runs.retain(|r| !r.text.is_empty() || r.style.image.is_some());
 }
 
 /// The runs' text, as it reads.

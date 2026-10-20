@@ -2,6 +2,8 @@ Third-party assets and code in Shepherd
 
 Geist and Geist Mono (assets/fonts/*.ttf)
   SIL Open Font License 1.1; the full license is in assets/fonts/Geist-OFL.txt.
+  ShepherdInlineMono.ttf is Geist Mono with its glyphs scaled to 88% and renamed (a Modified Version under the
+  same license), for inline code beside Geist.
 
 Solar icon set, Linear style (assets/solar-linear.json)
   By 480 Design (https://www.figma.com/community/file/1166831539721848736), Creative Commons Attribution 4.0

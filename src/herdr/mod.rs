@@ -15,7 +15,10 @@ pub use client::{Client, EVENT_TYPES};
 pub use config::{HerdrConfig, config_path};
 pub use session::{Mode, Session, SessionEvent, SessionInfo, current_session, delete_session, new_session, no_server, sessions, valid_session_name, set_binary, set_socket, start_server};
 pub use wire::PaneInput;
-pub use remote::{Machine, add_machine, git, locate, machines, quote, relay, remove_machine, rename_machine, show_machine, split, ssh};
+pub use remote::{
+    Machine, add_machine, find_file, git, locate, machines, quote, read_file, relay, remove_machine, rename_machine, show_machine, shown_machine,
+    split, ssh,
+};
 
 /// Why herdr's server cannot carry Shepherd's panes, from its `ping`: it speaks another protocol than Shepherd. Set
 /// by the sync loop, shown on every pane that loses its connection.

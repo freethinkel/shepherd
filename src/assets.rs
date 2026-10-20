@@ -2,11 +2,12 @@
 use gpui::App;
 use std::borrow::Cow;
 
-const FONTS: [&[u8]; 4] = [
+const FONTS: [&[u8]; 5] = [
     include_bytes!("../assets/fonts/Geist.ttf"),
     include_bytes!("../assets/fonts/Geist-Medium.ttf"),
     include_bytes!("../assets/fonts/Geist-SemiBold.ttf"),
     include_bytes!("../assets/fonts/GeistMono.ttf"),
+    include_bytes!("../assets/fonts/ShepherdInlineMono.ttf"),
 ];
 
 /// Adds Geist and Geist Mono; without them gpui falls back to the system font.
