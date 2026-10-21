@@ -83,14 +83,15 @@ nothing more. The page does not need anything from Shepherd: no session, no them
   removed. Hidden pages are hidden (`set_visible(false)`), not destroyed.
 - **Cookies and storage persist across restarts** (a login to a local tool survives): a data directory under
   Shepherd's cache dir on Windows/Linux, and the default persistent store on macOS.
+- **Back / forward** show as disabled when there's no history (wry 0.57 has `can_go_back` / `can_go_forward`).
 - **Server not running:** the engine's own error page shows, and reload retries. No custom screen.
 - **Favicon:** fetched from the page (`<link rel="icon">`, else `/favicon.ico`) and cached. Until it arrives, or if
   it can't be had, the entry shows its name's first letter, like the session bar.
-- **Overlays:** only the big ones hide the page while open: the command and agents panels, settings, dialogs (image
-  viewer, Markdown reader, session and worktree dialogs) and herdr's plugin popups. Small ones never hide it, so the
-  page doesn't flicker: toasts, tooltips and context menus are placed or clipped so they stay off the page. The
-  closed sidebar's peek keeps working: the web view leaves the few pixels at the window's left edge that trigger it.
-  No page snapshots.
+- **Overlays:** every Shepherd overlay hides the page while it is open: the command and agents panels, settings,
+  dialogs, context menus, herdr's plugin popups, the closed sidebar's peek, and toasts. Menus are opened by a click,
+  so hiding for them isn't flicker; toasts are rare (errors, the update note) and a click closes them. The bar's own
+  buttons have no tooltips, which would open down over the page. The closed sidebar's peek keeps working: the web
+  view leaves the few pixels at the window's left edge that trigger it. No page snapshots.
 - `target=_blank` and `window.open` follow the same rule as off-site links: inside by default.
 - **"Show in" stores the place's key.** If that place is gone (session stopped, machine removed), the entry stays in
   Settings, marked as such, and shows nowhere until it's changed.
@@ -109,8 +110,6 @@ nothing more. The page does not need anything from Shepherd: no session, no them
 - How the web view's bounds follow the main area: window resize, sidebar resize or toggle, review panel open.
 - How the shown page is modelled next to the shown tab and workspace (Shell state), and how ⌘↑/⌘↓ or the swipe
   treat it.
-- Whether back/forward show as disabled when there is no history (wry exposes navigation events, not
-  `can_go_back`).
 - Favicon formats beyond PNG (`image` is built with `png` only; ICO/SVG may need features or a conversion).
 - The GTK main-loop pumping on Linux, and keeping the X11 child window stacked correctly.
 - Tests: the settings round-trip, the link policy (same-origin vs off-site), favicon `<link>` parsing, which entries
