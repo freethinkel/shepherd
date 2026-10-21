@@ -2,9 +2,10 @@
 //! the tabs and panes. A page lives until Shepherd quits or its entry goes; hidden, it keeps its state.
 use super::*;
 use super::tab_bar::{TAB_H, TAB_TOP};
-use crate::settings::WebEntry;
+use crate::settings::{OpenFrom, WebEntry};
 use crate::web::{label, listed, normalize, off_site, page_bounds, page_is_current};
 use futures::StreamExt;
+use std::sync::Arc;
 use futures::channel::mpsc::UnboundedSender;
 use wry::dpi::{LogicalPosition, LogicalSize};
 
@@ -33,12 +34,22 @@ pub(super) struct Page {
     placed: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
+/// An entry's sidebar icon.
+pub(super) enum Favicon {
+    Loading,
+    Image(Arc<gpui::Image>),
+    /// None to be had: the name's first letter stands in.
+    None,
+}
+
 /// The live pages and which one is shown.
 #[derive(Default)]
 pub(super) struct Pages {
     /// The entry shown in place of the tabs and panes; `None` shows the tabs and panes.
     pub(super) shown: Option<String>,
     live: HashMap<PageKey, Page>,
+    /// Each entry's favicon and the URL it was fetched for; in memory only, so fetched again each launch.
+    favicons: HashMap<String, (String, Favicon)>,
     /// Where pages keep their cookies and storage between launches; macOS keeps WKWebView's default store.
     #[cfg(not(target_os = "macos"))]
     context: Option<wry::WebContext>,
@@ -57,7 +68,42 @@ impl Shell {
 
     /// The entries the sidebar lists for the place shown.
     fn listed_entries(&self, cx: &App) -> Vec<WebEntry> {
-        listed(&SettingsGlobal::of(cx).settings.web_entries, self.shown_place_key().as_deref()).into_iter().cloned().collect()
+        self.entries_in(self.shown_place_key().as_deref(), cx)
+    }
+
+    /// The entries the sidebar lists for the place with key `place`.
+    fn entries_in(&self, place: Option<&str>, cx: &App) -> Vec<WebEntry> {
+        listed(&SettingsGlobal::of(cx).settings.web_entries, place).into_iter().cloned().collect()
+    }
+
+    /// Fetches the favicons of the entries listed that have none yet, or whose URL changed.
+    fn fetch_favicons(&mut self, cx: &mut Context<Self>) {
+        for entry in self.listed_entries(cx) {
+            // ponytail: a page opened on a machine keeps its letter until its forward can fetch the icon (Task 8)
+            if entry.open_from == OpenFrom::Machine {
+                continue;
+            }
+            let url = normalize(&entry.url);
+            if self.pages.favicons.get(&entry.id).is_some_and(|(fetched, _)| *fetched == url) {
+                continue;
+            }
+            self.pages.favicons.insert(entry.id.clone(), (url.clone(), Favicon::Loading));
+            let (id, fetched) = (entry.id, url.clone());
+            let icon = cx.background_spawn(async move { crate::web::fetch_favicon(&fetched) });
+            cx.spawn(async move |this, cx| {
+                let icon = icon.await;
+                let _ = this.update(cx, |s, cx| {
+                    // an edit since asked for another URL's icon
+                    let Some((_, slot)) = s.pages.favicons.get_mut(&id).filter(|(u, _)| *u == url) else { return };
+                    *slot = match icon {
+                        Some((format, bytes)) => Favicon::Image(Arc::new(gpui::Image::from_bytes(format, bytes))),
+                        None => Favicon::None,
+                    };
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     /// The entry shown, with its page's key, while it is listed for the place shown.
@@ -213,6 +259,7 @@ impl Shell {
             self.show_web(entry.id.clone(), window, cx);
         }
         self.pages.links_outside.set(SettingsGlobal::of(cx).settings.web_links_outside);
+        self.fetch_favicons(cx);
         let entries = SettingsGlobal::of(cx).settings.web_entries.clone();
         self.pages.live.retain(|(id, _), page| page_is_current(&entries, id, &page.entry_url));
         let shown = self.shown_page(cx).map(|(key, _)| key);
@@ -302,20 +349,26 @@ impl Shell {
     }
 
     /// The sidebar's rows of the entries listed for the place shown, above the workspaces, with a hairline under them.
-    pub(super) fn web_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
-        let entries = self.listed_entries(cx);
+    /// `place`'s rows; `live` for the sidebar itself, not for the place a swipe shows beside it, whose rows are only
+    /// drawn.
+    pub(super) fn web_rows(&self, place: Option<&str>, live: bool, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
+        let entries = self.entries_in(place, cx);
         if entries.is_empty() {
             return None;
         }
-        let shown = self.pages.shown.clone();
+        let shown = self.pages.shown.clone().filter(|_| live);
         let rows = entries.into_iter().map(|e| {
             let name = label(&e, self.pages.live.get(&self.page_key(&e)).and_then(|p| p.title.as_deref()));
             let selected = shown.as_deref() == Some(e.id.as_str());
             let id = e.id.clone();
+            let icon = match self.pages.favicons.get(&e.id) {
+                Some((_, Favicon::Image(image))) => gpui::img(image.clone()).size(px(16.)).rounded(px(3.)).into_any_element(),
+                _ => sessions::place_mark(&name, None, false, theme.text_muted),
+            };
             crate::shell::row(theme, selected, SharedString::from(format!("web-{}", e.id)))
-                .child(div().size(px(16.)).flex_none().flex().items_center().justify_center().child(sessions::place_mark(&name, None, false, theme.text_muted)))
+                .child(div().size(px(16.)).flex_none().flex().items_center().justify_center().child(icon))
                 .child(div().flex_1().min_w_0().truncate().child(name))
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.show_web(id.clone(), window, cx)))
+                .when(live, |el| el.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.show_web(id.clone(), window, cx))))
         });
         Some(
             div()

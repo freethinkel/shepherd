@@ -447,7 +447,6 @@ impl Shell {
             .flex()
             .flex_col()
             .pt(px(TITLEBAR_HEIGHT))
-            .children(self.web_rows(theme, cx))
             // everything between the titlebar and the place bar goes under a swipe's fingers, then springs home, and
             // beside it the place it goes to (or comes from)
             .child(
@@ -459,6 +458,7 @@ impl Shell {
                 .size_full()
                 .flex()
                 .flex_col()
+            .children(self.web_rows(self.shown_place_key().as_deref(), true, theme, cx))
             .child(
                 div()
                     .px(px(16.))

@@ -117,6 +117,16 @@ pub fn page_bounds(area: Bounds<Pixels>, sidebar_closed: bool) -> Bounds<Pixels>
     Bounds::new(point(area.origin.x + inset, area.origin.y), size(area.size.width - inset, area.size.height))
 }
 
+/// A page's favicon: the icon its HTML links to, else its site's `/favicon.ico`, with the image's format. Blocking
+/// (5 s at most for each of the two requests): call it off the main thread.
+pub fn fetch_favicon(page: &str) -> Option<(ImageFormat, Vec<u8>)> {
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(5))).build().into();
+    let get = |url: &str| agent.get(url).call().ok()?.body_mut().with_config().limit(1 << 20).read_to_vec().ok();
+    let html = get(page).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    let bytes = get(&favicon_url(&html, page))?;
+    Some((image_format(&bytes)?, bytes))
+}
+
 /// An image's format by its first bytes, for GPUI's `Image::from_bytes`; `None` when unknown.
 pub fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]).trim_start().to_ascii_lowercase();
@@ -211,6 +221,35 @@ mod tests {
         assert_eq!(page_bounds(area, true), Bounds::new(point(px(6.), px(38.)), size(px(794.), px(500.))));
         let docked = Bounds::new(point(px(256.), px(38.)), size(px(600.), px(500.)));
         assert_eq!(page_bounds(docked, true), docked);
+    }
+
+    #[test]
+    fn a_favicon_is_fetched_from_the_pages_icon_link() {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in server.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let mut request = [0; 1024];
+                let n = stream.read(&mut request).unwrap();
+                let body: &[u8] = match request[..n].starts_with(b"GET /i.png") {
+                    true => b"\x89PNG\r\n\x1a\nrest",
+                    false => br#"<link rel="icon" href="/i.png">"#,
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        let (format, bytes) = fetch_favicon(&format!("http://127.0.0.1:{port}/board")).unwrap();
+        assert_eq!(format, gpui::ImageFormat::Png);
+        assert!(bytes.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn nothing_listening_no_favicon() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert!(fetch_favicon(&format!("http://127.0.0.1:{port}/")).is_none());
     }
 
     #[test]
