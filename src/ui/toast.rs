@@ -49,6 +49,11 @@ fn push(cx: &mut App, message: SharedString, error: bool, action: Option<Rc<dyn 
     .detach();
 }
 
+/// Whether a toast is on screen, sliding out included.
+pub fn any_open(cx: &App) -> bool {
+    cx.try_global::<Toasts>().is_some_and(|t| !t.0.is_empty())
+}
+
 fn close(cx: &mut App, serial: usize) {
     if let Some(t) = cx.default_global::<Toasts>().0.iter_mut().find(|t| t.popup.serial == serial) {
         t.popup.close();

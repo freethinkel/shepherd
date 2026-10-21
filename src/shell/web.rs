@@ -67,6 +67,34 @@ impl Shell {
         (entry.id.clone(), None)
     }
 
+    /// Whether anything Shepherd draws over the main area is open, sliding out included: the page, which sits above
+    /// all of it, hides meanwhile. A new popup field belongs here.
+    pub(super) fn overlay_open(&self, cx: &App) -> bool {
+        let popups = [
+            self.view_menu.is_some(),
+            self.agents_menu.is_some(),
+            self.ws_menu.is_some(),
+            self.pane_menu.is_some(),
+            self.spent_menu.is_some(),
+            self.usage_menu.is_some(),
+            self.statusbar_menu.is_some(),
+            self.tab_menu.is_some(),
+            self.worktree_dialog.is_some(),
+            self.remove_confirm.is_some(),
+            self.merge_confirm.is_some(),
+            self.session_dialog.is_some(),
+            self.place_menu.is_some(),
+            self.place_edit.is_some(),
+            self.session_delete.is_some(),
+            self.command_panel.is_some(),
+        ];
+        popups.into_iter().any(|open| open)
+            || self.settings.is_some()
+            || self.floating_open()
+            || self.peek_now() > 0.
+            || crate::ui::toast::any_open(cx)
+    }
+
     /// Every user selection of a tab goes through here; it leaves the page for the tabs.
     pub(super) fn select_tab(&mut self, tab: Option<String>) {
         self.selected_tab = tab;

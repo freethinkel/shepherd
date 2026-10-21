@@ -1308,7 +1308,8 @@ impl Render for Shell {
             window.request_animation_frame();
         }
 
-        self.sync_pages(overlaid, window, cx);
+        let covered = self.overlay_open(cx);
+        self.sync_pages(covered, window, cx);
         let web = self.shown_page(cx);
         // a page in place of the tabs: no workspace looks selected
         let sidebar_ws = if web.is_some() { None } else { shown_ws.clone() };
