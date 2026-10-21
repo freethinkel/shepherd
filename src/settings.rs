@@ -86,6 +86,10 @@ pub struct Settings {
     pub sidebar_open: bool,
     /// Worktree groups folded in the sidebar, by workspace id.
     pub folded: Vec<String>,
+    /// Web pages listed in the sidebar above the workspaces and shown in place of the tabs and panes.
+    pub web_entries: Vec<WebEntry>,
+    /// Links to another site open in the system browser instead of in the page.
+    pub web_links_outside: bool,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
 }
@@ -127,6 +131,40 @@ pub struct PlaceLook {
     pub name: Option<String>,
     /// A short text, an emoji or a letter or two.
     pub icon: Option<String>,
+}
+
+/// A web page in the sidebar: a local tool's name and URL, where it is listed and where its URL is opened.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebEntry {
+    /// Stable for the entry's life, so its page and favicon survive renames, edits and reordering.
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    /// The place key (`Place::key`: a session's socket, `machine:<id>`) it is listed in; `None` is everywhere.
+    pub show_in: Option<String>,
+    pub open_from: OpenFrom,
+}
+
+impl WebEntry {
+    /// An empty entry with an id of its own.
+    pub fn new() -> WebEntry {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static MADE: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+        WebEntry { id: format!("{:x}{:x}", nanos, MADE.fetch_add(1, Ordering::Relaxed)), ..Default::default() }
+    }
+}
+
+/// Where a web entry's URL is opened: on this computer as written, or on the shown place's machine through an SSH
+/// forward of its port. An unknown (future) value reads as this computer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenFrom {
+    Machine,
+    #[default]
+    #[serde(other)]
+    Here,
 }
 
 /// The parts of a workspace row that can be hidden; all shown by default.
@@ -255,6 +293,8 @@ impl Default for Settings {
             window_buttons: true,
             sidebar_open: true,
             folded: Vec::new(),
+            web_entries: Vec::new(),
+            web_links_outside: false,
             window: None,
         }
     }
@@ -424,6 +464,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         (dir, path)
+    }
+
+    #[test]
+    fn web_entries_default_to_none_and_round_trip() {
+        assert!(Settings::default().web_entries.is_empty());
+        assert!(!Settings::default().web_links_outside);
+        let (_dir, path) = tmp();
+        let mut s = Settings::default();
+        s.web_entries.push(WebEntry {
+            id: "a1".into(),
+            name: "board".into(),
+            url: "http://localhost:4317".into(),
+            show_in: Some("machine:m1".into()),
+            open_from: OpenFrom::Machine,
+        });
+        s.web_links_outside = true;
+        s.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).0, s);
+    }
+
+    #[test]
+    fn an_unknown_open_from_reads_as_here() {
+        let e: WebEntry = serde_json::from_str(r#"{"open_from":"moon"}"#).unwrap();
+        assert_eq!(e.open_from, OpenFrom::Here);
+    }
+
+    #[test]
+    fn new_web_entries_get_distinct_ids() {
+        assert_ne!(WebEntry::new().id, WebEntry::new().id);
     }
 
     #[test]
