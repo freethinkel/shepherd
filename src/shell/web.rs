@@ -32,6 +32,9 @@ pub(super) struct Page {
     visible: bool,
     /// Where it was last placed, so it isn't moved every frame.
     placed: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// On macOS, the view of its own the page sits in, under GPUI's overlay plane.
+    #[cfg(target_os = "macos")]
+    host: Option<Rc<host::Host>>,
     /// The SSH forward a page opened on a machine loads through; it closes with the page.
     _tunnel: Option<crate::herdr::Tunnel>,
 }
@@ -68,9 +71,8 @@ pub(super) struct Pages {
     links_outside: Rc<Cell<bool>>,
     /// `SHEPHERD_WEB`'s entry was shown.
     hooked: bool,
-    /// The loop that keeps WebKit's inspector in a window of its own runs.
-    #[cfg(target_os = "macos")]
-    inspector_watch: bool,
+    /// GPUI draws its deferred layer (menus, dialogs, panels, toasts) above the pages, so they needn't hide for it.
+    layered: bool,
     /// GTK's loop is pumped beside GPUI's.
     #[cfg(target_os = "linux")]
     gtk_pump: bool,
@@ -140,9 +142,16 @@ impl Shell {
         (entry.id.clone(), machine)
     }
 
-    /// Whether anything Shepherd draws over the main area is open, sliding out included: the page, which sits above
-    /// all of it, hides meanwhile. A new popup field belongs here.
+    /// Whether anything Shepherd draws over the main area is open, sliding out included, that the page has to hide
+    /// for: Settings, which takes the window; and where GPUI can't draw above native views (off macOS), every popup
+    /// too, the page sitting above all of it. A new popup field belongs here.
     pub(super) fn overlay_open(&self, cx: &App) -> bool {
+        if self.settings.is_some() {
+            return true;
+        }
+        if self.pages.layered {
+            return false;
+        }
         let popups = [
             self.view_menu.is_some(),
             self.agents_menu.is_some(),
@@ -261,8 +270,6 @@ impl Shell {
     /// `entry_url` is the entry's URL, which keeps the page while it is the same; `url` is the one loaded, the
     /// forward's for a page on a machine, and the site its links are measured against.
     fn make_page(&mut self, key: PageKey, entry_url: &str, url: &str, window: &Window, cx: &mut Context<Self>) -> wry::Result<Page> {
-        #[cfg(target_os = "macos")]
-        self.watch_inspectors(cx);
         let events = self.page_events(cx);
         let send = move |event: PageEvent| {
             let _ = events.unbounded_send((key.clone(), event));
@@ -298,44 +305,24 @@ impl Shell {
                 wry::NewWindowResponse::Deny
             })
             .build_as_child(window)?;
-        Ok(Page { view: Rc::new(view), entry_url: entry_url.to_string(), title: None, visible: false, placed: Default::default(), _tunnel: None })
-    }
-
-    /// WebKit docks its inspector into the web view's superview, which is all of Shepherd's window, and the page with
-    /// it: while an inspector is open it is sent to a window of its own, and its page put back in place. There is no
-    /// event for its opening, nor a setting for where it opens, so this looks a few times a second while pages live.
-    #[cfg(target_os = "macos")]
-    fn watch_inspectors(&mut self, cx: &mut Context<Self>) {
-        if std::mem::replace(&mut self.pages.inspector_watch, true) {
-            return;
+        // GPUI's deferred layer goes on a plane of its own above native views (macOS only, in this GPUI); the page
+        // moves into a view of its own below it. Without it, the page hides under Shepherd's overlays instead.
+        #[cfg(target_os = "macos")]
+        let host = window.enable_scene_overlay().ok().and_then(|()| host::Host::new(&view)).map(Rc::new);
+        #[cfg(target_os = "macos")]
+        {
+            self.pages.layered = host.is_some();
         }
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_millis(300)).await;
-                let Ok(live) = this.update(cx, |s, cx| {
-                    let mut moved = false;
-                    for page in s.pages.live.values() {
-                        if detach_inspector(&page.view) {
-                            // the docked inspector resized the page: it is placed again
-                            page.placed.set(None);
-                            moved = true;
-                        }
-                    }
-                    if moved {
-                        cx.notify();
-                    }
-                    let live = !s.pages.live.is_empty();
-                    s.pages.inspector_watch = live;
-                    live
-                }) else {
-                    break;
-                };
-                if !live {
-                    break;
-                }
-            }
+        Ok(Page {
+            view: Rc::new(view),
+            entry_url: entry_url.to_string(),
+            title: None,
+            visible: false,
+            placed: Default::default(),
+            #[cfg(target_os = "macos")]
+            host,
+            _tunnel: None,
         })
-        .detach();
     }
 
     /// WebKitGTK needs GTK set up on this thread, once, and its loop run: here a few iterations every frame's worth
@@ -447,6 +434,10 @@ impl Shell {
             }
             page.visible = visible;
             let _ = page.view.set_visible(visible);
+            #[cfg(target_os = "macos")]
+            if let Some(host) = &page.host {
+                host.show(visible);
+            }
             // the keyboard goes with the page, and back to Shepherd when it hides
             let _ = if visible { page.view.focus() } else { page.view.focus_parent() };
         }
@@ -454,7 +445,13 @@ impl Shell {
 
     /// The page area, in place of the pane grid: a canvas that places the shown page's web view over itself.
     pub(super) fn render_web_area(&self, key: &PageKey, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let page = self.pages.live.get(key).map(|p| (p.view.clone(), p.placed.clone()));
+        let page = self.pages.live.get(key).map(|p| {
+            #[cfg(target_os = "macos")]
+            let host = p.host.clone();
+            #[cfg(not(target_os = "macos"))]
+            let host: Option<Rc<()>> = None;
+            (p.view.clone(), p.placed.clone(), host)
+        });
         let sidebar_closed = !self.sidebar_open;
         let target = key.1.clone().unwrap_or_default();
         // a page on a machine before its forward is up: connecting, or why it couldn't and a retry
@@ -507,20 +504,35 @@ impl Shell {
             .relative()
             .bg(theme.terminal.background)
             .when_some(waiting, |el, waiting| el.flex().items_center().justify_center().child(waiting))
-            .when_some(page, |el, (view, placed)| {
+            .when_some(page, |el, (view, placed, host)| {
             el.child(
                 canvas(
-                    move |area, _, _| {
-                        let bounds = page_bounds(area, sidebar_closed);
-                        if placed.get() != Some(bounds) {
-                            placed.set(Some(bounds));
-                            let _ = view.set_bounds(wry::Rect {
-                                position: LogicalPosition::new(f32::from(bounds.origin.x), f32::from(bounds.origin.y)).into(),
-                                size: LogicalSize::new(f32::from(bounds.size.width), f32::from(bounds.size.height)).into(),
-                            });
+                    move |area, _, _| page_bounds(area, sidebar_closed),
+                    move |_, bounds, window, _| {
+                        if placed.get() == Some(bounds) {
+                            return;
+                        }
+                        match host.clone() {
+                            // moved with the frame that shows the new layout, not before it; a paint that presents
+                            // nothing (hit testing only) moves nothing, so the move is noted once it is made
+                            #[cfg(target_os = "macos")]
+                            Some(host) => {
+                                let placed = placed.clone();
+                                window.on_present(move || {
+                                    host.place(bounds);
+                                    placed.set(Some(bounds));
+                                })
+                            }
+                            _ => {
+                                let _ = window;
+                                placed.set(Some(bounds));
+                                let _ = view.set_bounds(wry::Rect {
+                                    position: LogicalPosition::new(f32::from(bounds.origin.x), f32::from(bounds.origin.y)).into(),
+                                    size: LogicalSize::new(f32::from(bounds.size.width), f32::from(bounds.size.height)).into(),
+                                });
+                            }
                         }
                     },
-                    |_, _, _, _| {},
                 )
                 .absolute()
                 .size_full(),
@@ -609,22 +621,64 @@ impl Shell {
     }
 }
 
-/// Sends `view`'s inspector, when it is open, to a window of its own (`_WKInspector`'s `detach`, a no-op when it is
-/// already); true when it was open.
+/// macOS: a page's own view, holding its WKWebView and, docked, WebKit's inspector (which docks into the web view's
+/// superview: in GPUI's view it took the whole window). It sits under GPUI's overlay plane, so menus, dialogs and
+/// toasts draw over the page.
 #[cfg(target_os = "macos")]
-fn detach_inspector(view: &wry::WebView) -> bool {
+mod host {
+    use gpui::{Bounds, Pixels};
     use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
+    use objc2::{MainThreadMarker, MainThreadOnly, msg_send};
+    use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindowOrderingMode};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
     use wry::WebViewExtMacOS;
-    let webview = view.webview();
-    // SAFETY: WKWebView's `_inspector` (WebKit SPI, as wry's own open_devtools uses) answers an `_WKInspector`, which
-    // has `isVisible` and `detach`
-    unsafe {
-        let Some(inspector): Option<Retained<AnyObject>> = objc2::msg_send![&*webview, _inspector] else { return false };
-        let open: bool = objc2::msg_send![&*inspector, isVisible];
-        if open {
-            let () = objc2::msg_send![&*inspector, detach];
+
+    pub(super) struct Host(Retained<NSView>);
+
+    impl Host {
+        /// Moves `view`'s WKWebView into a view of its own, just below GPUI's overlay plane.
+        pub(super) fn new(view: &wry::WebView) -> Option<Host> {
+            let mtm = MainThreadMarker::new()?;
+            let web = view.webview();
+            // SAFETY: a view's superview, read on the main thread
+            let parent = unsafe { web.superview() }?;
+            let host = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+            host.setAutoresizesSubviews(true);
+            host.setHidden(true);
+            web.removeFromSuperview();
+            web.setFrame(host.bounds());
+            web.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+            host.addSubview(&web);
+            let overlay = parent.subviews().iter().find(|v| v.class().name() == c"GPUIOverlayView");
+            match overlay {
+                Some(overlay) => parent.addSubview_positioned_relativeTo(&host, NSWindowOrderingMode::Below, Some(&overlay)),
+                None => parent.addSubview(&host),
+            }
+            Some(Host(host))
         }
-        open
+
+        /// Puts it at `bounds`, in GPUI's top-left coordinates; its web view (and a docked inspector) follow.
+        pub(super) fn place(&self, bounds: Bounds<Pixels>) {
+            // SAFETY: as in `new`
+            let Some(parent) = (unsafe { self.0.superview() }) else { return };
+            let (x, y) = (f64::from(f32::from(bounds.origin.x)), f64::from(f32::from(bounds.origin.y)));
+            let (w, h) = (f64::from(f32::from(bounds.size.width)).max(0.), f64::from(f32::from(bounds.size.height)).max(0.));
+            let y = if parent.isFlipped() { y } else { parent.bounds().size.height - y - h };
+            // SAFETY: CATransaction's class methods; no implicit animation of the move, which would trail the frame
+            unsafe {
+                let _: () = msg_send![objc2::class!(CATransaction), setDisableActions: true];
+            }
+            self.0.setFrame(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)));
+        }
+
+        pub(super) fn show(&self, visible: bool) {
+            self.0.setHidden(!visible);
+        }
+    }
+
+    impl Drop for Host {
+        fn drop(&mut self) {
+            self.0.removeFromSuperview();
+        }
     }
 }

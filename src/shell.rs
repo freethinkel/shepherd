@@ -1604,8 +1604,9 @@ impl Render for Shell {
                         .w(px(6.))
                         .on_hover(cx.listener(|this, on: &bool, _, cx| this.hover_peek(*on, cx))),
                 )
+                // deferred: drawn above a web page, which sits above the rest
                 .when(peek > 0., |el| {
-                    el.child(
+                    el.child(gpui::deferred(
                         div()
                             .id("sidebar-peek")
                             .occlude()
@@ -1623,7 +1624,7 @@ impl Render for Shell {
                             .shadow_lg()
                             .on_hover(cx.listener(|this, on: &bool, _, cx| this.hover_peek(*on, cx)))
                             .children(peeking),
-                    )
+                    ))
                 })
             })
             // The sidebar's edge: drag to resize, double-click for the default width.
