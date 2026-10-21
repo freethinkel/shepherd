@@ -68,6 +68,9 @@ pub(super) struct Pages {
     links_outside: Rc<Cell<bool>>,
     /// `SHEPHERD_WEB`'s entry was shown.
     hooked: bool,
+    /// The loop that keeps WebKit's inspector in a window of its own runs.
+    #[cfg(target_os = "macos")]
+    inspector_watch: bool,
 }
 
 impl Shell {
@@ -249,6 +252,8 @@ impl Shell {
     /// `entry_url` is the entry's URL, which keeps the page while it is the same; `url` is the one loaded, the
     /// forward's for a page on a machine, and the site its links are measured against.
     fn make_page(&mut self, key: PageKey, entry_url: &str, url: &str, window: &Window, cx: &mut Context<Self>) -> wry::Result<Page> {
+        #[cfg(target_os = "macos")]
+        self.watch_inspectors(cx);
         let events = self.page_events(cx);
         let send = move |event: PageEvent| {
             let _ = events.unbounded_send((key.clone(), event));
@@ -266,8 +271,7 @@ impl Shell {
         let builder = wry::WebViewBuilder::new();
         let view = builder
             .with_url(url)
-            // WebKit's inspector docks into Shepherd's window and takes it over
-            .with_devtools(false)
+            .with_devtools(true)
             .with_visible(false)
             .with_bounds(wry::Rect { position: LogicalPosition::new(0., 0.).into(), size: LogicalSize::new(1., 1.).into() })
             .with_document_title_changed_handler(move |t| title(PageEvent::Title(t)))
@@ -286,6 +290,43 @@ impl Shell {
             })
             .build_as_child(window)?;
         Ok(Page { view: Rc::new(view), entry_url: entry_url.to_string(), title: None, visible: false, placed: Default::default(), _tunnel: None })
+    }
+
+    /// WebKit docks its inspector into the web view's superview, which is all of Shepherd's window, and the page with
+    /// it: while an inspector is open it is sent to a window of its own, and its page put back in place. There is no
+    /// event for its opening, nor a setting for where it opens, so this looks a few times a second while pages live.
+    #[cfg(target_os = "macos")]
+    fn watch_inspectors(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.pages.inspector_watch, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(300)).await;
+                let Ok(live) = this.update(cx, |s, cx| {
+                    let mut moved = false;
+                    for page in s.pages.live.values() {
+                        if detach_inspector(&page.view) {
+                            // the docked inspector resized the page: it is placed again
+                            page.placed.set(None);
+                            moved = true;
+                        }
+                    }
+                    if moved {
+                        cx.notify();
+                    }
+                    let live = !s.pages.live.is_empty();
+                    s.pages.inspector_watch = live;
+                    live
+                }) else {
+                    break;
+                };
+                if !live {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The channel the pages' handlers report on; its first use starts the loop that applies what they say.
@@ -330,7 +371,14 @@ impl Shell {
             && let Some(entry) = self.listed_entries(cx).into_iter().find(|e| e.name == name)
         {
             self.pages.hooked = true;
+            let key = self.page_key(&entry);
             self.show_web(entry.id, window, cx);
+            // `SHEPHERD_WEB_INSPECT` opens its inspector too, as Inspect Element does (screenshots)
+            if std::env::var_os("SHEPHERD_WEB_INSPECT").is_some()
+                && let Some(page) = self.pages.live.get(&key)
+            {
+                page.view.open_devtools();
+            }
         }
         self.pages.links_outside.set(SettingsGlobal::of(cx).settings.web_links_outside);
         self.fetch_favicons(cx);
@@ -519,5 +567,25 @@ impl Shell {
                 .children(rows)
                 .child(div().mt(px(6.)).mx(px(8.)).h(px(1.)).bg(theme.border)),
         )
+    }
+}
+
+/// Sends `view`'s inspector, when it is open, to a window of its own (`_WKInspector`'s `detach`, a no-op when it is
+/// already); true when it was open.
+#[cfg(target_os = "macos")]
+fn detach_inspector(view: &wry::WebView) -> bool {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use wry::WebViewExtMacOS;
+    let webview = view.webview();
+    // SAFETY: WKWebView's `_inspector` (WebKit SPI, as wry's own open_devtools uses) answers an `_WKInspector`, which
+    // has `isVisible` and `detach`
+    unsafe {
+        let Some(inspector): Option<Retained<AnyObject>> = objc2::msg_send![&*webview, _inspector] else { return false };
+        let open: bool = objc2::msg_send![&*inspector, isVisible];
+        if open {
+            let () = objc2::msg_send![&*inspector, detach];
+        }
+        open
     }
 }

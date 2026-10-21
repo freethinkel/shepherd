@@ -33,7 +33,8 @@ ureq = "3.4.2"
 # URLs of web integrations; the same crate ureq and wry use
 http = "1"
 # web integrations' pages, in the system web view
-wry = "0.57"
+# `devtools`: Inspect Element in release builds too
+wry = { version = "0.57", features = ["devtools"] }
 toml_edit = "0.25"
 emojis = "0.9.0"
 unicode-width = "0.2"
