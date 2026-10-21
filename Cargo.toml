@@ -52,6 +52,8 @@ block2 = "0.6"
 interprocess = { version = "2.4", features = ["tokio"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# WebKitGTK's loop, pumped beside GPUI's while web pages live
+gtk = "0.18"
 gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "18a89af04cfe079d55275b111ac349d5640d9cda", features = ["wayland", "x11"] }
 
 [dev-dependencies]
@@ -80,6 +82,7 @@ assets = [
 
 [package.metadata.generate-rpm.requires]
 vulkan-loader = "*"
+"webkit2gtk4.1" = "*"
 
 [package.metadata.generate-rpm.recommends]
 mesa-vulkan-drivers = "*"

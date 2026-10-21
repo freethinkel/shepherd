@@ -1,11 +1,12 @@
-# `make linux`: the CI runners' Ubuntu (its glibc is the oldest the packages run on), GPUI's Linux libraries, Zig for
-# libghostty-vt and the packagers.
+# `make linux`: the CI runners' Ubuntu (its glibc is the oldest the packages run on), GPUI's Linux libraries, WebKitGTK
+# for web pages, Zig for libghostty-vt and the packagers.
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl build-essential clang cmake pkg-config xz-utils dpkg-dev \
     libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev \
     libvulkan-dev libfontconfig-dev libfreetype-dev libssl-dev libzstd-dev \
+    libwebkit2gtk-4.1-dev libgtk-3-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
 ENV PATH=/root/.cargo/bin:$PATH

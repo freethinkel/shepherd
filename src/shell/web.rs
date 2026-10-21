@@ -71,6 +71,9 @@ pub(super) struct Pages {
     /// The loop that keeps WebKit's inspector in a window of its own runs.
     #[cfg(target_os = "macos")]
     inspector_watch: bool,
+    /// GTK's loop is pumped beside GPUI's.
+    #[cfg(target_os = "linux")]
+    gtk_pump: bool,
 }
 
 impl Shell {
@@ -178,6 +181,12 @@ impl Shell {
         let url = normalize(&entry.url);
         use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         if matches!(HasWindowHandle::window_handle(window).map(|h| h.as_raw()), Ok(RawWindowHandle::Wayland(_))) {
+            cx.open_url(&url);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if let Err(e) = self.gtk_ready(cx) {
+            crate::ui::toast::error(cx, format!("Web pages need GTK ({e}): {url} opens in the browser"));
             cx.open_url(&url);
             return;
         }
@@ -327,6 +336,36 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// WebKitGTK needs GTK set up on this thread, once, and its loop run: here a few iterations every frame's worth
+    /// of time, beside GPUI's loop, while any page lives or waits for its forward.
+    #[cfg(target_os = "linux")]
+    fn gtk_ready(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        static INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+        INIT.get_or_init(|| gtk::init().map_err(|e| e.to_string())).clone()?;
+        if !std::mem::replace(&mut self.pages.gtk_pump, true) {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(16)).await;
+                    while gtk::events_pending() {
+                        gtk::main_iteration_do(false);
+                    }
+                    let Ok(live) = this.update(cx, |s, _| {
+                        let live = !s.pages.live.is_empty() || !s.pages.forwards.is_empty();
+                        s.pages.gtk_pump = live;
+                        live
+                    }) else {
+                        break;
+                    };
+                    if !live {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        Ok(())
     }
 
     /// The channel the pages' handlers report on; its first use starts the loop that applies what they say.

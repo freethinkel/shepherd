@@ -6295,6 +6295,7 @@ dependencies = [
  "gpui",
  "gpui-base",
  "gpui_platform",
+ "gtk",
  "http",
  "image",
  "interprocess",
