@@ -43,6 +43,12 @@ impl Place {
     }
 }
 
+/// `places` in the bar's saved `order` (by key); ones it does not have keep herdr's order after it.
+fn in_order(mut places: Vec<Place>, order: &[String]) -> Vec<Place> {
+    places.sort_by_key(|p| order.iter().position(|k| *k == p.key()).unwrap_or(usize::MAX));
+    places
+}
+
 /// A horizontal two-finger swipe over the sidebar, from its first event to its last.
 #[derive(Default)]
 pub(super) struct Swipe {
@@ -333,12 +339,24 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let Ok(places) = list.await else { return };
             let _ = this.update(cx, |s, cx| {
-                s.places = places;
+                s.places = in_order(places, &SettingsGlobal::of(cx).settings.place_order);
                 s.prefetch_neighbours(cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// The bar's place at `from` dropped on the one at `to`, which it takes the place of; the order is saved.
+    pub(super) fn move_place(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to || from >= self.places.len() || to >= self.places.len() {
+            return;
+        }
+        let place = self.places.remove(from);
+        self.places.insert(to, place);
+        let order: Vec<String> = self.places.iter().map(Place::key).collect();
+        save_from_sidebar(cx, move |s| s.place_order = order);
+        cx.notify();
     }
 
     pub(super) fn switch_to(&mut self, place: Place, cx: &mut Context<Self>) {
@@ -671,6 +689,140 @@ impl Shell {
 }
 
 /// A place's icon drawn at `size`: a drawn icon (`icon:<name>`) in `color`, or the emoji.
+/// A place's mark in the bar: its icon, else a machine's server or the session's first letter.
+pub(super) fn place_mark(name: &str, icon: Option<&str>, machine: bool, color: gpui::Hsla) -> gpui::AnyElement {
+    match icon {
+        Some(icon) => icon_mark(icon, 15., color),
+        None if machine => gpui::svg().path("icons/remote-server.svg").size(px(15.)).text_color(color).into_any_element(),
+        None => div()
+            .text_size(px(12.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(color)
+            .child(name.chars().next().unwrap_or('?').to_uppercase().to_string())
+            .into_any_element(),
+    }
+}
+
+/// One button and the gap after it in the bar.
+pub(super) const PLACE_STEP: f32 = 34.;
+
+/// A button springing to a new slot.
+const PLACE_SLIDE: Duration = Duration::from_millis(380);
+
+/// The bar's buttons on their way to their slots, by place key, and the drag under way.
+#[derive(Default)]
+pub(super) struct PlaceMotion {
+    slides: HashMap<String, Slide>,
+    pub(super) drag: Option<PlaceDrag>,
+    /// The row of buttons in the window, as last painted.
+    pub(super) row: Option<Bounds<Pixels>>,
+}
+
+/// The place being dragged, the slot its placeholder holds, and its ghost's top-left in the window.
+pub(super) struct PlaceDrag {
+    pub(super) key: String,
+    pub(super) slot: usize,
+    pub(super) ghost: Option<gpui::Point<Pixels>>,
+}
+
+/// A button going from `from` (x, and y off the row) to `to` since `at`.
+#[derive(Clone, Copy)]
+struct Slide {
+    from: (f32, f32),
+    to: f32,
+    at: Instant,
+}
+
+impl Slide {
+    fn now(&self, now: Instant) -> (f32, f32) {
+        let s = spring(now.saturating_duration_since(self.at).as_secs_f32() / PLACE_SLIDE.as_secs_f32());
+        (self.from.0 + (self.to - self.from.0) * s, self.from.1 * (1. - s))
+    }
+
+    fn done(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.at) >= PLACE_SLIDE
+    }
+}
+
+impl PlaceMotion {
+    /// Where each of `keys` is drawn now, `(x, y)` in the row, given the slot each belongs in: a button whose slot
+    /// changed springs there from where it was; one let go of flies from its ghost. True while any still moves.
+    pub(super) fn layout(&mut self, keys: &[String], dragging: bool, now: Instant) -> (Vec<(f32, f32)>, bool) {
+        let mut slots: Vec<usize> = (0..keys.len()).collect();
+        if let Some(drag) = self.drag.as_ref().filter(|_| dragging)
+            && let Some(from) = keys.iter().position(|k| *k == drag.key)
+        {
+            // the others close up around the placeholder, which the dragged one's slot follows
+            let slot = drag.slot.min(keys.len() - 1);
+            for (i, s) in slots.iter_mut().enumerate() {
+                *s = if i == from { slot } else { (i - usize::from(i > from)) + usize::from(i - usize::from(i > from) >= slot) };
+            }
+        }
+        let landed = self.drag.take_if(|_| !dragging);
+        let mut moving = false;
+        let at: Vec<(f32, f32)> = keys
+            .iter()
+            .zip(slots)
+            .map(|(key, slot)| {
+                let to = slot as f32 * PLACE_STEP;
+                let slide = self.slides.entry(key.clone()).or_insert(Slide { from: (to, 0.), to, at: now });
+                if slide.to != to {
+                    *slide = Slide { from: slide.now(now), to, at: now };
+                }
+                if let (Some(ghost), Some(row)) = (landed.as_ref().filter(|d| d.key == *key).and_then(|d| d.ghost), self.row) {
+                    *slide = Slide { from: (f32::from(ghost.x - row.left()), f32::from(ghost.y - row.top())), to, at: now };
+                }
+                moving |= !slide.done(now);
+                slide.now(now)
+            })
+            .collect();
+        self.slides.retain(|k, _| keys.contains(k));
+        (at, moving)
+    }
+
+    /// The slot under the pointer at window x `x`.
+    pub(super) fn slot_at(&self, x: Pixels, count: usize) -> usize {
+        let Some(row) = self.row else { return 0 };
+        let slot = (f32::from(x - row.left()) / PLACE_STEP).floor().max(0.) as usize;
+        slot.min(count.saturating_sub(1))
+    }
+}
+
+/// A place being dragged along the bar to another slot: its button, lifted on a card.
+#[derive(Clone)]
+pub(super) struct DraggedPlace {
+    pub(super) index: usize,
+    pub(super) key: String,
+    pub(super) name: String,
+    pub(super) icon: Option<String>,
+    pub(super) machine: bool,
+    pub(super) theme: Theme,
+    /// Where the pointer grabbed the button, from its top-left.
+    pub(super) grab: gpui::Point<Pixels>,
+    pub(super) motion: Rc<std::cell::RefCell<PlaceMotion>>,
+}
+
+impl Render for DraggedPlace {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // gpui draws the ghost at the pointer less the grab: remember it, a drop flies home from there
+        if let Some(drag) = self.motion.borrow_mut().drag.as_mut() {
+            drag.ghost = Some(window.mouse_position() - self.grab);
+        }
+        let theme = &self.theme;
+        div()
+            .size(px(30.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.))
+            .bg(theme.card)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_lg()
+            .child(place_mark(&self.name, self.icon.as_deref(), self.machine, theme.accent))
+    }
+}
+
 pub(super) fn icon_mark(icon: &str, size: f32, color: gpui::Hsla) -> gpui::AnyElement {
     match icon.strip_prefix("icon:") {
         Some(name) => gpui::svg().path(SharedString::from(format!("icons/solar/{name}.svg"))).size(px(size)).flex_none().text_color(color).into_any_element(),
@@ -681,6 +833,31 @@ pub(super) fn icon_mark(icon: &str, size: f32, color: gpui::Hsla) -> gpui::AnyEl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dragged_place_holds_its_slot_and_the_others_close_up() {
+        let keys: Vec<String> = ["a", "b", "c", "d"].map(String::from).into();
+        let mut motion = PlaceMotion::default();
+        let start = Instant::now();
+        motion.layout(&keys, false, start);
+        motion.drag = Some(PlaceDrag { key: "b".into(), slot: 3, ghost: None });
+        motion.layout(&keys, true, start);
+        let to: Vec<f32> = keys.iter().map(|k| motion.slides[k].to / PLACE_STEP).collect();
+        assert_eq!(to, [0., 3., 1., 2.]);
+        // let go away from the bar: it springs back home, the others with it
+        let (at, moving) = motion.layout(&keys, false, start);
+        assert!(moving && motion.drag.is_none());
+        assert_eq!(motion.layout(&keys, false, start + PLACE_SLIDE).0, [(0., 0.), (34., 0.), (68., 0.), (102., 0.)]);
+        assert_eq!(at.len(), 4);
+    }
+
+    #[test]
+    fn places_follow_the_dragged_order_and_new_ones_go_last() {
+        let machine = |id: &str| Place::Machine(Machine { id: id.into(), label: id.into(), target: id.into(), session: "s".into(), enabled: true });
+        let order = ["machine:b".to_string(), "machine:a".to_string()];
+        let keys: Vec<String> = in_order(vec![machine("a"), machine("c"), machine("b")], &order).iter().map(Place::key).collect();
+        assert_eq!(keys, ["machine:b", "machine:a", "machine:c"]);
+    }
 
     #[test]
     fn emoji_search_by_name() {

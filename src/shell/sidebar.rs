@@ -627,32 +627,69 @@ impl Shell {
     fn place_bar(&self, theme: &Theme, offset: f32, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let hover_bg = theme.hover;
         let shown_at = self.places.iter().position(|p| self.places_shown(p));
-        let buttons = self.places.iter().enumerate().map(|(i, place)| {
+        // each button at its slot, springing there when the order or a drag's placeholder moves it
+        let keys: Vec<String> = self.places.iter().map(sessions::Place::key).collect();
+        let dragging = cx.has_active_drag();
+        let (slots, moving) = self.place_motion.borrow_mut().layout(&keys, dragging, Instant::now());
+        if moving {
+            window.request_animation_frame();
+        }
+        let held = self.place_motion.borrow().drag.as_ref().filter(|_| dragging).map(|d| d.key.clone());
+        // the slot it would land in, its mark faint there
+        let placeholder = held.as_ref().and_then(|key| keys.iter().position(|k| k == key)).map(|i| {
+            let place = &self.places[i];
+            let (name, icon) = place.look(cx);
+            let mark = sessions::place_mark(&name, icon.as_deref(), matches!(place, sessions::Place::Machine(_)), theme.text_muted);
+            div()
+                .absolute()
+                .top_0()
+                .left(px(slots[i].0))
+                .size(px(30.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.wash(0.04))
+                .child(div().opacity(0.4).child(mark))
+        });
+        let buttons = self.places.iter().enumerate().filter(|(i, _)| held.as_ref() != Some(&keys[*i])).map(|(i, place)| {
             let shown = self.places_shown(place);
             let (name, icon) = place.look(cx);
-            let letter = || div().text_size(px(12.)).font_weight(gpui::FontWeight::SEMIBOLD).child(name.chars().next().unwrap_or('?').to_uppercase().to_string());
-            let mark = match (icon, place) {
-                (Some(icon), _) => sessions::icon_mark(&icon, 15., if shown { theme.accent } else { theme.text_faint }),
-                (None, sessions::Place::Machine(_)) => {
-                    gpui::svg().path("icons/remote-server.svg").size(px(15.)).text_color(if shown { theme.accent } else { theme.text_faint }).into_any_element()
-                }
-                (None, sessions::Place::Session(_)) => letter().into_any_element(),
+            let machine = matches!(place, sessions::Place::Machine(_));
+            let mark = sessions::place_mark(&name, icon.as_deref(), machine, if shown { theme.accent } else { theme.text_faint });
+            let dragged = sessions::DraggedPlace {
+                index: i,
+                key: keys[i].clone(),
+                name: name.clone(),
+                icon,
+                machine,
+                theme: theme.clone(),
+                grab: Default::default(),
+                motion: self.place_motion.clone(),
             };
             let (to, menu) = (place.clone(), place.clone());
+            let (x, y) = slots[i];
             div()
                 .id(("place", i))
                 .tooltip(tip(name.clone(), None))
+                .absolute()
+                .left(px(x))
+                .top(px(y))
                 .size(px(30.))
-                .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded(px(8.))
                 .cursor_pointer()
-                .relative()
                 .text_color(if shown { theme.accent } else { theme.text_faint })
                 .when(!shown, |el| el.hover(move |s| s.bg(hover_bg)))
                 .child(mark)
+                .on_drag(dragged, |d, grab, _, cx| {
+                    d.motion.borrow_mut().drag = Some(sessions::PlaceDrag { key: d.key.clone(), slot: d.index, ghost: None });
+                    cx.new(|_| sessions::DraggedPlace { grab, ..d.clone() })
+                })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     if !this.places_shown(&to) {
                         this.switch_to(to.clone(), cx)
@@ -663,8 +700,7 @@ impl Shell {
                     cx.listener(move |this, e: &MouseDownEvent, _, cx| this.open_place_menu(menu.clone(), e.position, cx)),
                 )
         });
-        // one button and the gap after it
-        let step = 34.;
+        let step = sessions::PLACE_STEP;
         if let Some((from, to, at)) = self.bar_glide.get() {
             let t = at.elapsed().as_secs_f32() / FOLD_DURATION.as_secs_f32();
             let x = if t >= 1. { to } else { from + (to - from) * ease_out(t) };
@@ -687,15 +723,30 @@ impl Shell {
                     self.bar_glide.set(Some((from, to, Instant::now())));
                 }
             }
+            // the square stays on its button as that springs to another slot
+            let x = (x + slots[at].0 - at as f32 * step).clamp(0., (self.places.len() - 1) as f32 * step);
             div().absolute().top_0().left(px(x)).size(px(30.)).rounded(px(8.)).bg(theme.selected)
         });
         if self.bar_glide.get().is_some() {
             window.request_animation_frame(); // a glide set just now starts on the next frame
         }
         let bar_bounds = self.bar_bounds.clone();
+        let motion = self.place_motion.clone();
         div()
             .relative()
             .flex_none()
+            // a place dragged over the bar holds the slot under the pointer; let go there, it moves to it
+            .on_drag_move(cx.listener(|this, e: &gpui::DragMoveEvent<sessions::DraggedPlace>, _, cx| {
+                let slot = this.place_motion.borrow().slot_at(e.event.position.x, this.places.len());
+                if let Some(drag) = this.place_motion.borrow_mut().drag.as_mut().filter(|d| d.slot != slot) {
+                    drag.slot = slot;
+                    cx.notify();
+                }
+            }))
+            .on_drop(cx.listener(|this, d: &sessions::DraggedPlace, _, cx| {
+                let slot = this.place_motion.borrow().drag.as_ref().map_or(d.index, |drag| drag.slot);
+                this.move_place(d.index, slot, cx);
+            }))
             // close under the agents list, the window's edge kept below
             .pt(px(2.))
             .pb(px(8.))
@@ -733,7 +784,18 @@ impl Shell {
                         .overflow_x_scroll()
                         .track_scroll(&self.places_scroll)
                         // auto margins centre the row while it fits and fall to 0 once it scrolls
-                        .child(div().flex_none().mx_auto().relative().flex().gap(px(step - 30.)).children(lit).children(buttons)),
+                        .child(
+                            div()
+                                .flex_none()
+                                .mx_auto()
+                                .relative()
+                                .w(px(self.places.len() as f32 * step - (step - 30.)))
+                                .h(px(30.))
+                                .child(gpui::canvas(move |bounds, _, _| motion.borrow_mut().row = Some(bounds), |_, _, _, _| {}).absolute().size_full())
+                                .children(lit)
+                                .children(placeholder)
+                                .children(buttons),
+                        ),
                 )),
             )
             .child(

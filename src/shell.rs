@@ -240,6 +240,8 @@ pub struct Shell {
     bar_glide: Cell<Option<(f32, f32, Instant)>>,
     /// Where the bar was painted: a swipe there scrolls the bar, not to the next place.
     bar_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The bar's buttons sliding to their slots, and the one being dragged.
+    place_motion: Rc<std::cell::RefCell<sessions::PlaceMotion>>,
     /// A place's right-click menu in the bar, and where it was clicked.
     place_menu: Option<crate::ui::Popup<(sessions::Place, gpui::Point<Pixels>)>>,
     /// The Edit dialog of a place's name and icon.
@@ -505,6 +507,7 @@ impl Shell {
                     slide: None,
                     places_scroll: gpui::ScrollHandle::new(),
                     bar_bounds: Default::default(),
+                    place_motion: Default::default(),
                     lit_seen: Cell::new(-1.),
                     bar_glide: Cell::new(None),
                     place_menu: None,

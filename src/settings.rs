@@ -29,6 +29,8 @@ pub struct Settings {
     /// The names and icons given to herdr sessions and machines in Shepherd, by the place's key (a session's socket,
     /// `machine:<id>`).
     pub place_looks: BTreeMap<String, PlaceLook>,
+    /// The bar's order of herdr sessions and machines, by the place's key, as dragged; new ones go last.
+    pub place_order: Vec<String>,
     /// The command Cmd+click opens `path:line:col` with (`zed`, `code -g`, `nvim` in a pane to the right); `None`
     /// finds Zed, Cursor or VS Code.
     pub editor: Option<String>,
@@ -226,6 +228,7 @@ impl Default for Settings {
             herdr_socket: None,
             herdr_machine: None,
             place_looks: BTreeMap::new(),
+            place_order: Vec::new(),
             editor: None,
             keys: BTreeMap::new(),
             sidebar_width: SIDEBAR_WIDTH,
