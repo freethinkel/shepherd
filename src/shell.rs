@@ -841,6 +841,10 @@ impl Shell {
     }
 
     fn pane_command(&mut self, window: &Window, cx: &mut Context<Self>, make: impl FnOnce(String) -> Command) {
+        // a page shown hides the panes: nothing unseen is split or closed
+        if self.pages.shown.is_some() {
+            return;
+        }
         if let Some(pane_id) = self.active_pane(window, cx) {
             self.send(make(pane_id), cx, |_, _, _| {});
         }
@@ -1517,7 +1521,7 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
-                if let Some(tab) = this.shown_tab() {
+                if let Some(tab) = this.shown_tab().filter(|_| this.pages.shown.is_none()) {
                     this.send(Command::CloseTab { tab_id: tab.tab_id }, cx, |_, _, _| {});
                 }
             }))

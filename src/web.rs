@@ -150,6 +150,47 @@ pub fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     })
 }
 
+/// The modifiers held with a key the page was sent.
+#[derive(Clone, Copy, Default)]
+pub struct Mods {
+    pub cmd: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+/// The keystroke of Shepherd's one-key chord among `chords` that a key the page was sent (`characters` as AppKit
+/// gives them without modifiers) is, so it goes to Shepherd instead; plain typing is the page's. Shift that only
+/// typed the key's symbol (`cmd-{`) may be left out of the chord.
+pub fn shepherds_key(mods: Mods, characters: &str, chords: &[String]) -> Option<gpui::Keystroke> {
+    if !(mods.cmd || mods.ctrl || mods.alt) {
+        return None;
+    }
+    let key = match characters {
+        "\u{F700}" => "up".to_string(),
+        "\u{F701}" => "down".to_string(),
+        "\u{F702}" => "left".to_string(),
+        "\u{F703}" => "right".to_string(),
+        "\r" => "enter".to_string(),
+        "\t" | "\u{19}" => "tab".to_string(),
+        "\u{1b}" => "escape".to_string(),
+        "\u{7f}" => "backspace".to_string(),
+        " " => "space".to_string(),
+        other => other.to_lowercase(),
+    };
+    let combo = |shift: bool| {
+        let held = [(mods.cmd, "cmd-"), (mods.ctrl, "ctrl-"), (mods.alt, "alt-"), (shift, "shift-")];
+        let prefix: String = held.iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect();
+        gpui::Keystroke::parse(&format!("{prefix}{key}")).ok()
+    };
+    let pressed = [combo(mods.shift), combo(false).filter(|_| mods.shift)];
+    chords
+        .iter()
+        .filter(|c| !c.trim().contains(' '))
+        .filter_map(|c| gpui::Keystroke::parse(c.trim()).ok())
+        .find(|k| pressed.iter().flatten().any(|p| p == k))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +333,22 @@ mod tests {
         assert_eq!(image_format(b"GIF89a"), Some(ImageFormat::Gif));
         assert_eq!(image_format(b"RIFF\0\0\0\0WEBPVP8 "), Some(ImageFormat::Webp));
         assert_eq!(image_format(b"nope"), None);
+    }
+
+    #[test]
+    fn a_key_the_page_has_is_shepherds_when_shepherd_binds_it() {
+        let chords = ["cmd-k", "cmd-shift-w", "cmd-{", "cmd-up", "ctrl-a x"].map(String::from);
+        let key = |mods, chars| shepherds_key(mods, chars, &chords);
+        let ks = |k| gpui::Keystroke::parse(k).ok();
+        let (cmd, shift) = (Mods { cmd: true, ..Mods::default() }, Mods { cmd: true, shift: true, ..Mods::default() });
+        assert_eq!(key(cmd, "k"), ks("cmd-k"));
+        assert_eq!(key(shift, "W"), ks("cmd-shift-w"));
+        // shift typed the brace: the chord names the brace alone
+        assert_eq!(key(shift, "{"), ks("cmd-{"));
+        assert_eq!(key(cmd, "\u{F700}"), ks("cmd-up"));
+        assert_eq!(key(cmd, "c"), None);
+        assert_eq!(key(Mods::default(), "k"), None);
+        // a chord of two keys isn't taken from the page
+        assert_eq!(key(Mods { ctrl: true, ..Mods::default() }, "a"), None);
     }
 }

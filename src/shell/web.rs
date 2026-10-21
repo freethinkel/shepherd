@@ -21,6 +21,9 @@ pub(super) enum PageEvent {
     Navigate(String),
     /// A link to another site, for the system browser.
     Outside(String),
+    /// One of Shepherd's shortcuts, pressed in the page.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Key(gpui::Keystroke),
 }
 
 pub(super) struct Page {
@@ -30,6 +33,8 @@ pub(super) struct Page {
     title: Option<String>,
     /// Whether it was last made visible, so it isn't told every frame.
     visible: bool,
+    /// Whether it was last given the keyboard.
+    focused: bool,
     /// Where it was last placed, so it isn't moved every frame.
     placed: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// On macOS, the view of its own the page sits in, under GPUI's overlay plane.
@@ -73,6 +78,9 @@ pub(super) struct Pages {
     hooked: bool,
     /// GPUI draws its deferred layer (menus, dialogs, panels, toasts) above the pages, so they needn't hide for it.
     layered: bool,
+    /// Shepherd's chords in force, which the pages' key monitors take from the page.
+    #[cfg(target_os = "macos")]
+    shortcuts: Rc<std::cell::RefCell<Vec<String>>>,
     /// GTK's loop is pumped beside GPUI's.
     #[cfg(target_os = "linux")]
     gtk_pump: bool,
@@ -144,14 +152,14 @@ impl Shell {
 
     /// Whether anything Shepherd draws over the main area is open, sliding out included, that the page has to hide
     /// for: Settings, which takes the window; and where GPUI can't draw above native views (off macOS), every popup
-    /// too, the page sitting above all of it. A new popup field belongs here.
+    /// too, the page sitting above all of it.
     pub(super) fn overlay_open(&self, cx: &App) -> bool {
-        if self.settings.is_some() {
-            return true;
-        }
-        if self.pages.layered {
-            return false;
-        }
+        self.settings.is_some()
+            || (!self.pages.layered && (self.popup_open() || self.peek_now() > 0. || crate::ui::toast::any_open(cx)))
+    }
+
+    /// Whether a menu, dialog or panel is open, which takes the keyboard from the page. A new popup field belongs here.
+    fn popup_open(&self) -> bool {
         let popups = [
             self.view_menu.is_some(),
             self.agents_menu.is_some(),
@@ -170,11 +178,7 @@ impl Shell {
             self.session_delete.is_some(),
             self.command_panel.is_some(),
         ];
-        popups.into_iter().any(|open| open)
-            || self.settings.is_some()
-            || self.floating_open()
-            || self.peek_now() > 0.
-            || crate::ui::toast::any_open(cx)
+        popups.into_iter().any(|open| open) || self.floating_open()
     }
 
     /// Every user selection of a tab goes through here; it leaves the page for the tabs.
@@ -270,11 +274,13 @@ impl Shell {
     /// `entry_url` is the entry's URL, which keeps the page while it is the same; `url` is the one loaded, the
     /// forward's for a page on a machine, and the site its links are measured against.
     fn make_page(&mut self, key: PageKey, entry_url: &str, url: &str, window: &Window, cx: &mut Context<Self>) -> wry::Result<Page> {
-        let events = self.page_events(cx);
+        let events = self.page_events(window, cx);
         let send = move |event: PageEvent| {
             let _ = events.unbounded_send((key.clone(), event));
         };
-        let (title, loaded, opened, followed) = (send.clone(), send.clone(), send.clone(), send);
+        let (title, loaded, opened, followed) = (send.clone(), send.clone(), send.clone(), send.clone());
+        #[cfg(target_os = "macos")]
+        let key_event = send;
         // a link to another site goes to the browser when the setting says so; anything else stays in the page
         let (site, flag) = (url.to_string(), self.pages.links_outside.clone());
         let follows_outside: Rc<dyn Fn(&str) -> bool> = Rc::new(move |to| flag.get() && off_site(&site, to));
@@ -308,7 +314,11 @@ impl Shell {
         // GPUI's deferred layer goes on a plane of its own above native views (macOS only, in this GPUI); the page
         // moves into a view of its own below it. Without it, the page hides under Shepherd's overlays instead.
         #[cfg(target_os = "macos")]
-        let host = window.enable_scene_overlay().ok().and_then(|()| host::Host::new(&view)).map(Rc::new);
+        let host = window
+            .enable_scene_overlay()
+            .ok()
+            .and_then(|()| host::Host::new(&view, self.pages.shortcuts.clone(), move |k| key_event(PageEvent::Key(k))))
+            .map(Rc::new);
         #[cfg(target_os = "macos")]
         {
             self.pages.layered = host.is_some();
@@ -318,6 +328,7 @@ impl Shell {
             entry_url: entry_url.to_string(),
             title: None,
             visible: false,
+            focused: false,
             placed: Default::default(),
             #[cfg(target_os = "macos")]
             host,
@@ -356,14 +367,14 @@ impl Shell {
     }
 
     /// The channel the pages' handlers report on; its first use starts the loop that applies what they say.
-    fn page_events(&mut self, cx: &mut Context<Self>) -> UnboundedSender<(PageKey, PageEvent)> {
+    fn page_events(&mut self, window: &Window, cx: &mut Context<Self>) -> UnboundedSender<(PageKey, PageEvent)> {
         if let Some(events) = &self.pages.events {
             return events.clone();
         }
         let (events, mut said) = futures::channel::mpsc::unbounded::<(PageKey, PageEvent)>();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             while let Some((key, event)) = said.next().await {
-                if this.update(cx, |s, cx| s.page_event(key, event, cx)).is_err() {
+                if this.update_in(cx, |s, window, cx| s.page_event(key, event, window, cx)).is_err() {
                     break;
                 }
             }
@@ -373,12 +384,16 @@ impl Shell {
         events
     }
 
-    fn page_event(&mut self, key: PageKey, event: PageEvent, cx: &mut Context<Self>) {
+    fn page_event(&mut self, key: PageKey, event: PageEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(page) = self.pages.live.get_mut(&key) else { return };
         match event {
             PageEvent::Title(title) => page.title = Some(title).filter(|t| !t.is_empty()),
             PageEvent::Loaded => {}
             PageEvent::Outside(url) => cx.open_url(&url),
+            // dispatched as if pressed in Shepherd; a menu or dialog it opens takes the keyboard in `sync_pages`
+            PageEvent::Key(keystroke) => window.defer(cx, move |window, cx| {
+                window.dispatch_keystroke(keystroke, cx);
+            }),
             PageEvent::Navigate(url) => {
                 if let Err(e) = page.view.load_url(&url) {
                     crate::ui::toast::error(cx, format!("{url}: {e}"));
@@ -407,6 +422,13 @@ impl Shell {
             }
         }
         self.pages.links_outside.set(SettingsGlobal::of(cx).settings.web_links_outside);
+        #[cfg(target_os = "macos")]
+        if let Some(active) = cx.try_global::<crate::bindings::ActiveBindings>() {
+            let chords: Vec<String> = active.0.iter().map(|(_, chord)| chord.clone()).collect();
+            if *self.pages.shortcuts.borrow() != chords {
+                *self.pages.shortcuts.borrow_mut() = chords;
+            }
+        }
         self.fetch_favicons(cx);
         let entries = SettingsGlobal::of(cx).settings.web_entries.clone();
         // a page on a machine also goes when its entry no longer opens there
@@ -427,19 +449,23 @@ impl Shell {
         {
             self.show_web(key.0.clone(), window, cx);
         }
+        let popup = self.popup_open();
         for (key, page) in &mut self.pages.live {
             let visible = shown.as_ref() == Some(key) && !covered;
-            if page.visible == visible {
-                continue;
+            if page.visible != visible {
+                page.visible = visible;
+                let _ = page.view.set_visible(visible);
+                #[cfg(target_os = "macos")]
+                if let Some(host) = &page.host {
+                    host.show(visible);
+                }
             }
-            page.visible = visible;
-            let _ = page.view.set_visible(visible);
-            #[cfg(target_os = "macos")]
-            if let Some(host) = &page.host {
-                host.show(visible);
+            // the keyboard goes with the page, to a menu or dialog open over it, and back to Shepherd when it hides
+            let focused = visible && !popup;
+            if page.focused != focused {
+                page.focused = focused;
+                let _ = if focused { page.view.focus() } else { page.view.focus_parent() };
             }
-            // the keyboard goes with the page, and back to Shepherd when it hides
-            let _ = if visible { page.view.focus() } else { page.view.focus_parent() };
         }
     }
 
@@ -629,15 +655,25 @@ mod host {
     use gpui::{Bounds, Pixels};
     use objc2::rc::Retained;
     use objc2::{MainThreadMarker, MainThreadOnly, msg_send};
-    use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindowOrderingMode};
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSEventModifierFlags, NSView, NSWindowOrderingMode};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use std::ptr::NonNull;
+    use std::rc::Rc;
     use wry::WebViewExtMacOS;
 
-    pub(super) struct Host(Retained<NSView>);
+    /// The page's view, and the key monitor that takes Shepherd's shortcuts from the page while it has the keyboard
+    /// (WebKit would keep them, as Zeron's browser found).
+    pub(super) struct Host(Retained<NSView>, Option<Retained<AnyObject>>);
 
     impl Host {
-        /// Moves `view`'s WKWebView into a view of its own, just below GPUI's overlay plane.
-        pub(super) fn new(view: &wry::WebView) -> Option<Host> {
+        /// Moves `view`'s WKWebView into a view of its own, just below GPUI's overlay plane; a key among `shortcuts`
+        /// pressed in it goes to `key` instead.
+        pub(super) fn new(
+            view: &wry::WebView,
+            shortcuts: Rc<std::cell::RefCell<Vec<String>>>,
+            key: impl Fn(gpui::Keystroke) + 'static,
+        ) -> Option<Host> {
             let mtm = MainThreadMarker::new()?;
             let web = view.webview();
             // SAFETY: a view's superview, read on the main thread
@@ -654,7 +690,35 @@ mod host {
                 Some(overlay) => parent.addSubview_positioned_relativeTo(&host, NSWindowOrderingMode::Below, Some(&overlay)),
                 None => parent.addSubview(&host),
             }
-            Some(Host(host))
+            let watched = host.clone();
+            let monitor = block2::RcBlock::new(move |event: NonNull<NSEvent>| {
+                // SAFETY: AppKit hands the monitor a live event, on the main thread
+                let e = unsafe { event.as_ref() };
+                let in_page = watched
+                    .window()
+                    .filter(|w| e.window(mtm).as_ref() == Some(w))
+                    .and_then(|w| w.firstResponder())
+                    .and_then(|r| r.downcast::<NSView>().ok())
+                    .is_some_and(|v| !watched.isHidden() && v.isDescendantOf(&watched));
+                let flags = e.modifierFlags();
+                let mods = crate::web::Mods {
+                    cmd: flags.contains(NSEventModifierFlags::Command),
+                    ctrl: flags.contains(NSEventModifierFlags::Control),
+                    alt: flags.contains(NSEventModifierFlags::Option),
+                    shift: flags.contains(NSEventModifierFlags::Shift),
+                };
+                let characters = e.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default();
+                match in_page.then(|| crate::web::shepherds_key(mods, &characters, &shortcuts.borrow())).flatten() {
+                    Some(keystroke) => {
+                        key(keystroke);
+                        std::ptr::null_mut()
+                    }
+                    None => event.as_ptr(),
+                }
+            });
+            // SAFETY: the block lives as long as the monitor, which `Drop` removes
+            let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &monitor) };
+            Some(Host(host, monitor))
         }
 
         /// Puts it at `bounds`, in GPUI's top-left coordinates; its web view (and a docked inspector) follow.
@@ -678,6 +742,10 @@ mod host {
 
     impl Drop for Host {
         fn drop(&mut self) {
+            if let Some(monitor) = self.1.take() {
+                // SAFETY: a monitor `new` added
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
             self.0.removeFromSuperview();
         }
     }
