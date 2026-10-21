@@ -5,7 +5,7 @@
 //! `config.toml`, which herdr then reloads.
 use crate::bindings::{ACTIONS, effective, rebind, recordable};
 use crate::herdr::{Client, HerdrConfig, config_path, set_binary, set_socket};
-use crate::settings::{Settings, SettingsGlobal, step_font_size, step_line_height};
+use crate::settings::{OpenFrom, Settings, SettingsGlobal, WebEntry, step_font_size, step_line_height};
 use crate::theme::{Appearance, AppearanceMode, StatusIcons, Theme, variants_for};
 use crate::ui::input_style;
 use crate::update::{self as updater, Updates};
@@ -137,12 +137,40 @@ pub struct SettingsView {
     integration_busy: Option<String>,
     /// The action whose chord the next keystroke becomes.
     recording: Option<&'static str>,
+    /// The web pages' name and URL fields, in the settings' order; made as entries come, dropped as they go.
+    web_fields: Vec<WebFields>,
+    /// The places a web page can be listed in, as (key, name), once herdr has listed them.
+    places: Option<Vec<(String, String)>>,
     ping: Option<String>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<Close> for SettingsView {}
+
+/// One web page's fields, saved on Enter or when left.
+struct WebFields {
+    id: String,
+    name: Entity<InputState>,
+    url: Entity<InputState>,
+    _events: [Subscription; 2],
+}
+
+/// Changes the web page `id`, and saves.
+fn edit_web(cx: &mut App, id: &str, change: impl FnOnce(&mut WebEntry)) {
+    update(cx, |s| {
+        if let Some(e) = s.web_entries.iter_mut().find(|e| e.id == id) {
+            change(e)
+        }
+    });
+}
+
+/// The id of web page `id`'s Show in select: selects are keyed by a `&'static str`.
+// ponytail: one leaked string per web page shown in this run; key selects by SharedString if that ever matters
+fn web_select_id(id: &str) -> &'static str {
+    static IDS: std::sync::Mutex<std::collections::BTreeMap<String, &'static str>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+    IDS.lock().unwrap().entry(id.to_string()).or_insert_with(|| Box::leak(format!("web-show-{id}").into_boxed_str()))
+}
 
 /// Changes the settings, saves them and applies them everywhere.
 pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
@@ -320,6 +348,8 @@ impl SettingsView {
             integrations: None,
             integration_busy: None,
             recording: None,
+            web_fields: Vec::new(),
+            places: None,
             ping: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -336,7 +366,156 @@ impl SettingsView {
             }
         }
         view.load_integrations(cx);
+        view.load_places(cx);
         view
+    }
+
+    /// The herdr sessions and machines a web page can be listed in, named as the session bar names them.
+    fn load_places(&mut self, cx: &mut Context<Self>) {
+        let list = cx.background_spawn(async { (crate::herdr::sessions().unwrap_or_default(), crate::herdr::machines().unwrap_or_default()) });
+        cx.spawn(async move |v, cx| {
+            let (sessions, machines) = list.await;
+            let _ = v.update(cx, |v, cx| {
+                let looks = &SettingsGlobal::of(cx).settings.place_looks;
+                let name = |key: &str, herdr: &str| looks.get(key).and_then(|l| l.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| herdr.to_string());
+                let sessions = sessions.iter().map(|s| (s.socket_path.clone(), name(&s.socket_path, &s.name)));
+                let machines = machines.iter().filter(|m| m.enabled).map(|m| {
+                    let key = format!("machine:{}", m.id);
+                    let label = name(&key, &m.label);
+                    (key, label)
+                });
+                v.places = Some(sessions.chain(machines).collect());
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fields for the web pages in the settings: kept for the ones still there, made for new ones.
+    fn sync_web_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = SettingsGlobal::of(cx).settings.web_entries.clone();
+        if self.web_fields.iter().map(|f| &f.id).eq(entries.iter().map(|e| &e.id)) {
+            return;
+        }
+        let theme = Theme::of(cx).clone();
+        let mut old = std::mem::take(&mut self.web_fields);
+        for entry in entries {
+            if let Some(at) = old.iter().position(|f| f.id == entry.id) {
+                self.web_fields.push(old.remove(at));
+                continue;
+            }
+            let input = |value: &str, placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
+                cx.new(|cx| {
+                    let mut input = InputState::new(window, cx).placeholder(placeholder).default_value(value.to_string());
+                    input.set_editor_style(input_style(&theme));
+                    input
+                })
+            };
+            let name = input(&entry.name, "Name", window, cx);
+            let url = input(&entry.url, "http://localhost:4317", window, cx);
+            let setters: [(&Entity<InputState>, fn(&mut WebEntry, String)); 2] = [(&name, |e, v| e.name = v), (&url, |e, v| e.url = v)];
+            let events = setters.map(|(field, set)| {
+                let id = entry.id.clone();
+                cx.subscribe_in(field, window, move |_, field, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        let value = field.read(cx).value().trim().to_string();
+                        edit_web(cx, &id, |e| set(e, value));
+                    }
+                })
+            });
+            self.web_fields.push(WebFields { id: entry.id, name, url, _events: events });
+        }
+    }
+
+    /// Settings → Integrations' web pages: each one's name, URL, where it is listed and where it opens, and the
+    /// switch for links to other sites.
+    fn web_pages(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let settings = &SettingsGlobal::of(cx).settings;
+        let (entries, outside) = (settings.web_entries.clone(), settings.web_links_outside);
+        let muted = theme.text_muted;
+        let rows: Vec<Div> = self
+            .web_fields
+            .iter()
+            .zip(&entries)
+            .enumerate()
+            .map(|(i, (fields, entry))| {
+                let id = entry.id.clone();
+                let places = self.places.clone().unwrap_or_default();
+                let labels = std::iter::once(SharedString::from("Everywhere")).chain(places.iter().map(|(_, n)| SharedString::from(n.clone()))).collect();
+                let current = match &entry.show_in {
+                    None => Some(0),
+                    Some(key) => places.iter().position(|(k, _)| k == key).map(|at| at + 1),
+                };
+                // a place no longer there (stopped, removed) shows as its key; until herdr answers, nothing
+                let fallback = match (&entry.show_in, &self.places) {
+                    (Some(key), Some(_)) => format!("{key} (gone)"),
+                    _ => String::new(),
+                };
+                let keys: Vec<Option<String>> = std::iter::once(None).chain(places.into_iter().map(|(k, _)| Some(k))).collect();
+                let pick = {
+                    let id = id.clone();
+                    move |i: usize, cx: &mut App| {
+                        let key = keys[i].clone();
+                        edit_web(cx, &id, |e| e.show_in = key)
+                    }
+                };
+                let show_in = self.select(theme, web_select_id(&id), labels, current, fallback.into(), |_| None, pick, cx);
+                let from = |open_from: OpenFrom, label: &'static str| {
+                    let id = id.clone();
+                    choice(theme, SharedString::from(format!("web-from-{label}-{id}")), label, entry.open_from == open_from)
+                        .h(px(32.))
+                        .on_click(move |_, _, cx| edit_web(cx, &id, |e| e.open_from = open_from))
+                };
+                let remove = {
+                    let id = id.clone();
+                    action(theme, SharedString::from(format!("web-remove-{id}")), "Remove")
+                        .on_click(move |_, _, cx| update(cx, |s| s.web_entries.retain(|e| e.id != id)))
+                };
+                div()
+                    .mx(px(16.))
+                    .py(px(12.))
+                    .when(i > 0, |el| el.border_t_1().border_color(theme.border.opacity(0.6)))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(field(theme, &fields.name).w(px(160.)))
+                            .child(field(theme, &fields.url).flex_1())
+                            .child(remove),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().text_color(muted).child("Show in"))
+                            .child(show_in)
+                            .child(div().ml(px(8.)).text_color(muted).child("Open from"))
+                            .child(from(OpenFrom::Here, "This computer"))
+                            .child(from(OpenFrom::Machine, "The machine")),
+                    )
+            })
+            .collect();
+        div()
+            .child(section_label(theme, "Web pages"))
+            .child(note(theme, "Local tools, listed in the sidebar above the workspaces and shown in place of the tabs and panes. The machine opens the URL on the machine shown, through SSH.").mt(px(0.)))
+            .when(!rows.is_empty(), |el| el.child(card(theme).mt(px(12.)).children(rows)))
+            .child(
+                div().mt(px(8.)).flex().child(
+                    action(theme, "web-add", "Add page").on_click(|_, _, cx| update(cx, |s| s.web_entries.push(WebEntry::new()))),
+                ),
+            )
+            .child(
+                card(theme).mt(px(12.)).child(
+                    card_row(theme, true)
+                        .child(row_text(theme, "Open links to other sites in the browser", "Off: they open in the page, inside Shepherd."))
+                        .child(toggle(theme, "web-links-outside", outside).on_click(|_, _, cx| update(cx, |s| s.web_links_outside = !s.web_links_outside))),
+                ),
+            )
     }
 
     /// A request to the herdr Shepherd is connected to; `done` gets the result on the main thread.
@@ -925,6 +1104,7 @@ pub(crate) fn display_chord(chord: &str) -> String {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::reap_popup(&mut self.open_select, window);
+        self.sync_web_fields(window, cx);
         let theme = Theme::of(cx).clone();
         let global = SettingsGlobal::of(cx);
         let settings = global.settings.clone();
@@ -1327,6 +1507,7 @@ impl Render for SettingsView {
                     ))
                     .child(body)
                     .children(self.herdr_note.clone().map(|text| note(&theme, text)))
+                    .child(self.web_pages(&theme, cx))
             }
             Section::Herdr => div()
                 .child(page_header(&theme, "herdr", "Where Shepherd finds herdr. Empty fields use herdr's defaults."))
