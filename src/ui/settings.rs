@@ -1175,6 +1175,16 @@ impl Render for SettingsView {
             .bg(theme.wash(0.05))
             .border_r_1()
             .border_color(theme.border)
+            // Zeron's Back: a muted tab at the top of the column, an arrow and the word.
+            .child(
+                div().flex_none().px(px(8.)).child(
+                    crate::shell::row(&theme, false, "settings-back")
+                        .text_color(theme.text_muted)
+                        .child(gpui::svg().path("icons/arrow-left.svg").size(px(16.)).flex_none().text_color(theme.text_muted))
+                        .child("Back")
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Close))),
+                ),
+            )
             .child(div().flex_1().min_h_0().flex().flex_col().gap(px(2.)).px(px(8.)).pt(px(12.)).children(Section::ALL.into_iter().map(
                 |section| {
                     let selected = self.section == section;
@@ -1192,17 +1202,7 @@ impl Render for SettingsView {
                             cx.notify();
                         }))
                 },
-            )))
-            // Back: a muted tab at the foot of the column, where the sidebar keeps New workspace; an arrow and the word.
-            .child(
-                div().flex_none().m(px(8.)).child(
-                    crate::shell::row(&theme, false, "settings-back")
-                        .text_color(theme.text_muted)
-                        .child(gpui::svg().path("icons/arrow-left.svg").size(px(16.)).flex_none().text_color(theme.text_muted))
-                        .child("Back")
-                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Close))),
-                ),
-            );
+            )));
 
         let body = match self.section {
             Section::General => div().child(page_header(&theme, "General", "The window and what it shows.")).child(
