@@ -206,6 +206,11 @@ fn ssh_options() -> Vec<String> {
         "-o".into(), "ControlPersist=600".into(),
         "-o".into(), format!("ControlPath={}", control.display()),
     ];
+    ssh_base_options().into_iter().chain(shared.into_iter().filter(|_| !cfg!(windows))).collect()
+}
+
+/// [`ssh_options`] without the shared connection.
+fn ssh_base_options() -> Vec<String> {
     [
         "-C",
         "-o", "BatchMode=yes",
@@ -215,8 +220,61 @@ fn ssh_options() -> Vec<String> {
     ]
     .into_iter()
     .map(String::from)
-    .chain(shared.into_iter().filter(|_| !cfg!(windows)))
     .collect()
+}
+
+/// An SSH local forward to a port on a machine: `port` here reaches it. Its ssh stops when it drops, and when
+/// Shepherd goes however it goes: the ssh runs `cat` on the machine on a pipe only Shepherd holds, which ends with it.
+pub struct Tunnel {
+    child: std::process::Child,
+    _alive: Option<std::process::ChildStdin>,
+    pub port: u16,
+}
+
+impl Drop for Tunnel {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Forwards a free local port to `host:port` as `target` sees it, over a connection of its own (never the shared
+/// one, whose forwards outlive the ssh that asked for them), and returns once the port takes connections. Blocking:
+/// call it off the main thread. Fails when ssh exits first, or nothing listens within 15 s.
+pub fn forward(target: &str, host: &str, port: u16) -> std::io::Result<Tunnel> {
+    use std::time::{Duration, Instant};
+    let local = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let child = crate::process::command("ssh")
+        .args(ssh_base_options())
+        .args(["-T", "-o", "ExitOnForwardFailure=yes", "-L"])
+        .arg(format!("127.0.0.1:{local}:{host}:{port}"))
+        .arg("--")
+        .arg(target)
+        .arg("cat >/dev/null")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut tunnel = Tunnel { _alive: None, child, port: local };
+    tunnel._alive = tunnel.child.stdin.take();
+    let until = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = tunnel.child.try_wait()? {
+            let mut why = String::new();
+            if let Some(mut err) = tunnel.child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut err, &mut why);
+            }
+            let why = why.trim();
+            return Err(std::io::Error::other(if why.is_empty() { format!("ssh {target}: {status}") } else { why.to_string() }));
+        }
+        if std::net::TcpStream::connect(("127.0.0.1", local)).is_ok() {
+            return Ok(tunnel);
+        }
+        if Instant::now() > until {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("ssh {target}: no forward after 15 s")));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// The shell command that runs `bridge` for `session` on the host, with herdr where its installers put it: a
@@ -240,6 +298,14 @@ fn short(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forward_that_cannot_connect_fails() {
+        // a host that can't resolve: ssh exits at once, well inside the wait
+        let at = std::time::Instant::now();
+        assert!(forward("nobody@shepherd-no-such-host.invalid", "localhost", 4317).is_err());
+        assert!(at.elapsed() < std::time::Duration::from_secs(15));
+    }
 
     #[test]
     fn machines_from_herdrs_list() {

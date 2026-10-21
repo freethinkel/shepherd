@@ -1318,7 +1318,7 @@ impl Render for Shell {
 
         let tabbar = self.render_tab_bar(&theme, shown_ws.clone(), shown_tab.clone(), sidebar_w, window, cx);
         let (tabbar, web_area) = match &web {
-            Some((key, entry)) => (self.render_web_bar(key, entry, &theme, sidebar_w, cx), Some(self.render_web_area(key, &theme))),
+            Some((key, entry)) => (self.render_web_bar(key, entry, &theme, sidebar_w, cx), Some(self.render_web_area(key, &theme, window, cx))),
             None => (tabbar, None),
         };
 

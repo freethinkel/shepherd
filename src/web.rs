@@ -127,6 +127,15 @@ pub fn fetch_favicon(page: &str) -> Option<(ImageFormat, Vec<u8>)> {
     Some((image_format(&bytes)?, bytes))
 }
 
+/// Whether something replies on local `port`: an SSH forward takes a connection even when nothing listens on the
+/// machine, and closes it unanswered. Blocking, 5 s at most.
+pub fn answers(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else { return false };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    stream.write_all(b"HEAD / HTTP/1.0\r\n\r\n").is_ok() && stream.read(&mut [0; 1]).is_ok_and(|n| n > 0)
+}
+
 /// An image's format by its first bytes, for GPUI's `Image::from_bytes`; `None` when unknown.
 pub fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]).trim_start().to_ascii_lowercase();
@@ -244,6 +253,26 @@ mod tests {
         let (format, bytes) = fetch_favicon(&format!("http://127.0.0.1:{port}/board")).unwrap();
         assert_eq!(format, gpui::ImageFormat::Png);
         assert!(bytes.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn a_port_answers_only_when_something_replies() {
+        use std::io::{Read, Write};
+        let serve = |reply: bool| {
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = server.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                let (mut stream, _) = server.accept().unwrap();
+                let _ = stream.read(&mut [0; 256]);
+                if reply {
+                    let _ = stream.write_all(b"HTTP/1.0 200 OK\r\n\r\n");
+                }
+            });
+            port
+        };
+        assert!(answers(serve(true)));
+        // as an SSH forward does when nothing listens on the machine: it takes the connection, then closes it
+        assert!(!answers(serve(false)));
     }
 
     #[test]
