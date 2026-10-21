@@ -35,19 +35,21 @@ enum Section {
     Notifications,
     Usage,
     Integrations,
+    WebPages,
     Herdr,
     Shortcuts,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 9] = [
+    const ALL: [Section; 10] = [
         Section::General,
         Section::Terminal,
         Section::Appearance,
         Section::Notifications,
         Section::Usage,
         Section::Integrations,
+        Section::WebPages,
         Section::Herdr,
         Section::Shortcuts,
         Section::About,
@@ -61,6 +63,7 @@ impl Section {
             Section::Notifications => "Notifications",
             Section::Usage => "Usage",
             Section::Integrations => "Integrations",
+            Section::WebPages => "Web pages",
             Section::Herdr => "herdr",
             Section::Shortcuts => "Shortcuts",
             Section::About => "About",
@@ -75,7 +78,8 @@ impl Section {
             Section::Notifications => "icons/bell.svg",
             Section::Usage => "icons/clock-circle.svg",
             Section::Integrations => "icons/widget.svg",
-            Section::Herdr => "icons/remote-server.svg",
+            Section::WebPages => "icons/solar/global.svg",
+            Section::Herdr => "icons/solar/server-2.svg",
             Section::Shortcuts => "icons/keyboard.svg",
             Section::About => "icons/info-circle.svg",
         }
@@ -428,9 +432,7 @@ impl SettingsView {
         }
     }
 
-    /// Settings → Integrations' web pages: each one's name, URL, where it is listed and where it opens, and the
-    /// switch for links to other sites.
-    /// Settings → Integrations' web pages, Zeron's way: each page a block of labelled fields on a two-column grid
+    /// Settings → Web pages, Zeron's way: each page a block of labelled fields on a two-column grid
     /// (name and URL, where it is listed and where it opens) with a red bin to remove it, "Add page" by the section's
     /// label, and the switch for links to other sites.
     fn web_pages(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -527,7 +529,7 @@ impl SettingsView {
                     .pl(px(8.))
                     .flex()
                     .items_center()
-                    .child(div().flex_1().text_color(muted).child("Web pages"))
+                    .child(div().flex_1().text_color(muted).child("Pages"))
                     .child(
                         action(theme, "web-add", "Add page")
                             .gap(px(6.))
@@ -540,7 +542,7 @@ impl SettingsView {
                     el.child(card_row(theme, true).child(row_text(
                         theme,
                         "No web pages yet",
-                        "Local tools, listed in the sidebar above the workspaces and shown in place of the tabs and panes.",
+                        "Add one with its URL: a dev server, a dashboard, a tool on a machine.",
                     )))
                 }),
             )
@@ -1543,8 +1545,14 @@ impl Render for SettingsView {
                     ))
                     .child(body)
                     .children(self.herdr_note.clone().map(|text| note(&theme, text)))
-                    .child(self.web_pages(&theme, cx))
             }
+            Section::WebPages => div()
+                .child(page_header(
+                    &theme,
+                    "Web pages",
+                    "Local tools, listed in the sidebar above the workspaces and shown in place of the tabs and panes.",
+                ))
+                .child(self.web_pages(&theme, cx)),
             Section::Herdr => div()
                 .child(page_header(&theme, "herdr", "Where Shepherd finds herdr. Empty fields use herdr's defaults."))
                 .child(
