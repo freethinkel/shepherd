@@ -12,6 +12,17 @@ pub fn normalize(url: &str) -> String {
     if url.contains("://") { url.to_string() } else { format!("http://{url}") }
 }
 
+/// What an entry goes by in the sidebar and the tab bar: its name, else its page's title once loaded, else the
+/// URL's host and port.
+pub fn label(entry: &WebEntry, title: Option<&str>) -> String {
+    let given = [entry.name.trim(), title.unwrap_or_default().trim()];
+    if let Some(name) = given.into_iter().find(|n| !n.is_empty()) {
+        return name.to_string();
+    }
+    let url = normalize(&entry.url);
+    url.parse::<http::Uri>().ok().and_then(|u| u.authority().map(|a| a.to_string())).unwrap_or_else(|| entry.url.trim().to_string())
+}
+
 /// The entries listed while the place with `place` key is shown, in the settings' order.
 pub fn listed<'a>(entries: &'a [WebEntry], place: Option<&str>) -> Vec<&'a WebEntry> {
     entries.iter().filter(|e| e.show_in.is_none() || e.show_in.as_deref() == place).collect()
@@ -124,6 +135,17 @@ pub fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
 mod tests {
     use super::*;
     use crate::settings::WebEntry;
+
+    #[test]
+    fn an_entry_without_a_name_goes_by_its_pages_title_else_its_host() {
+        let e = |name: &str| WebEntry { name: name.into(), url: "localhost:4317/board".into(), ..Default::default() };
+        assert_eq!(label(&e("board"), Some("herdr board")), "board");
+        assert_eq!(label(&e(" "), Some("herdr board")), "herdr board");
+        assert_eq!(label(&e(""), None), "localhost:4317");
+        assert_eq!(label(&e(""), Some(" ")), "localhost:4317");
+        let blank = WebEntry::default();
+        assert_eq!(label(&blank, None), "");
+    }
 
     #[test]
     fn a_url_without_a_scheme_is_http() {

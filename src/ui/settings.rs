@@ -411,7 +411,7 @@ impl SettingsView {
                     input
                 })
             };
-            let name = input(&entry.name, "Name", window, cx);
+            let name = input(&entry.name, "Name (the page's title)", window, cx);
             let url = input(&entry.url, "http://localhost:4317", window, cx);
             let setters: [(&Entity<InputState>, fn(&mut WebEntry, String)); 2] = [(&name, |e, v| e.name = v), (&url, |e, v| e.url = v)];
             let events = setters.map(|(field, set)| {

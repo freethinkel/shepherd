@@ -3,7 +3,7 @@
 use super::*;
 use super::tab_bar::{TAB_H, TAB_TOP};
 use crate::settings::WebEntry;
-use crate::web::{listed, normalize, off_site, page_bounds, page_is_current};
+use crate::web::{label, listed, normalize, off_site, page_bounds, page_is_current};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedSender;
 use wry::dpi::{LogicalPosition, LogicalSize};
@@ -207,6 +207,7 @@ impl Shell {
     pub(super) fn sync_pages(&mut self, covered: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !std::mem::replace(&mut self.pages.hooked, true)
             && let Ok(name) = std::env::var("SHEPHERD_WEB")
+            && !name.is_empty()
             && let Some(entry) = SettingsGlobal::of(cx).settings.web_entries.iter().find(|e| e.name == name)
         {
             self.show_web(entry.id.clone(), window, cx);
@@ -256,12 +257,12 @@ impl Shell {
     }
 
     /// The tab bar's row while a page is shown: back, forward, reload and the page's title (the entry's name until
-    /// the page has one). No tooltips: they would open down over the page, under it.
+    /// the page has one, its host until then). No tooltips: they would open down over the page, under it.
     pub(super) fn render_web_bar(&self, key: &PageKey, entry: &WebEntry, theme: &Theme, sidebar_w: f32, cx: &mut Context<Self>) -> Div {
         let page = self.pages.live.get(key);
         let view = page.map(|p| p.view.clone());
         let can = |f: fn(&wry::WebView) -> wry::Result<bool>| view.as_deref().is_some_and(|v| f(v).unwrap_or(false));
-        let title = page.and_then(|p| p.title.clone()).unwrap_or_else(|| entry.name.clone());
+        let title = page.and_then(|p| p.title.clone()).unwrap_or_else(|| label(entry, None));
         let hover = theme.hover;
         let button = |id: &'static str, icon: &'static str, enabled: bool, act: fn(&wry::WebView) -> wry::Result<()>| {
             let view = view.clone();
@@ -308,11 +309,12 @@ impl Shell {
         }
         let shown = self.pages.shown.clone();
         let rows = entries.into_iter().map(|e| {
+            let name = label(&e, self.pages.live.get(&self.page_key(&e)).and_then(|p| p.title.as_deref()));
             let selected = shown.as_deref() == Some(e.id.as_str());
             let id = e.id.clone();
             crate::shell::row(theme, selected, SharedString::from(format!("web-{}", e.id)))
-                .child(div().size(px(16.)).flex_none().flex().items_center().justify_center().child(sessions::place_mark(&e.name, None, false, theme.text_muted)))
-                .child(div().flex_1().min_w_0().truncate().child(e.name.clone()))
+                .child(div().size(px(16.)).flex_none().flex().items_center().justify_center().child(sessions::place_mark(&name, None, false, theme.text_muted)))
+                .child(div().flex_1().min_w_0().truncate().child(name))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.show_web(id.clone(), window, cx)))
         });
         Some(
