@@ -165,11 +165,12 @@ fn edit_web(cx: &mut App, id: &str, change: impl FnOnce(&mut WebEntry)) {
     });
 }
 
-/// The id of web page `id`'s Show in select: selects are keyed by a `&'static str`.
-// ponytail: one leaked string per web page shown in this run; key selects by SharedString if that ever matters
-fn web_select_id(id: &str) -> &'static str {
+/// The id of web page `id`'s `which` select (Show in, Open from): selects are keyed by a `&'static str`.
+// ponytail: two leaked strings per web page shown in this run; key selects by SharedString if that ever matters
+fn web_select_id(which: &str, id: &str) -> &'static str {
     static IDS: std::sync::Mutex<std::collections::BTreeMap<String, &'static str>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
-    IDS.lock().unwrap().entry(id.to_string()).or_insert_with(|| Box::leak(format!("web-show-{id}").into_boxed_str()))
+    let key = format!("web-{which}-{id}");
+    IDS.lock().unwrap().entry(key.clone()).or_insert_with(|| Box::leak(key.into_boxed_str()))
 }
 
 /// Changes the settings, saves them and applies them everywhere.
@@ -411,7 +412,7 @@ impl SettingsView {
                     input
                 })
             };
-            let name = input(&entry.name, "Name (the page's title)", window, cx);
+            let name = input(&entry.name, "The page's title", window, cx);
             let url = input(&entry.url, "http://localhost:4317", window, cx);
             let setters: [(&Entity<InputState>, fn(&mut WebEntry, String)); 2] = [(&name, |e, v| e.name = v), (&url, |e, v| e.url = v)];
             let events = setters.map(|(field, set)| {
@@ -429,10 +430,25 @@ impl SettingsView {
 
     /// Settings → Integrations' web pages: each one's name, URL, where it is listed and where it opens, and the
     /// switch for links to other sites.
+    /// Settings → Integrations' web pages, Zeron's way: each page a block of labelled fields on a two-column grid
+    /// (name and URL, where it is listed and where it opens) with a red bin to remove it, "Add page" by the section's
+    /// label, and the switch for links to other sites.
     fn web_pages(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let settings = &SettingsGlobal::of(cx).settings;
         let (entries, outside) = (settings.web_entries.clone(), settings.web_links_outside);
         let muted = theme.text_muted;
+        // a control under its caption, sharing its row's width with its neighbour
+        let labelled = |label: &'static str, control: Div| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(div().text_size(px(12.)).line_height(px(16.)).text_color(muted).child(label))
+                .child(control)
+        };
+        let pair = |left: Div, right: Div| div().flex().gap(px(12.)).child(left).child(right);
         let rows: Vec<Div> = self
             .web_fields
             .iter()
@@ -452,62 +468,81 @@ impl SettingsView {
                     _ => String::new(),
                 };
                 let keys: Vec<Option<String>> = std::iter::once(None).chain(places.into_iter().map(|(k, _)| Some(k))).collect();
-                let pick = {
+                let pick_place = {
                     let id = id.clone();
                     move |i: usize, cx: &mut App| {
                         let key = keys[i].clone();
                         edit_web(cx, &id, |e| e.show_in = key)
                     }
                 };
-                let show_in = self.select(theme, web_select_id(&id), labels, current, fallback.into(), |_| None, pick, cx);
-                let from = |open_from: OpenFrom, label: &'static str| {
+                let show_in = self.select(theme, web_select_id("show", &id), labels, current, fallback.into(), |_| None, pick_place, cx);
+                const FROM: [(OpenFrom, &str); 2] = [(OpenFrom::Here, "This computer"), (OpenFrom::Machine, "The machine shown")];
+                let pick_from = {
                     let id = id.clone();
-                    choice(theme, SharedString::from(format!("web-from-{label}-{id}")), label, entry.open_from == open_from)
-                        .h(px(32.))
-                        .on_click(move |_, _, cx| edit_web(cx, &id, |e| e.open_from = open_from))
+                    move |i: usize, cx: &mut App| edit_web(cx, &id, |e| e.open_from = FROM[i].0)
                 };
-                let remove = {
-                    let id = id.clone();
-                    action(theme, SharedString::from(format!("web-remove-{id}")), "Remove")
-                        .on_click(move |_, _, cx| update(cx, |s| s.web_entries.retain(|e| e.id != id)))
-                };
+                let from = FROM.iter().position(|(f, _)| *f == entry.open_from);
+                let open_from = self.select(theme, web_select_id("from", &id), FROM.iter().map(|(_, l)| SharedString::from(*l)).collect(), from, "".into(), |_| None, pick_from, cx);
+                let danger = theme.danger;
+                let remove = div()
+                    .id(SharedString::from(format!("web-remove-{id}")))
+                    .flex_none()
+                    // level with the fields under the first row's captions
+                    .mt(px(22.))
+                    .size(px(32.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(danger.opacity(0.12)))
+                    .child(gpui::svg().path("icons/solar/trash-bin-minimalistic.svg").size(px(16.)).text_color(danger))
+                    .on_click(move |_, _, cx| update(cx, |s| s.web_entries.retain(|e| e.id != id)));
                 div()
                     .mx(px(16.))
-                    .py(px(12.))
+                    .py(px(14.))
                     .when(i > 0, |el| el.border_t_1().border_color(theme.border.opacity(0.6)))
                     .flex()
-                    .flex_col()
-                    .gap(px(8.))
+                    .items_start()
+                    .gap(px(12.))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(field(theme, &fields.name).w(px(160.)))
-                            .child(field(theme, &fields.url).flex_1())
-                            .child(remove),
+                            .flex_col()
+                            .gap(px(12.))
+                            .child(pair(labelled("Name", field(theme, &fields.name).w_full()), labelled("URL", field(theme, &fields.url).w_full())))
+                            .child(pair(labelled("Show in", show_in.w_full()), labelled("Open from", open_from.w_full()))),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(div().text_color(muted).child("Show in"))
-                            .child(show_in)
-                            .child(div().ml(px(8.)).text_color(muted).child("Open from"))
-                            .child(from(OpenFrom::Here, "This computer"))
-                            .child(from(OpenFrom::Machine, "The machine")),
-                    )
+                    .child(remove)
             })
             .collect();
+        let empty = rows.is_empty();
         div()
-            .child(section_label(theme, "Web pages"))
-            .child(note(theme, "Local tools, listed in the sidebar above the workspaces and shown in place of the tabs and panes. The machine opens the URL on the machine shown, through SSH.").mt(px(0.)))
-            .when(!rows.is_empty(), |el| el.child(card(theme).mt(px(12.)).children(rows)))
             .child(
-                div().mt(px(8.)).flex().child(
-                    action(theme, "web-add", "Add page").on_click(|_, _, cx| update(cx, |s| s.web_entries.push(WebEntry::new()))),
-                ),
+                div()
+                    .mt(px(32.))
+                    .mb(px(8.))
+                    .pl(px(8.))
+                    .flex()
+                    .items_center()
+                    .child(div().flex_1().text_color(muted).child("Web pages"))
+                    .child(
+                        action(theme, "web-add", "Add page")
+                            .gap(px(6.))
+                            .child(gpui::svg().path("icons/solar/add-circle.svg").size(px(14.)).text_color(muted))
+                            .on_click(|_, _, cx| update(cx, |s| s.web_entries.push(WebEntry::new()))),
+                    ),
+            )
+            .child(
+                card(theme).mt(px(0.)).children(rows).when(empty, |el| {
+                    el.child(card_row(theme, true).child(row_text(
+                        theme,
+                        "No web pages yet",
+                        "Local tools, listed in the sidebar above the workspaces and shown in place of the tabs and panes.",
+                    )))
+                }),
             )
             .child(
                 card(theme).mt(px(12.)).child(
@@ -630,7 +665,7 @@ impl SettingsView {
         let label = current.and_then(|i| labels.get(i).cloned()).unwrap_or(fallback);
         let trigger = div()
             .id(id)
-            .w(px(240.))
+            .w_full()
             .h(px(32.))
             .px(px(10.))
             .flex()
@@ -753,7 +788,8 @@ impl SettingsView {
             // `anchored` is absolutely placed at its parent's origin: an in-flow wrapper puts that under the trigger.
             div().child(gpui::deferred(gpui::anchored().snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion("select-menu-in", menu, card))).with_priority(1))
         });
-        div().flex_none().flex().flex_col().child(trigger).children(menu)
+        // 240 px; a caller sets another width on this
+        div().w(px(240.)).flex_none().flex().flex_col().child(trigger).children(menu)
     }
 
     /// Closes the open select and gives the keyboard back to the page, which Escape then closes.
