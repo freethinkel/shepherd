@@ -3,7 +3,7 @@
 use super::*;
 use super::tab_bar::{TAB_H, TAB_TOP};
 use crate::settings::WebEntry;
-use crate::web::{listed, normalize, page_bounds, page_is_current};
+use crate::web::{listed, normalize, off_site, page_bounds, page_is_current};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedSender;
 use wry::dpi::{LogicalPosition, LogicalSize};
@@ -18,6 +18,8 @@ pub(super) enum PageEvent {
     Loaded,
     /// A new window asked for: it loads in the page instead.
     Navigate(String),
+    /// A link to another site, for the system browser.
+    Outside(String),
 }
 
 pub(super) struct Page {
@@ -41,6 +43,8 @@ pub(super) struct Pages {
     #[cfg(not(target_os = "macos"))]
     context: Option<wry::WebContext>,
     events: Option<UnboundedSender<(PageKey, PageEvent)>>,
+    /// The setting that sends links to other sites to the browser, as the pages' handlers read it.
+    links_outside: Rc<Cell<bool>>,
     /// `SHEPHERD_WEB` was looked at.
     hooked: bool,
 }
@@ -132,7 +136,11 @@ impl Shell {
         let send = move |event: PageEvent| {
             let _ = events.unbounded_send((key.clone(), event));
         };
-        let (title, loaded, opened) = (send.clone(), send.clone(), send);
+        let (title, loaded, opened, followed) = (send.clone(), send.clone(), send.clone(), send);
+        // a link to another site goes to the browser when the setting says so; anything else stays in the page
+        let (site, flag) = (url.to_string(), self.pages.links_outside.clone());
+        let follows_outside: Rc<dyn Fn(&str) -> bool> = Rc::new(move |to| flag.get() && off_site(&site, to));
+        let opens_outside = follows_outside.clone();
         #[cfg(not(target_os = "macos"))]
         let context = self.pages.context.get_or_insert_with(|| wry::WebContext::new(Some(crate::settings::cache_dir().join("web"))));
         #[cfg(not(target_os = "macos"))]
@@ -145,8 +153,16 @@ impl Shell {
             .with_bounds(wry::Rect { position: LogicalPosition::new(0., 0.).into(), size: LogicalSize::new(1., 1.).into() })
             .with_document_title_changed_handler(move |t| title(PageEvent::Title(t)))
             .with_on_page_load_handler(move |_, _| loaded(PageEvent::Loaded))
-            .with_new_window_req_handler(move |url, _| {
-                opened(PageEvent::Navigate(url));
+            .with_navigation_handler(move |to| {
+                let stay = !follows_outside(&to);
+                if !stay {
+                    followed(PageEvent::Outside(to));
+                }
+                stay
+            })
+            .with_new_window_req_handler(move |to, _| {
+                let event = if opens_outside(&to) { PageEvent::Outside(to) } else { PageEvent::Navigate(to) };
+                opened(event);
                 wry::NewWindowResponse::Deny
             })
             .build_as_child(window)?;
@@ -176,6 +192,7 @@ impl Shell {
         match event {
             PageEvent::Title(title) => page.title = Some(title).filter(|t| !t.is_empty()),
             PageEvent::Loaded => {}
+            PageEvent::Outside(url) => cx.open_url(&url),
             PageEvent::Navigate(url) => {
                 if let Err(e) = page.view.load_url(&url) {
                     crate::ui::toast::error(cx, format!("{url}: {e}"));
@@ -194,6 +211,7 @@ impl Shell {
         {
             self.show_web(entry.id.clone(), window, cx);
         }
+        self.pages.links_outside.set(SettingsGlobal::of(cx).settings.web_links_outside);
         let entries = SettingsGlobal::of(cx).settings.web_entries.clone();
         self.pages.live.retain(|(id, _), page| page_is_current(&entries, id, &page.entry_url));
         let shown = self.shown_page(cx).map(|(key, _)| key);
