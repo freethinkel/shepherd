@@ -1,0 +1,206 @@
+//! Web integrations: local tools' pages listed in the sidebar and shown in place of the tabs and panes. What here is
+//! plain logic; the pages themselves are the Shell's (`shell/web.rs`).
+use crate::settings::WebEntry;
+use gpui::{Bounds, ImageFormat, Pixels, point, px, size};
+
+/// How much of the window's left edge the page leaves while the sidebar is closed: the strip that brings it out.
+pub const PEEK_EDGE: f32 = 6.;
+
+/// `localhost:4317` → `http://localhost:4317`; a URL with a scheme is kept; surrounding space trimmed.
+pub fn normalize(url: &str) -> String {
+    let url = url.trim();
+    if url.contains("://") { url.to_string() } else { format!("http://{url}") }
+}
+
+/// The entries listed while the place with `place` key is shown, in the settings' order.
+pub fn listed<'a>(entries: &'a [WebEntry], place: Option<&str>) -> Vec<&'a WebEntry> {
+    entries.iter().filter(|e| e.show_in.is_none() || e.show_in.as_deref() == place).collect()
+}
+
+/// A URL's scheme, lowercased host and port (the scheme's default when none is written); `None` for anything but
+/// http and https.
+fn origin(url: &str) -> Option<(String, String, u16)> {
+    let uri: http::Uri = url.parse().ok()?;
+    let scheme = uri.scheme_str()?.to_ascii_lowercase();
+    let port = uri.port_u16().unwrap_or(match scheme.as_str() {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    });
+    Some((scheme, uri.host()?.to_ascii_lowercase(), port))
+}
+
+/// Whether `to` leaves `page`'s site: another scheme, host or port. Anything but http and https (about:, data:) is
+/// not off-site.
+pub fn off_site(page: &str, to: &str) -> bool {
+    match (origin(page), origin(to)) {
+        (Some(page), Some(to)) => page != to,
+        _ => false,
+    }
+}
+
+/// `name="value"` (or `'value'`) of an HTML tag; the name is matched without regard to case.
+fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find(name).map(|i| i + from) {
+        from = at + name.len();
+        let before = lower[..at].chars().next_back();
+        let rest = lower[from..].trim_start();
+        if !before.is_some_and(char::is_whitespace) || !rest.starts_with('=') {
+            continue;
+        }
+        let value_at = tag.len() - rest.len() + 1;
+        let value = tag[value_at..].trim_start();
+        let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+        return value[1..].split(quote).next();
+    }
+    None
+}
+
+/// The favicon's absolute URL from a page's HTML: the first `<link rel=…icon…>`'s href resolved against `page`, else
+/// `<origin>/favicon.ico`.
+pub fn favicon_url(html: &str, page: &str) -> String {
+    let (scheme, rest) = page.split_once("://").unwrap_or(("http", page));
+    let root = format!("{scheme}://{}", rest.split('/').next().unwrap_or(rest));
+    let lower = html.to_ascii_lowercase();
+    let href = lower.match_indices("<link").find_map(|(at, _)| {
+        let tag = &html[at..at + lower[at..].find('>').unwrap_or(lower.len() - at)];
+        attribute(tag, "rel").filter(|rel| rel.to_ascii_lowercase().contains("icon"))?;
+        attribute(tag, "href").filter(|href| !href.is_empty())
+    });
+    match href {
+        None => format!("{root}/favicon.ico"),
+        Some(href) if href.contains("://") => href.to_string(),
+        Some(href) if href.starts_with("//") => format!("{scheme}:{href}"),
+        Some(href) if href.starts_with('/') => format!("{root}{href}"),
+        Some(href) => {
+            // relative to the page's folder: its path up to the last `/`
+            let path = rest.find('/').map_or("/", |at| &rest[at..]);
+            format!("{root}{}{href}", &path[..path.rfind('/').unwrap_or(0) + 1])
+        }
+    }
+}
+
+/// For a forward: the URL's (host, port) to reach on the machine, and the URL to load here through `local_port`
+/// (`http://localhost:<local_port>` with the same path and query).
+pub fn forwarded(url: &str, local_port: u16) -> Option<((String, u16), String)> {
+    let (_, host, port) = origin(url)?;
+    let uri: http::Uri = url.parse().ok()?;
+    let path = uri.path_and_query().map_or("/", |p| p.as_str());
+    Some(((host, port), format!("http://localhost:{local_port}{path}")))
+}
+
+/// Whether a live page, made for `url`, still belongs to entry `id`: the entry exists and its normalized URL is `url`.
+pub fn page_is_current(entries: &[WebEntry], id: &str, url: &str) -> bool {
+    entries.iter().any(|e| e.id == id && normalize(&e.url) == url)
+}
+
+/// The web view's rectangle inside the main area: the area itself, less [`PEEK_EDGE`] at its left when the sidebar
+/// is closed and the area starts at the window's left edge.
+pub fn page_bounds(area: Bounds<Pixels>, sidebar_closed: bool) -> Bounds<Pixels> {
+    if !sidebar_closed || area.origin.x >= px(PEEK_EDGE) {
+        return area;
+    }
+    let inset = px(PEEK_EDGE) - area.origin.x;
+    Bounds::new(point(area.origin.x + inset, area.origin.y), size(area.size.width - inset, area.size.height))
+}
+
+/// An image's format by its first bytes, for GPUI's `Image::from_bytes`; `None` when unknown.
+pub fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]).trim_start().to_ascii_lowercase();
+    Some(match bytes {
+        [0x89, b'P', b'N', b'G', ..] => ImageFormat::Png,
+        [0, 0, 1, 0, ..] => ImageFormat::Ico,
+        [0xff, 0xd8, 0xff, ..] => ImageFormat::Jpeg,
+        [b'G', b'I', b'F', b'8', ..] => ImageFormat::Gif,
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => ImageFormat::Webp,
+        _ if text.starts_with("<svg") || (text.starts_with("<?xml") && text.contains("<svg")) => ImageFormat::Svg,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::WebEntry;
+
+    #[test]
+    fn a_url_without_a_scheme_is_http() {
+        assert_eq!(normalize(" localhost:4317 "), "http://localhost:4317");
+        assert_eq!(normalize("127.0.0.1:8080/board"), "http://127.0.0.1:8080/board");
+        assert_eq!(normalize("https://x.dev/a"), "https://x.dev/a");
+    }
+
+    #[test]
+    fn an_entry_tied_to_a_place_lists_only_there() {
+        let e = |id: &str, show_in: Option<&str>| WebEntry { id: id.into(), show_in: show_in.map(Into::into), ..Default::default() };
+        let entries = [e("a", None), e("b", Some("machine:m1")), e("c", Some("/tmp/s.sock"))];
+        let ids = |p| listed(&entries, p).iter().map(|e| e.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids(Some("machine:m1")), ["a", "b"]);
+        assert_eq!(ids(Some("/tmp/s.sock")), ["a", "c"]);
+        assert_eq!(ids(None), ["a"]);
+    }
+
+    #[test]
+    fn off_site_is_another_scheme_host_or_port() {
+        let page = "http://localhost:4317/board";
+        assert!(!off_site(page, "http://localhost:4317/other?q=1"));
+        assert!(off_site(page, "http://localhost:3000/"));
+        assert!(off_site(page, "https://localhost:4317/"));
+        assert!(off_site(page, "https://github.com/x"));
+        assert!(!off_site(page, "about:blank"));
+    }
+
+    #[test]
+    fn the_favicon_is_the_pages_icon_link_else_favicon_ico() {
+        let page = "http://localhost:4317/board/";
+        assert_eq!(favicon_url(r#"<head><link rel="icon" href="/static/i.png"></head>"#, page), "http://localhost:4317/static/i.png");
+        assert_eq!(favicon_url(r#"<LINK href='i.svg' rel='shortcut icon'>"#, page), "http://localhost:4317/board/i.svg");
+        assert_eq!(favicon_url(r#"<link rel="icon" href="https://cdn.x/i.ico">"#, page), "https://cdn.x/i.ico");
+        assert_eq!(favicon_url(r#"<link rel="icon" href="//cdn.x/i.ico">"#, page), "http://cdn.x/i.ico");
+        assert_eq!(favicon_url(r#"<link rel="stylesheet" href="a.css">"#, page), "http://localhost:4317/favicon.ico");
+        assert_eq!(favicon_url("<html></html>", page), "http://localhost:4317/favicon.ico");
+    }
+
+    #[test]
+    fn a_forwarded_url_keeps_its_path_on_the_local_port() {
+        assert_eq!(
+            forwarded("http://localhost:4317/board?x=1", 50123),
+            Some((("localhost".into(), 4317), "http://localhost:50123/board?x=1".into()))
+        );
+        assert_eq!(forwarded("http://10.0.0.5/", 50123), Some((("10.0.0.5".into(), 80), "http://localhost:50123/".into())));
+        assert_eq!(forwarded("https://10.0.0.5", 50123), Some((("10.0.0.5".into(), 443), "http://localhost:50123/".into())));
+    }
+
+    #[test]
+    fn a_page_is_current_only_for_its_entrys_url() {
+        let entries = [WebEntry { id: "a".into(), url: "localhost:1".into(), ..Default::default() }];
+        assert!(page_is_current(&entries, "a", "http://localhost:1"));
+        assert!(!page_is_current(&entries, "a", "http://localhost:2"));
+        assert!(!page_is_current(&entries, "gone", "http://localhost:1"));
+    }
+
+    #[test]
+    fn the_page_leaves_the_peek_edge_while_the_sidebar_is_closed() {
+        use gpui::{Bounds, point, px, size};
+        let area = Bounds::new(point(px(0.), px(38.)), size(px(800.), px(500.)));
+        assert_eq!(page_bounds(area, false), area);
+        assert_eq!(page_bounds(area, true), Bounds::new(point(px(6.), px(38.)), size(px(794.), px(500.))));
+        let docked = Bounds::new(point(px(256.), px(38.)), size(px(600.), px(500.)));
+        assert_eq!(page_bounds(docked, true), docked);
+    }
+
+    #[test]
+    fn favicon_formats_by_magic_bytes() {
+        use gpui::ImageFormat;
+        assert_eq!(image_format(b"\x89PNG\r\n\x1a\n...."), Some(ImageFormat::Png));
+        assert_eq!(image_format(&[0, 0, 1, 0, 1, 0]), Some(ImageFormat::Ico));
+        assert_eq!(image_format(b"<svg xmlns=..."), Some(ImageFormat::Svg));
+        assert_eq!(image_format(b"<?xml version=\"1.0\"?><svg"), Some(ImageFormat::Svg));
+        assert_eq!(image_format(&[0xff, 0xd8, 0xff, 0xe0]), Some(ImageFormat::Jpeg));
+        assert_eq!(image_format(b"GIF89a"), Some(ImageFormat::Gif));
+        assert_eq!(image_format(b"RIFF\0\0\0\0WEBPVP8 "), Some(ImageFormat::Webp));
+        assert_eq!(image_format(b"nope"), None);
+    }
+}

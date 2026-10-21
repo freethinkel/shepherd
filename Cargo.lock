@@ -5652,6 +5652,7 @@ dependencies = [
  "gpui",
  "gpui-base",
  "gpui_platform",
+ "http",
  "image",
  "interprocess",
  "objc2 0.6.5",

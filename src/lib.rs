@@ -16,3 +16,4 @@ pub mod terminal;
 pub mod theme;
 pub mod ui;
 pub mod update;
+pub mod web;
