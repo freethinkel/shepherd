@@ -150,6 +150,14 @@ pub fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     })
 }
 
+/// The local port a page on a machine is forwarded through, the same each launch for its entry and machine: a page's
+/// storage belongs to its origin, port included. In 20000–29999, below the systems' ephemeral ranges.
+pub fn forward_port(entry: &str, target: &str) -> u16 {
+    // FNV-1a: std's hasher may change between Rust releases
+    let hash = format!("{entry}\0{target}").bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+    20000 + (hash % 10000) as u16
+}
+
 /// The modifiers held with a key the page was sent.
 #[derive(Clone, Copy, Default)]
 pub struct Mods {
@@ -161,7 +169,7 @@ pub struct Mods {
 
 /// The keystroke of Shepherd's one-key chord among `chords` that a key the page was sent (`characters` as AppKit
 /// gives them without modifiers) is, so it goes to Shepherd instead; plain typing is the page's. Shift that only
-/// typed the key's symbol (`cmd-{`) may be left out of the chord.
+/// typed the key's symbol (`cmd-{`) may be left out of the chord. Arrows without ⌃ are the page's.
 pub fn shepherds_key(mods: Mods, characters: &str, chords: &[String]) -> Option<gpui::Keystroke> {
     if !(mods.cmd || mods.ctrl || mods.alt) {
         return None;
@@ -178,6 +186,10 @@ pub fn shepherds_key(mods: Mods, characters: &str, chords: &[String]) -> Option<
         " " => "space".to_string(),
         other => other.to_lowercase(),
     };
+    // ⌘ and ⌥ with an arrow move the caret and scroll the page; ponytail: always the page's, rebound or not
+    if !mods.ctrl && matches!(key.as_str(), "up" | "down" | "left" | "right") {
+        return None;
+    }
     let combo = |shift: bool| {
         let held = [(mods.cmd, "cmd-"), (mods.ctrl, "ctrl-"), (mods.alt, "alt-"), (shift, "shift-")];
         let prefix: String = held.iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect();
@@ -345,10 +357,21 @@ mod tests {
         assert_eq!(key(shift, "W"), ks("cmd-shift-w"));
         // shift typed the brace: the chord names the brace alone
         assert_eq!(key(shift, "{"), ks("cmd-{"));
-        assert_eq!(key(cmd, "\u{F700}"), ks("cmd-up"));
         assert_eq!(key(cmd, "c"), None);
         assert_eq!(key(Mods::default(), "k"), None);
+        // arrows move the caret and scroll in a page: ⌘↑ stays the page's though Shepherd binds it
+        assert_eq!(key(cmd, "\u{F700}"), None);
+        assert_eq!(key(Mods { cmd: true, alt: true, ..Mods::default() }, "\u{F702}"), None);
         // a chord of two keys isn't taken from the page
         assert_eq!(key(Mods { ctrl: true, ..Mods::default() }, "a"), None);
+    }
+
+    #[test]
+    fn a_page_on_a_machine_keeps_its_port_between_launches() {
+        let port = forward_port("entry-1", "stand");
+        assert_eq!(port, forward_port("entry-1", "stand"));
+        assert_ne!(port, forward_port("entry-1", "other"));
+        assert_ne!(port, forward_port("entry-2", "stand"));
+        assert!((20000..30000).contains(&port));
     }
 }

@@ -231,6 +231,13 @@ pub struct Tunnel {
     pub port: u16,
 }
 
+impl Tunnel {
+    /// Whether its ssh still runs: the Mac slept, the network changed, the machine rebooted.
+    pub fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
 impl Drop for Tunnel {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -238,12 +245,15 @@ impl Drop for Tunnel {
     }
 }
 
-/// Forwards a free local port to `host:port` as `target` sees it, over a connection of its own (never the shared
-/// one, whose forwards outlive the ssh that asked for them), and returns once the port takes connections. Blocking:
-/// call it off the main thread. Fails when ssh exits first, or nothing listens within 15 s.
-pub fn forward(target: &str, host: &str, port: u16) -> std::io::Result<Tunnel> {
+/// Forwards local port `local` (a free one when it is taken) to `host:port` as `target` sees it, over a connection
+/// of its own (never the shared one, whose forwards outlive the ssh that asked for them), and returns once the port
+/// takes connections. Blocking: call it off the main thread. Fails when ssh exits first, or nothing listens within 15 s.
+pub fn forward(target: &str, host: &str, port: u16, local: u16) -> std::io::Result<Tunnel> {
     use std::time::{Duration, Instant};
-    let local = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let local = match std::net::TcpListener::bind(("127.0.0.1", local)) {
+        Ok(free) => free.local_addr()?.port(),
+        Err(_) => std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port(),
+    };
     let child = crate::process::command("ssh")
         .args(ssh_base_options())
         .args(["-T", "-o", "ExitOnForwardFailure=yes", "-L"])
@@ -268,6 +278,10 @@ pub fn forward(target: &str, host: &str, port: u16) -> std::io::Result<Tunnel> {
             return Err(std::io::Error::other(if why.is_empty() { format!("ssh {target}: {status}") } else { why.to_string() }));
         }
         if std::net::TcpStream::connect(("127.0.0.1", local)).is_ok() {
+            // ssh logs each refused connection on stderr; unread, the pipe fills and ssh blocks, forward and all
+            if let Some(mut err) = tunnel.child.stderr.take() {
+                std::thread::spawn(move || std::io::copy(&mut err, &mut std::io::sink()));
+            }
             return Ok(tunnel);
         }
         if Instant::now() > until {
@@ -303,7 +317,7 @@ mod tests {
     fn a_forward_that_cannot_connect_fails() {
         // a host that can't resolve: ssh exits at once, well inside the wait
         let at = std::time::Instant::now();
-        assert!(forward("nobody@shepherd-no-such-host.invalid", "localhost", 4317).is_err());
+        assert!(forward("nobody@shepherd-no-such-host.invalid", "localhost", 4317, 0).is_err());
         assert!(at.elapsed() < std::time::Duration::from_secs(15));
     }
 

@@ -41,10 +41,10 @@ pub(super) struct Page {
     #[cfg(target_os = "macos")]
     host: Option<Rc<host::Host>>,
     /// The SSH forward a page opened on a machine loads through; it closes with the page.
-    _tunnel: Option<crate::herdr::Tunnel>,
+    tunnel: Option<crate::herdr::Tunnel>,
 }
 
-/// A machine's page whose forward isn't up: being made, or why it couldn't be.
+/// A machine's page whose forward isn't up: being made, or why it couldn't be; with the entry's URL it is for.
 pub(super) enum Forward {
     Connecting,
     Failed(String),
@@ -65,7 +65,7 @@ pub(super) struct Pages {
     pub(super) shown: Option<String>,
     live: HashMap<PageKey, Page>,
     /// Pages opened on a machine still waiting for their forward, or whose forward failed.
-    forwards: HashMap<PageKey, Forward>,
+    forwards: HashMap<PageKey, (String, Forward)>,
     /// Each entry's favicon and the URL it was fetched for; in memory only, so fetched again each launch.
     favicons: HashMap<String, (String, Favicon)>,
     /// Where pages keep their cookies and storage between launches; macOS keeps WKWebView's default store.
@@ -230,12 +230,14 @@ impl Shell {
     /// why it couldn't, for the page area to show.
     fn open_forwarded(&mut self, key: PageKey, url: String, target: String, window: &Window, cx: &mut Context<Self>) {
         let Some(((host, port), _)) = forwarded(&url, 0) else {
-            self.pages.forwards.insert(key, Forward::Failed(format!("{url} is not an http or https URL")));
+            let why = format!("{url} is not an http or https URL");
+            self.pages.forwards.insert(key, (url, Forward::Failed(why)));
             return;
         };
-        self.pages.forwards.insert(key.clone(), Forward::Connecting);
+        self.pages.forwards.insert(key.clone(), (url.clone(), Forward::Connecting));
+        let local = crate::web::forward_port(&key.0, &target);
         let tunnel = cx.background_spawn(async move {
-            let tunnel = crate::herdr::forward(&target, &host, port)?;
+            let tunnel = crate::herdr::forward(&target, &host, port, local)?;
             match crate::web::answers(tunnel.port) {
                 true => Ok(tunnel),
                 false => Err(std::io::Error::other(format!("Nothing answers on {host}:{port} there."))),
@@ -245,23 +247,24 @@ impl Shell {
             let tunnel = tunnel.await;
             let _ = this.update_in(cx, |s, window, cx| {
                 // the entry went, or the attempt was dropped, meanwhile
-                if !matches!(s.pages.forwards.get(&key), Some(Forward::Connecting)) {
+                if !matches!(s.pages.forwards.get(&key), Some((for_url, Forward::Connecting)) if *for_url == url) {
                     return;
                 }
                 let made = tunnel.map_err(|e| e.to_string()).and_then(|tunnel| {
                     let Some((_, load)) = forwarded(&url, tunnel.port) else { return Err(format!("{url}: no host")) };
                     let mut page = s.make_page(key.clone(), &url, &load, window, cx).map_err(|e| e.to_string())?;
                     s.fetch_favicon(key.0.clone(), url.clone(), load, cx);
-                    page._tunnel = Some(tunnel);
+                    page.tunnel = Some(tunnel);
                     Ok(page)
                 });
                 match made {
                     Ok(page) => {
                         s.pages.forwards.remove(&key);
                         s.pages.live.insert(key.clone(), page);
+                        s.watch_tunnel(key.clone(), cx);
                     }
                     Err(why) => {
-                        s.pages.forwards.insert(key.clone(), Forward::Failed(why));
+                        s.pages.forwards.insert(key.clone(), (url.clone(), Forward::Failed(why)));
                     }
                 }
                 cx.notify();
@@ -269,6 +272,29 @@ impl Shell {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Looks at the page's forward every few seconds while the page lives: once its ssh has gone, a render lets
+    /// `sync_pages` show why, with Retry.
+    fn watch_tunnel(&self, key: PageKey, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                let Ok(alive) = this.update(cx, |s, cx| {
+                    let alive = s.pages.live.get_mut(&key).and_then(|p| p.tunnel.as_mut()).map(|t| t.alive());
+                    if alive == Some(false) {
+                        cx.notify();
+                    }
+                    alive == Some(true)
+                }) else {
+                    break;
+                };
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// `entry_url` is the entry's URL, which keeps the page while it is the same; `url` is the one loaded, the
@@ -332,7 +358,7 @@ impl Shell {
             placed: Default::default(),
             #[cfg(target_os = "macos")]
             host,
-            _tunnel: None,
+            tunnel: None,
         })
     }
 
@@ -436,7 +462,16 @@ impl Shell {
             machine.is_none() || entries.iter().any(|e| &e.id == id && e.open_from == OpenFrom::Machine)
         };
         self.pages.live.retain(|(id, machine), page| page_is_current(&entries, id, &page.entry_url) && still_opened(id, machine));
-        self.pages.forwards.retain(|(id, machine), _| entries.iter().any(|e| &e.id == id) && still_opened(id, machine));
+        self.pages.forwards.retain(|(id, machine), (url, _)| page_is_current(&entries, id, url) && still_opened(id, machine));
+        // a page whose forward closed shows why, with Retry
+        let closed: Vec<PageKey> =
+            self.pages.live.iter_mut().filter_map(|(k, p)| p.tunnel.as_mut().is_some_and(|t| !t.alive()).then(|| k.clone())).collect();
+        for key in closed {
+            if let Some(page) = self.pages.live.remove(&key) {
+                let why = format!("The connection to {} closed.", key.1.as_deref().unwrap_or_default());
+                self.pages.forwards.insert(key, (page.entry_url, Forward::Failed(why)));
+            }
+        }
         let shown = self.shown_page(cx).map(|(key, _)| key);
         if shown.is_none() {
             self.pages.shown = None;
@@ -481,7 +516,7 @@ impl Shell {
         let sidebar_closed = !self.sidebar_open;
         let target = key.1.clone().unwrap_or_default();
         // a page on a machine before its forward is up: connecting, or why it couldn't and a retry
-        let waiting = match self.pages.forwards.get(key) {
+        let waiting = match self.pages.forwards.get(key).map(|(_, f)| f) {
             Some(Forward::Connecting) => Some(
                 div()
                     .flex()
