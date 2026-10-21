@@ -166,7 +166,7 @@ impl Shell {
 
     /// Brings the agent's tab up and its pane to the keyboard.
     pub(super) fn show_agent(&mut self, tab_id: String, pane_id: String, cx: &mut Context<Self>) {
-        self.selected_tab = Some(tab_id);
+        self.select_tab(Some(tab_id));
         self.focus_next = Some(pane_id);
         cx.notify();
     }
@@ -334,7 +334,7 @@ impl Shell {
                             this.start_rename(RenameTarget::Workspace(ws_id.clone()), label.clone(), window, cx);
                             return;
                         }
-                        this.selected_tab = target.clone();
+                        this.select_tab(target.clone());
                         cx.notify();
                     }))
                     .on_mouse_down(MouseButton::Right, cx.listener({
@@ -447,6 +447,7 @@ impl Shell {
             .flex()
             .flex_col()
             .pt(px(TITLEBAR_HEIGHT))
+            .children(self.web_rows(theme, cx))
             // everything between the titlebar and the place bar goes under a swipe's fingers, then springs home, and
             // beside it the place it goes to (or comes from)
             .child(

@@ -13,9 +13,9 @@ const SLIDE: Duration = Duration::from_millis(110);
 /// A dropped tab's flight home.
 const LAND: Duration = Duration::from_millis(220);
 
-const TAB_H: f32 = 28.;
+pub(super) const TAB_H: f32 = 28.;
 /// The tabs' top inside the bar.
-const TAB_TOP: f32 = (TITLEBAR_HEIGHT - TAB_H) / 2.;
+pub(super) const TAB_TOP: f32 = (TITLEBAR_HEIGHT - TAB_H) / 2.;
 /// Space after each tab; it collapses with a closing tab so neighbours close in smoothly.
 const GAP: f32 = 2.;
 const PAD_L: f32 = 6.;
@@ -598,7 +598,7 @@ impl Shell {
                         this.start_rename(RenameTarget::Tab(id.clone()), label.clone(), window, cx);
                         return;
                     }
-                    this.selected_tab = Some(id.clone());
+                    this.select_tab(Some(id.clone()));
                     cx.notify();
                 }))
                 .into_any_element(),

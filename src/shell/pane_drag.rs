@@ -294,7 +294,7 @@ impl Shell {
     /// Shows the tab a moved pane landed in.
     fn follow_moved_pane(&mut self, result: &serde_json::Value, cx: &mut Context<Self>) {
         if let Some(tab) = crate::commands::moved_tab_id(result) {
-            self.selected_tab = Some(tab);
+            self.select_tab(Some(tab));
             cx.notify();
         }
     }
@@ -443,7 +443,7 @@ pub(super) fn accept_pane(el: Stateful<Div>, tab_id: &str, drop_bg: Hsla, cx: &C
                 cx.background_executor().timer(OPEN_TAB).await;
                 let _ = this.update(cx, |shell, cx| {
                     if shell.pane_drop.as_ref().is_some_and(|d| d.over_tab.as_ref() == Some(&tab)) && cx.has_active_drag() {
-                        shell.selected_tab = Some(tab);
+                        shell.select_tab(Some(tab));
                         cx.notify();
                     }
                 });

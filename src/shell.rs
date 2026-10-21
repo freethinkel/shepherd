@@ -32,6 +32,7 @@ mod sessions;
 mod sidebar;
 mod sync;
 mod tab_bar;
+mod web;
 mod widgets;
 mod workspaces;
 use motion::*;
@@ -242,6 +243,8 @@ pub struct Shell {
     bar_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The bar's buttons sliding to their slots, and the one being dragged.
     place_motion: Rc<std::cell::RefCell<sessions::PlaceMotion>>,
+    /// Web integrations' pages, and the one shown in place of the tabs and panes.
+    pages: web::Pages,
     /// A place's right-click menu in the bar, and where it was clicked.
     place_menu: Option<crate::ui::Popup<(sessions::Place, gpui::Point<Pixels>)>>,
     /// The Edit dialog of a place's name and icon.
@@ -508,6 +511,7 @@ impl Shell {
                     places_scroll: gpui::ScrollHandle::new(),
                     bar_bounds: Default::default(),
                     place_motion: Default::default(),
+                    pages: Default::default(),
                     lit_seen: Cell::new(-1.),
                     bar_glide: Cell::new(None),
                     place_menu: None,
@@ -648,7 +652,7 @@ impl Shell {
                     window.focus(&this.focus, cx);
                     this.run_herdr_command(command, window, cx);
                 }
-                PanelEvent::Run(Run::Tab(tab_id)) => this.selected_tab = Some(tab_id.clone()),
+                PanelEvent::Run(Run::Tab(tab_id)) => this.select_tab(Some(tab_id.clone())),
                 PanelEvent::Run(Run::Branch(branch)) => {
                     let (Some(dir), branch) = (dir.clone(), branch.clone()) else { return };
                     cx.spawn(async move |this, cx| {
@@ -673,12 +677,12 @@ impl Shell {
                         w.active_tab_id.clone().or_else(|| s.tabs_of(id).first().map(|t| t.tab_id.clone()))
                     });
                     match open_tab {
-                        Some(tab) => this.selected_tab = Some(tab),
+                        Some(tab) => this.select_tab(Some(tab)),
                         None => {
                             let command = Command::OpenWorktree { workspace_id: repo.clone(), path: path.clone() };
                             this.send_then(command, cx, |shell, result, cx| {
                                 match result {
-                                    Ok(value) => shell.selected_tab = crate::commands::created_tab_id(&value),
+                                    Ok(value) => shell.select_tab(crate::commands::created_tab_id(&value)),
                                     Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),
                                 }
                                 cx.notify();
@@ -964,7 +968,7 @@ impl Shell {
     fn go_to_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         let (Some(snapshot), Some(tab)) = (self.snapshot.as_ref(), self.shown_tab()) else { return };
         if let Some(target) = snapshot.tabs_of(&tab.workspace_id).get(index) {
-            self.selected_tab = Some(target.tab_id.clone());
+            self.select_tab(Some(target.tab_id.clone()));
             cx.notify();
         }
     }
@@ -974,7 +978,7 @@ impl Shell {
         let tabs = snapshot.tabs_of(&tab.workspace_id);
         let Some(i) = tabs.iter().position(|t| t.tab_id == tab.tab_id) else { return };
         let n = tabs.len();
-        self.selected_tab = Some(tabs[if forward { (i + 1) % n } else { (i + n - 1) % n }].tab_id.clone());
+        self.select_tab(Some(tabs[if forward { (i + 1) % n } else { (i + n - 1) % n }].tab_id.clone()));
         cx.notify();
     }
 
@@ -985,13 +989,13 @@ impl Shell {
         let Some(i) = workspaces.iter().position(|w| w.workspace_id == tab.workspace_id) else { return };
         let n = workspaces.len();
         let next = &workspaces[if forward { (i + 1) % n } else { (i + n - 1) % n }];
-        self.selected_tab = next.active_tab_id.clone().or_else(|| snapshot.tabs_of(&next.workspace_id).first().map(|t| t.tab_id.clone()));
+        self.select_tab(next.active_tab_id.clone().or_else(|| snapshot.tabs_of(&next.workspace_id).first().map(|t| t.tab_id.clone())));
         cx.notify();
     }
 
     fn new_tab(&mut self, workspace_id: String, cx: &mut Context<Self>) {
         self.send(Command::NewTab { workspace_id }, cx, |shell, result, cx| {
-            shell.selected_tab = crate::commands::created_tab_id(result);
+            shell.select_tab(crate::commands::created_tab_id(result));
             cx.notify();
         });
     }
@@ -1304,10 +1308,18 @@ impl Render for Shell {
             window.request_animation_frame();
         }
 
-        let sidebar = self.render_sidebar(&theme, &snapshot, &shown_ws, &shown_tab, window, cx);
+        self.sync_pages(overlaid, window, cx);
+        let web = self.shown_page(cx);
+        // a page in place of the tabs: no workspace looks selected
+        let sidebar_ws = if web.is_some() { None } else { shown_ws.clone() };
+        let sidebar = self.render_sidebar(&theme, &snapshot, &sidebar_ws, &shown_tab, window, cx);
         let (docked, peeking) = if sidebar_w > 0. { (Some(sidebar), None) } else { (None, Some(sidebar)) };
 
         let tabbar = self.render_tab_bar(&theme, shown_ws.clone(), shown_tab.clone(), sidebar_w, window, cx);
+        let (tabbar, web_area) = match &web {
+            Some((key, entry)) => (self.render_web_bar(key, entry, &theme, sidebar_w, cx), Some(self.render_web_area(key, &theme))),
+            None => (tabbar, None),
+        };
 
         let shown_tab_id = shown_tab.clone().unwrap_or_default();
         let grid_bounds = self.grid_bounds.clone();
@@ -1573,7 +1585,10 @@ impl Render for Shell {
             })
             .map(|el| match settings_page {
                 Some(page) => el.child(page),
-                None => el.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).child(grid).children(statusbar)),
+                None => el.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).map(|el| match web_area {
+                    Some(area) => el.child(area),
+                    None => el.child(grid),
+                }).children(statusbar)),
             })
             .children(review.into_iter().flatten())
             // The sidebar closed: the window's left edge brings it out floating over the panes, as Arc's does.

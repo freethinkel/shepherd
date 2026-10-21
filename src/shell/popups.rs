@@ -790,7 +790,7 @@ impl Shell {
                 move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                     let _ = this.update(cx, |this, cx| {
                         if let Some(m) = this.spent_menu.as_mut() { m.close() }
-                        this.selected_tab = Some(tab.clone());
+                        this.select_tab(Some(tab.clone()));
                         cx.notify();
                     });
                 }
