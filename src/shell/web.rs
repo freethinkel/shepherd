@@ -708,7 +708,7 @@ mod host {
     use objc2::rc::Retained;
     use objc2::{MainThreadMarker, MainThreadOnly, msg_send};
     use objc2::runtime::AnyObject;
-    use objc2_app_kit::{NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSEventModifierFlags, NSView, NSWindowOrderingMode};
+    use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSEventModifierFlags, NSView, NSWindowOrderingMode};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
     use std::ptr::NonNull;
     use std::rc::Rc;
@@ -759,12 +759,22 @@ mod host {
                     alt: flags.contains(NSEventModifierFlags::Option),
                     shift: flags.contains(NSEventModifierFlags::Shift),
                 };
-                let characters = e.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default();
-                match in_page.then(|| crate::web::shepherds_key(mods, &characters, &shortcuts.borrow())).flatten() {
-                    Some(keystroke) => {
-                        key(keystroke);
-                        std::ptr::null_mut()
-                    }
+                // the key as ⌘ types it: Latin in a layout like Russian, whose own letters ⌘ doesn't use (Shift kept,
+                // ⌥ left out, as `charactersIgnoringModifiers` would)
+                let as_cmd = NSEventModifierFlags::Command | (flags & NSEventModifierFlags::Shift);
+                let characters = e.charactersByApplyingModifiers(as_cmd).map(|c| c.to_string()).unwrap_or_default();
+                if !in_page {
+                    return event.as_ptr();
+                }
+                if let Some(keystroke) = crate::web::shepherds_key(mods, &characters, &shortcuts.borrow()) {
+                    key(keystroke);
+                    return std::ptr::null_mut();
+                }
+                // ⌘C, ⌘V and the rest go to the page's first responder, as an Edit menu's items would send them
+                let edit = crate::web::edit_action(mods, &characters).map(objc2::runtime::Sel::register);
+                // SAFETY: an action sent up the responder chain, on the main thread
+                match edit.filter(|&sel| unsafe { NSApplication::sharedApplication(mtm).sendAction_to_from(sel, None, None) }) {
+                    Some(_) => std::ptr::null_mut(),
                     None => event.as_ptr(),
                 }
             });

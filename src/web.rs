@@ -203,6 +203,24 @@ pub fn shepherds_key(mods: Mods, characters: &str, chords: &[String]) -> Option<
         .find(|k| pressed.iter().flatten().any(|p| p == k))
 }
 
+/// The edit action (AppKit's selector) of a standard editing chord pressed in a page: WebKit takes these from the
+/// Edit menu, which Shepherd hasn't, so the page's key monitor sends them itself.
+pub fn edit_action(mods: Mods, characters: &str) -> Option<&'static std::ffi::CStr> {
+    if !mods.cmd || mods.ctrl {
+        return None;
+    }
+    Some(match (characters.to_lowercase().as_str(), mods.alt, mods.shift) {
+        ("c", false, false) => c"copy:",
+        ("x", false, false) => c"cut:",
+        ("v", false, false) => c"paste:",
+        ("v", true, true) => c"pasteAsPlainText:",
+        ("a", false, false) => c"selectAll:",
+        ("z", false, false) => c"undo:",
+        ("z", false, true) => c"redo:",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +363,17 @@ mod tests {
         assert_eq!(image_format(b"GIF89a"), Some(ImageFormat::Gif));
         assert_eq!(image_format(b"RIFF\0\0\0\0WEBPVP8 "), Some(ImageFormat::Webp));
         assert_eq!(image_format(b"nope"), None);
+    }
+
+    #[test]
+    fn a_standard_editing_chord_in_a_page_is_its_edit_action() {
+        let cmd = Mods { cmd: true, ..Mods::default() };
+        assert_eq!(edit_action(cmd, "c"), Some(c"copy:"));
+        assert_eq!(edit_action(cmd, "v"), Some(c"paste:"));
+        assert_eq!(edit_action(Mods { shift: true, ..cmd }, "Z"), Some(c"redo:"));
+        assert_eq!(edit_action(Mods { ctrl: true, ..cmd }, "c"), None);
+        assert_eq!(edit_action(Mods::default(), "c"), None);
+        assert_eq!(edit_action(cmd, "k"), None);
     }
 
     #[test]
