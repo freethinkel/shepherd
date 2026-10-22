@@ -249,47 +249,54 @@ impl Drop for Tunnel {
 /// of its own (never the shared one, whose forwards outlive the ssh that asked for them), and returns once the port
 /// takes connections. Blocking: call it off the main thread. Fails when ssh exits first, or nothing listens within 15 s.
 pub fn forward(target: &str, host: &str, port: u16, local: u16) -> std::io::Result<Tunnel> {
-    use std::time::{Duration, Instant};
+    use std::io::{BufRead, Read};
+    use std::time::Duration;
     let local = match std::net::TcpListener::bind(("127.0.0.1", local)) {
         Ok(free) => free.local_addr()?.port(),
         Err(_) => std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port(),
     };
+    // ssh listens on its forwards before it runs the command, and with ExitOnForwardFailure exits when it can't: the
+    // command's mark means the port is ssh's, not a program's that took it after it was found free
     let child = crate::process::command("ssh")
         .args(ssh_base_options())
         .args(["-T", "-o", "ExitOnForwardFailure=yes", "-L"])
         .arg(format!("127.0.0.1:{local}:{host}:{port}"))
         .arg("--")
         .arg(target)
-        .arg("cat >/dev/null")
+        .arg(format!("echo {FORWARDING}; cat >/dev/null"))
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
     let mut tunnel = Tunnel { _alive: None, child, port: local };
     tunnel._alive = tunnel.child.stdin.take();
-    let until = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(status) = tunnel.child.try_wait()? {
-            let mut why = String::new();
-            if let Some(mut err) = tunnel.child.stderr.take() {
-                let _ = std::io::Read::read_to_string(&mut err, &mut why);
-            }
-            let why = why.trim();
-            return Err(std::io::Error::other(if why.is_empty() { format!("ssh {target}: {status}") } else { why.to_string() }));
-        }
-        if std::net::TcpStream::connect(("127.0.0.1", local)).is_ok() {
+    let out = tunnel.child.stdout.take().expect("piped");
+    let (marked, mark) = std::sync::mpsc::channel();
+    // a login shell's rc files may print first; the lines end when ssh does
+    std::thread::spawn(move || {
+        let up = std::io::BufReader::new(out).lines().map_while(Result::ok).any(|l| l.trim() == FORWARDING);
+        let _ = marked.send(up);
+    });
+    let mut err = tunnel.child.stderr.take().expect("piped");
+    match mark.recv_timeout(Duration::from_secs(15)) {
+        Ok(true) => {
             // ssh logs each refused connection on stderr; unread, the pipe fills and ssh blocks, forward and all
-            if let Some(mut err) = tunnel.child.stderr.take() {
-                std::thread::spawn(move || std::io::copy(&mut err, &mut std::io::sink()));
-            }
-            return Ok(tunnel);
+            std::thread::spawn(move || std::io::copy(&mut err, &mut std::io::sink()));
+            Ok(tunnel)
         }
-        if Instant::now() > until {
-            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("ssh {target}: no forward after 15 s")));
+        Ok(false) => {
+            let status = tunnel.child.wait()?;
+            let mut why = String::new();
+            let _ = err.read_to_string(&mut why);
+            let why = why.trim();
+            Err(std::io::Error::other(if why.is_empty() { format!("ssh {target}: {status}") } else { why.to_string() }))
         }
-        std::thread::sleep(Duration::from_millis(100));
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("ssh {target}: no forward after 15 s"))),
     }
 }
+
+/// What a forward's command prints once ssh listens on the forward.
+const FORWARDING: &str = "shepherd-forwarding";
 
 /// The shell command that runs `bridge` for `session` on the host, with herdr where its installers put it: a
 /// non-interactive SSH shell has a bare PATH.

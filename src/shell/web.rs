@@ -7,7 +7,7 @@ use crate::web::{forwarded, label, listed, normalize, off_site, page_bounds, pag
 use futures::StreamExt;
 use std::sync::Arc;
 use futures::channel::mpsc::UnboundedSender;
-use wry::dpi::{LogicalPosition, LogicalSize};
+use wry::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 
 /// A page by its entry's id and, for one opened on a machine, that machine's SSH target.
 pub(super) type PageKey = (String, Option<String>);
@@ -28,6 +28,8 @@ pub(super) enum PageEvent {
 
 pub(super) struct Page {
     view: Rc<wry::WebView>,
+    /// Told apart from an earlier page under its key, whose events may still be on their way.
+    serial: u64,
     /// The normalized URL of the entry it was made for, so an edited URL makes a new page.
     entry_url: String,
     title: Option<String>,
@@ -66,12 +68,15 @@ pub(super) struct Pages {
     live: HashMap<PageKey, Page>,
     /// Pages opened on a machine still waiting for their forward, or whose forward failed.
     forwards: HashMap<PageKey, (String, Forward)>,
-    /// Each entry's favicon and the URL it was fetched for; in memory only, so fetched again each launch.
-    favicons: HashMap<String, (String, Favicon)>,
+    /// Each page's favicon (a machine's page has its own) and the URL it was fetched for; in memory only, so fetched
+    /// again each launch.
+    favicons: HashMap<PageKey, (String, Favicon)>,
     /// Where pages keep their cookies and storage between launches; macOS keeps WKWebView's default store.
     #[cfg(not(target_os = "macos"))]
     context: Option<wry::WebContext>,
-    events: Option<UnboundedSender<(PageKey, PageEvent)>>,
+    events: Option<UnboundedSender<(PageKey, u64, PageEvent)>>,
+    /// The last page's serial.
+    made: u64,
     /// The setting that sends links to other sites to the browser, as the pages' handlers read it.
     links_outside: Rc<Cell<bool>>,
     /// `SHEPHERD_WEB`'s entry was shown.
@@ -110,22 +115,23 @@ impl Shell {
                 continue;
             }
             let url = normalize(&entry.url);
-            if self.pages.favicons.get(&entry.id).is_some_and(|(fetched, _)| *fetched == url) {
+            let key = self.page_key(&entry);
+            if self.pages.favicons.get(&key).is_some_and(|(fetched, _)| *fetched == url) {
                 continue;
             }
-            self.fetch_favicon(entry.id, url.clone(), url, cx);
+            self.fetch_favicon(key, url.clone(), url, cx);
         }
     }
 
-    /// Fetches entry `id`'s favicon from `from` (its URL, or its forward's), kept as the icon of its URL `url`.
-    fn fetch_favicon(&mut self, id: String, url: String, from: String, cx: &mut Context<Self>) {
-        self.pages.favicons.insert(id.clone(), (url.clone(), Favicon::Loading));
+    /// Fetches page `key`'s favicon from `from` (its URL, or its forward's), kept as the icon of its URL `url`.
+    fn fetch_favicon(&mut self, key: PageKey, url: String, from: String, cx: &mut Context<Self>) {
+        self.pages.favicons.insert(key.clone(), (url.clone(), Favicon::Loading));
         let icon = cx.background_spawn(async move { crate::web::fetch_favicon(&from) });
         cx.spawn(async move |this, cx| {
             let icon = icon.await;
             let _ = this.update(cx, |s, cx| {
                 // an edit since asked for another URL's icon
-                let Some((_, slot)) = s.pages.favicons.get_mut(&id).filter(|(u, _)| *u == url) else { return };
+                let Some((_, slot)) = s.pages.favicons.get_mut(&key).filter(|(u, _)| *u == url) else { return };
                 *slot = match icon {
                     Some((format, bytes)) => Favicon::Image(Arc::new(gpui::Image::from_bytes(format, bytes))),
                     None => Favicon::None,
@@ -253,7 +259,7 @@ impl Shell {
                 let made = tunnel.map_err(|e| e.to_string()).and_then(|tunnel| {
                     let Some((_, load)) = forwarded(&url, tunnel.port) else { return Err(format!("{url}: no host")) };
                     let mut page = s.make_page(key.clone(), &url, &load, window, cx).map_err(|e| e.to_string())?;
-                    s.fetch_favicon(key.0.clone(), url.clone(), load, cx);
+                    s.fetch_favicon(key.clone(), url.clone(), load, cx);
                     page.tunnel = Some(tunnel);
                     Ok(page)
                 });
@@ -301,8 +307,10 @@ impl Shell {
     /// forward's for a page on a machine, and the site its links are measured against.
     fn make_page(&mut self, key: PageKey, entry_url: &str, url: &str, window: &Window, cx: &mut Context<Self>) -> wry::Result<Page> {
         let events = self.page_events(window, cx);
+        self.pages.made += 1;
+        let serial = self.pages.made;
         let send = move |event: PageEvent| {
-            let _ = events.unbounded_send((key.clone(), event));
+            let _ = events.unbounded_send((key.clone(), serial, event));
         };
         let (title, loaded, opened, followed) = (send.clone(), send.clone(), send.clone(), send.clone());
         #[cfg(target_os = "macos")]
@@ -351,6 +359,7 @@ impl Shell {
         }
         Ok(Page {
             view: Rc::new(view),
+            serial,
             entry_url: entry_url.to_string(),
             title: None,
             visible: false,
@@ -367,7 +376,13 @@ impl Shell {
     #[cfg(target_os = "linux")]
     fn gtk_ready(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         static INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
-        INIT.get_or_init(|| gtk::init().map_err(|e| e.to_string())).clone()?;
+        // GPUI is on X11 here (a Wayland window opens pages in the browser); GDK would take Wayland when it is there too,
+        // and the page couldn't be put in GPUI's X11 window
+        INIT.get_or_init(|| {
+            gtk::gdk::set_allowed_backends("x11");
+            gtk::init().map_err(|e| e.to_string())
+        })
+        .clone()?;
         if !std::mem::replace(&mut self.pages.gtk_pump, true) {
             cx.spawn(async move |this, cx| {
                 loop {
@@ -393,14 +408,14 @@ impl Shell {
     }
 
     /// The channel the pages' handlers report on; its first use starts the loop that applies what they say.
-    fn page_events(&mut self, window: &Window, cx: &mut Context<Self>) -> UnboundedSender<(PageKey, PageEvent)> {
+    fn page_events(&mut self, window: &Window, cx: &mut Context<Self>) -> UnboundedSender<(PageKey, u64, PageEvent)> {
         if let Some(events) = &self.pages.events {
             return events.clone();
         }
-        let (events, mut said) = futures::channel::mpsc::unbounded::<(PageKey, PageEvent)>();
+        let (events, mut said) = futures::channel::mpsc::unbounded::<(PageKey, u64, PageEvent)>();
         cx.spawn_in(window, async move |this, cx| {
-            while let Some((key, event)) = said.next().await {
-                if this.update_in(cx, |s, window, cx| s.page_event(key, event, window, cx)).is_err() {
+            while let Some((key, serial, event)) = said.next().await {
+                if this.update_in(cx, |s, window, cx| s.page_event(key, serial, event, window, cx)).is_err() {
                     break;
                 }
             }
@@ -410,8 +425,8 @@ impl Shell {
         events
     }
 
-    fn page_event(&mut self, key: PageKey, event: PageEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(page) = self.pages.live.get_mut(&key) else { return };
+    fn page_event(&mut self, key: PageKey, serial: u64, event: PageEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = self.pages.live.get_mut(&key).filter(|p| p.serial == serial) else { return };
         match event {
             PageEvent::Title(title) => page.title = Some(title).filter(|t| !t.is_empty()),
             PageEvent::Loaded => {}
@@ -584,12 +599,13 @@ impl Shell {
                                     placed.set(Some(bounds));
                                 })
                             }
+                            // in device pixels: wry scales logical ones by GTK's factor, which needn't be GPUI's
                             _ => {
-                                let _ = window;
                                 placed.set(Some(bounds));
+                                let device = |v: Pixels| (f32::from(v) * window.scale_factor()).round() as i32;
                                 let _ = view.set_bounds(wry::Rect {
-                                    position: LogicalPosition::new(f32::from(bounds.origin.x), f32::from(bounds.origin.y)).into(),
-                                    size: LogicalSize::new(f32::from(bounds.size.width), f32::from(bounds.size.height)).into(),
+                                    position: PhysicalPosition::new(device(bounds.origin.x), device(bounds.origin.y)).into(),
+                                    size: PhysicalSize::new(device(bounds.size.width), device(bounds.size.height)).into(),
                                 });
                             }
                         }
@@ -656,10 +672,11 @@ impl Shell {
         }
         let shown = self.pages.shown.clone().filter(|_| live);
         let rows = entries.into_iter().map(|e| {
-            let name = label(&e, self.pages.live.get(&self.page_key(&e)).and_then(|p| p.title.as_deref()));
+            let key = self.page_key(&e);
+            let name = label(&e, self.pages.live.get(&key).and_then(|p| p.title.as_deref()));
             let selected = shown.as_deref() == Some(e.id.as_str());
             let id = e.id.clone();
-            let icon = match self.pages.favicons.get(&e.id) {
+            let icon = match self.pages.favicons.get(&key) {
                 Some((_, Favicon::Image(image))) => gpui::img(image.clone()).size(px(16.)).rounded(px(3.)).into_any_element(),
                 _ => sessions::place_mark(&name, None, false, theme.text_muted),
             };
