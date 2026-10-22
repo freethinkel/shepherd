@@ -28,6 +28,15 @@ pub fn listed<'a>(entries: &'a [WebEntry], place: Option<&str>) -> Vec<&'a WebEn
     entries.iter().filter(|e| e.show_in.is_none() || e.show_in.as_deref() == place).collect()
 }
 
+/// Moves entry `id` to where entry `to` is: a row dropped on another takes its place, so it lands after it when
+/// moved down and before it when moved up.
+pub fn move_entry(entries: &mut Vec<WebEntry>, id: &str, to: &str) {
+    let at = |id: &str| entries.iter().position(|e| e.id == id);
+    let (Some(from), Some(to)) = (at(id), at(to)) else { return };
+    let entry = entries.remove(from);
+    entries.insert(to, entry);
+}
+
 /// A URL's scheme, lowercased host and port (the scheme's default when none is written); `None` for anything but
 /// http and https.
 fn origin(url: &str) -> Option<(String, String, u16)> {
@@ -363,6 +372,18 @@ mod tests {
         assert_eq!(image_format(b"GIF89a"), Some(ImageFormat::Gif));
         assert_eq!(image_format(b"RIFF\0\0\0\0WEBPVP8 "), Some(ImageFormat::Webp));
         assert_eq!(image_format(b"nope"), None);
+    }
+
+    #[test]
+    fn a_dropped_entry_takes_the_place_of_the_one_it_is_dropped_on() {
+        let mut entries: Vec<WebEntry> = ["a", "b", "c"].map(|id| WebEntry { id: id.into(), ..Default::default() }).into();
+        let ids = |e: &[WebEntry]| e.iter().map(|e| e.id.clone()).collect::<Vec<_>>().join("");
+        move_entry(&mut entries, "a", "c");
+        assert_eq!(ids(&entries), "bca");
+        move_entry(&mut entries, "a", "b");
+        assert_eq!(ids(&entries), "abc");
+        move_entry(&mut entries, "a", "gone");
+        assert_eq!(ids(&entries), "abc");
     }
 
     #[test]

@@ -350,3 +350,17 @@ fn worktrees_group_under_their_repo() {
         .collect();
     assert_eq!(groups, [("mochi", vec!["mochi-a", "mochi-b"]), ("plain", vec![])]);
 }
+
+#[test]
+fn a_dropped_workspace_group_takes_the_place_of_the_one_it_is_dropped_on() {
+    let groups: Vec<Vec<String>> = [vec!["a"], vec!["b", "b1"], vec!["c"]]
+        .map(|g| g.into_iter().map(String::from).collect())
+        .into();
+    let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    // down onto the last: to the end; down onto the middle: before the one after it
+    assert_eq!(shepherd::model::group_move(&groups, 0, 2), Some((ids(&["a"]), None)));
+    assert_eq!(shepherd::model::group_move(&groups, 0, 1), Some((ids(&["a"]), Some("c".into()))));
+    // up: before the one dropped on, worktrees along
+    assert_eq!(shepherd::model::group_move(&groups, 1, 0), Some((ids(&["b", "b1"]), Some("a".into()))));
+    assert_eq!(shepherd::model::group_move(&groups, 1, 1), None);
+}

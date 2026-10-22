@@ -428,6 +428,17 @@ pub fn groups(tree: Vec<(&Workspace, Option<bool>)>) -> Vec<(&Workspace, Vec<&Wo
     out
 }
 
+/// Where group `from` (each group its workspaces' ids, the top-level one first) goes when dropped on group `to`:
+/// it takes that group's place, so it goes before it when moved up and before the one after it (or to the end)
+/// when moved down.
+pub fn group_move(groups: &[Vec<String>], from: usize, to: usize) -> Option<(Vec<String>, Option<String>)> {
+    if from == to || to >= groups.len() {
+        return None;
+    }
+    let before = if from < to { groups.get(to + 1) } else { groups.get(to) };
+    Some((groups.get(from)?.clone(), before.map(|g| g[0].clone())))
+}
+
 /// A Shepherd started inside a herdr pane must not mirror that pane into itself.
 pub fn attachable(pane_id: &str, own_pane: Option<&str>) -> bool {
     own_pane != Some(pane_id)

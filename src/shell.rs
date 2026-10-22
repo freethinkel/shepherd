@@ -26,6 +26,7 @@ mod floating;
 mod motion;
 mod pane_drag;
 mod popups;
+mod reorder;
 mod review;
 mod sessions;
 mod sidebar;
@@ -240,6 +241,8 @@ pub struct Shell {
     bar_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The bar's buttons sliding to their slots, and the one being dragged.
     place_motion: Rc<std::cell::RefCell<sessions::PlaceMotion>>,
+    /// The workspace rows, as dragged to reorder.
+    ws_reorder: Rc<std::cell::RefCell<reorder::Reorder>>,
     /// Web integrations' pages, and the one shown in place of the tabs and panes.
     pages: web::Pages,
     /// A place's right-click menu in the bar, and where it was clicked.
@@ -507,6 +510,7 @@ impl Shell {
                     places_scroll: gpui::ScrollHandle::new(),
                     bar_bounds: Default::default(),
                     place_motion: Default::default(),
+                    ws_reorder: Default::default(),
                     pages: Default::default(),
                     lit_seen: Cell::new(-1.),
                     bar_glide: Cell::new(None),

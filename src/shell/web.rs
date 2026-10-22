@@ -79,6 +79,8 @@ pub(super) struct Pages {
     made: u64,
     /// The setting that sends links to other sites to the browser, as the pages' handlers read it.
     links_outside: Rc<Cell<bool>>,
+    /// The sidebar's rows of them, as dragged to reorder.
+    reorder: Rc<std::cell::RefCell<reorder::Reorder>>,
     /// `SHEPHERD_WEB`'s entry was shown.
     hooked: bool,
     /// GPUI draws its deferred layer (menus, dialogs, panels, toasts) above the pages, so they needn't hide for it.
@@ -663,28 +665,48 @@ impl Shell {
     }
 
     /// The sidebar's rows of the entries listed for the place shown, above the workspaces, with a hairline under them.
-    /// `place`'s rows; `live` for the sidebar itself, not for the place a swipe shows beside it, whose rows are only
-    /// drawn.
-    pub(super) fn web_rows(&self, place: Option<&str>, live: bool, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
+    /// `place`'s rows; `live` for the sidebar itself, dragged to reorder them, not for the place a swipe shows beside
+    /// it, whose rows are only drawn.
+    pub(super) fn web_rows(&self, place: Option<&str>, live: bool, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let entries = self.entries_in(place, cx);
         if entries.is_empty() {
             return None;
         }
         let shown = self.pages.shown.clone().filter(|_| live);
-        let rows = entries.into_iter().map(|e| {
-            let key = self.page_key(&e);
-            let name = label(&e, self.pages.live.get(&key).and_then(|p| p.title.as_deref()));
-            let selected = shown.as_deref() == Some(e.id.as_str());
-            let id = e.id.clone();
-            let icon = match self.pages.favicons.get(&key) {
-                Some((_, Favicon::Image(image))) => gpui::img(image.clone()).size(px(16.)).rounded(px(3.)).into_any_element(),
-                _ => sessions::place_mark(&name, None, false, theme.text_muted),
-            };
-            crate::shell::row(theme, selected, SharedString::from(format!("web-{}", e.id)))
-                .child(div().size(px(16.)).flex_none().flex().items_center().justify_center().child(icon))
-                .child(div().flex_1().min_w_0().truncate().child(name))
-                .when(live, |el| el.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.show_web(id.clone(), window, cx))))
-        });
+        let rows: Vec<(String, gpui::AnyElement)> = entries
+            .into_iter()
+            .map(|e| {
+                let key = self.page_key(&e);
+                let name = label(&e, self.pages.live.get(&key).and_then(|p| p.title.as_deref()));
+                let selected = shown.as_deref() == Some(e.id.as_str());
+                let id = e.id.clone();
+                let icon = match self.pages.favicons.get(&key) {
+                    Some((_, Favicon::Image(image))) => gpui::img(image.clone()).size(px(16.)).rounded(px(3.)).into_any_element(),
+                    _ => sessions::place_mark(&name, None, false, theme.text_muted),
+                };
+                let row = crate::shell::row(theme, selected, SharedString::from(format!("web-{}", e.id)))
+                    .child(div().size(px(16.)).flex_none().flex().items_center().justify_center().child(icon))
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .when(live, |el| {
+                        reorder::draggable(el, &self.pages.reorder, &e.id)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.show_web(id.clone(), window, cx)))
+                    });
+                (e.id, row.into_any_element())
+            })
+            .collect();
+        let keys: Vec<String> = rows.iter().map(|(k, _)| k.clone()).collect();
+        let column = match live {
+            true => {
+                let (column, dropped) = reorder::column(&self.pages.reorder, rows, 2., theme, window, cx.has_active_drag());
+                // the dropped row takes the place of the one it was dropped on
+                if let Some((from, to)) = dropped {
+                    let (id, to) = (keys[from].clone(), keys[to].clone());
+                    cx.defer(move |cx| save_from_sidebar(cx, move |s| crate::web::move_entry(&mut s.web_entries, &id, &to)));
+                }
+                column
+            }
+            false => div().flex().flex_col().gap(px(2.)).children(rows.into_iter().map(|(_, row)| row)),
+        };
         Some(
             div()
                 .flex_none()
@@ -692,9 +714,8 @@ impl Shell {
                 .pt(px(8.))
                 .flex()
                 .flex_col()
-                .gap(px(2.))
-                .children(rows)
-                .child(div().mt(px(6.)).mx(px(8.)).h(px(1.)).bg(theme.border)),
+                .child(column)
+                .child(div().mt(px(8.)).mx(px(8.)).h(px(1.)).bg(theme.border)),
         )
     }
 }

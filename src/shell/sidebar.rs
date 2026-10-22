@@ -189,7 +189,7 @@ impl Shell {
         live: bool,
         active: bool,
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
+    ) -> Vec<(String, gpui::AnyElement)> {
         // a workspace row's height, one line; a worktree's, which always has a branch line unless compact
         let (ws_h, kid_h) = if SettingsGlobal::of(cx).settings.compact_workspaces { (26., 26.) } else { (32., WS_TWO_LINES) };
         let groups: Vec<(crate::model::Workspace, Vec<crate::model::Workspace>)> = snapshot
@@ -346,6 +346,12 @@ impl Shell {
                     }))
                 })
         };
+        let reorder = self.ws_reorder.clone();
+        // a top-level row, a workspace or a repo with its worktrees, is dragged to another group's place
+        let draggable = |el: Stateful<Div>, w: &crate::model::Workspace| match live && self.renaming.is_none() {
+            true => reorder::draggable(el, &reorder, &w.workspace_id),
+            false => el,
+        };
         groups.into_iter().map(|(w, kids)| {
             // Pending worktrees join the group of the workspace their dialog was opened on.
             // herdr opens the worktree's workspace before it answers (hooks still run): once
@@ -366,7 +372,7 @@ impl Shell {
                 .map(|(_, branch)| branch.clone())
                 .collect();
             if kids.is_empty() && pending.is_empty() {
-                return ws_row(&w, false, None, None, cx).into_any_element();
+                return (w.workspace_id.clone(), draggable(ws_row(&w, false, None, None, cx), &w).into_any_element());
             }
             // A folded group opens while one of its worktrees is being created.
             let open = !self.folded.contains(&w.workspace_id) || !pending.is_empty();
@@ -383,6 +389,7 @@ impl Shell {
                 }))
             });
             let header = ws_row(&w, false, Some(chevron.into_any_element()), (!open).then_some(kids.len()), cx);
+            let header = draggable(header, &w);
             let body = div()
                 .w_full()
                 .flex_none()
@@ -408,8 +415,30 @@ impl Shell {
                     )
                     .into_any_element(),
             };
-            div().flex().flex_col().flex_none().child(header).child(body).into_any_element()
+            (w.workspace_id.clone(), div().flex().flex_col().flex_none().child(header).child(body).into_any_element())
         }).collect::<Vec<_>>()
+    }
+
+    /// The sidebar's workspace rows, dragged to reorder them: a group dropped on another takes its place in herdr.
+    fn workspace_column(
+        &self,
+        theme: &Theme,
+        snapshot: Option<&Snapshot>,
+        shown_ws: &Option<String>,
+        active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let rows = self.workspace_rows(theme, snapshot, shown_ws, true, active, cx);
+        let (column, dropped) = reorder::column(&self.ws_reorder, rows, 2., theme, window, cx.has_active_drag());
+        let blocks: Vec<Vec<String>> = snapshot
+            .map(|s| crate::model::groups(s.workspace_tree()).into_iter().map(|(w, kids)| std::iter::once(w).chain(kids).map(|w| w.workspace_id.clone()).collect()).collect())
+            .unwrap_or_default();
+        if let Some((workspace_ids, before)) = dropped.and_then(|(from, to)| crate::model::group_move(&blocks, from, to)) {
+            let this = cx.entity();
+            cx.defer(move |cx| this.update(cx, |this, cx| this.send(Command::MoveWorkspaces { workspace_ids, before }, cx, |_, _, _| {})));
+        }
+        column
     }
 
     /// The sidebar's rows: workspaces with their worktrees folded under them, the agents list and the update strip.
@@ -458,7 +487,7 @@ impl Shell {
                 .size_full()
                 .flex()
                 .flex_col()
-            .children(self.web_rows(self.shown_place_key().as_deref(), true, theme, cx))
+            .children(self.web_rows(self.shown_place_key().as_deref(), true, theme, window, cx))
             .child(
                 div()
                     .px(px(16.))
@@ -495,8 +524,7 @@ impl Shell {
                     .px(px(8.))
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
-                    .children(self.workspace_rows(theme, snapshot.as_ref(), shown_ws, true, active, cx))
+                    .child(self.workspace_column(theme, snapshot.as_ref(), shown_ws, active, window, cx))
             ),
             )
             .child(
@@ -893,3 +921,4 @@ pub(super) fn agent_rows(
         })
         .collect()
 }
+

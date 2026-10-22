@@ -466,7 +466,7 @@ impl Shell {
     pub(super) fn place_preview(&self, place: &Place, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let settings = SettingsGlobal::of(cx).settings.clone();
         let heading = div().px(px(16.)).pt(px(8.)).pb(px(6.)).text_size(px(11.)).text_color(theme.text_faint).truncate().child(place.look(cx).0);
-        let column = div().size_full().flex().flex_col().children(self.web_rows(Some(&place.key()), false, theme, cx)).child(heading);
+        let column = div().size_full().flex().flex_col().children(self.web_rows(Some(&place.key()), false, theme, window, cx)).child(heading);
         let Some(snapshot) = self.snapshots.get(&place.key()) else {
             if let Place::Session(s) = place && !s.running {
                 let why = "Not running: it starts when you get there";
@@ -477,7 +477,7 @@ impl Shell {
         // the rows the sidebar draws once the swipe lands, on the tab herdr would show there first
         let shown_ws = snapshot.pick_tab_in(None, None).map(|t| t.workspace_id.clone());
         let rows = self.workspace_rows(theme, Some(snapshot), &shown_ws, false, window.is_window_active(), cx);
-        let workspaces = div().flex_1().min_h_0().overflow_hidden().px(px(8.)).flex().flex_col().gap(px(2.)).children(rows);
+        let workspaces = div().flex_1().min_h_0().overflow_hidden().px(px(8.)).flex().flex_col().gap(px(2.)).children(rows.into_iter().map(|(_, row)| row));
         let new_workspace = div()
             .flex_none()
             .m(px(8.))
