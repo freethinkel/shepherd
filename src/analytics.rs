@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-const APP_KEY: &str = "A-EU-5120995280";
-const URL: &str = "https://eu.aptabase.com/api/v0/events";
+const APP_KEY: &str = "A-SH-5120995280";
+const URL: &str = "https://aptabase.freethinkel.dev/api/v0/events";
 
 /// The UTC day the events went out for, its session id, and the agents already reported that day.
 static SENT: Mutex<Option<(u64, String, HashSet<String>)>> = Mutex::new(None);
