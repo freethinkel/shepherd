@@ -221,6 +221,11 @@ impl SettingsView {
         cx.notify();
     }
 
+    pub fn show_web_pages(&mut self, cx: &mut Context<Self>) {
+        self.section = Section::WebPages;
+        cx.notify();
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = SettingsGlobal::of(cx).settings.clone();
         let theme = Theme::of(cx).clone();

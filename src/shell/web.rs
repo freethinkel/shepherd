@@ -172,6 +172,7 @@ impl Shell {
             self.view_menu.is_some(),
             self.agents_menu.is_some(),
             self.ws_menu.is_some(),
+            self.web_menu.is_some(),
             self.pane_menu.is_some(),
             self.spent_menu.is_some(),
             self.usage_menu.is_some(),
@@ -664,6 +665,65 @@ impl Shell {
             .child(div().ml(px(6.)).flex_1().min_w_0().truncate().text_color(theme.text_muted).child(title))
     }
 
+    /// A web page's right-click menu in the sidebar, while it is up.
+    pub(super) fn web_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let menu = self.web_menu.as_ref()?;
+        let (id, at) = menu.value.clone();
+        let entry = SettingsGlobal::of(cx).settings.web_entries.iter().find(|e| e.id == id).cloned()?;
+        let url = normalize(&entry.url);
+        let view = self.pages.live.get(&self.page_key(&entry)).map(|p| p.view.clone());
+        type Pick = Box<dyn Fn(&mut Shell, &mut Window, &mut Context<Shell>)>;
+        let item = |key: &'static str, label: &'static str, pick: Pick| {
+            row(theme, false, key).h(px(28.)).rounded(px(6.)).child(label).on_pick(
+                at,
+                cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    if let Some(m) = this.web_menu.as_mut() {
+                        m.close()
+                    }
+                    pick(this, window, cx);
+                    cx.notify();
+                }),
+            )
+        };
+        let (copied, removed) = (url.clone(), id.clone());
+        let card = menu_card(theme, "web-menu", 160.)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if let Some(m) = this.web_menu.as_mut() {
+                    m.close()
+                }
+                cx.notify();
+            }))
+            // a page not opened yet has nothing to reload
+            .children(view.map(|view| {
+                item("web-menu-reload", "Reload", Box::new(move |_, _, _| drop(view.reload())))
+            }))
+            .child(item("web-menu-browser", "Open in Browser", Box::new(move |_, _, cx| cx.open_url(&url))))
+            .child(item(
+                "web-menu-copy",
+                "Copy URL",
+                Box::new(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone()))),
+            ))
+            .child(item("web-menu-edit", "Edit…", Box::new(|this, window, cx| this.open_web_settings(window, cx))))
+            .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
+            .child(
+                item(
+                    "web-menu-remove",
+                    "Remove",
+                    Box::new(move |_, _, cx| {
+                        let id = removed.clone();
+                        save_from_sidebar(cx, move |s| s.web_entries.retain(|e| e.id != id))
+                    }),
+                )
+                .text_color(theme.danger),
+            );
+        let menu = crate::ui::menu_motion("web-menu-in", menu, card);
+        Some(
+            gpui::deferred(gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(menu))
+                .with_priority(1)
+                .into_any_element(),
+        )
+    }
+
     /// The sidebar's rows of the entries listed for the place shown, above the workspaces, with a hairline under them.
     /// `place`'s rows; `live` for the sidebar itself, dragged to reorder them, not for the place a swipe shows beside
     /// it, whose rows are only drawn.
@@ -684,12 +744,21 @@ impl Shell {
                     Some((_, Favicon::Image(image))) => gpui::img(image.clone()).size(px(16.)).rounded(px(3.)).into_any_element(),
                     _ => sessions::place_mark(&name, None, false, theme.text_muted),
                 };
+                let menu_id = e.id.clone();
                 let row = crate::shell::row(theme, selected, SharedString::from(format!("web-{}", e.id)))
+                    .h(px(if SettingsGlobal::of(cx).settings.compact_workspaces { 26. } else { 32. }))
                     .child(div().size(px(16.)).flex_none().flex().items_center().justify_center().child(icon))
                     .child(div().flex_1().min_w_0().truncate().child(name))
                     .when(live, |el| {
                         reorder::draggable(el, &self.pages.reorder, &e.id)
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.show_web(id.clone(), window, cx)))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                    this.web_menu = Some(crate::ui::Popup::new((menu_id.clone(), e.position)));
+                                    cx.notify();
+                                }),
+                            )
                     });
                 (e.id, row.into_any_element())
             })

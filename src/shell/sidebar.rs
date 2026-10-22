@@ -68,6 +68,7 @@ impl Shell {
                 // the pointer passes over it again
                 let open = |m: Option<bool>| m.unwrap_or(false);
                 let menu = open(shell.ws_menu.as_ref().map(|m| m.is_open()))
+                    || open(shell.web_menu.as_ref().map(|m| m.is_open()))
                     || open(shell.view_menu.as_ref().map(|m| m.is_open()))
                     || open(shell.agents_menu.as_ref().map(|m| m.is_open()))
                     || open(shell.place_menu.as_ref().map(|m| m.is_open()));
