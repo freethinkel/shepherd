@@ -213,9 +213,6 @@ pub enum Mode {
 
 enum Transport {
     Socket(Mutex<Stream>),
-    /// herdr's popup as Shepherd's client shell shows it (PoC, [`super::client_shell`]): frames from its surface,
-    /// input as `ClientShellPopupInput`.
-    Popup { shell: std::sync::Arc<super::client_shell::ClientShell>, terminal_id: String },
     Cli { child: Option<Child>, stdin: Mutex<Option<ChildStdin>> },
 }
 
@@ -226,23 +223,6 @@ impl Session {
             Some(session) => Ok(session),
             None => Self::spawn_cli(pane, cols, rows, mode),
         }
-    }
-
-    /// herdr's popup `terminal_id` over `shell`: no connection of its own.
-    pub fn over_popup(shell: std::sync::Arc<super::client_shell::ClientShell>, terminal_id: &str) -> (Session, UnboundedReceiver<SessionEvent>) {
-        let rx = shell.subscribe_popup(terminal_id);
-        (Session { transport: Transport::Popup { shell, terminal_id: terminal_id.into() } }, rx)
-    }
-
-    /// Semantic input for a client-shell popup; `false` (nothing sent) for the others, which take bytes.
-    pub fn shell_input(&self, events: Vec<wire::PaneInput>) -> bool {
-        let Transport::Popup { shell, terminal_id } = &self.transport else { return false };
-        shell.popup_input(terminal_id, events);
-        true
-    }
-
-    pub fn is_shell(&self) -> bool {
-        matches!(self.transport, Transport::Popup { .. })
     }
 
     /// `None` when the socket is not there or speaks another protocol version.
@@ -301,7 +281,7 @@ impl Session {
 
     /// Whether this session reports [`SessionEvent::MouseCapture`] (the socket does, the CLI cannot).
     pub fn knows_mouse_capture(&self) -> bool {
-        matches!(self.transport, Transport::Socket(_) | Transport::Popup { .. })
+        matches!(self.transport, Transport::Socket(_))
     }
 
     pub fn input(&self, bytes: &[u8]) {
@@ -351,24 +331,6 @@ impl Session {
     fn send(&self, message: ClientMessage, record: impl FnOnce() -> Value) {
         match &self.transport {
             Transport::Socket(stream) => drop(wire::write_message(&mut *stream.lock().unwrap(), &message)),
-            Transport::Popup { shell, terminal_id } => {
-                // herdr sizes the popup from the shell's surface: the view's own resize means nothing there
-                let event = match message {
-                    ClientMessage::Input { data } => wire::PaneInput::TextCommit(String::from_utf8_lossy(&data).into_owned()),
-                    ClientMessage::AttachScroll { direction, lines, column, row, .. } => wire::PaneInput::Mouse {
-                        kind: if matches!(direction, AttachScrollDirection::Up) { MouseKind::ScrollUp } else { MouseKind::ScrollDown },
-                        position: MousePosition::Cell { column: column.unwrap_or(0), row: row.unwrap_or(0) },
-                        geometry: None,
-                        modifiers: 0,
-                        lines,
-                    },
-                    ClientMessage::AttachMouse { kind, position, geometry, modifiers, lines } => {
-                        wire::PaneInput::Mouse { kind, position, geometry, modifiers, lines }
-                    }
-                    _ => return,
-                };
-                shell.popup_input(terminal_id, vec![event]);
-            }
             Transport::Cli { stdin, .. } => {
                 if let Some(stdin) = stdin.lock().unwrap().as_mut() {
                     let _ = writeln!(stdin, "{}", record());
@@ -430,7 +392,6 @@ fn tail(s: &str, max: usize) -> String {
 impl Drop for Session {
     fn drop(&mut self) {
         let (child, stdin) = match &mut self.transport {
-            Transport::Popup { shell, .. } => return shell.unsubscribe_popup(),
             Transport::Socket(stream) => {
                 // Detach releases control at once; the shutdown also ends the reader thread.
                 let stream = stream.get_mut().unwrap();

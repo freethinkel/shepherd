@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-mod client_shell;
 mod divider;
 mod floating;
 mod motion;
@@ -220,8 +219,6 @@ pub struct Shell {
     pane_images: crate::herdr::graphics::PaneImages,
     /// Images no pane shows any more: freed from the window's atlas at the next render (a hidden pane never renders).
     retired_images: Vec<std::sync::Arc<gpui::RenderImage>>,
-    /// PoC: the window's herdr client shell for theme, popup and commands (`SHEPHERD_CLIENT_SHELL=1`).
-    client_shell: Option<client_shell::ShellView>,
     /// herdr's `[[keys.command]]` ids for `command.invoke`, with their keys, from the client shell.
     herdr_commands: Vec<(String, Vec<String>)>,
     /// Panes `[[keys.command]]` of `type = "pane"` opened, by the command's keys: pressed again in their tab, the
@@ -502,7 +499,6 @@ impl Shell {
                     focused_tab: None,
                     pane_images: Default::default(),
                     retired_images: Vec::new(),
-                    client_shell: None,
                     herdr_commands: Vec::new(),
                     command_panes: Vec::new(),
                     places: Vec::new(),
@@ -576,11 +572,7 @@ impl Shell {
         cx.set_global(PaneQueries(client.clone(), rt.clone()));
         self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, resync, cx).await);
         self.floating = None;
-        self.popup_watch = if crate::herdr::client_shell::enabled() {
-            cx.spawn(async move |this, cx| client_shell::shell_loop(this, cx).await)
-        } else {
-            cx.spawn(async move |this, cx| floating::popup_loop(this, cx).await)
-        };
+        self.popup_watch = cx.spawn(async move |this, cx| floating::popup_loop(this, cx).await);
     }
 
     fn toggle_settings_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -851,11 +843,10 @@ impl Shell {
     }
 
     /// herdr paints the terminals' default colors itself: it is told the theme's over the popup watch, which then
-    /// is the client in front again (back from herdr's TUI on another machine, say). The client shell (PoC) does
-    /// this in `sync_client_shell`.
+    /// is the client in front again (back from herdr's TUI on another machine, say).
     fn push_host_theme(&self, cx: &App) {
         if let Some((surface, _)) = &self.popup_surface {
-            surface.theme(client_shell::host_theme(Theme::of(cx)));
+            surface.theme(floating::host_theme(Theme::of(cx)));
         }
     }
 
@@ -876,10 +867,13 @@ impl Shell {
     /// A `[[keys.command]]` of herdr's config, for the pane you are in.
     fn run_herdr_command(&mut self, command: &crate::herdr::keys::HerdrCommand, window: &Window, cx: &mut Context<Self>) {
         let pane_id = self.active_pane(window, cx);
-        let Some(focused) = self.focus_shown_tab(cx) else { return self.run_herdr_command_in(command, pane_id, cx) };
-        let command = command.clone();
+        // herdr gives a popup to the tab in its focus as the popup opens, and only a client shell on that tab gets it:
+        // herdr's focus moves to the tab shown first, so a popup the command opens comes to this window
+        let Some(tab) = self.shown_tab() else { return self.run_herdr_command_in(command, pane_id, cx) };
+        let (client, command) = (self.client.clone(), command.clone());
+        let focused = self.rt.spawn(async move { client.call("tab.focus", json!({"tab_id": tab.tab_id})).await });
         cx.spawn(async move |this, cx| {
-            focused.await;
+            let _ = focused.await;
             let _ = this.update(cx, |s, cx| s.run_herdr_command_in(&command, pane_id, cx));
         })
         .detach();
@@ -1241,7 +1235,6 @@ impl Render for Shell {
         let toasts = crate::ui::toast::stack(&theme, TITLEBAR_HEIGHT + 8., window, cx);
         let tab = self.shown_tab();
         self.shown_workspace = tab.as_ref().map(|t| t.workspace_id.clone());
-        self.sync_client_shell(window, cx);
         self.follow_shown_tab();
         let (mut frames, mut splits) = match (&snapshot, &tab) {
             (Some(s), Some(t)) => (s.pane_frames(&t.tab_id), s.split_frames(&t.tab_id)),

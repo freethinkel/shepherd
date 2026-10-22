@@ -1,5 +1,6 @@
 //! herdr's popup (a plugin's chooser, a `[[keys.command]]` popup) as a floating terminal over the panes.
 use super::*;
+use crate::herdr::client_shell::HostThemeUpdate as Update;
 use crate::herdr::popup::{self, Event, PopupSurface};
 use futures::StreamExt;
 
@@ -18,9 +19,10 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
         let Ok(((cols, rows), px)) = this.update(cx, |s, cx| (s.grid_cells(cx).unwrap_or((120, 40)), s.cell_px(cx))) else { return };
         let watch = cx.background_executor().spawn(async move { popup::watch(cols, rows, px) });
         if let Ok((mut rx, surface)) = watch.await {
-            // at once: a shell in front without a theme blanks herdr's (as in `client_shell::shell_loop`)
+            // at once: a shell in front without a theme blanks herdr's, and a window that is not drawn (screen locked,
+            // another Space) has no render to send it from
             let started = this.update(cx, |s, cx| {
-                surface.theme(client_shell::host_theme(Theme::of(cx)));
+                surface.theme(host_theme(Theme::of(cx)));
                 let surface = std::sync::Arc::new(surface);
                 cx.set_global(crate::terminal::pane::TypingShell(surface.clone()));
                 s.popup_surface = Some((surface, ((cols, rows), px)));
@@ -154,4 +156,39 @@ impl Shell {
             ),
         )
     }
+}
+
+impl Shell {
+    /// A grid cell in device pixels, from a measured pane of the tab shown; (0, 0) before one is drawn.
+    pub(super) fn cell_px(&self, cx: &App) -> (u32, u32) {
+        self.shown_geometry(cx).map_or((0, 0), |g| g.cell_px)
+    }
+
+    /// Hands each pane its images (a pane made later gets them as it is made); a pane herdr shows none on loses
+    /// its own, freed from the window's atlas at the next render.
+    pub(super) fn show_images(&mut self, images: crate::herdr::graphics::PaneImages, cx: &mut Context<Self>) {
+        for (id, pane) in &self.panes {
+            let mine = images.get(id).cloned().unwrap_or_default();
+            let gone = pane.update(cx, |pane, cx| pane.set_images(mine, cx));
+            self.retired_images.extend(gone);
+        }
+        self.pane_images = images;
+        cx.notify();
+    }
+}
+
+/// Shepherd's colors as herdr's host theme.
+pub(super) fn host_theme(theme: &Theme) -> Vec<Update> {
+    use crate::herdr::client_shell::{DefaultColorKind as Kind, HostAppearance as Appearance, Rgb};
+    let rgb = |c: Hsla| {
+        let c = gpui::Rgba::from(c);
+        let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        Rgb { r: b(c.r), g: b(c.g), b: b(c.b) }
+    };
+    vec![
+        Update::DefaultColor { kind: Kind::Foreground, color: rgb(theme.terminal.foreground) },
+        Update::DefaultColor { kind: Kind::Background, color: rgb(theme.terminal.background) },
+        Update::PaletteColors(theme.terminal.ansi.iter().enumerate().map(|(i, c)| (i as u8, rgb(*c))).collect()),
+        Update::Appearance(if theme.appearance == crate::theme::Appearance::Dark { Appearance::Dark } else { Appearance::Light }),
+    ]
 }

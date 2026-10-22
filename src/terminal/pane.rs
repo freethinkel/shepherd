@@ -68,11 +68,6 @@ pub fn claim(cx: &mut App) {
     }
 }
 
-/// Shepherd's client shell (PoC, `SHEPHERD_CLIENT_SHELL=1`): herdr's popup is shown from it instead of an attach.
-pub struct ShellConnection(pub std::sync::Arc<crate::herdr::client_shell::ClientShell>);
-
-impl gpui::Global for ShellConnection {}
-
 /// The window's popup watch, which also carries typing to the panes it shows (see [`Surface::type_into`]).
 ///
 /// [`Surface::type_into`]: crate::herdr::popup::Surface::type_into
@@ -338,14 +333,6 @@ impl PaneTerminal {
         if crate::mock::pane_text(&self.pane_id).is_some() {
             return; // the fixture's text is laid out by `on_grid_metrics`; there is no herdr to attach to
         }
-        // herdr's popup comes with the client shell's surface, when there is one
-        if let Some(ShellConnection(shell)) = cx.try_global::<ShellConnection>().filter(|_| self.takes_over) {
-            let (session, rx) = Session::over_popup(shell.clone(), &self.pane_id);
-            self.session = Some(session);
-            self.ended = None;
-            self._pump = Some(cx.spawn(async move |this, cx| pump(this, rx, cx).await));
-            return;
-        }
         let (cols, rows) = (self.emulator.cols() as u16, self.emulator.rows() as u16);
         let px = self.geometry.map_or((0, 0), |g| g.cell_px);
         let pane_id = self.pane_id.clone();
@@ -418,9 +405,7 @@ impl PaneTerminal {
         }
         let rescaled = self.geometry.is_some_and(|g| g.cell_px != geometry.cell_px);
         let (cols, rows) = (geometry.cols, geometry.rows);
-        // a client shell's popup is sized by herdr (`SessionEvent::Size`), not by its view
-        let sized_by_herdr = self.session.as_ref().is_some_and(Session::is_shell);
-        let resized = !sized_by_herdr && (self.emulator.cols() != cols as usize || self.emulator.rows() != rows as usize);
+        let resized = self.emulator.cols() != cols as usize || self.emulator.rows() != rows as usize;
         let held = cx.try_global::<GridHold>().is_some_and(|hold| hold.0);
         // the scrollbar follows the pane every frame, not the grid it held back
         self.scrollbar.0.bounds.set(geometry.bounds);
@@ -520,8 +505,7 @@ impl PaneTerminal {
             cx.notify();
             return None;
         }
-        let shell = self.session.as_ref().is_some_and(Session::is_shell);
-        let local = delta > 0 && self.scroll.offset_from_bottom == 0 && !self.mouse_capture && !self.emulator.alt_screen() && !shell;
+        let local = delta > 0 && self.scroll.offset_from_bottom == 0 && !self.mouse_capture && !self.emulator.alt_screen();
         let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>().filter(|_| local) else { return Some(delta) };
         self.history_pending = Some(delta);
         let (client, pane_id) = (client.clone(), self.pane_id.clone());
@@ -1189,8 +1173,6 @@ impl PaneTerminal {
             // ponytail: always bracketed; herdr's frames do not tell us whether the app asked for it.
             if let Some(item) = cx.read_from_clipboard() {
                 match item.text() {
-                    // the client shell brackets the paste as the app asked
-                    Some(text) if self.session.as_ref().is_some_and(|s| s.shell_input(vec![PaneInput::Paste(text.to_string())])) => {}
                     Some(text) => self.input(&paste_bytes(&text, true), cx),
                     // an image: ctrl-v, the key agent TUIs (Claude Code, Codex) read the clipboard's image on
                     None => self.input(b"\x16", cx),
@@ -1202,13 +1184,6 @@ impl PaneTerminal {
         if ks.key == "c" && app_shortcut(mods) {
             if let Some(text) = self.emulator.selection_text() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
-                cx.stop_propagation();
-            }
-            return;
-        }
-        if let Some(session) = self.session.as_ref().filter(|s| s.is_shell()) {
-            if let Some(event) = crate::herdr::client_shell::key_event(&ks.key, ks.key_char.as_deref(), mods) {
-                session.shell_input(vec![event]);
                 cx.stop_propagation();
             }
             return;
