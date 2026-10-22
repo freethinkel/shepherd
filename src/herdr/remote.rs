@@ -342,6 +342,8 @@ mod tests {
         assert!(command.contains("\"$HOME/.local/bin/herdr\""));
     }
 
+    // The script runs on the machine's POSIX shell; a Windows temp path isn't absolute there.
+    #[cfg(unix)]
     #[test]
     fn a_clicked_path_is_found_from_the_shells_folder() {
         let dir = std::env::temp_dir().join(format!("shepherd-find-{}", std::process::id()));
