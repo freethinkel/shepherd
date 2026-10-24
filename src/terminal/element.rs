@@ -23,7 +23,7 @@ use crate::herdr::graphics::PaneImage;
 use crate::theme::{Appearance, Theme, rgb_to_hsl};
 
 use super::sprite;
-use super::emulator::{CellColor, CellSnapshot, Side};
+use super::emulator::{CellColor, CellSnapshot, CursorShape, Side};
 use super::pane::{GridGeometry, PaneTerminal};
 
 /// Default terminal font metrics; the rendered values come from the theme.
@@ -334,7 +334,8 @@ impl gpui::Element for TerminalElement {
         let mut lines = Vec::with_capacity(snapshot.lines.len());
         let mut glyphs = Vec::with_capacity(snapshot.lines.len());
         // Ghostty's block cursor: the cell's text takes the background color.
-        let block_cursor = snapshot.cursor.as_ref().filter(|_| self.focused).map(|c| (c.row, c.col));
+        let block_cursor =
+            snapshot.cursor.as_ref().filter(|c| self.focused && c.shape == CursorShape::Block).map(|c| (c.row, c.col));
         let cursor_text = Hsla { a: 1.0, ..theme.terminal.background };
 
         // Search matches wash their cells under the selection; the current one stands out.
@@ -411,10 +412,16 @@ impl gpui::Element for TerminalElement {
                 ),
                 size(cell_w, line_h),
             );
-            if self.focused {
-                fill(cursor_bounds, theme.cursor)
-            } else {
-                outline(cursor_bounds, theme.cursor, gpui::BorderStyle::Solid)
+            // the shape the program set (DECSCUSR, passed on by herdr): vim's insert beam, an underline
+            let bar = px(2.0);
+            match (self.focused, c.shape) {
+                (true, CursorShape::Block) => fill(cursor_bounds, theme.cursor),
+                (true, CursorShape::Beam) => fill(Bounds::new(cursor_bounds.origin, size(bar, line_h)), theme.cursor),
+                (true, CursorShape::Underline) => fill(
+                    Bounds::new(point(cursor_bounds.left(), cursor_bounds.bottom() - bar), size(cell_w, bar)),
+                    theme.cursor,
+                ),
+                _ => outline(cursor_bounds, theme.cursor, gpui::BorderStyle::Solid),
             }
         });
 
@@ -437,7 +444,7 @@ impl gpui::Element for TerminalElement {
             line_h,
             cursor,
             images,
-            cursor_under_text: self.focused,
+            cursor_under_text: block_cursor.is_some(),
         }
     }
 
@@ -588,8 +595,9 @@ fn shape_row(
         let underline = cell.underline.then_some(gpui::UnderlineStyle {
             color: Some(color),
             thickness: px(1.0),
-            wavy: false,
+            wavy: cell.undercurl,
         });
+        let strikethrough = cell.strikethrough.then_some(gpui::StrikethroughStyle { color: Some(color), thickness: px(1.0) });
         // a cell's whole grapheme cluster (a flag, a skin tone, a letter and its marks) shapes together, on its column
         let mut buf = [0; 4];
         let text = cell.cluster.as_deref().filter(|_| !cell.hidden).unwrap_or_else(|| ch.encode_utf8(&mut buf));
@@ -599,7 +607,8 @@ fn shape_row(
         // every run is `mono` but for weight and style: comparing those spares a font clone and compare per cell
         match seg.runs.last_mut() {
             Some(last)
-                if last.color == color && last.font.weight == weight && last.font.style == style && last.underline == underline =>
+                if last.color == color && last.font.weight == weight && last.font.style == style && last.underline == underline
+                    && last.strikethrough == strikethrough =>
             {
                 last.len += len;
             }
@@ -609,7 +618,7 @@ fn shape_row(
                 color,
                 background_color: None,
                 underline,
-                strikethrough: None,
+                strikethrough,
             }),
         }
         rtl_run = rtl || joins;

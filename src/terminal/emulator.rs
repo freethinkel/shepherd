@@ -20,7 +20,7 @@
 
 use std::cell::RefCell;
 
-use ghostty_vt::render::{CellIterator, Dirty, RowIterator};
+use ghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use ghostty_vt::screen::{CellContentTag, CellWide, GridRef, Screen};
 use ghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordBetweenOptions, Selection};
 use ghostty_vt::style::{Style, StyleColor, Underline};
@@ -86,6 +86,10 @@ pub struct CellSnapshot {
     pub dim: bool,
     pub italic: bool,
     pub underline: bool,
+    /// The underline is curly (SGR 4:3): spelling and diagnostics.
+    // ponytail: double, dotted and dashed underlines draw as a single line.
+    pub undercurl: bool,
+    pub strikethrough: bool,
     pub inverse: bool,
     pub hidden: bool,
     /// A double-width char (occupies this cell plus the next spacer cell).
@@ -113,6 +117,16 @@ impl CellSnapshot {
 pub struct CursorSnapshot {
     pub row: usize,
     pub col: usize,
+    pub shape: CursorShape,
+}
+
+/// How the cursor paints, as the program set it (DECSCUSR).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Beam,
+    Underline,
+    HollowBlock,
 }
 
 /// The render-path handles, reused across snapshots. Behind a `RefCell`
@@ -402,6 +416,8 @@ impl Emulator {
                         dim: style.faint,
                         italic: style.italic,
                         underline: style.underline != Underline::None,
+                        undercurl: style.underline == Underline::Curly,
+                        strikethrough: style.strikethrough,
                         inverse: style.inverse,
                         hidden: style.invisible,
                         wide: wide == CellWide::Wide,
@@ -422,10 +438,13 @@ impl Emulator {
         if !self.term.is_cursor_visible().ok()? {
             return None;
         }
-        Some(CursorSnapshot {
-            row: self.term.cursor_y().ok()? as usize,
-            col: self.term.cursor_x().ok()? as usize,
-        })
+        let shape = match self.render.borrow_mut().state.update(&self.term).ok()?.cursor_visual_style().ok()? {
+            CursorVisualStyle::Bar => CursorShape::Beam,
+            CursorVisualStyle::Underline => CursorShape::Underline,
+            CursorVisualStyle::BlockHollow => CursorShape::HollowBlock,
+            _ => CursorShape::Block,
+        };
+        Some(CursorSnapshot { row: self.term.cursor_y().ok()? as usize, col: self.term.cursor_x().ok()? as usize, shape })
     }
 
     fn hyperlink(&self, row: usize, col: usize) -> Option<String> {
@@ -547,7 +566,7 @@ mod tests {
         let mut e = emu(20, 5);
         e.feed(b"hello");
         assert_eq!(e.row_text(0), "hello");
-        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 0, col: 5 }));
+        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 0, col: 5, shape: CursorShape::Block }));
     }
 
     #[test]
@@ -585,6 +604,29 @@ mod tests {
     }
 
     #[test]
+    fn strikethrough_and_undercurl() {
+        let mut e = emu(20, 2);
+        e.feed(b"\x1b[9mS\x1b[0m\x1b[4:3mC\x1b[0m\x1b[4mU");
+        let line = e.line(0);
+        assert!(line[0].strikethrough && !line[0].underline);
+        assert!(line[1].underline && line[1].undercurl);
+        assert!(line[2].underline && !line[2].undercurl && !line[2].strikethrough);
+    }
+
+    #[test]
+    fn cursor_shape_follows_decscusr() {
+        let mut e = emu(10, 2);
+        let shape = |e: &Emulator| e.cursor().unwrap().shape;
+        assert_eq!(shape(&e), CursorShape::Block);
+        e.feed(b"\x1b[6 q");
+        assert_eq!(shape(&e), CursorShape::Beam);
+        e.feed(b"\x1b[3 q");
+        assert_eq!(shape(&e), CursorShape::Underline);
+        e.feed(b"\x1b[0 q");
+        assert_eq!(shape(&e), CursorShape::Block);
+    }
+
+    #[test]
     fn bright_256_and_truecolor_sgr() {
         let mut e = emu(40, 2);
         e.feed(b"\x1b[95mA\x1b[38;5;196mB\x1b[38;2;10;20;30mC");
@@ -616,11 +658,11 @@ mod tests {
         e.feed(b"\x1b[3;5Hx");
         // CSI H is 1-based; cell written at row 2, col 4; cursor advanced by 1.
         assert_eq!(e.line(2)[4].ch, 'x');
-        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 2, col: 5 }));
+        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 2, col: 5, shape: CursorShape::Block }));
         e.feed(b"\x1b[2D"); // left twice
-        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 2, col: 3 }));
+        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 2, col: 3, shape: CursorShape::Block }));
         e.feed(b"\x1b[A"); // up
-        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 1, col: 3 }));
+        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 1, col: 3, shape: CursorShape::Block }));
     }
 
     #[test]
@@ -631,7 +673,7 @@ mod tests {
         for row in 0..4 {
             assert_eq!(e.row_text(row), "");
         }
-        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 0, col: 0 }));
+        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 0, col: 0, shape: CursorShape::Block }));
         e.feed(b"fresh");
         assert_eq!(e.row_text(0), "fresh");
     }
@@ -753,7 +795,7 @@ mod tests {
         assert!(line[1].wide_spacer);
         assert_eq!(line[2].ch, 'w');
         assert_eq!(e.row_text(0), "宽w");
-        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 0, col: 3 }));
+        assert_eq!(e.cursor(), Some(CursorSnapshot { row: 0, col: 3, shape: CursorShape::Block }));
     }
 
     #[test]
