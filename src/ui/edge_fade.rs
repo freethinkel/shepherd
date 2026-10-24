@@ -82,6 +82,8 @@ impl Element for EdgeFaded {
             band: px(self.band),
             band_top: None,
             band_bottom: None,
+            band_left: None,
+            band_right: None,
             top: start && !self.across,
             bottom: end && !self.across,
             left: start && self.across,
