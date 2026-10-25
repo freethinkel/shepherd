@@ -47,7 +47,9 @@ pub struct GridSnapshot {
 /// terminal follows the drag without a SIGWINCH per pixel; the drag's end re-measures them all.
 pub struct GridHold(pub bool);
 
-const HELD_RESIZE: std::time::Duration = std::time::Duration::from_millis(80);
+/// herdr draws a resized grid within a millisecond, and a shell, vim or Claude Code redraws in ~5–15 ms
+/// (`client_shell::input_paths::resize_latency`): two frames at 60 Hz keeps up with a drag.
+const HELD_RESIZE: std::time::Duration = std::time::Duration::from_millis(33);
 
 impl gpui::Global for GridHold {}
 
@@ -230,6 +232,8 @@ pub struct PaneTerminal {
     /// Until then `scroll.offset_from_bottom` is our own prediction, not herdr's (stale) report.
     scroll_local_until: Option<std::time::Instant>,
     _scroll_settle: Option<Task<()>>,
+    /// The frame that lays out a resize `HELD_RESIZE` held back.
+    _resize_catchup: Option<Task<()>>,
     _pump: Option<Task<()>>,
     search: Option<Search>,
     /// The pointer, and the link under it while Cmd is held: (row, cells).
@@ -291,6 +295,7 @@ impl PaneTerminal {
             _scrollbar_drag: scrollbar_drag,
             scroll_local_until: None,
             _scroll_settle: None,
+            _resize_catchup: None,
             _pump: None,
             search: None,
             pointer: None,
@@ -409,8 +414,15 @@ impl PaneTerminal {
         let held = cx.try_global::<GridHold>().is_some_and(|hold| hold.0);
         // the scrollbar follows the pane every frame, not the grid it held back
         self.scrollbar.0.bounds.set(geometry.bounds);
-        if !first && resized && held && self.resized_at.is_some_and(|at| at.elapsed() < HELD_RESIZE) {
-            return; // a drag is under way and the grid just reflowed: the next frame (or the drop) catches up
+        let wait = self.resized_at.and_then(|at| HELD_RESIZE.checked_sub(at.elapsed())).filter(|w| !w.is_zero());
+        if let Some(wait) = wait.filter(|_| !first && resized && held) {
+            // a drag is under way and the grid just reflowed: a frame once the pace allows catches up, also when
+            // the drag stops before it (a window's live resize has no drop to say so)
+            self._resize_catchup = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            }));
+            return;
         }
         self.geometry = Some(geometry);
         // the fixture's text (`SHEPHERD_MOCK`), laid out afresh at every size: there is no herdr to redraw it
@@ -1948,6 +1960,7 @@ mod tests {
         cx.update(|cx| cx.set_global(GridHold(true)));
         pane.update(cx, |p, cx| p.on_grid_metrics(geometry(90, 40), cx));
         pane.read_with(cx, |p, _| assert_eq!(p.emulator.cols(), 120, "reflowed twice within HELD_RESIZE"));
+        pane.read_with(cx, |p, _| assert!(p._resize_catchup.is_some(), "the held-back size waits for no further frame"));
         pane.update(cx, |p, cx| {
             p.resized_at = Some(std::time::Instant::now() - HELD_RESIZE);
             p.on_grid_metrics(geometry(90, 40), cx)

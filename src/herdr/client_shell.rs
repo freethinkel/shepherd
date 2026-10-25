@@ -183,6 +183,44 @@ mod input_paths {
         std::thread::sleep(Duration::from_millis(300));
     }
 
+    /// A grid resize over the attach until herdr's first frame at the new size and until frames stop (50 ms quiet),
+    /// with `RUN` in `PANE`: `PANE=… RUN=vim cargo test --lib client_shell::input_paths::resize -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn resize_latency() {
+        let pane = std::env::var("PANE").expect("PANE: a pane of herdr's");
+        let (session, mut frames) = Session::spawn(&pane, 80, 24, (16, 32), Mode::Control).unwrap();
+        if let Ok(run) = std::env::var("RUN") {
+            session.input(format!("{run}\r").as_bytes());
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        while frames.try_recv().is_ok() {}
+        let (mut first, mut last) = (Vec::new(), Vec::new());
+        for i in 0..30 {
+            let start = std::time::Instant::now();
+            session.resize(if i % 2 == 0 { 70 } else { 80 }, 24, (16, 32));
+            let _ = futures::executor::block_on(frames.next());
+            first.push(start.elapsed().as_secs_f64() * 1000.0);
+            let mut end = start.elapsed();
+            loop {
+                std::thread::sleep(Duration::from_millis(50));
+                let mut more = false;
+                while frames.try_recv().is_ok() {
+                    more = true;
+                }
+                if !more {
+                    break;
+                }
+                end = start.elapsed() - Duration::from_millis(25);
+            }
+            last.push(end.as_secs_f64() * 1000.0);
+        }
+        for (name, mut took) in [("first frame", first), ("frames stop (±25 ms)", last)] {
+            took.sort_by(f64::total_cmp);
+            println!("resize → {name}, ms: p50 {:.2}, p90 {:.2}, max {:.2}", took[took.len() / 2], took[took.len() * 9 / 10], took[took.len() - 1]);
+        }
+    }
+
     fn scroll_bench(name: &str, frames: &mut UnboundedReceiver<SessionEvent>, emu: &mut crate::terminal::emulator::Emulator, send: impl Fn(bool)) {
         let mut took = Vec::new();
         for i in 0..40 {
