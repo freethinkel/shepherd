@@ -543,7 +543,11 @@ impl PaneTerminal {
 
     fn scroll_herdr(&mut self, delta: i64, at: Option<(u16, u16)>, cx: &mut Context<Self>) {
         let Some(session) = &self.session else { return };
-        session.scroll(delta > 0, delta.unsigned_abs().min(u16::MAX as u64) as u16, at);
+        let (up, lines) = (delta > 0, delta.unsigned_abs().min(u16::MAX as u64) as u16);
+        let (col, row) = at.unwrap_or((0, 0));
+        if !self.via_shell(PaneInput::wheel(up, lines, col, row), cx) {
+            session.scroll(up, lines, at);
+        }
         let max = self.scroll.max_offset_from_bottom as i64;
         self.scroll.offset_from_bottom = (self.scroll.offset_from_bottom as i64 + delta).clamp(0, max) as u32;
         self.scroll_local_until = Some(std::time::Instant::now() + SCROLL_SETTLE);
@@ -1103,12 +1107,19 @@ impl PaneTerminal {
     /// A key as herdr's semantic event over the window's client shell (see [`TypingShell`]), which encodes it for
     /// the app's keyboard protocol; false: the pane is not one to type into that way (see [`Self::input`]).
     fn type_key(&mut self, event: PaneInput, cx: &mut Context<Self>) -> bool {
-        let controlled = self.session.is_some() && !self.observing;
-        if !controlled || !cx.try_global::<TypingShell>().is_some_and(|t| t.0.pane_input(&self.pane_id, vec![event])) {
+        if !self.via_shell(event, cx) {
             return false;
         }
         self.typed(cx);
         true
+    }
+
+    /// Sends `event` over the window's client shell, which herdr acts on at once, where an attach's input waits out
+    /// its 16 ms render cadence (a key's echo ~6 ms against ~23, the wheel in an app reading the mouse ~0.8 against
+    /// ~20, `client_shell::input_paths`); false: send it over the attach.
+    fn via_shell(&self, event: PaneInput, cx: &App) -> bool {
+        let controlled = self.session.is_some() && !self.observing;
+        controlled && cx.try_global::<TypingShell>().is_some_and(|t| t.0.pane_input(&self.pane_id, vec![event]))
     }
 
     /// Typing goes back to the live bottom, as in a terminal.
@@ -1229,13 +1240,15 @@ impl PaneTerminal {
         Some((hit.row as u16, hit.col as u16, point, hit.side))
     }
 
-    fn mouse(&self, action: &str, button: MouseButton, position: gpui::Point<Pixels>, mods: &Modifiers) {
+    fn mouse(&self, action: &str, button: MouseButton, position: gpui::Point<Pixels>, mods: &Modifiers, cx: &App) {
         let button = match button {
             MouseButton::Right => "right",
             MouseButton::Middle => "middle",
             _ => "left",
         };
-        if let (Some(session), Some((row, col, _, _))) = (&self.session, self.hit(position)) {
+        if let (Some(session), Some((row, col, _, _))) = (&self.session, self.hit(position))
+            && !self.via_shell(PaneInput::mouse(action, button, col, row, mouse_mods(mods)), cx)
+        {
             session.mouse(action, button, col, row, mouse_mods(mods));
         }
     }
@@ -1251,7 +1264,7 @@ impl PaneTerminal {
             cx.stop_propagation();
             window.focus(&self.focus, cx);
             claim(cx);
-            self.mouse("down", event.button, event.position, &event.modifiers);
+            self.mouse("down", event.button, event.position, &event.modifiers, cx);
             let drag = Drag { origin: event.position, armed: false, to_app: true, select: false, button: event.button };
             self.drag = Some(drag);
             return;
@@ -1269,7 +1282,7 @@ impl PaneTerminal {
         let known = self.session.as_ref().is_some_and(Session::knows_mouse_capture);
         let (to_app, select) = if known { (self.mouse_capture && !shift, !self.mouse_capture || shift) } else { (!shift, true) };
         if to_app {
-            self.mouse("down", MouseButton::Left, event.position, &event.modifiers);
+            self.mouse("down", MouseButton::Left, event.position, &event.modifiers, cx);
         }
         self.emulator.clear_selection();
         let armed = select && event.click_count > 1;
@@ -1285,17 +1298,17 @@ impl PaneTerminal {
         self.pointer = Some(event.position);
         // gpui's `dragging` is the left button's only
         if let Some(drag) = self.drag.filter(|d| d.button != MouseButton::Left) {
-            self.mouse("drag", drag.button, event.position, &event.modifiers);
+            self.mouse("drag", drag.button, event.position, &event.modifiers, cx);
             return;
         }
         if !event.dragging() {
             self.update_hover(link_modifier(&event.modifiers), cx);
-            self.report_hover(event);
+            self.report_hover(event, cx);
             return;
         }
         let Some(mut drag) = self.drag else { return };
         if drag.to_app {
-            self.mouse("drag", drag.button, event.position, &event.modifiers);
+            self.mouse("drag", drag.button, event.position, &event.modifiers, cx);
         }
         if !drag.select {
             return;
@@ -1318,11 +1331,11 @@ impl PaneTerminal {
 
     /// A move with no button held goes to an app that captures the mouse (herdr drops it unless the app asked for
     /// any-motion reporting); Shift keeps the mouse for a selection, as on a press.
-    fn report_hover(&mut self, event: &MouseMoveEvent) {
+    fn report_hover(&mut self, event: &MouseMoveEvent, cx: &App) {
         let captured = self.mouse_capture && self.session.as_ref().is_some_and(Session::knows_mouse_capture);
         let cell = self.hit(event.position).map(|(row, col, _, _)| (row, col)).filter(|_| captured && !event.modifiers.shift);
         if cell.is_some() && cell != self.hover_cell {
-            self.mouse("move", MouseButton::Left, event.position, &event.modifiers);
+            self.mouse("move", MouseButton::Left, event.position, &event.modifiers, cx);
         }
         self.hover_cell = cell;
     }
@@ -1330,7 +1343,7 @@ impl PaneTerminal {
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.take().filter(|d| d.button == event.button) else { return };
         if drag.to_app {
-            self.mouse("up", drag.button, event.position, &event.modifiers);
+            self.mouse("up", drag.button, event.position, &event.modifiers, cx);
         }
         if !drag.armed || !crate::settings::SettingsGlobal::of(cx).settings.copy_on_select {
             return;

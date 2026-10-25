@@ -4,7 +4,7 @@
 //! Shepherd learns when the pane's app captures the mouse (`MouseCapture`, which the JSON CLI drops). Otherwise —
 //! another herdr version, no socket — it falls back to a `herdr terminal session control <pane>` child (base64
 //! frames in, JSON command lines out), where mouse capture stays unknown.
-use super::wire::{self, AttachScrollDirection, AttachScrollSource, ClientMessage, MouseButton, MouseKind, MousePosition, ServerMessage};
+use super::wire::{self, AttachScrollDirection, AttachScrollSource, ClientMessage, MousePosition, ServerMessage};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
@@ -310,19 +310,8 @@ impl Session {
 
     /// `action` is `down` / `up` / `drag` / `move`, `button` is `left` / `right` / `middle` (herdr's CLI names).
     pub fn mouse(&self, action: &str, button: &str, column: u16, row: u16, modifiers: u8) {
-        let b = match button {
-            "right" => MouseButton::Right,
-            "middle" => MouseButton::Middle,
-            _ => MouseButton::Left,
-        };
-        let kind = match action {
-            "down" => MouseKind::Down(b),
-            "up" => MouseKind::Up(b),
-            "drag" => MouseKind::Drag(b),
-            _ => MouseKind::Moved,
-        };
         self.send(
-            ClientMessage::AttachMouse { kind, position: MousePosition::Cell { column, row }, geometry: None, modifiers, lines: 1 },
+            ClientMessage::AttachMouse { kind: wire::mouse_kind(action, button), position: MousePosition::Cell { column, row }, geometry: None, modifiers, lines: 1 },
             || json!({"type": "terminal.mouse", "action": action, "button": button,
                       "column": column, "row": row, "modifiers": modifiers}),
         );

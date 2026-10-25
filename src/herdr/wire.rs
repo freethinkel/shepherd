@@ -159,6 +159,34 @@ pub enum PaneInput {
     Paste(String),
 }
 
+impl PaneInput {
+    /// A click, drag or move at a pane's cell; `action` is `down` / `up` / `drag` / `move`, `button` is `left` /
+    /// `right` / `middle` (herdr's CLI names).
+    pub fn mouse(action: &str, button: &str, column: u16, row: u16, modifiers: u8) -> Self {
+        PaneInput::Mouse { kind: mouse_kind(action, button), position: MousePosition::Cell { column, row }, geometry: None, modifiers, lines: 1 }
+    }
+
+    /// `lines` of the wheel at a pane's cell: herdr scrolls its history, or hands the wheel to an app reading the mouse.
+    pub fn wheel(up: bool, lines: u16, column: u16, row: u16) -> Self {
+        let kind = if up { MouseKind::ScrollUp } else { MouseKind::ScrollDown };
+        PaneInput::Mouse { kind, position: MousePosition::Cell { column, row }, geometry: None, modifiers: 0, lines }
+    }
+}
+
+pub fn mouse_kind(action: &str, button: &str) -> MouseKind {
+    let b = match button {
+        "right" => MouseButton::Right,
+        "middle" => MouseButton::Middle,
+        _ => MouseButton::Left,
+    };
+    match action {
+        "down" => MouseKind::Down(b),
+        "up" => MouseKind::Up(b),
+        "drag" => MouseKind::Drag(b),
+        _ => MouseKind::Moved,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
 pub enum KeyCode {

@@ -146,6 +146,64 @@ mod input_paths {
         session.input(b"\x03");
     }
 
+    /// The wheel over `PANE`, sent over the attach (`AttachScroll`) or over a client shell (a wheel `Mouse`):
+    /// `PANE=… cargo test --lib client_shell::input_paths::wheel -- --ignored --nocapture`. Over history both take
+    /// under a millisecond; over an app reading the mouse (`RUN='seq 1 2000 | less --mouse' DOWN_FIRST=1`) the attach
+    /// waits out its cadence: ~20 ms against ~0.8 ms.
+    #[test]
+    #[ignore]
+    fn wheel_scroll_latency() {
+        let (_events, watch) = super::super::popup::watch(80, 24, (0, 0)).unwrap();
+        let pane = std::env::var("PANE").expect("PANE: a pane of herdr's focused tab");
+        let (session, mut frames) = Session::spawn(&pane, 80, 24, (0, 0), Mode::Control).unwrap();
+        let mut emu = crate::terminal::emulator::Emulator::new(80, 24);
+        session.input(std::env::var("RUN").unwrap_or("clear; seq 1 2000".into()).as_bytes());
+        session.input(b"\r");
+        std::thread::sleep(Duration::from_secs(1));
+        drain(&mut frames, &mut emu);
+        println!("pane {pane}");
+        for _ in 0..2 {
+            scroll_bench("attach AttachScroll", &mut frames, &mut emu, |up| session.scroll(up, 3, Some((10, 10))));
+            scroll_bench("ClientShellPaneInput Mouse", &mut frames, &mut emu, |up| {
+                assert!(watch.pane_input(&pane, vec![PaneInput::wheel(up, 3, 10, 10)]));
+            });
+        }
+    }
+
+    /// A click over a client shell lands on the pane's own cell, not the shell surface's: run a program printing the
+    /// mouse reports it gets in `PANE` (not the tab's leftmost), then
+    /// `cargo test --lib client_shell::input_paths::click -- --ignored --nocapture` and read the pane.
+    #[test]
+    #[ignore]
+    fn click_lands_on_the_panes_cell() {
+        let (_events, watch) = super::super::popup::watch(80, 24, (0, 0)).unwrap();
+        let pane = std::env::var("PANE").expect("PANE: a pane of herdr's focused tab");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(watch.pane_input(&pane, vec![PaneInput::mouse("down", "left", 3, 2, 0), PaneInput::mouse("up", "left", 3, 2, 0)]));
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    fn scroll_bench(name: &str, frames: &mut UnboundedReceiver<SessionEvent>, emu: &mut crate::terminal::emulator::Emulator, send: impl Fn(bool)) {
+        let mut took = Vec::new();
+        for i in 0..40 {
+            std::thread::sleep(Duration::from_millis(50));
+            drain(frames, emu);
+            let before = emu.row_text(0);
+            let start = std::time::Instant::now();
+            send((i % 4 < 2) != std::env::var_os("DOWN_FIRST").is_some()); // twice one way, twice back: never past an end
+            while emu.row_text(0) == before {
+                match futures::executor::block_on(frames.next()) {
+                    Some(SessionEvent::Frame(bytes)) => drop(emu.feed(&bytes)),
+                    Some(_) => {}
+                    None => return,
+                }
+            }
+            took.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        took.sort_by(f64::total_cmp);
+        println!("{name}: wheel → scrolled screen, ms: p50 {:.2}, p90 {:.2}, max {:.2}", took[took.len() / 2], took[took.len() * 9 / 10], took[took.len() - 1]);
+    }
+
     fn drain(frames: &mut UnboundedReceiver<SessionEvent>, emu: &mut crate::terminal::emulator::Emulator) {
         while let Ok(event) = frames.try_recv() {
             if let SessionEvent::Frame(bytes) = event {
