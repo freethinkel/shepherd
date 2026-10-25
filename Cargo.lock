@@ -6283,7 +6283,7 @@ dependencies = [
 
 [[package]]
 name = "shepherd"
-version = "1.3.5"
+version = "1.3.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
