@@ -25,32 +25,12 @@ pub struct Git {
     pub branch: String,
     pub ahead: u32,
     pub behind: u32,
-    pub dirty: bool,
 }
 
-/// `git status --porcelain=v2 --branch`, read; `None` outside a repo (git printed nothing).
-pub fn parse_git(out: &str) -> Option<Git> {
-    let mut git = Git::default();
-    let mut oid = None;
-    for line in out.lines() {
-        if let Some(head) = line.strip_prefix("# branch.head ") {
-            git.branch = head.to_string();
-        } else if let Some(o) = line.strip_prefix("# branch.oid ") {
-            oid = Some(o.chars().take(7).collect::<String>());
-        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
-            let mut it = ab.split(' ').map(|n| n.trim_start_matches(['+', '-']).parse().unwrap_or(0));
-            (git.ahead, git.behind) = (it.next().unwrap_or(0), it.next().unwrap_or(0));
-        } else if !line.starts_with('#') && !line.is_empty() {
-            git.dirty = true;
-        }
-    }
-    if git.branch.is_empty() {
-        return None;
-    }
-    if git.branch == "(detached)" {
-        git.branch = oid.unwrap_or(git.branch);
-    }
-    Some(git)
+/// `git rev-list --left-right --count HEAD...@{u}`, read: commits (ahead, behind) the upstream.
+pub fn parse_ahead_behind(out: &str) -> (u32, u32) {
+    let mut it = out.split_whitespace().map(|n| n.parse().unwrap_or(0));
+    (it.next().unwrap_or(0), it.next().unwrap_or(0))
 }
 
 /// `path` with the home directory as `~`; deeper than three parts, only the last two after `…`.
@@ -178,10 +158,22 @@ pub fn switch_branch(dir: &str, branch: &str) -> Result<(), String> {
     }
 }
 
+/// git's output in `dir`, when it succeeds. --no-optional-locks: never take index.lock from under the agents' own git.
+fn git_in(dir: &str, args: &[&str]) -> Option<String> {
+    let out = crate::herdr::git(dir, &[&["--no-optional-locks"][..], args].concat()).ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The branch from refs alone, not `git status`, which walks the whole worktree: ~2.5 s against ~0.03 s in a 40k-file
+/// repo, every [`GIT_TTL`] for each worktree in the sidebar.
 fn read_git(dir: &str) -> Option<Git> {
-    // --no-optional-locks: never take index.lock from under the agents' own git.
-    let out = crate::herdr::git(dir, &["--no-optional-locks", "status", "--porcelain=v2", "--branch"]).ok()?;
-    parse_git(&String::from_utf8_lossy(&out.stdout))
+    let mut branch = git_in(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if branch == "HEAD" {
+        branch = git_in(dir, &["rev-parse", "--short", "HEAD"])?; // detached
+    }
+    // no upstream: git fails, nothing to show
+    let (ahead, behind) = git_in(dir, &["rev-list", "--left-right", "--count", "HEAD...@{u}"]).map_or((0, 0), |out| parse_ahead_behind(&out));
+    Some(Git { branch, ahead, behind })
 }
 
 /// `git diff --shortstat`, read: lines added and removed; `(0, 0)` for no changes.
@@ -196,10 +188,7 @@ pub fn parse_shortstat(out: &str) -> (u32, u32) {
 /// (`develop` for `origin/develop`), `main` and `master`: a local default ahead of origin and an origin that already
 /// merged the branch both move it up. `None` without any of them.
 fn read_changes(dir: &str) -> Option<(u32, u32)> {
-    let git = |args: &[&str]| {
-        let out = crate::herdr::git(dir, &[&["--no-optional-locks"][..], args].concat()).ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-    };
+    let git = |args: &[&str]| git_in(dir, args);
     let remote = git(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).unwrap_or_default();
     let local = format!("refs/heads/{}", remote.trim().strip_prefix("origin/").unwrap_or("main"));
     let refs = git(&["for-each-ref", "--format=%(objectname)", "refs/remotes/origin/HEAD", &local, "refs/heads/main", "refs/heads/master"])?;
@@ -880,14 +869,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_branch_tracking_and_changes() {
-        let out = "# branch.oid 7d9be72aaaa\n# branch.head statusbar\n# branch.upstream origin/statusbar\n# branch.ab +2 -1\n1 .M N... 100644 100644 100644 a b src/x.rs\n";
-        assert_eq!(parse_git(out), Some(Git { branch: "statusbar".into(), ahead: 2, behind: 1, dirty: true }));
-        let clean = "# branch.oid 7d9be72aaaa\n# branch.head main\n";
-        assert_eq!(parse_git(clean), Some(Git { branch: "main".into(), ..Git::default() }));
-        let detached = "# branch.oid 7d9be72aaaa\n# branch.head (detached)\n? new.txt\n";
-        assert_eq!(parse_git(detached), Some(Git { branch: "7d9be72".into(), dirty: true, ..Git::default() }));
-        assert_eq!(parse_git(""), None);
+    fn parses_ahead_and_behind() {
+        assert_eq!(parse_ahead_behind("2\t1\n"), (2, 1));
+        assert_eq!(parse_ahead_behind(""), (0, 0));
     }
 
     #[test]
