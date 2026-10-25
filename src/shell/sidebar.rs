@@ -770,6 +770,7 @@ impl Shell {
                 let slot = this.place_motion.borrow().slot_at(e.event.position.x, this.places.len());
                 if let Some(drag) = this.place_motion.borrow_mut().drag.as_mut().filter(|d| d.slot != slot) {
                     drag.slot = slot;
+                    haptic();
                     cx.notify();
                 }
             }))

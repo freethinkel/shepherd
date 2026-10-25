@@ -1,3 +1,5 @@
+> Архив: PoC удалён из main в 04babc3; попап herdr показывается из popup watch. Замеры ниже остаются в силе.
+
 # PoC: гибрид attach + одно ClientShell-подключение
 
 Ветка `clientshell-poc`, herdr 0.9.3, флаг `SHEPHERD_CLIENT_SHELL=1`. Без флага Shepherd работает как в main.

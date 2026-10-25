@@ -98,6 +98,9 @@ impl Reorder {
                     slot += usize::from(y + h(k) / 2. < mid);
                     y += h(k) + gap;
                 }
+                if d.slot != slot {
+                    haptic();
+                }
                 d.slot = slot;
             }
             (Some(_), Some(from)) => {

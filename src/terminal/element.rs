@@ -12,9 +12,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{
-    App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, PaintQuad, Pixels, RenderImage,
+    App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, PaintQuad, Pixels, Point, RenderImage,
     ShapedLine, SharedString, Style, TextRun, Window, fill, font, outline, point, px, relative,
     size,
 };
@@ -222,6 +223,8 @@ pub struct TerminalPrepaint {
     /// measured the grid with.
     line_h: Pixels,
     cursor: Option<PaintQuad>,
+    /// [`CursorTrail`]'s quad, painted under the text.
+    trail: Option<(gpui::Path<Pixels>, Hsla)>,
     /// herdr's Kitty images, lowest z first, and whether each goes under the text.
     images: Vec<(Bounds<Pixels>, Arc<RenderImage>, bool)>,
     /// The focused block cursor is opaque, so it goes under the text (whose
@@ -241,7 +244,8 @@ impl gpui::Element for TerminalElement {
     type PrepaintState = TerminalPrepaint;
 
     fn id(&self) -> Option<gpui::ElementId> {
-        None
+        // keyed so the cursor's animation state lives across frames
+        Some(("terminal-grid", self.panel.entity_id()).into())
     }
 
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -263,7 +267,7 @@ impl gpui::Element for TerminalElement {
 
     fn prepaint(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        id: Option<&GlobalElementId>,
         _inspector_id: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         _state: &mut Self::RequestLayoutState,
@@ -324,6 +328,7 @@ impl gpui::Element for TerminalElement {
                 cell_w,
                 line_h,
                 cursor: None,
+                trail: None,
                 images: Vec::new(),
                 cursor_under_text: false,
             };
@@ -333,6 +338,40 @@ impl gpui::Element for TerminalElement {
         let mut sel_quads = Vec::new();
         let mut lines = Vec::with_capacity(snapshot.lines.len());
         let mut glyphs = Vec::with_capacity(snapshot.lines.len());
+        let cursor_rect = snapshot.cursor.as_ref().map(|c| {
+            let cell = Bounds::new(
+                point(origin.x + cell_w * c.col as f32, origin.y + line_h * c.row as f32),
+                size(cell_w, line_h),
+            );
+            // the shape the program set (DECSCUSR, passed on by herdr): vim's insert beam, an underline
+            let bar = px(2.0);
+            match (self.focused, c.shape) {
+                (true, CursorShape::Beam) => Bounds::new(cell.origin, size(bar, line_h)),
+                (true, CursorShape::Underline) => {
+                    Bounds::new(point(cell.left(), cell.bottom() - bar), size(cell_w, bar))
+                }
+                _ => cell,
+            }
+        });
+        // Ghostty's cursor_smear, focused only; the state is dropped on a frame that skips it, so
+        // the cursor comes back without a trail after a blur or a hidden spell.
+        let trail = match (id, cursor_rect) {
+            (Some(id), Some(rect))
+                if self.focused
+                    && !cx.reduce_motion()
+                    && crate::settings::SettingsGlobal::of(cx).settings.animated_cursor =>
+            {
+                window.with_element_state(id, |trail: Option<CursorTrail>, window| {
+                    let mut trail = trail.unwrap_or_default();
+                    let corners = trail.step(rect, Instant::now());
+                    if corners.is_some() {
+                        window.request_animation_frame();
+                    }
+                    (corners, trail)
+                })
+            }
+            _ => None,
+        };
         // Ghostty's block cursor: the cell's text takes the background color.
         let block_cursor =
             snapshot.cursor.as_ref().filter(|c| self.focused && c.shape == CursorShape::Block).map(|c| (c.row, c.col));
@@ -404,25 +443,18 @@ impl gpui::Element for TerminalElement {
             glyphs.push(row_glyphs);
         }
 
-        let cursor = snapshot.cursor.map(|c| {
-            let cursor_bounds = Bounds::new(
-                point(
-                    origin.x + cell_w * c.col as f32,
-                    origin.y + line_h * c.row as f32,
-                ),
-                size(cell_w, line_h),
-            );
-            // the shape the program set (DECSCUSR, passed on by herdr): vim's insert beam, an underline
-            let bar = px(2.0);
-            match (self.focused, c.shape) {
-                (true, CursorShape::Block) => fill(cursor_bounds, theme.cursor),
-                (true, CursorShape::Beam) => fill(Bounds::new(cursor_bounds.origin, size(bar, line_h)), theme.cursor),
-                (true, CursorShape::Underline) => fill(
-                    Bounds::new(point(cursor_bounds.left(), cursor_bounds.bottom() - bar), size(cell_w, bar)),
-                    theme.cursor,
-                ),
-                _ => outline(cursor_bounds, theme.cursor, gpui::BorderStyle::Solid),
+        let cursor = cursor_rect.map(|rect| match self.focused {
+            true => fill(rect, theme.cursor),
+            false => outline(rect, theme.cursor, gpui::BorderStyle::Solid),
+        });
+        let trail = trail.and_then(|corners| {
+            let mut path = gpui::PathBuilder::fill();
+            path.move_to(corners[0]);
+            for corner in &corners[1..] {
+                path.line_to(*corner);
             }
+            path.close();
+            path.build().ok().map(|path| (path, theme.cursor))
         });
 
         let images = snapshot
@@ -443,6 +475,7 @@ impl gpui::Element for TerminalElement {
             cell_w,
             line_h,
             cursor,
+            trail,
             images,
             cursor_under_text: block_cursor.is_some(),
         }
@@ -472,6 +505,9 @@ impl gpui::Element for TerminalElement {
             }
             for quad in prepaint.sel_quads.drain(..) {
                 window.paint_quad(quad);
+            }
+            if let Some((path, color)) = prepaint.trail.take() {
+                window.paint_path(path, color);
             }
             if prepaint.cursor_under_text
                 && let Some(cursor) = prepaint.cursor.take()
@@ -510,6 +546,67 @@ impl gpui::Element for TerminalElement {
                 window.paint_quad(cursor);
             }
         });
+    }
+}
+
+/// Ghostty's cursor_smear shader (DURATION 0.2, TRAIL_SIZE 0.8, EaseOutCirc): the cursor jumps,
+/// and a quad from where it was to where it is trails it, each corner easing in on its own clock:
+/// the ones leading the move in DURATION·(1−TRAIL_SIZE), the trailing ones in DURATION, the sides
+/// in between. A move under 1.5 cursor heights, typing, leaves no trail.
+#[derive(Default)]
+struct CursorTrail {
+    /// The cursor's rect and since when it has been there.
+    at: Option<(Bounds<Pixels>, Instant)>,
+    /// Where it was before.
+    from: Option<Bounds<Pixels>>,
+}
+
+impl CursorTrail {
+    const DURATION: f32 = 0.2;
+    const TRAIL_SIZE: f32 = 0.8;
+    const MIN_DISTANCE: f32 = 1.5;
+    const THICKNESS_X: f32 = 0.9;
+    /// TL, TR, BR, BL as (x, y) signs; y grows down.
+    const CORNERS: [(f32, f32); 4] = [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)];
+
+    /// The trail's corners at `now`, `None` when there is none to draw.
+    fn step(&mut self, rect: Bounds<Pixels>, now: Instant) -> Option<[Point<Pixels>; 4]> {
+        if self.at.is_none_or(|(at, _)| at != rect) {
+            self.from = self.at.map(|(at, _)| at);
+            self.at = Some((rect, now));
+        }
+        let ((to, since), from) = (self.at?, self.from?);
+        let t = now.duration_since(since).as_secs_f32();
+        let (to, from) = (Self::corners(to), Self::corners(from));
+        let (dx, dy) = (to[2].x - from[2].x, to[2].y - from[2].y);
+        let height = to[2].y - to[1].y;
+        if t >= Self::DURATION || dx.hypot(dy) <= height * Self::MIN_DISTANCE {
+            return None;
+        }
+        let sign = |v: f32| if v.abs() < 0.5 { 0.0 } else { v.signum() };
+        let (sx, sy) = (sign(dx), sign(dy));
+        let lead = Self::DURATION * (1.0 - Self::TRAIL_SIZE);
+        Some(std::array::from_fn(|i| {
+            let (cx, cy) = Self::CORNERS[i];
+            // the shader's rails: the edge a sideways move pushes keeps both its corners leading
+            let dot = if sx != 0.0 && cx == sx { 2.0 } else { cx * sx + cy * sy };
+            let duration = match dot {
+                d if d >= 0.5 => lead,
+                d if d >= -0.5 => (lead + Self::DURATION) / 2.0,
+                _ => Self::DURATION,
+            };
+            // EaseOutCirc
+            let x = (t / duration).clamp(0.0, 1.0);
+            let p = (1.0 - (x - 1.0).powi(2)).sqrt();
+            point(px(from[i].x + (to[i].x - from[i].x) * p), px(from[i].y + (to[i].y - from[i].y) * p))
+        }))
+    }
+
+    /// A rect's corners, TL, TR, BR, BL, narrowed by THICKNESS_X.
+    fn corners(rect: Bounds<Pixels>) -> [Point<f32>; 4] {
+        let c = rect.center();
+        let (hw, hh) = (f32::from(rect.size.width) * 0.5 * Self::THICKNESS_X, f32::from(rect.size.height) * 0.5);
+        Self::CORNERS.map(|(x, y)| Point::new(f32::from(c.x) + x * hw, f32::from(c.y) + y * hh))
     }
 }
 
@@ -785,6 +882,22 @@ fn paint_custom_glyph(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_jump_trails_the_cursor_leading_corners_first() {
+        let cell = |col: f32| Bounds::new(point(px(col * 10.), px(0.)), size(px(10.), px(20.)));
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        let mut trail = CursorTrail::default();
+        assert!(trail.step(cell(0.), t0).is_none(), "the first sighting has no trail");
+        assert!(trail.step(cell(1.), t0).is_none(), "nor does typing");
+        assert!(trail.step(cell(10.), t0).is_some(), "a jump does");
+        let c = trail.step(cell(10.), at(100)).unwrap();
+        // moving right: the right edge has landed, at the center plus 0.9 of the half width
+        assert_eq!((c[1].x, c[2].x), (px(109.5), px(109.5)));
+        assert!(c[0].x > px(0.5) && c[0].x < px(100.5), "{c:?}");
+        assert!(trail.step(cell(10.), at(200)).is_none(), "and it is gone after DURATION");
+    }
 
     #[test]
     fn an_image_covers_its_cells_less_the_offset_into_the_first() {

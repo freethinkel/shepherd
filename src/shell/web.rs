@@ -27,12 +27,12 @@ pub(super) enum PageEvent {
 }
 
 pub(super) struct Page {
-    view: Rc<wry::WebView>,
+    pub(super) view: Rc<wry::WebView>,
     /// Told apart from an earlier page under its key, whose events may still be on their way.
     serial: u64,
     /// The normalized URL of the entry it was made for, so an edited URL makes a new page.
     entry_url: String,
-    title: Option<String>,
+    pub(super) title: Option<String>,
     /// Whether it was last made visible, so it isn't told every frame.
     visible: bool,
     /// Whether it was last given the keyboard.
@@ -65,12 +65,12 @@ pub(super) enum Favicon {
 pub(super) struct Pages {
     /// The entry shown in place of the tabs and panes; `None` shows the tabs and panes.
     pub(super) shown: Option<String>,
-    live: HashMap<PageKey, Page>,
+    pub(super) live: HashMap<PageKey, Page>,
     /// Pages opened on a machine still waiting for their forward, or whose forward failed.
     forwards: HashMap<PageKey, (String, Forward)>,
     /// Each page's favicon (a machine's page has its own) and the URL it was fetched for; in memory only, so fetched
     /// again each launch.
-    favicons: HashMap<PageKey, (String, Favicon)>,
+    pub(super) favicons: HashMap<PageKey, (String, Favicon)>,
     /// Where pages keep their cookies and storage between launches; macOS keeps WKWebView's default store.
     #[cfg(not(target_os = "macos"))]
     context: Option<wry::WebContext>,
@@ -126,7 +126,7 @@ impl Shell {
     }
 
     /// Fetches page `key`'s favicon from `from` (its URL, or its forward's), kept as the icon of its URL `url`.
-    fn fetch_favicon(&mut self, key: PageKey, url: String, from: String, cx: &mut Context<Self>) {
+    pub(super) fn fetch_favicon(&mut self, key: PageKey, url: String, from: String, cx: &mut Context<Self>) {
         self.pages.favicons.insert(key.clone(), (url.clone(), Favicon::Loading));
         let icon = cx.background_spawn(async move { crate::web::fetch_favicon(&from) });
         cx.spawn(async move |this, cx| {
@@ -147,7 +147,7 @@ impl Shell {
     /// The entry shown, with its page's key, while it is listed for the place shown.
     pub(super) fn shown_page(&self, cx: &App) -> Option<(PageKey, WebEntry)> {
         let id = self.pages.shown.as_ref()?;
-        let entry = self.listed_entries(cx).into_iter().find(|e| &e.id == id)?;
+        let entry = self.listed_entries(cx).into_iter().chain(self.browser.entries()).find(|e| &e.id == id)?;
         Some((self.page_key(&entry), entry))
     }
 
@@ -173,6 +173,7 @@ impl Shell {
             self.agents_menu.is_some(),
             self.ws_menu.is_some(),
             self.web_menu.is_some(),
+            self.new_tab_menu.is_some(),
             self.pane_menu.is_some(),
             self.spent_menu.is_some(),
             self.usage_menu.is_some(),
@@ -199,7 +200,8 @@ impl Shell {
     /// The entry clicked in the sidebar: its page shown (made on first show); on Wayland, where a web view can't sit in
     /// Shepherd's window, its URL in the browser.
     pub(super) fn show_web(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = SettingsGlobal::of(cx).settings.web_entries.iter().find(|e| e.id == id).cloned() else { return };
+        let entries = SettingsGlobal::of(cx).settings.web_entries.iter().cloned().chain(self.browser.entries());
+        let Some(entry) = entries.into_iter().find(|e| e.id == id) else { return };
         let url = normalize(&entry.url);
         use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         if matches!(HasWindowHandle::window_handle(window).map(|h| h.as_raw()), Ok(RawWindowHandle::Wayland(_))) {
@@ -310,6 +312,7 @@ impl Shell {
     /// forward's for a page on a machine, and the site its links are measured against.
     fn make_page(&mut self, key: PageKey, entry_url: &str, url: &str, window: &Window, cx: &mut Context<Self>) -> wry::Result<Page> {
         let events = self.page_events(window, cx);
+        let browser = browser::is_tab(&key.0);
         self.pages.made += 1;
         let serial = self.pages.made;
         let send = move |event: PageEvent| {
@@ -319,8 +322,9 @@ impl Shell {
         #[cfg(target_os = "macos")]
         let key_event = send;
         // a link to another site goes to the browser when the setting says so; anything else stays in the page
+        // a browser tab is the browser: its links stay in it
         let (site, flag) = (url.to_string(), self.pages.links_outside.clone());
-        let follows_outside: Rc<dyn Fn(&str) -> bool> = Rc::new(move |to| flag.get() && off_site(&site, to));
+        let follows_outside: Rc<dyn Fn(&str) -> bool> = Rc::new(move |to| !browser && flag.get() && off_site(&site, to));
         let opens_outside = follows_outside.clone();
         #[cfg(not(target_os = "macos"))]
         let context = self.pages.context.get_or_insert_with(|| wry::WebContext::new(Some(crate::settings::cache_dir().join("web"))));
@@ -444,6 +448,9 @@ impl Shell {
                 }
             }
         }
+        if browser::is_tab(&key.0) {
+            self.browser_loaded(&key, window, cx);
+        }
         cx.notify();
     }
 
@@ -474,7 +481,9 @@ impl Shell {
             }
         }
         self.fetch_favicons(cx);
-        let entries = SettingsGlobal::of(cx).settings.web_entries.clone();
+        self.sync_browser(window, cx);
+        let mut entries = SettingsGlobal::of(cx).settings.web_entries.clone();
+        entries.extend(self.browser.entries());
         // a page on a machine also goes when its entry no longer opens there
         let still_opened = |id: &String, machine: &Option<String>| {
             machine.is_none() || entries.iter().any(|e| &e.id == id && e.open_from == OpenFrom::Machine)
@@ -502,7 +511,8 @@ impl Shell {
         {
             self.show_web(key.0.clone(), window, cx);
         }
-        let popup = self.popup_open();
+        // the address field being typed in keeps the keyboard too
+        let popup = self.popup_open() || self.browser.editing();
         for (key, page) in &mut self.pages.live {
             let visible = shown.as_ref() == Some(key) && !covered;
             if page.visible != visible {
@@ -627,29 +637,6 @@ impl Shell {
         let view = page.map(|p| p.view.clone());
         let can = |f: fn(&wry::WebView) -> wry::Result<bool>| view.as_deref().is_some_and(|v| f(v).unwrap_or(false));
         let title = page.and_then(|p| p.title.clone()).unwrap_or_else(|| label(entry, None));
-        let hover = theme.hover;
-        let button = |id: &'static str, icon: &'static str, enabled: bool, act: fn(&wry::WebView) -> wry::Result<()>| {
-            let view = view.clone();
-            div()
-                .id(id)
-                .size(px(TAB_H))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(8.))
-                .block_mouse_except_scroll()
-                .when(cfg!(windows), |el| el.occlude()) // off the drag strip, as the tabs
-                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                .child(gpui::svg().path(icon).size(px(16.)).text_color(if enabled { theme.text_muted } else { theme.text_faint }))
-                .when(enabled, |el| {
-                    el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, _| {
-                        if let Some(view) = &view {
-                            let _ = act(view);
-                        }
-                    })
-                })
-        };
         div()
             .h(px(TITLEBAR_HEIGHT))
             .flex_none()
@@ -659,9 +646,9 @@ impl Shell {
             .gap(px(2.))
             .pr(px(TAB_TOP + if self.review_open { 0. } else { window_controls_w(cx) }))
             .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
-            .child(button("web-back", "icons/solar/alt-arrow-left.svg", can(wry::WebView::can_go_back), wry::WebView::go_back))
-            .child(button("web-forward", "icons/solar/alt-arrow-right.svg", can(wry::WebView::can_go_forward), wry::WebView::go_forward))
-            .child(button("web-reload", "icons/solar/restart.svg", view.is_some(), wry::WebView::reload))
+            .child(nav_button(theme, view.clone(), "web-back", "icons/solar/alt-arrow-left.svg", can(wry::WebView::can_go_back), wry::WebView::go_back))
+            .child(nav_button(theme, view.clone(), "web-forward", "icons/solar/alt-arrow-right.svg", can(wry::WebView::can_go_forward), wry::WebView::go_forward))
+            .child(nav_button(theme, view.clone(), "web-reload", "icons/solar/restart.svg", view.is_some(), wry::WebView::reload))
             .child(div().ml(px(6.)).flex_1().min_w_0().truncate().text_color(theme.text_muted).child(title))
     }
 
@@ -787,6 +774,37 @@ impl Shell {
                 .child(div().mt(px(8.)).mx(px(8.)).h(px(1.)).bg(theme.border)),
         )
     }
+}
+
+/// A page's back, forward or reload button, doing `act` to its web view while `enabled`.
+pub(super) fn nav_button(
+    theme: &Theme,
+    view: Option<Rc<wry::WebView>>,
+    id: &'static str,
+    icon: &'static str,
+    enabled: bool,
+    act: fn(&wry::WebView) -> wry::Result<()>,
+) -> Stateful<Div> {
+    let hover = theme.hover;
+    div()
+        .id(id)
+        .size(px(TAB_H))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.))
+        .block_mouse_except_scroll()
+        .when(cfg!(windows), |el| el.occlude()) // off the drag strip, as the tabs
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .child(gpui::svg().path(icon).size(px(16.)).text_color(if enabled { theme.text_muted } else { theme.text_faint }))
+        .when(enabled, |el| {
+            el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, _| {
+                if let Some(view) = &view {
+                    let _ = act(view);
+                }
+            })
+        })
 }
 
 /// macOS: a page's own view, holding its WKWebView and, docked, WebKit's inspector (which docks into the web view's

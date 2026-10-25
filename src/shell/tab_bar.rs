@@ -12,6 +12,8 @@ const EXIT: Duration = Duration::from_millis(150);
 const SLIDE: Duration = Duration::from_millis(110);
 /// A dropped tab's flight home.
 const LAND: Duration = Duration::from_millis(220);
+/// How long a dropped order is shown, at most, before herdr's own catches up.
+const PENDING: Duration = Duration::from_millis(1500);
 
 pub(super) const TAB_H: f32 = 28.;
 /// The tabs' top inside the bar.
@@ -41,6 +43,12 @@ pub(super) struct TabBar {
     drag: Rc<RefCell<Option<(String, gpui::Point<Pixels>)>>>,
     /// The tab last scrolled into view; the bar follows a newly shown tab once, then leaves the scroll to you.
     revealed: Option<String>,
+    /// The tab held in a drag and the slot its gap holds among the others, as the place bar's buttons do.
+    pub held: Option<(String, usize)>,
+    /// The order a drop asked for, shown until herdr's is it.
+    pending: Option<(Vec<String>, Instant)>,
+    /// The tabs' order as last drawn, so a change of it slides them.
+    order: Vec<String>,
 }
 
 /// One tab as drawn.
@@ -56,6 +64,9 @@ struct Shown {
     zoomed: bool,
     /// The full width: label measured, clamped.
     width: f32,
+    /// A browser tab: Shepherd's own page, not herdr's; no status, its site's icon once fetched.
+    browser: bool,
+    image: Option<std::sync::Arc<gpui::Image>>,
 }
 
 #[derive(Clone)]
@@ -255,26 +266,113 @@ impl TabBar {
         }
     }
 
-    /// Each entry's slot x, full width and presence, laid out left to right; records where each is drawn
-    /// (its slot, or on its way there).
-    fn layout(&mut self, now: Instant) -> Vec<(f32, f32, f32)> {
+    /// Each entry's slot x (where the row lays it out), full width and presence, and records where each is drawn:
+    /// in the order shown, which is the list's, or with the tab `held` (its id, and its middle's x) in the slot its
+    /// middle has reached, the others closing up around its gap, or a dropped order until the list's is it; a tab
+    /// whose place in that order changed slides there. True when the held tab took another slot.
+    fn layout(&mut self, now: Instant, held: Option<(&str, f32)>) -> (Vec<(f32, f32, f32)>, bool) {
+        let ks: Vec<f32> = self.entries.iter().map(|e| e.presence(now)).collect();
+        let step = |i: usize| (self.entries[i].tab.width + GAP) * ks[i];
+        let live: Vec<usize> = (0..self.entries.len()).filter(|i| self.entries[*i].exit.is_none()).collect();
+        let ids = |order: &[usize]| order.iter().map(|i| self.entries[*i].tab.id.clone()).collect::<Vec<_>>();
+        let list = ids(&live);
+        let mut slid = false;
+        let shown: Vec<usize> = match held.and_then(|(id, mid)| Some((live.iter().position(|i| self.entries[*i].tab.id == id)?, mid))) {
+            Some((from, mid)) => {
+                let mut others = live.clone();
+                let h = others.remove(from);
+                let id = self.entries[h].tab.id.clone();
+                // the others as drawn around its gap: one after the gap goes before it once the held tab's right edge
+                // passes that one's middle, one before goes after once its left edge does
+                let gap = self.held.as_ref().filter(|(was, _)| *was == id).map_or(from, |(_, at)| *at);
+                let half = self.entries[h].tab.width / 2.;
+                let (mut x, mut slot) = (0., 0);
+                for (n, i) in others.iter().enumerate() {
+                    if n == gap {
+                        x += step(h);
+                    }
+                    let middle = x + self.entries[*i].tab.width / 2.;
+                    slot += usize::from(if n < gap { mid - half >= middle } else { mid + half > middle });
+                    x += step(*i);
+                }
+                slid = self.held.as_ref().is_some_and(|(was, at)| *was == id && *at != slot);
+                self.held = Some((id, slot));
+                others.insert(slot, h);
+                others
+            }
+            None => {
+                self.held = None;
+                let asked = self.pending.as_ref().filter(|(order, at)| {
+                    let (mut a, mut b) = (order.clone(), list.clone());
+                    a.sort();
+                    b.sort();
+                    a == b && *order != list && now.saturating_duration_since(*at) < PENDING
+                });
+                match asked {
+                    Some((order, _)) => order.iter().filter_map(|id| live.iter().copied().find(|i| self.entries[*i].tab.id == *id)).collect(),
+                    None => {
+                        self.pending = None;
+                        live.clone()
+                    }
+                }
+            }
+        };
+        // closing tabs keep their places in the row
+        let mut order = shown.clone();
+        for i in (0..self.entries.len()).filter(|i| self.entries[*i].exit.is_some()) {
+            order.insert(i.min(order.len()), i);
+        }
+        let mut targets = vec![0.; self.entries.len()];
         let mut x = 0.;
-        self.entries
+        for i in order {
+            targets[i] = x;
+            x += step(i);
+        }
+        let now_order = ids(&shown);
+        let prev = std::mem::replace(&mut self.order, now_order.clone());
+        let kept = |a: &[String], b: &[String]| a.iter().filter(|id| b.contains(id)).cloned().collect::<Vec<_>>();
+        if kept(&prev, &now_order) != kept(&now_order, &prev) {
+            for i in &shown {
+                let e = &mut self.entries[*i];
+                // a move started this frame (a drop's flight, herdr's reorder) already heads for the new slot
+                if prev.contains(&e.tab.id) && e.moved.is_none_or(|m| m.started != now) {
+                    e.moved = Some(Move { from: e.drawn, started: now, duration: SLIDE, lifted: false });
+                }
+            }
+        }
+        let mut natural = 0.;
+        let layout = self
+            .entries
             .iter_mut()
-            .map(|e| {
-                let k = e.presence(now);
-                let at = x;
-                x += (e.tab.width + GAP) * k;
+            .enumerate()
+            .map(|(i, e)| {
+                let (at, to) = (natural, targets[i]);
+                natural += (e.tab.width + GAP) * ks[i];
                 e.drawn = match e.moved {
                     Some(m) => {
                         let t = ease_out(progress(m.started, m.duration, now));
-                        (m.from.0 + (at - m.from.0) * t, m.from.1 * (1. - t))
+                        (m.from.0 + (to - m.from.0) * t, m.from.1 * (1. - t))
                     }
-                    None => (at, 0.),
+                    None => (to, 0.),
                 };
-                (at, e.tab.width, k)
+                (at, e.tab.width, ks[i])
             })
-            .collect()
+            .collect();
+        (layout, slid)
+    }
+
+    /// A drop let go of with the held tab in its slot: that order is shown until herdr's is it. The move it asks
+    /// for, `(from, to)` among the tabs not closing.
+    fn drop_held(&mut self, now: Instant) -> Option<(usize, usize)> {
+        let (id, slot) = self.held.clone()?;
+        let mut order: Vec<String> = self.entries.iter().filter(|e| e.exit.is_none()).map(|e| e.tab.id.clone()).collect();
+        let from = order.iter().position(|t| *t == id)?;
+        let tab = order.remove(from);
+        order.insert(slot.min(order.len()), tab);
+        (from != slot).then(|| {
+            self.pending = Some((order, now));
+            (from, slot)
+        })
     }
 
     /// Where the active wash is drawn this frame (x, width): sliding from where it was toward `selected`.
@@ -307,7 +405,10 @@ impl TabBar {
 
 /// The favicon: the mark on a filled tile of its color, the same size for every kind.
 fn favicon(t: &Shown) -> Div {
-    tile(t.icon, t.tint)
+    match &t.image {
+        Some(image) => div().size(px(ICON)).flex_none().flex().items_center().justify_center().child(gpui::img(image.clone()).size(px(16.)).rounded(px(3.))),
+        None => tile(t.icon, t.tint),
+    }
 }
 
 /// A tab's favicon for `agent`, for lists of agents elsewhere.
@@ -347,15 +448,15 @@ fn face(theme: &Theme, t: &Shown, width: f32, selected: bool) -> Div {
         .child(favicon(t))
 }
 
-fn dot_slot(theme: &Theme, status: AgentStatus) -> Div {
-    div().size(px(SLOT)).flex_none().flex().items_center().justify_center().child(status_dot(status, theme))
+/// The trailing slot: the agent's status dot; a browser tab's stays empty.
+fn dot_slot(theme: &Theme, t: &Shown) -> Div {
+    div().size(px(SLOT)).flex_none().flex().items_center().justify_center().when(!t.browser, |el| el.child(status_dot(t.status, theme)))
 }
 
 /// A tab being dragged along the tab bar: its own face under the pointer, lifted on a card.
 #[derive(Clone)]
 pub(super) struct DraggedTab {
     tab: Shown,
-    index: usize,
     theme: Theme,
     /// Where the pointer grabbed the tab, from its top-left.
     grab: gpui::Point<Pixels>,
@@ -374,11 +475,21 @@ impl Render for DraggedTab {
             .shadow_lg()
             .child(div().flex_1().min_w_0().truncate().child(self.tab.label.clone()))
             .when(self.tab.zoomed, |el| el.child(zoom_mark(theme)))
-            .child(dot_slot(theme, self.tab.status))
+            .child(dot_slot(theme, &self.tab))
     }
 }
 
 impl Shell {
+    /// The held tab let go of over the bar: it lands in the slot its gap holds, browser tabs and herdr's alike.
+    fn tab_dropped(&mut self, cx: &mut Context<Self>) {
+        // the tabs a drop reorders: (id, browser tab or not), closing ones left out
+        let order: Vec<(String, bool)> = self.tab_bar.entries.iter().filter(|e| e.exit.is_none()).map(|e| (e.tab.id.clone(), e.tab.browser)).collect();
+        if let Some((from, to)) = self.tab_bar.drop_held(Instant::now()) {
+            self.drop_tab(&order, from, to, cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn render_tab_bar(
         &mut self,
         theme: &Theme,
@@ -390,21 +501,16 @@ impl Shell {
     ) -> Div {
         let now = Instant::now();
         let font = gpui::font(theme.font_ui.clone());
-        let tabs: Vec<Shown> = match (&self.snapshot, &shown_ws) {
+        let measure = |label: &str| {
+            let run = gpui::TextRun { len: label.len(), font: font.clone(), color: theme.text, background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(label.to_string().into(), px(FONT_SIZE), &[run], None).width)
+        };
+        let herdr: Vec<Shown> = match (&self.snapshot, &shown_ws) {
             (Some(s), Some(ws)) => {
                 let agents = s.agents();
                 s.tabs_of(ws)
                     .into_iter()
                     .map(|t| {
-                        let run = gpui::TextRun {
-                            len: t.label.len(),
-                            font: font.clone(),
-                            color: theme.text,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        };
-                        let label_w = window.text_system().shape_line(t.label.clone().into(), px(FONT_SIZE), &[run], None).width;
                         let agent = agents.iter().find(|p| p.tab_id == t.tab_id).and_then(|p| p.agent.as_deref());
                         let zoomed = s.layouts.iter().any(|l| l.tab_id == t.tab_id && l.zoomed);
                         Shown {
@@ -414,13 +520,35 @@ impl Shell {
                             icon: agent_icon(agent),
                             tint: agent_tint(agent, theme),
                             zoomed,
-                            width: tab_width(f32::from(label_w), zoomed),
+                            width: tab_width(measure(&t.label), zoomed),
+                            browser: false,
+                            image: None,
                         }
                     })
                     .collect()
             }
             _ => Vec::new(),
         };
+        // the browser tabs among them, each after the herdr tab it follows
+        let browser: Vec<(Shown, Option<String>)> = shown_ws
+            .as_deref()
+            .map(|ws| self.browser_tabs_of(ws))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(id, label, image, after)| {
+                let width = tab_width(measure(&label), false);
+                (Shown { id, label, status: AgentStatus::Idle, icon: "icons/solar/global.svg", tint: (theme.surface.opacity(0.), theme.text_muted), zoomed: false, width, browser: true, image }, after)
+            })
+            .collect();
+        let herdr_ids: Vec<&str> = herdr.iter().map(|t| t.id.as_str()).collect();
+        let anchors: Vec<(&str, Option<&str>)> = browser.iter().map(|(t, after)| (t.id.as_str(), after.as_deref())).collect();
+        let tabs: Vec<Shown> = super::browser::interleave(&herdr_ids, &anchors)
+            .into_iter()
+            .filter_map(|(id, b)| match b {
+                true => browser.iter().map(|(t, _)| t).find(|t| t.id == id).cloned(),
+                false => herdr.iter().find(|t| t.id == id).cloned(),
+            })
+            .collect();
         self.tab_bar.sync(shown_ws.as_deref(), tabs, now);
 
         // The drag ended (dropped on a tab or anywhere): the tab flies home from where its ghost was let go.
@@ -432,9 +560,17 @@ impl Shell {
             self.tab_bar.drag.borrow_mut().take();
             self.tab_bar.land(id, (f32::from(at.x) - bar_x, f32::from(at.y) - bar_y), now);
         }
+        // the held tab's middle, where its ghost is, in the row
+        let held = dragged.as_ref().filter(|_| dragging).and_then(|(id, at)| {
+            let width = self.tab_bar.entries.iter().find(|e| e.tab.id == *id)?.tab.width;
+            Some((id.clone(), f32::from(at.x) - bar_x + width / 2.))
+        });
         let lifted_id = dragged.filter(|_| dragging).map(|(id, _)| id);
 
-        let layout = self.tab_bar.layout(now);
+        let (layout, slid) = self.tab_bar.layout(now, held.as_ref().map(|(id, mid)| (id.as_str(), *mid)));
+        if slid {
+            haptic();
+        }
         let wash = self.tab_bar.wash(shown_tab.as_deref(), lifted_id.as_deref(), &layout, now);
         // A newly shown tab scrolls into view, followed while it grows in (gpui clamps the offset to the content).
         if let Some(i) = self.tab_bar.entries.iter().position(|e| Some(&e.tab.id) == shown_tab.as_ref() && e.exit.is_none()) {
@@ -443,7 +579,7 @@ impl Shell {
                 let scroll = &self.tab_bar.scroll;
                 let view = f32::from(scroll.bounds().size.width);
                 if view > 0. {
-                    if let Some(to) = reveal(-f32::from(scroll.offset().x), view, layout[i].0, entry.tab.width) {
+                    if let Some(to) = reveal(-f32::from(scroll.offset().x), view, entry.drawn.0, entry.tab.width) {
                         scroll.set_offset(gpui::point(px(-to), scroll.offset().y));
                     }
                     self.tab_bar.revealed = shown_tab.clone();
@@ -454,7 +590,6 @@ impl Shell {
             window.request_animation_frame();
         }
 
-        let mut index = 0;
         let mut items = Vec::new();
         let mut flying = Vec::new();
         for (entry, (slot_x, full_w, k)) in self.tab_bar.entries.clone().into_iter().zip(layout) {
@@ -465,7 +600,9 @@ impl Shell {
             let draggable = editing.is_none();
             let full_w = if draggable { full_w } else { MAX_W };
             // While dragged, the ghost carries the tab; while it flies home, a copy over everything does.
-            let lifted = lifted_id.as_deref() == Some(t.id.as_str()) || entry.lifted(now);
+            // held, a placeholder keeps its gap; flying home, a copy over everything carries it
+            let holding = lifted_id.as_deref() == Some(t.id.as_str());
+            let lifted = holding || entry.lifted(now);
             if entry.lifted(now) {
                 let t_land = ease_out(entry.moved.map_or(1., |m| progress(m.started, m.duration, now)));
                 let at = gpui::point(px(bar_x + entry.drawn.0), px(bar_y + entry.drawn.1));
@@ -479,7 +616,7 @@ impl Shell {
                                 .border_color(theme.border.opacity(1. - t_land))
                                 .child(div().flex_1().min_w_0().truncate().child(t.label.clone()))
                                 .when(t.zoomed, |el| el.child(zoom_mark(theme)))
-                                .child(dot_slot(theme, t.status)),
+                                .child(dot_slot(theme, &t)),
                         ),
                     )
                     .with_priority(1)
@@ -503,7 +640,7 @@ impl Shell {
                         .relative()
                         .rounded(px(6.))
                         .hover(|s| s.bg(theme.hover))
-                        .child(dot_slot(theme, t.status).absolute().inset_0().group_hover(group.clone(), |s| s.opacity(0.)))
+                        .child(dot_slot(theme, &t).absolute().inset_0().group_hover(group.clone(), |s| s.opacity(0.)))
                         .child(
                             div()
                                 .absolute()
@@ -516,7 +653,7 @@ impl Shell {
                                 .child(gpui::svg().path("icons/close.svg").size(px(12.)).text_color(theme.text_muted)),
                         )
                         .when(!closing, |el| {
-                            let id = t.id.clone();
+                            let (id, browser) = (t.id.clone(), t.browser);
                             // the tab owns a drag: claim the press so it closes instead of starting one
                             el.on_mouse_down(MouseButton::Left, |_, window, cx| {
                                 window.prevent_default();
@@ -524,7 +661,7 @@ impl Shell {
                             })
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 cx.stop_propagation();
-                                this.send(Command::CloseTab { tab_id: id.clone() }, cx, |_, _, _| {});
+                                this.close_tab(&id, browser, cx);
                             }))
                         }),
                 );
@@ -538,44 +675,42 @@ impl Shell {
                 .w(px(full_w * k))
                 .mr(px(GAP * k))
                 .overflow_hidden()
-                .opacity(if lifted { 0. } else { k })
+                .opacity(if lifted && !holding { 0. } else { k })
+                .when(holding, |el| el.border_1().border_color(theme.border).bg(theme.wash(0.04)))
                 .rounded(px(8.))
                 .cursor_pointer()
                 // off the titlebar's drag strip: a press here drags the tab, not the window; the wheel still scrolls the bar
                 .block_mouse_except_scroll()
                 .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                 .when(!selected && !closing, |el| el.hover(|s| s.bg(theme.hover)))
-                .child(content);
+                .child(content.when(holding, |el| el.opacity(0.)));
             if closing {
                 items.push(tab.into_any_element());
                 continue;
             }
-            let i = index;
-            index += 1;
             let id = t.id.clone();
             let dragged = draggable.then(|| DraggedTab {
                 tab: t.clone(),
-                index: i,
                 theme: theme.clone(),
                 grab: gpui::Point::default(),
                 drag: self.tab_bar.drag.clone(),
             });
             let drop_bg = theme.accent.opacity(0.15);
-            let label = t.label.clone();
+            let (label, browser) = (t.label.clone(), t.browser);
             items.push(
-                tab.on_mouse_down(MouseButton::Right, cx.listener({
-                    let id = id.clone();
-                    move |this, e: &MouseDownEvent, _, cx| {
-                        this.tab_menu = Some(crate::ui::Popup::new((id.clone(), e.position)));
-                        cx.notify();
-                    }
-                }))
+                tab.when(!browser, |el| {
+                    el.on_mouse_down(MouseButton::Right, cx.listener({
+                        let id = id.clone();
+                        move |this, e: &MouseDownEvent, _, cx| {
+                            this.tab_menu = Some(crate::ui::Popup::new((id.clone(), e.position)));
+                            cx.notify();
+                        }
+                    }))
+                })
                 // Middle-click closes, like every tab strip (Zeron §1.10).
                 .on_mouse_down(MouseButton::Middle, cx.listener({
                     let id = id.clone();
-                    move |this, _: &MouseDownEvent, _, cx| {
-                        this.send(Command::CloseTab { tab_id: id.clone() }, cx, |_, _, _| {});
-                    }
+                    move |this, _: &MouseDownEvent, _, cx| this.close_tab(&id, browser, cx)
                 }))
                 .when_some(dragged, |el, dragged| {
                     el.on_drag(dragged, |d, grab, _, cx| {
@@ -583,17 +718,13 @@ impl Shell {
                         cx.new(|_| d)
                     })
                 })
-                .map(|el| pane_drag::accept_pane(el, &id, drop_bg, cx))
-                .drag_over::<DraggedTab>(move |s, d, _, _| if d.index == i { s } else { s.bg(drop_bg) })
-                // Dropped on a tab, the dragged one takes its place: herdr's slot is after it when moving right.
-                .on_drop(cx.listener(move |this, d: &DraggedTab, _, cx| {
-                    if d.index != i {
-                        let insert_index = if d.index < i { i + 1 } else { i };
-                        this.send(Command::MoveTab { tab_id: d.tab.id.clone(), insert_index }, cx, |_, _, _| {});
-                    }
-                    cx.notify();
-                }))
+                .when(!browser, |el| pane_drag::accept_pane(el, &id, drop_bg, cx))
+                // a tab's hitbox hides the bar's from the drop: each takes it too
+                .on_drop(cx.listener(|this, _: &DraggedTab, _, cx| this.tab_dropped(cx)))
                 .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                    if browser {
+                        return this.show_web(id.clone(), window, cx);
+                    }
                     if e.click_count() == 2 {
                         this.start_rename(RenameTarget::Tab(id.clone()), label.clone(), window, cx);
                         return;
@@ -638,6 +769,10 @@ impl Shell {
                             .items_center()
                             .overflow_x_scroll()
                             .track_scroll(scroll)
+                            // the held tab's gap follows the pointer; let go of, it lands in that slot, browser tabs
+                            // and herdr's alike
+                            .on_drag_move::<DraggedTab>(cx.listener(|_, _, _, cx| cx.notify()))
+                            .on_drop(cx.listener(|this, _: &DraggedTab, _, cx| this.tab_dropped(cx)))
                             // re-render so the edge fades follow the scroll position
                             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
                             // the active wash, drawn under the tabs, slides between them
@@ -672,6 +807,7 @@ impl Shell {
             .children(flying)
             // `+` stays in view; only the tabs scroll
             .when_some(shown_ws, |el, ws| {
+                let menu_ws = ws.clone();
                 el.child(
                     icon_button(theme, "new-tab", "+")
                         .tooltip(tip("New tab", Some("NewTab")))
@@ -683,6 +819,26 @@ impl Shell {
                         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.new_tab(ws.clone(), cx))),
                 )
+                // the chevron: a terminal or a browser tab
+                .child(
+                    icon_button(theme, "new-tab-more", "")
+                        .tooltip(tip("New…", None))
+                        .w(px(16.))
+                        .h(px(TAB_H))
+                        .ml(px(-2.))
+                        .rounded(px(6.))
+                        .when(self.new_tab_menu.is_some(), |el| el.bg(theme.hover))
+                        .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(12.)).text_color(theme.text_muted))
+                        .block_mouse_except_scroll()
+                        .when(cfg!(windows), |el| el.occlude())
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                        .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                            // under the chevron, the menu's right edge at it
+                            let at = gpui::point(e.position().x + px(8.), px(TITLEBAR_HEIGHT - 2.));
+                            this.new_tab_menu = Some(crate::ui::Popup::new((menu_ws.clone(), at)));
+                            cx.notify();
+                        })),
+                )
             })
     }
 }
@@ -692,7 +848,7 @@ mod tests {
     use super::*;
 
     fn tab(id: &str) -> Shown {
-        Shown { id: id.into(), label: id.into(), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), zoomed: false, width: 100. }
+        Shown { id: id.into(), label: id.into(), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), zoomed: false, width: 100., browser: false, image: None }
     }
 
     #[test]
@@ -732,7 +888,7 @@ mod tests {
         bar.sync(Some("w"), vec![tab("a"), tab("b")], t0);
         bar.sync(Some("w"), vec![tab("b")], t0);
         assert_eq!(bar.entries.len(), 2);
-        assert_eq!(bar.layout(t0)[1].0, 102.); // `a` still holds its slot as it starts to close
+        assert_eq!(bar.layout(t0, None).0[1].0, 102.); // `a` still holds its slot as it starts to close
         bar.sync(Some("w"), vec![tab("b")], t0 + EXIT);
         assert_eq!(bar.entries.len(), 1);
         // another workspace swaps the tabs without motion
@@ -745,19 +901,49 @@ mod tests {
         let t0 = Instant::now();
         let mut bar = TabBar::default();
         bar.sync(Some("w"), vec![tab("a"), tab("b")], t0);
-        bar.layout(t0);
+        bar.layout(t0, None);
         bar.sync(Some("w"), vec![tab("b"), tab("a")], t0);
-        bar.layout(t0);
+        bar.layout(t0, None);
         // `a` starts where it was drawn and ends in its new slot
         assert_eq!(bar.entries[1].drawn, (0., 0.));
-        bar.layout(t0 + SLIDE);
+        bar.layout(t0 + SLIDE, None);
         assert_eq!(bar.entries[1].drawn, (102., 0.));
         // dropped 40 px below the bar, `b` flies home from there
         bar.land("b", (300., 40.), t0);
-        bar.layout(t0);
+        bar.layout(t0, None);
         assert_eq!(bar.entries[0].drawn, (300., 40.));
         assert!(bar.entries[0].lifted(t0));
-        bar.layout(t0 + LAND);
+        bar.layout(t0 + LAND, None);
         assert_eq!(bar.entries[0].drawn, (0., 0.));
+    }
+
+    #[test]
+    fn a_held_tab_takes_the_slot_its_middle_reaches_and_lands_there() {
+        let t0 = Instant::now();
+        let mut bar = TabBar::default();
+        bar.sync(Some("w"), vec![tab("a"), tab("b"), tab("c")], t0);
+        bar.layout(t0, None);
+        // `a` (middle 50) dragged right: its right edge (150) short of b's middle (152), it keeps its slot; past it,
+        // it takes b's
+        let (_, slid) = bar.layout(t0, Some(("a", 100.)));
+        assert_eq!(bar.held, Some(("a".into(), 0)));
+        assert!(!slid);
+        let (_, slid) = bar.layout(t0, Some(("a", 110.)));
+        assert_eq!(bar.held, Some(("a".into(), 1)));
+        assert!(slid);
+        // held there, it stays: its left edge (60) is past b's middle (50) now b has closed up
+        let (_, slid) = bar.layout(t0, Some(("a", 110.)));
+        assert!(!slid);
+        // b springs into a's place
+        bar.layout(t0 + SLIDE, Some(("a", 110.)));
+        assert_eq!((bar.entries[0].drawn.0, bar.entries[1].drawn.0), (102., 0.));
+        // let go: the move asked for, and that order kept until herdr's is it
+        assert_eq!(bar.drop_held(t0 + SLIDE), Some((0, 1)));
+        bar.layout(t0 + SLIDE * 2, None);
+        assert_eq!((bar.entries[0].drawn.0, bar.entries[1].drawn.0), (102., 0.));
+        bar.sync(Some("w"), vec![tab("b"), tab("a"), tab("c")], t0 + SLIDE * 2);
+        bar.layout(t0 + SLIDE * 3, None);
+        assert_eq!((bar.entries[0].drawn.0, bar.entries[1].drawn.0), (0., 102.));
+        assert!(bar.pending.is_none());
     }
 }

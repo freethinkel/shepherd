@@ -39,10 +39,10 @@ toml_edit = "0.25"
 emojis = "0.9.0"
 unicode-width = "0.2"
 
-# The Dock, notifications' authorization and Secure Keyboard Entry.
+# The Dock, notifications' authorization, Secure Keyboard Entry and the trackpad's haptics.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSDockTile", "NSEvent", "NSGraphics", "NSImage", "NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSDockTile", "NSEvent", "NSGraphics", "NSHapticFeedback", "NSImage", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSGeometry", "NSString"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter"] }
 block2 = "0.6"
@@ -91,26 +91,26 @@ mesa-vulkan-drivers = "*"
 [profile.dev.package."*"]
 opt-level = 2
 
-# freethinkel/zui@continuous-corners: three Metal drawables (with zui's two, a live window resize blocks in
-# next_drawable and stutters as it starts) and Apple's continuous corners. Every zui crate is patched, so gpui-base
-# and Shepherd share one gpui.
+# freethinkel/zui@notification-reply (on continuous-corners): three Metal drawables (with zui's two, a live window
+# resize blocks in next_drawable and stutters as it starts), Apple's continuous corners, and notification actions that
+# take text (Reply). Every zui crate is patched, so gpui-base and Shepherd share one gpui.
 [patch."https://github.com/zeronsh/zui"]
-collections = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-derive_refineable = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-gpui = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-gpui_linux = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-gpui_macos = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-gpui_macros = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-gpui_platform = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-gpui_shared_string = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-gpui_util = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-gpui_web = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-gpui_wgpu = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-gpui_windows = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-http_client = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-media = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-perf = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-refineable = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-scheduler = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-sum_tree = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
-util_macros = { git = "https://github.com/freethinkel/zui", rev = "531d7e7deeaa25c771e15acc7736a842faa37100" }
+collections = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+derive_refineable = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+gpui = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+gpui_linux = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+gpui_macos = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+gpui_macros = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+gpui_platform = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+gpui_shared_string = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+gpui_util = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+gpui_web = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+gpui_wgpu = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+gpui_windows = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+http_client = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+media = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+perf = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+refineable = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+scheduler = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+sum_tree = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }
+util_macros = { git = "https://github.com/freethinkel/zui", rev = "c71f94761676d1a5bda55dd42c1dad7ea0c3441d" }

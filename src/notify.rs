@@ -36,16 +36,45 @@ pub fn tag_pane(tag: &str) -> &str {
 /// The id of a waiting agent's Approve button.
 pub const APPROVE: &str = "approve";
 
-/// Posts a notification tagged with the pane, so a click can bring that pane up; `approve` adds a button that
+/// The id of a finished agent's Reply field.
+pub const REPLY: &str = "reply";
+
+/// What a notification lets you answer without opening Shepherd.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Answer {
+    /// A waiting agent takes its highlighted choice.
+    Approve,
+    /// A finished agent gets your next message, typed into the notification.
+    Reply,
+}
+
+/// The answer a notification about `status` offers: Approve while the agent waits for you, Reply once it is done.
+/// Reply needs a text field on the notification, which only macOS's has.
+pub fn answer_for(status: AgentStatus) -> Option<Answer> {
+    match status {
+        AgentStatus::Blocked => Some(Answer::Approve),
+        AgentStatus::Done if cfg!(target_os = "macos") => Some(Answer::Reply),
+        _ => None,
+    }
+}
+
+/// Posts a notification tagged with the pane, so a click can bring that pane up; `answer` adds a button that
 /// answers the agent from the notification.
-pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool, approve: bool) {
+pub fn show(cx: &App, pane_id: &str, title: String, body: String, sound: bool, answer: Option<Answer>) {
     if can_notify() {
+        let action = |id: &str, label: &str, text_input: Option<&str>| SystemNotificationAction { id: id.to_string().into(), label: label.to_string().into(), text_input: text_input.map(|t| t.to_string().into()) };
         cx.show_system_notification(SystemNotification {
             // macOS replaces a delivered notification with the same tag without a banner: one tag per post
             tag: format!("{pane_id}{TAG_SEP}{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()).into(),
             title: title.into(),
             body: body.into(),
-            actions: approve.then(|| SystemNotificationAction { id: APPROVE.into(), label: "Approve".into() }).into_iter().collect(),
+            actions: answer
+                .map(|a| match a {
+                    Answer::Approve => action(APPROVE, "Approve", None),
+                    Answer::Reply => action(REPLY, "Reply", Some("Message")),
+                })
+                .into_iter()
+                .collect(),
         });
     }
     #[cfg(target_os = "macos")]
@@ -237,6 +266,13 @@ mod tests {
         std::fs::write(&sound, b"").unwrap();
         assert_eq!(theme_sound(&[a.path().into(), b.path().into()], "complete"), Some(sound));
         assert_eq!(theme_sound(&[a.path().into()], "complete"), None);
+    }
+
+    #[test]
+    fn waiting_is_approved_and_done_is_replied_to() {
+        assert_eq!(answer_for(AgentStatus::Blocked), Some(Answer::Approve));
+        assert_eq!(answer_for(AgentStatus::Done), cfg!(target_os = "macos").then_some(Answer::Reply));
+        assert_eq!(answer_for(AgentStatus::Working), None);
     }
 
     #[test]

@@ -60,6 +60,8 @@ pub enum Command {
     /// Enter in the pane, without attaching to it: a waiting agent takes its highlighted choice (Claude's and Codex's
     /// is "Yes").
     Approve { pane_id: String },
+    /// Your next message to an agent at its prompt, typed and sent with Enter, without attaching to the pane.
+    Reply { pane_id: String, text: String },
     /// A plugin's action (`plugin.action` or a bare `action`), as herdr's keybinding runs it but for the pane
     /// you are in: herdr's own focus is its TUI clients'.
     InvokePluginAction { action_id: String, pane: Option<crate::model::Pane> },
@@ -138,6 +140,7 @@ impl Command {
                 ("layout.set_split_ratio", json!({"tab_id": tab_id, "path": path, "ratio": ratio}))
             }
             Command::Approve { pane_id } => ("pane.send_input", json!({"pane_id": pane_id, "keys": ["enter"]})),
+            Command::Reply { pane_id, text } => ("pane.send_input", json!({"pane_id": pane_id, "text": text, "keys": ["enter"]})),
             Command::InvokePluginAction { action_id, pane } => {
                 let mut context = json!({"invocation_source": "keybinding"});
                 if let Some(p) = pane {
@@ -310,6 +313,10 @@ mod tests {
         assert_eq!(
             req(Command::Approve { pane_id: "w1:p1".into() }),
             ("pane.send_input", json!({"pane_id": "w1:p1", "keys": ["enter"]}))
+        );
+        assert_eq!(
+            req(Command::Reply { pane_id: "w1:p1".into(), text: "go on".into() }),
+            ("pane.send_input", json!({"pane_id": "w1:p1", "text": "go on", "keys": ["enter"]}))
         );
         assert_eq!(
             req(Command::InvokePluginAction { action_id: "persiyanov.reviewr.toggle".into(), pane: None }),

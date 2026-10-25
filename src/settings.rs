@@ -73,6 +73,8 @@ pub struct Settings {
     pub dock_badge: bool,
     /// A finished selection in a pane goes to the clipboard and clears, as in herdr.
     pub copy_on_select: bool,
+    /// A jump of the cursor leaves a short trail behind it, as Ghostty's cursor_smear shader draws.
+    pub animated_cursor: bool,
     /// macOS Secure Keyboard Entry while a Shepherd window is in front: other apps cannot read the keys typed.
     pub secure_input: bool,
     /// The window lets the desktop show through: blurred on macOS, and elsewhere as the compositor does it. On by
@@ -90,6 +92,8 @@ pub struct Settings {
     pub web_entries: Vec<WebEntry>,
     /// Links to another site open in the system browser instead of in the page.
     pub web_links_outside: bool,
+    /// Web links clicked in a terminal open in a browser tab beside it instead of in the system browser.
+    pub web_links_inside: bool,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
 }
@@ -288,6 +292,7 @@ impl Default for Settings {
             notify_sound: true,
             dock_badge: true,
             copy_on_select: true,
+            animated_cursor: true,
             secure_input: false,
             translucent_window: cfg!(target_os = "macos"),
             window_buttons: true,
@@ -295,6 +300,7 @@ impl Default for Settings {
             folded: Vec::new(),
             web_entries: Vec::new(),
             web_links_outside: false,
+            web_links_inside: false,
             window: None,
         }
     }

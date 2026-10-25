@@ -9,7 +9,7 @@ pub const PEEK_EDGE: f32 = 6.;
 /// `localhost:4317` → `http://localhost:4317`; a URL with a scheme is kept; surrounding space trimmed.
 pub fn normalize(url: &str) -> String {
     let url = url.trim();
-    if url.contains("://") { url.to_string() } else { format!("http://{url}") }
+    if url.contains("://") || url.starts_with("about:") { url.to_string() } else { format!("http://{url}") }
 }
 
 /// What an entry goes by in the sidebar and the tab bar: its name, else its page's title once loaded, else the
