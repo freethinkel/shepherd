@@ -395,6 +395,7 @@ mod tests {
 
     /// `script` as a machine runs it from [`super::super::ssh`] (`sh -c '…'` in its login shell), with `home` as
     /// `$HOME` and a stub herdr that logs its arguments and lists `listed` plugins.
+    #[cfg(unix)]
     fn run_remote(script: &str, home: &Path, listed: &str) -> String {
         let bin = home.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
