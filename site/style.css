@@ -71,6 +71,9 @@ nav .links { margin-left: auto; display: flex; align-items: center; gap: 16px; f
 /* the hero keeps its own snow-white button and quiet text link */
 .hero .btn { height: 40px; padding: 0 18px; font-size: 15.5px; background: var(--ink); color: var(--accent-ink); border-radius: 10px; }
 .hero .btn:hover { background: #d8dee9; }
+/* the phone app beside the download, the quiet one of the two */
+.hero .btn.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); }
+.hero .btn.ghost:hover { color: var(--ink); border-color: var(--faint); }
 .hero .btn[data-download-os]::before {
   content: ""; width: 16px; height: 16px; background: currentColor;
   -webkit-mask: var(--os-icon) no-repeat center / contain; mask: var(--os-icon) no-repeat center / contain;
@@ -81,14 +84,6 @@ nav .links { margin-left: auto; display: flex; align-items: center; gap: 16px; f
 .hero .text-link { font-size: 15.5px; font-weight: 500; color: var(--dim); transition: color .15s; }
 .hero .text-link:hover { color: var(--ink); }
 .hero-note { margin-top: 26px; font-size: 14px; color: var(--faint); }
-/* the other app, above the headline: the phone page's badge points back here */
-.hero-badge {
-  display: inline-flex; align-items: center; gap: 8px; margin-bottom: 22px; padding: 6px 14px;
-  border: 1px solid var(--line); border-radius: 999px; font-size: 13.5px; color: var(--dim);
-  transition: color .15s, border-color .15s;
-}
-.hero-badge:hover { color: var(--ink); border-color: var(--faint); }
-.hero-badge b { color: var(--accent); font-weight: 500; }
 
 /* ── shot ── */
 /* the capture carries its own rounded corners and shadow on a transparent ground, so it sits straight on the page */
