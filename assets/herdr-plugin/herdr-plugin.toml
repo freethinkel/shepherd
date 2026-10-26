@@ -1,0 +1,24 @@
+id = "shepherd.worktree-hooks"
+name = "Worktree hooks (Shepherd)"
+version = "1.0.0"
+min_herdr_version = "0.7.0"
+description = "Runs a project's commands when herdr makes or removes one of its worktrees. Shepherd → Settings → Worktrees writes hooks.conf in this plugin's config dir; it can be edited by hand too."
+platforms = ["macos", "linux"]
+
+# herdr's UI "new worktree" emits only workspace.focused, its CLI worktree.created and workspace.created: event.sh
+# listens to all three and runs a worktree's commands once.
+[[events]]
+on = "worktree.created"
+command = ["/bin/sh", "event.sh"]
+
+[[events]]
+on = "workspace.created"
+command = ["/bin/sh", "event.sh"]
+
+[[events]]
+on = "workspace.focused"
+command = ["/bin/sh", "event.sh"]
+
+[[events]]
+on = "worktree.removed"
+command = ["/bin/sh", "event.sh"]
