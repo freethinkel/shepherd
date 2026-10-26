@@ -165,3 +165,21 @@ do not run twice.
 - Widget choice for command lists; layout of the section.
 - Whether a manifest change needs a relink or reload in herdr.
 - Exact layout of the plugin's files in the repo.
+
+## Sessions (added 2026-10-26)
+
+The user asked for the section to be grouped by herdr session, and for projects to be added only from the repos
+open in herdr (the sidebar's).
+
+- A project belongs to one herdr session: its section is `[session/name]`. A bare `[name]` (hand-written, or from
+  before sessions) runs in every session; the section shows it under `default` and the next save writes it as
+  `[default/name]`.
+- `event.sh` knows its session from `$HERDR_SOCKET_PATH`: `<dir>/sessions/<name>/herdr.sock` is `<name>`, anything
+  else `default`. Other sessions' sections are skipped. `$PROJECT` is the name without the session.
+- Settings → Worktrees: a group per herdr session (`herdr session list`), named as the session bar names it; running
+  sessions always, stopped ones only when they have projects. "Add project" lists the session's open repos
+  (`workspace.list` on its socket: each repo's main checkout once), minus those already added; name and main
+  checkout come from the repo, only the commands are typed. A stopped session's projects can be edited, not added
+  to. Remote machines are still out of scope.
+- The command fields grow with their text and never scroll themselves; the settings page scrolls with the app's
+  scrollbar (the agents list's).

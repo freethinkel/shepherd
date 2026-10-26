@@ -154,6 +154,22 @@ run_cases() {
   event workspace.focused "$(focused_json)"
   [ "$(lines ran "$LOG")" = 1 ] && ok || fail "ran $(lines ran "$LOG") times"
 
+  CASE=session_project_runs_in_its_session; setup
+  conf "[demo/main]" "dir = $MAIN" 'created = echo "$PROJECT" >> "$LOG"'
+  event worktree.created "$(created_json)" /x/sessions/demo/herdr.sock
+  [ "$(cat "$LOG")" = main ] && ok || fail "ran.log: $(cat "$LOG")"
+
+  CASE=session_project_skips_other_sessions; setup
+  conf "[demo/main]" "dir = $MAIN" 'created = echo ran >> "$LOG"'
+  event worktree.created "$(created_json)" /x/herdr.sock
+  event worktree.created "$(created_json)" /x/sessions/work/herdr.sock
+  [ ! -s "$LOG" ] && ok || fail "ran outside its session"
+
+  CASE=default_session_project_runs; setup
+  conf "[default/main]" "dir = $MAIN" 'created = echo ran >> "$LOG"'
+  event worktree.created "$(created_json)" /x/herdr.sock
+  [ "$(lines ran "$LOG")" = 1 ] && ok || fail "ran $(lines ran "$LOG") times"
+
   CASE=no_projects_exits_quietly; setup
   conf "# nothing yet"
   event workspace.focused "$(focused_json)" && [ ! -s "$T/calls.log" ] && ok || fail "calls: $(cat "$T/calls.log")"

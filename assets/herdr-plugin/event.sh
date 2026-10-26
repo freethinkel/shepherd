@@ -3,7 +3,7 @@
 # worktrees. POSIX sh only (dash runs it on Debian); jq is used when it works, never required.
 #
 # hooks.conf, one file for all projects:
-#   [name]
+#   [session/name]                                 (a herdr session's project; a bare [name] is every session's)
 #   dir = ~/path/to/main/checkout
 #   created = command run in the new worktree    (repeats, in order; the first failure stops the rest)
 #   removed = command run from the main checkout (repeats)
@@ -16,6 +16,11 @@ state="${HERDR_PLUGIN_STATE_DIR:-${TMPDIR:-/tmp}/shepherd-worktree-hooks}"
 herdr="${HERDR_BIN_PATH:-herdr}"
 event="${HERDR_PLUGIN_EVENT:-}"
 json="${HERDR_PLUGIN_EVENT_JSON:-}"
+# the herdr session this runs for: `default` at herdr's own socket, else <dir>/sessions/<name>/herdr.sock
+case ${HERDR_SOCKET_PATH:-} in
+  */sessions/*/herdr.sock) session=${HERDR_SOCKET_PATH%/herdr.sock}; session=${session##*/} ;;
+  *) session=default ;;
+esac
 tab=$(printf '\t')
 cr=$(printf '\r')
 
@@ -36,8 +41,8 @@ else
   }
 fi
 
-# Every `key = value` of hooks.conf as section<TAB>key<TAB>value; comments, blank lines and keys outside a section
-# are skipped.
+# Every `key = value` of hooks.conf as section<TAB>key<TAB>value; comments, blank lines, keys outside a section and
+# other sessions' sections are skipped.
 entries() {
   [ -f "$conf" ] || return 0
   s=
@@ -45,7 +50,11 @@ entries() {
     line=${line%"$cr"}
     case $line in
       '#'* | '') continue ;;
-      '['*']') s=${line#?}; s=${s%?}; continue ;;
+      '['*']')
+        s=${line#?}; s=${s%?}
+        case $s in */*) [ "${s%%/*}" = "$session" ] || s= ;; esac
+        continue
+        ;;
       *=*) ;;
       *) continue ;;
     esac
@@ -109,7 +118,7 @@ run() {
   [ -n "$cmds" ] || return 0
   main=$(project_dir "$1")
   login_path
-  PROJECT=$1 MAIN=$main WORKTREE=$4 EVENT=$2
+  PROJECT=${1#*/} MAIN=$main WORKTREE=$4 EVENT=$2
   export PROJECT MAIN WORKTREE EVENT
   while IFS= read -r cmd; do
     [ -n "$cmd" ] || continue

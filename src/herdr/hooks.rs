@@ -13,13 +13,15 @@ const EVENT_SH: &str = include_str!("../../assets/herdr-plugin/event.sh");
 /// One project of `hooks.conf`: its main checkout and the commands for its worktrees, one per line, run in order.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Project {
+    /// The herdr session whose worktrees it is for (`default`, a named one); `None` is every session's.
+    pub session: Option<String>,
     pub name: String,
     pub dir: String,
     pub created: Vec<String>,
     pub removed: Vec<String>,
 }
 
-/// `hooks.conf` as event.sh reads it: `[name]` starts a project, then `dir = …`, `created = …`, `removed = …`, the value
+/// `hooks.conf` as event.sh reads it: `[session/name]` (or `[name]`, every session's) starts a project, then `dir = …`, `created = …`, `removed = …`, the value
 /// verbatim after the `=` and its spaces. Comments, blank lines, unknown keys and keys before a `[name]` are skipped.
 pub fn parse(text: &str) -> Vec<Project> {
     let mut projects: Vec<Project> = Vec::new();
@@ -28,8 +30,12 @@ pub fn parse(text: &str) -> Vec<Project> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            projects.push(Project { name: name.to_string(), ..Project::default() });
+        if let Some(section) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            let (session, name) = match section.split_once('/') {
+                Some((session, name)) => (Some(session.to_string()), name),
+                None => (None, section),
+            };
+            projects.push(Project { session, name: name.to_string(), ..Project::default() });
             continue;
         }
         let (Some((key, value)), Some(project)) = (line.split_once('='), projects.last_mut()) else { continue };
@@ -51,7 +57,8 @@ pub fn render(projects: &[Project]) -> String {
          # first failure stops the rest. $PROJECT, $MAIN, $WORKTREE and $EVENT are set.\n",
     );
     for p in projects {
-        text.push_str(&format!("\n[{}]\ndir = {}\n", p.name, p.dir));
+        let section = p.session.as_ref().map_or_else(|| p.name.clone(), |session| format!("{session}/{}", p.name));
+        text.push_str(&format!("\n[{section}]\ndir = {}\n", p.dir));
         for c in &p.created {
             text.push_str(&format!("created = {c}\n"));
         }
@@ -113,7 +120,7 @@ fn save_in(herdr_dir: &Path, herdr: &str, projects: &[Project], stale: &dyn Fn()
     install(herdr_dir, herdr)
 }
 
-/// Projects of one name would be one to event.sh: the later ones get `-2`, `-3`.
+/// Projects of one name in one session would be one to event.sh: the later ones get `-2`, `-3`.
 fn unique(projects: &[Project]) -> Vec<Project> {
     let mut seen = std::collections::HashSet::new();
     projects
@@ -122,7 +129,7 @@ fn unique(projects: &[Project]) -> Vec<Project> {
             let mut p = p.clone();
             let base = p.name.clone();
             let mut n = 1;
-            while !seen.insert(p.name.clone()) {
+            while !seen.insert((p.session.clone(), p.name.clone())) {
                 n += 1;
                 p.name = format!("{base}-{n}");
             }
@@ -184,7 +191,26 @@ mod tests {
 
     fn project(name: &str, dir: &str, created: &[&str], removed: &[&str]) -> Project {
         let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
-        Project { name: name.into(), dir: dir.into(), created: lines(created), removed: lines(removed) }
+        Project { session: None, name: name.into(), dir: dir.into(), created: lines(created), removed: lines(removed) }
+    }
+
+    #[test]
+    fn a_session_is_the_section_prefix() {
+        let p = parse("[demo/app]\ndir = /a\n[app]\ndir = /b\n");
+        assert_eq!((p[0].session.as_deref(), p[0].name.as_str()), (Some("demo"), "app"));
+        assert_eq!((p[1].session.as_deref(), p[1].name.as_str()), (None, "app"));
+        assert_eq!(parse(&render(&p)), p);
+        assert!(render(&p).contains("\n[demo/app]\n"));
+    }
+
+    #[test]
+    fn one_name_in_two_sessions_stays() {
+        let mut a = project("app", "/a", &[], &[]);
+        a.session = Some("default".into());
+        let mut b = a.clone();
+        b.session = Some("demo".into());
+        let names: Vec<String> = unique(&[a, b]).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["app", "app"]);
     }
 
     #[test]

@@ -25,7 +25,7 @@ mod worktrees;
 mod widgets;
 use web::*;
 use widgets::*;
-use worktrees::ProjectFields;
+use worktrees::{ProjectFields, SessionRepos};
 
 /// The app's tokio runtime, for calls made from windows (the herdr connection test).
 pub struct Tokio(pub tokio::runtime::Handle);
@@ -160,11 +160,17 @@ pub struct SettingsView {
     places: Option<Vec<(String, String)>>,
     /// Each worktree hooks project's fields, once Worktrees was shown; why `hooks.conf` could not be read.
     worktrees: Option<Result<Vec<ProjectFields>, String>>,
+    /// herdr's sessions and the repos open in each, once herdr answered.
+    worktree_sessions: Option<Vec<SessionRepos>>,
+    /// Projects picked from a session's repos, given their fields at the next render (they need a window).
+    worktree_adds: Vec<crate::herdr::hooks::Project>,
     /// Why the worktree hooks were not saved.
     worktree_note: Option<String>,
     /// Saves of the worktree hooks started, so one overtaken by a later one is dropped.
     worktree_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ping: Option<String>,
+    /// The page's scroll, for its scrollbar.
+    body_scroll: gpui::ScrollHandle,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -355,9 +361,12 @@ impl SettingsView {
             web_fields: Vec::new(),
             places: None,
             worktrees: None,
+            worktree_sessions: None,
+            worktree_adds: Vec::new(),
             worktree_note: None,
             worktree_saves: Default::default(),
             ping: None,
+            body_scroll: gpui::ScrollHandle::new(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };

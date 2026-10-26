@@ -558,7 +558,9 @@ impl Render for SettingsView {
             }))
             .child(nav)
             .child(
-                div().id("settings-body").flex_1().min_w_0().h_full().overflow_y_scroll().child(
+                // the app's scrollbar (the agents list's) over the page's right edge
+                div().relative().flex_1().min_w_0().h_full().child(
+                div().id("settings-body").size_full().overflow_y_scroll().track_scroll(&self.body_scroll).child(
                     div()
                         .w_full()
                         .max_w(px(PAGE_MAX_WIDTH))
@@ -580,6 +582,8 @@ impl Render for SettingsView {
                         }))
                         .child(body),
                 ),
+                )
+                .child(crate::ui::scrollbar("settings-scrollbar", &self.body_scroll, &theme)),
             )
     }
 }
