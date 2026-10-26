@@ -1,6 +1,7 @@
 mod client;
 pub mod client_shell;
 pub mod graphics;
+pub mod hooks;
 mod config;
 mod install;
 pub mod keys;
