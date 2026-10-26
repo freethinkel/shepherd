@@ -37,6 +37,9 @@ nav { position: relative; z-index: 50; }
 nav .links { margin-left: auto; display: flex; align-items: center; gap: 16px; font-size: 14px; }
 .gh-icon { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); padding: 6px; transition: color .15s; }
 .gh-icon:hover { color: var(--ink); }
+.nav-link { color: var(--dim); transition: color .15s; }
+.nav-link:hover { color: var(--ink); }
+.dl-lead a.inline { color: var(--accent); }
 .gh-stars { font-size: 13.5px; font-variant-numeric: tabular-nums; }
 
 /* ── buttons ── */

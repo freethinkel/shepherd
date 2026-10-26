@@ -104,7 +104,8 @@ SITE_HOST ?= kuzyo
 deploy-site: ## rsync site/ to shepherd.freethinkel.dev
 	# ponytail: Cloudflare caches css/js/images for hours; a content hash in the query makes the fresh HTML fetch fresh files
 	for f in style.css site.js assets/screenshot.webp; do sed -i '' "s|$$f?v=[0-9a-f]*|$$f?v=$$(md5 -q site/$$f | cut -c1-8)|" site/index.html; done
-	rsync -rlpv --delete site/ $(SITE_HOST):/srv/pets/shepherd/site/
+	# phone/ is the phone app's page, deployed by the mochi repo's make deploy-site
+	rsync -rlpv --delete --exclude=/phone/ site/ $(SITE_HOST):/srv/pets/shepherd/site/
 
 version: ## Cargo.toml's version
 	@echo $(VERSION)
