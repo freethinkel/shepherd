@@ -7,7 +7,7 @@
 #   dir = ~/path/to/main/checkout
 #   created = command run in the new worktree    (repeats, in order; the first failure stops the rest)
 #   removed = command run from the main checkout (repeats)
-# Commands run with sh -c and $PROJECT, $MAIN, $WORKTREE, $EVENT in the environment.
+# Commands run with sh -c and $PROJECT, $ROOT_PATH, $WORKTREE_PATH, $EVENT in the environment.
 
 conf="${HERDR_PLUGIN_CONFIG_DIR:?}/hooks.conf"
 # Shepherd touches it when it installs the plugin: worktrees made before then are not new
@@ -118,8 +118,8 @@ run() {
   [ -n "$cmds" ] || return 0
   main=$(project_dir "$1")
   login_path
-  PROJECT=${1#*/} MAIN=$main WORKTREE=$4 EVENT=$2
-  export PROJECT MAIN WORKTREE EVENT
+  PROJECT=${1#*/} ROOT_PATH=$main WORKTREE_PATH=$4 EVENT=$2
+  export PROJECT ROOT_PATH WORKTREE_PATH EVENT
   while IFS= read -r cmd; do
     [ -n "$cmd" ] || continue
     log "\$ $cmd"

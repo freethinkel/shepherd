@@ -108,9 +108,9 @@ run_cases() {
   [ ! -s "$LOG" ] && ok || fail "went on after a failure"
 
   CASE=removed_runs_from_main; setup
-  project 'created = :' 'removed = echo "$EVENT $PROJECT $PWD $WORKTREE" >> "$LOG"'
+  project 'created = :' 'removed = echo "$EVENT $PROJECT $PWD $WORKTREE_PATH $ROOT_PATH" >> "$LOG"'
   event worktree.created "$(created_json)"; event worktree.removed "$(removed_json)"
-  [ "$(cat "$LOG")" = "removed main $MAIN $WT" ] && [ -z "$(ls -A "$T/state/applied")$(ls -A "$T/state/map")" ] && ok || fail "ran: $(cat "$LOG") state: $(ls -R "$T/state")"
+  [ "$(cat "$LOG")" = "removed main $MAIN $WT $MAIN" ] && [ -z "$(ls -A "$T/state/applied")$(ls -A "$T/state/map")" ] && ok || fail "ran: $(cat "$LOG") state: $(ls -R "$T/state")"
 
   CASE=match_by_basename; setup
   project 'created = echo ran >> "$LOG"'

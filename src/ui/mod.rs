@@ -10,9 +10,9 @@ pub mod statusbar;
 pub mod toast;
 
 use crate::theme::Theme;
-use gpui::{ElementId, px};
+use gpui::{App, ElementId, px};
 use gpui_base::input::InputEditorStyle;
-use gpui_base::{Scrollbar, ScrollbarHandle, ScrollbarThumbStyle};
+use gpui_base::{Scrollbar, ScrollbarHandle, ScrollbarStyles, ScrollbarThumbStyle};
 
 /// gpui-base inputs are unstyled: colors from the theme, as Collie does.
 pub fn input_style(theme: &Theme) -> InputEditorStyle {
@@ -29,18 +29,28 @@ pub fn input_style(theme: &Theme) -> InputEditorStyle {
 /// The app's one scrollbar (terminals, the agents list): gpui-base's overlay bar, shown while scrolling and faded
 /// out when idle as macOS does, with a 6 px round thumb 2 px off the edge in every state.
 pub fn scrollbar<H: ScrollbarHandle + Clone>(id: impl Into<ElementId>, handle: &H, theme: &Theme) -> Scrollbar {
+    let styles = scrollbar_styles(theme);
+    Scrollbar::vertical(handle).id(id).styles(|_| styles)
+}
+
+fn scrollbar_styles(theme: &Theme) -> ScrollbarStyles {
     let color = theme.text_muted;
     let thumb = move |t: ScrollbarThumbStyle, alpha: f32| {
         t.bg(color.opacity(alpha)).width(px(6.)).inset(px(2.)).radius(px(3.)).min_length(px(24.))
     };
-    Scrollbar::vertical(handle).id(id).styles(|s| {
-        s.track(|t| t.width(px(12.)))
-            .track_hover(|t| t.width(px(12.)))
-            .track_active(|t| t.width(px(12.)))
-            .thumb(|t| thumb(t, 0.35))
-            .thumb_hover(|t| thumb(t, 0.35))
-            .thumb_active(|t| thumb(t, 0.6))
-    })
+    ScrollbarStyles::default()
+        .track(|t| t.width(px(12.)))
+        .track_hover(|t| t.width(px(12.)))
+        .track_active(|t| t.width(px(12.)))
+        .thumb(|t| thumb(t, 0.35))
+        .thumb_hover(|t| thumb(t, 0.35))
+        .thumb_active(|t| thumb(t, 0.6))
+}
+
+/// Scrollbars gpui-base draws on its own (a code editor's) look like the app's, in the current theme.
+pub fn follow_theme(cx: &mut App) {
+    let styles = scrollbar_styles(Theme::of(cx));
+    gpui_base::Theme::global_mut(cx).scrollbar.styles = styles;
 }
 
 const SWITCH_WIDTH: f32 = 44.8;

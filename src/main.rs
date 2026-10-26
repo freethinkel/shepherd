@@ -2,6 +2,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // ponytail: a release build on Windows has no console, so `hooks` prints nothing there
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "hooks") {
+        std::process::exit(shepherd::herdr::hooks::cli(&args[1..]));
+    }
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     let handle = rt.handle().clone();
     gpui_platform::application().with_assets(shepherd::assets::Assets).run(move |cx| {
@@ -20,6 +25,8 @@ fn main() {
             }
         });
         cx.set_global(settings.theme(cx.window_appearance()));
+        shepherd::ui::follow_theme(cx);
+        cx.observe_global::<shepherd::theme::Theme>(shepherd::ui::follow_theme).detach();
         shepherd::bindings::rebind(cx, &settings.keys);
         cx.set_global(shepherd::settings::SettingsGlobal { settings, error, path });
         cx.on_action(|_: &shepherd::bindings::Quit, cx| cx.quit());

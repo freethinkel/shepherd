@@ -174,7 +174,7 @@ fn highlighted(source: &str, language: Option<&str>, key: &str, theme: &Theme) -
 
 // ponytail: the cache empties whole at 256 blocks; an LRU if switching between big documents ever re-highlights visibly.
 /// `source`'s highlight spans, from the start of `source`, kept per block text and language.
-fn syntax(source: &str, language: Option<&str>) -> Rc<Vec<(Range<usize>, HighlightKind)>> {
+pub(crate) fn syntax(source: &str, language: Option<&str>) -> Rc<Vec<(Range<usize>, HighlightKind)>> {
     thread_local! {
         static DONE: RefCell<HashMap<(String, Option<String>), Rc<Vec<(Range<usize>, HighlightKind)>>>> = RefCell::new(HashMap::new());
     }
@@ -203,7 +203,7 @@ fn syntax(source: &str, language: Option<&str>) -> Rc<Vec<(Range<usize>, Highlig
 }
 
 /// A syntax kind in the terminal theme's ANSI colors, so code reads as it does in the panes.
-fn syntax_color(kind: HighlightKind, theme: &Theme) -> Hsla {
+pub(crate) fn syntax_color(kind: HighlightKind, theme: &Theme) -> Hsla {
     let ansi = &theme.terminal.ansi;
     match kind {
         HighlightKind::Comment => theme.text_faint,

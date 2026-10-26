@@ -162,12 +162,16 @@ pub struct SettingsView {
     worktrees: Option<Result<Vec<ProjectFields>, String>>,
     /// herdr's sessions and the repos open in each, once herdr answered.
     worktree_sessions: Option<Vec<SessionRepos>>,
-    /// Projects picked from a session's repos, given their fields at the next render (they need a window).
-    worktree_adds: Vec<crate::herdr::hooks::Project>,
+    /// The session Worktrees shows, with its machine's SSH target (`None` here); `None` is the one Shepherd is on.
+    worktree_session: Option<(Option<String>, String)>,
+    /// The projects shown open, as `session/name`; the rest show only their name and path.
+    worktree_open: std::collections::HashSet<String>,
+    /// Repos open in a session and not yet its projects, given their fields at the next render (they need a window).
+    worktree_adds: Vec<(Option<String>, crate::herdr::hooks::Project)>,
     /// Why the worktree hooks were not saved.
     worktree_note: Option<String>,
-    /// Saves of the worktree hooks started, so one overtaken by a later one is dropped.
-    worktree_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Saves of the worktree hooks started, by machine (`None` here), so one overtaken by a later one is dropped.
+    worktree_saves: std::collections::HashMap<Option<String>, std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ping: Option<String>,
     /// The page's scroll, for its scrollbar.
     body_scroll: gpui::ScrollHandle,
@@ -362,6 +366,8 @@ impl SettingsView {
             places: None,
             worktrees: None,
             worktree_sessions: None,
+            worktree_session: None,
+            worktree_open: Default::default(),
             worktree_adds: Vec::new(),
             worktree_note: None,
             worktree_saves: Default::default(),

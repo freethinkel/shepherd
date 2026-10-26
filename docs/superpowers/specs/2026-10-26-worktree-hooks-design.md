@@ -50,9 +50,9 @@ CLI, another client, or Shepherd, while Shepherd is closed, and after Shepherd i
 # Worktree hooks, one file for all projects. Shepherd → Settings → Worktrees edits it; so can you.
 [callcenter]
 dir = ~/Developer/sftpro/callcenter-frontend
-created = ln -sf "$MAIN/.env" "$WORKTREE/.env"
-created = cp -Rc "$MAIN/node_modules" node_modules 2>/dev/null || cp -R "$MAIN/node_modules" node_modules
-removed = docker compose -p "$(basename "$WORKTREE")" down -v
+created = ln -sf "$ROOT_PATH/.env" "$WORKTREE_PATH/.env"
+created = cp -Rc "$ROOT_PATH/node_modules" node_modules 2>/dev/null || cp -R "$ROOT_PATH/node_modules" node_modules
+removed = docker compose -p "$(basename "$WORKTREE_PATH")" down -v
 ```
 
 - `[name]` starts a project; `dir`, `created`, `removed` follow. `created` and `removed` repeat, one command per line,
@@ -145,7 +145,7 @@ A new section, **Worktrees**, after **herdr** in the sidebar. *(My call; the "Wo
 herdr section.)* For each project: name, main checkout (a text field), and the two command lists, one command per line
 — a multi-line field, or a list of single-line fields with add and remove if Shepherd's widgets have no multi-line
 input (builder's call). Saved as other settings are, on change. A line under the title says the hooks run in herdr and
-keep working without Shepherd, and lists `$MAIN`, `$WORKTREE`, `$PROJECT`.
+keep working without Shepherd, and lists `$ROOT_PATH`, `$WORKTREE_PATH`, `$PROJECT`.
 
 ## Checks
 

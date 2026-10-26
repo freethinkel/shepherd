@@ -273,11 +273,6 @@ pub(super) fn number_field(theme: &Theme, i: usize, input: &Entity<InputState>) 
         .child(div().flex_none().flex().flex_col().child(chevron(1., "icons/alt-arrow-up.svg")).child(chevron(-1., "icons/alt-arrow-down.svg")))
 }
 
-/// A field of several lines, as tall as its text.
-pub(super) fn text_area(theme: &Theme, input: &Entity<gpui_base::input::TextareaState>) -> Div {
-    div().w_full().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme.wash(0.06)).child(gpui_base::input::Textarea::new(input))
-}
-
 /// A control under its caption, sharing its row's width with its neighbours: the fields of a web page or a project.
 pub(super) fn labelled(theme: &Theme, label: &'static str, control: impl IntoElement) -> Div {
     div()
