@@ -1015,15 +1015,6 @@ impl Shell {
         }
     }
 
-    fn step_tab(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let (Some(snapshot), Some(tab)) = (self.snapshot.as_ref(), self.shown_tab()) else { return };
-        let tabs = snapshot.tabs_of(&tab.workspace_id);
-        let Some(i) = tabs.iter().position(|t| t.tab_id == tab.tab_id) else { return };
-        let n = tabs.len();
-        self.select_tab(Some(tabs[if forward { (i + 1) % n } else { (i + n - 1) % n }].tab_id.clone()));
-        cx.notify();
-    }
-
     fn step_workspace(&mut self, forward: bool, cx: &mut Context<Self>) {
         let (Some(snapshot), Some(tab)) = (self.snapshot.as_ref(), self.shown_tab()) else { return };
         // sidebar order, so Cmd+Up/Down walk the tree as shown

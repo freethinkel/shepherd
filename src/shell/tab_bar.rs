@@ -67,6 +67,8 @@ struct Shown {
     /// A browser tab: Shepherd's own page, not herdr's; no status, its site's icon once fetched.
     browser: bool,
     image: Option<std::sync::Arc<gpui::Image>>,
+    /// A browser tab's page is loading: a spinner in place of the favicon.
+    loading: bool,
 }
 
 #[derive(Clone)]
@@ -405,6 +407,9 @@ impl TabBar {
 
 /// The favicon: the mark on a filled tile of its color, the same size for every kind.
 fn favicon(t: &Shown) -> Div {
+    if t.loading {
+        return div().size(px(ICON)).flex_none().flex().items_center().justify_center().child(crate::ui::loader::glyph_spinner(3., [t.tint.1; 3]));
+    }
     match &t.image {
         Some(image) => div().size(px(ICON)).flex_none().flex().items_center().justify_center().child(gpui::img(image.clone()).size(px(16.)).rounded(px(3.))),
         None => tile(t.icon, t.tint),
@@ -490,6 +495,23 @@ impl Shell {
         cx.notify();
     }
 
+    /// The next or previous tab in the tab bar's order, browser tabs among herdr's.
+    pub(super) fn step_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = match self.shown_browser_tab() {
+            Some(t) => Some(t.id.clone()),
+            None => self.shown_tab().map(|t| t.tab_id),
+        };
+        let tabs: Vec<(String, bool)> = self.tab_bar.entries.iter().filter(|e| e.exit.is_none()).map(|e| (e.tab.id.clone(), e.tab.browser)).collect();
+        let Some(i) = tabs.iter().position(|(id, _)| Some(id) == shown.as_ref()) else { return };
+        let n = tabs.len();
+        let (id, browser) = tabs[if forward { (i + 1) % n } else { (i + n - 1) % n }].clone();
+        match browser {
+            true => self.show_web(id, window, cx),
+            false => self.select_tab(Some(id)),
+        }
+        cx.notify();
+    }
+
     pub(super) fn render_tab_bar(
         &mut self,
         theme: &Theme,
@@ -523,6 +545,7 @@ impl Shell {
                             width: tab_width(measure(&t.label), zoomed),
                             browser: false,
                             image: None,
+                            loading: false,
                         }
                     })
                     .collect()
@@ -535,9 +558,9 @@ impl Shell {
             .map(|ws| self.browser_tabs_of(ws))
             .unwrap_or_default()
             .into_iter()
-            .map(|(id, label, image, after)| {
+            .map(|(id, label, image, after, loading)| {
                 let width = tab_width(measure(&label), false);
-                (Shown { id, label, status: AgentStatus::Idle, icon: "icons/solar/global.svg", tint: (theme.surface.opacity(0.), theme.text_muted), zoomed: false, width, browser: true, image }, after)
+                (Shown { id, label, status: AgentStatus::Idle, icon: "icons/solar/global.svg", tint: (theme.surface.opacity(0.), theme.text_muted), zoomed: false, width, browser: true, image, loading }, after)
             })
             .collect();
         let herdr_ids: Vec<&str> = herdr.iter().map(|t| t.id.as_str()).collect();
@@ -848,7 +871,7 @@ mod tests {
     use super::*;
 
     fn tab(id: &str) -> Shown {
-        Shown { id: id.into(), label: id.into(), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), zoomed: false, width: 100., browser: false, image: None }
+        Shown { id: id.into(), label: id.into(), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), zoomed: false, width: 100., browser: false, image: None, loading: false }
     }
 
     #[test]

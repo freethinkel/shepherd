@@ -227,6 +227,16 @@ impl Shell {
         input
     }
 
+    /// The shown browser tab's address field takes the keyboard, its text selected; a sidebar page has none.
+    pub(super) fn focus_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.shown_browser_tab().map(|t| t.id.clone()) else { return };
+        let input = self.address(&id, window, cx);
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+    }
+
     /// The address field shows the page's URL, unless it is being typed in.
     fn show_address(&mut self, key: &PageKey, window: &mut Window, cx: &mut Context<Self>) {
         let Some(a) = self.browser.address.as_ref().filter(|a| a.tab == key.0 && !a.editing) else { return };
@@ -245,14 +255,15 @@ impl Shell {
         }
     }
 
-    /// The browser tabs of workspace `ws` for the tab bar: id, label, the site's icon once fetched, and the herdr tab
-    /// each follows.
-    pub(super) fn browser_tabs_of(&self, ws: &str) -> Vec<(String, String, Option<std::sync::Arc<gpui::Image>>, Option<String>)> {
+    /// The browser tabs of workspace `ws` for the tab bar: id, label, the site's icon once fetched, the herdr tab each
+    /// follows, and whether its page is loading.
+    pub(super) fn browser_tabs_of(&self, ws: &str) -> Vec<(String, String, Option<std::sync::Arc<gpui::Image>>, Option<String>, bool)> {
         let icon = |id: &String| match self.pages.favicons.get(&(id.clone(), None)) {
             Some((_, Favicon::Image(image))) => Some(image.clone()),
             _ => None,
         };
-        self.browser.tabs.iter().filter(|t| t.workspace == ws).map(|t| (t.id.clone(), self.browser_label(&t.id), icon(&t.id), t.after.clone())).collect()
+        let loading = |id: &String| self.pages.live.get(&(id.clone(), None)).is_some_and(|p| p.loading);
+        self.browser.tabs.iter().filter(|t| t.workspace == ws).map(|t| (t.id.clone(), self.browser_label(&t.id), icon(&t.id), t.after.clone(), loading(&t.id))).collect()
     }
 
     /// The shown browser tab's row under the tab bar: back, forward, reload, the address and Open in Browser.
@@ -276,7 +287,7 @@ impl Shell {
             .border_color(theme.border)
             .child(nav_button(theme, view.clone(), "browser-back", "icons/solar/alt-arrow-left.svg", can(wry::WebView::can_go_back), wry::WebView::go_back))
             .child(nav_button(theme, view.clone(), "browser-forward", "icons/solar/alt-arrow-right.svg", can(wry::WebView::can_go_forward), wry::WebView::go_forward))
-            .child(nav_button(theme, view.clone(), "browser-reload", "icons/solar/restart.svg", view.is_some(), wry::WebView::reload))
+            .child(self.reload_button(key, "browser-reload", theme, cx))
             .child(
                 div()
                     .mx(px(4.))

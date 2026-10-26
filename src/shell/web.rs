@@ -15,8 +15,8 @@ pub(super) type PageKey = (String, Option<String>);
 /// What a web view reports, sent from its handlers (which run without a `cx`) to the Shell.
 pub(super) enum PageEvent {
     Title(String),
-    /// A load started or finished: back and forward may have changed.
-    Loaded,
+    /// A load started (true) or finished: back and forward may have changed.
+    Load(bool),
     /// A new window asked for: it loads in the page instead.
     Navigate(String),
     /// A link to another site, for the system browser.
@@ -24,6 +24,9 @@ pub(super) enum PageEvent {
     /// One of Shepherd's shortcuts, pressed in the page.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Key(gpui::Keystroke),
+    /// A click in the page, which takes the keyboard from Shepherd's fields without GPUI knowing.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Clicked,
 }
 
 pub(super) struct Page {
@@ -33,6 +36,10 @@ pub(super) struct Page {
     /// The normalized URL of the entry it was made for, so an edited URL makes a new page.
     entry_url: String,
     pub(super) title: Option<String>,
+    /// A load is under way: a spinner stands in for its favicon.
+    pub(super) loading: bool,
+    /// When it was last reloaded, so its reload arrow spins.
+    reloaded: Option<Instant>,
     /// Whether it was last made visible, so it isn't told every frame.
     visible: bool,
     /// Whether it was last given the keyboard.
@@ -85,6 +92,8 @@ pub(super) struct Pages {
     hooked: bool,
     /// GPUI draws its deferred layer (menus, dialogs, panels, toasts) above the pages, so they needn't hide for it.
     layered: bool,
+    /// A reload button (by its id) held down, or let go, since then: it shrinks while held and springs back.
+    reload_press: Option<(&'static str, bool, Instant)>,
     /// Shepherd's chords in force, which the pages' key monitors take from the page.
     #[cfg(target_os = "macos")]
     shortcuts: Rc<std::cell::RefCell<Vec<String>>>,
@@ -335,10 +344,12 @@ impl Shell {
         let view = builder
             .with_url(url)
             .with_devtools(true)
+            // a two-finger swipe goes back and forward, as in Safari (WebKit and WebView2 only)
+            .with_back_forward_navigation_gestures(true)
             .with_visible(false)
             .with_bounds(wry::Rect { position: LogicalPosition::new(0., 0.).into(), size: LogicalSize::new(1., 1.).into() })
             .with_document_title_changed_handler(move |t| title(PageEvent::Title(t)))
-            .with_on_page_load_handler(move |_, _| loaded(PageEvent::Loaded))
+            .with_on_page_load_handler(move |e, _| loaded(PageEvent::Load(matches!(e, wry::PageLoadEvent::Started))))
             .with_navigation_handler(move |to| {
                 let stay = !follows_outside(&to);
                 if !stay {
@@ -358,7 +369,7 @@ impl Shell {
         let host = window
             .enable_scene_overlay()
             .ok()
-            .and_then(|()| host::Host::new(&view, self.pages.shortcuts.clone(), move |k| key_event(PageEvent::Key(k))))
+            .and_then(|()| host::Host::new(&view, self.pages.shortcuts.clone(), key_event))
             .map(Rc::new);
         #[cfg(target_os = "macos")]
         {
@@ -369,6 +380,8 @@ impl Shell {
             serial,
             entry_url: entry_url.to_string(),
             title: None,
+            loading: true,
+            reloaded: None,
             visible: false,
             focused: false,
             placed: Default::default(),
@@ -436,12 +449,25 @@ impl Shell {
         let Some(page) = self.pages.live.get_mut(&key).filter(|p| p.serial == serial) else { return };
         match event {
             PageEvent::Title(title) => page.title = Some(title).filter(|t| !t.is_empty()),
-            PageEvent::Loaded => {}
+            PageEvent::Load(started) => page.loading = started,
             PageEvent::Outside(url) => cx.open_url(&url),
             // dispatched as if pressed in Shepherd; a menu or dialog it opens takes the keyboard in `sync_pages`
-            PageEvent::Key(keystroke) => window.defer(cx, move |window, cx| {
-                window.dispatch_keystroke(keystroke, cx);
-            }),
+            PageEvent::Key(keystroke) => {
+                // GPUI's focus may be on what the page hides (a pane): the keystroke would start at the window's root,
+                // above the Shell's handlers, and nothing would take it
+                if !self.focus.contains_focused(window, cx) {
+                    window.focus(&self.focus, cx);
+                }
+                window.defer(cx, move |window, cx| {
+                    window.dispatch_keystroke(keystroke, cx);
+                });
+            }
+            // the address field let go, as a click elsewhere in Shepherd would
+            PageEvent::Clicked => {
+                if self.browser.editing() {
+                    window.focus(&self.focus, cx);
+                }
+            }
             PageEvent::Navigate(url) => {
                 if let Err(e) = page.view.load_url(&url) {
                     crate::ui::toast::error(cx, format!("{url}: {e}"));
@@ -514,6 +540,11 @@ impl Shell {
         // the address field being typed in keeps the keyboard too
         let popup = self.popup_open() || self.browser.editing();
         for (key, page) in &mut self.pages.live {
+            // WebKit's own word, which also ends a load that failed before it began (no Finished comes for one)
+            #[cfg(target_os = "macos")]
+            {
+                page.loading = host::loading(&page.view);
+            }
             let visible = shown.as_ref() == Some(key) && !covered;
             if page.visible != visible {
                 page.visible = visible;
@@ -648,8 +679,99 @@ impl Shell {
             .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
             .child(nav_button(theme, view.clone(), "web-back", "icons/solar/alt-arrow-left.svg", can(wry::WebView::can_go_back), wry::WebView::go_back))
             .child(nav_button(theme, view.clone(), "web-forward", "icons/solar/alt-arrow-right.svg", can(wry::WebView::can_go_forward), wry::WebView::go_forward))
-            .child(nav_button(theme, view.clone(), "web-reload", "icons/solar/restart.svg", view.is_some(), wry::WebView::reload))
+            .child(self.reload_button(key, "web-reload", theme, cx))
             .child(div().ml(px(6.)).flex_1().min_w_0().truncate().text_color(theme.text_muted).child(title))
+    }
+
+    /// Page `key`'s reload button: one turn clockwise on a spring, shrinking a little as it sets off, after a reload.
+    pub(super) fn reload_button(&self, key: &PageKey, id: &'static str, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
+        let page = self.pages.live.get(key);
+        let turn = page.and_then(|p| p.reloaded).map(|at| at.elapsed().as_secs_f32() / RELOAD_SPIN.as_secs_f32()).filter(|t| *t < 1.);
+        // held: down to PRESSED in PRESS; let go: back up on a spring over RELEASE
+        let press = self.pages.reload_press.filter(|(of, _, _)| *of == id).and_then(|(_, down, at)| {
+            let (span, curve): (Duration, fn(f32) -> f32) = if down { (PRESS, motion::ease_out) } else { (RELEASE, motion::spring) };
+            let t = at.elapsed().as_secs_f32() / span.as_secs_f32();
+            let scale = if down { 1. - (1. - PRESSED) * curve(t.min(1.)) } else { PRESSED + (1. - PRESSED) * curve(t) };
+            (down || t < 1.).then_some((scale, t < 1.))
+        });
+        let mut transform = gpui::Transformation::rotate(gpui::radians(std::f32::consts::TAU * turn.map_or(0., |t| motion::damped_spring(0.6, t))));
+        if let Some((scale, _)) = press {
+            transform = transform.with_scaling(gpui::size(scale, scale));
+        }
+        let icon = gpui::svg()
+            .path("icons/solar/restart.svg")
+            .size(px(16.))
+            .text_color(if page.is_some() { theme.text_muted } else { theme.text_faint })
+            .with_transformation(transform);
+        let moving = turn.is_some() || press.is_some_and(|(_, moving)| moving);
+        let key = key.clone();
+        // let go over it or anywhere else
+        let released = move |this: &mut Shell, _: &gpui::MouseUpEvent, _: &mut Window, cx: &mut Context<Shell>| {
+            if this.pages.reload_press.is_some_and(|(of, down, _)| of == id && down) {
+                this.pages.reload_press = Some((id, false, Instant::now()));
+                cx.notify();
+            }
+        };
+        nav_frame(theme, id, page.is_some())
+            .child(icon)
+            // a frame each display refresh while it moves
+            .when(moving, |el| el.child(gpui::canvas(|_, window, _| window.request_animation_frame(), |_, _, _, _| {}).absolute()))
+            .when(page.is_some(), |el| {
+                el.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.pages.reload_press = Some((id, true, Instant::now()));
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up(MouseButton::Left, cx.listener(released))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(released))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.reload_page(&key);
+                    cx.notify();
+                }))
+            })
+    }
+
+    /// Reloads page `key`, its spinner shown at once.
+    pub(super) fn reload_page(&mut self, key: &PageKey) {
+        if let Some(page) = self.pages.live.get_mut(key) {
+            let _ = page.view.reload();
+            page.loading = true;
+            page.reloaded = Some(Instant::now());
+        }
+    }
+
+    /// The shown page reloaded (⌘R).
+    pub(super) fn reload_shown_page(&mut self, cx: &mut Context<Self>) {
+        if let Some((key, _)) = self.shown_page(cx) {
+            self.reload_page(&key);
+            cx.notify();
+        }
+    }
+
+    /// Drops the page's web view (and its forward) to free what it holds; the tabs show if it was shown, and a click
+    /// makes it again.
+    fn unload_page(&mut self, key: &PageKey) {
+        self.pages.live.remove(key);
+        self.pages.forwards.remove(key);
+        if self.pages.shown.as_ref() == Some(&key.0) {
+            self.pages.shown = None;
+        }
+    }
+
+    /// The shown page's URL on the clipboard: where it is now, or the entry's for a page on a machine, whose own is
+    /// its forward's.
+    pub(super) fn copy_page_url(&mut self, cx: &mut Context<Self>) {
+        let Some((key, entry)) = self.shown_page(cx) else { return };
+        let now = self.pages.live.get(&key).filter(|_| key.1.is_none()).and_then(|p| p.view.url().ok());
+        let url = now.unwrap_or_else(|| normalize(&entry.url));
+        // an empty browser tab has nothing to copy
+        if url == "about:blank" {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(url));
+        crate::ui::toast::info(cx, "URL copied", None);
     }
 
     /// A web page's right-click menu in the sidebar, while it is up.
@@ -658,7 +780,8 @@ impl Shell {
         let (id, at) = menu.value.clone();
         let entry = SettingsGlobal::of(cx).settings.web_entries.iter().find(|e| e.id == id).cloned()?;
         let url = normalize(&entry.url);
-        let view = self.pages.live.get(&self.page_key(&entry)).map(|p| p.view.clone());
+        let key = self.page_key(&entry);
+        let loaded = self.pages.live.contains_key(&key);
         type Pick = Box<dyn Fn(&mut Shell, &mut Window, &mut Context<Shell>)>;
         let item = |key: &'static str, label: &'static str, pick: Pick| {
             row(theme, false, key).h(px(28.)).rounded(px(6.)).child(label).on_pick(
@@ -680,9 +803,13 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            // a page not opened yet has nothing to reload
-            .children(view.map(|view| {
-                item("web-menu-reload", "Reload", Box::new(move |_, _, _| drop(view.reload())))
+            // a page not opened yet has nothing to reload or unload
+            .children(loaded.then(|| {
+                let key = key.clone();
+                item("web-menu-reload", "Reload", Box::new(move |this, _, _| this.reload_page(&key)))
+            }))
+            .children(loaded.then(|| {
+                item("web-menu-unload", "Unload", Box::new(move |this, _, _| this.unload_page(&key)))
             }))
             .child(item("web-menu-browser", "Open in Browser", Box::new(move |_, _, cx| cx.open_url(&url))))
             .child(item(
@@ -726,16 +853,21 @@ impl Shell {
                 let key = self.page_key(&e);
                 let name = label(&e, self.pages.live.get(&key).and_then(|p| p.title.as_deref()));
                 let selected = shown.as_deref() == Some(e.id.as_str());
+                // a page not opened yet, or unloaded, is dimmed
+                let loaded = self.pages.live.contains_key(&key) || self.pages.forwards.contains_key(&key);
                 let id = e.id.clone();
                 let icon = match self.pages.favicons.get(&key) {
+                    _ if self.pages.live.get(&key).is_some_and(|p| p.loading) => {
+                        crate::ui::loader::glyph_spinner(3., [theme.text_muted; 3]).into_any_element()
+                    }
                     Some((_, Favicon::Image(image))) => gpui::img(image.clone()).size(px(16.)).rounded(px(3.)).into_any_element(),
                     _ => sessions::place_mark(&name, None, false, theme.text_muted),
                 };
                 let menu_id = e.id.clone();
                 let row = crate::shell::row(theme, selected, SharedString::from(format!("web-{}", e.id)))
                     .h(px(if SettingsGlobal::of(cx).settings.compact_workspaces { 26. } else { 32. }))
-                    .child(div().size(px(16.)).flex_none().flex().items_center().justify_center().child(icon))
-                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .child(div().size(px(16.)).flex_none().flex().items_center().justify_center().when(!loaded, |el| el.opacity(0.5)).child(icon))
+                    .child(div().flex_1().min_w_0().truncate().when(!loaded, |el| el.text_color(theme.text_faint)).child(name))
                     .when(live, |el| {
                         reorder::draggable(el, &self.pages.reorder, &e.id)
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.show_web(id.clone(), window, cx)))
@@ -776,7 +908,14 @@ impl Shell {
     }
 }
 
-/// A page's back, forward or reload button, doing `act` to its web view while `enabled`.
+/// How long a reload button's arrow takes to turn.
+const RELOAD_SPIN: Duration = Duration::from_millis(700);
+/// A held reload button's size, reached in `PRESS`; let go, it springs back over `RELEASE`.
+const PRESSED: f32 = 0.82;
+const PRESS: Duration = Duration::from_millis(120);
+const RELEASE: Duration = Duration::from_millis(300);
+
+/// A page's back or forward button, doing `act` to its web view while `enabled`.
 pub(super) fn nav_button(
     theme: &Theme,
     view: Option<Rc<wry::WebView>>,
@@ -785,6 +924,19 @@ pub(super) fn nav_button(
     enabled: bool,
     act: fn(&wry::WebView) -> wry::Result<()>,
 ) -> Stateful<Div> {
+    nav_frame(theme, id, enabled)
+        .child(gpui::svg().path(icon).size(px(16.)).text_color(if enabled { theme.text_muted } else { theme.text_faint }))
+        .when(enabled, |el| {
+            el.on_click(move |_, _, _| {
+                if let Some(view) = &view {
+                    let _ = act(view);
+                }
+            })
+        })
+}
+
+/// A page's bar button, without its icon, hovered while `enabled`.
+fn nav_frame(theme: &Theme, id: &'static str, enabled: bool) -> Stateful<Div> {
     let hover = theme.hover;
     div()
         .id(id)
@@ -797,14 +949,7 @@ pub(super) fn nav_button(
         .block_mouse_except_scroll()
         .when(cfg!(windows), |el| el.occlude()) // off the drag strip, as the tabs
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .child(gpui::svg().path(icon).size(px(16.)).text_color(if enabled { theme.text_muted } else { theme.text_faint }))
-        .when(enabled, |el| {
-            el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, _| {
-                if let Some(view) = &view {
-                    let _ = act(view);
-                }
-            })
-        })
+        .when(enabled, |el| el.cursor_pointer().hover(move |s| s.bg(hover)))
 }
 
 /// macOS: a page's own view, holding its WKWebView and, docked, WebKit's inspector (which docks into the web view's
@@ -816,23 +961,29 @@ mod host {
     use objc2::rc::Retained;
     use objc2::{MainThreadMarker, MainThreadOnly, msg_send};
     use objc2::runtime::AnyObject;
-    use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSEventModifierFlags, NSView, NSWindowOrderingMode};
+    use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSView, NSWindowOrderingMode};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
     use std::ptr::NonNull;
     use std::rc::Rc;
     use wry::WebViewExtMacOS;
 
-    /// The page's view, and the key monitor that takes Shepherd's shortcuts from the page while it has the keyboard
+    /// Whether WebKit is loading the page.
+    pub(super) fn loading(view: &wry::WebView) -> bool {
+        // SAFETY: `isLoading` on a live WKWebView, on the main thread
+        unsafe { msg_send![&*view.webview(), isLoading] }
+    }
+
+    /// The page's view, and the key (and click) monitor that takes Shepherd's shortcuts from the page while it has the keyboard
     /// (WebKit would keep them, as Zeron's browser found).
     pub(super) struct Host(Retained<NSView>, Option<Retained<AnyObject>>);
 
     impl Host {
         /// Moves `view`'s WKWebView into a view of its own, just below GPUI's overlay plane; a key among `shortcuts`
-        /// pressed in it goes to `key` instead.
+        /// pressed in it goes to `send` instead, and a click in it is told to `send` too.
         pub(super) fn new(
             view: &wry::WebView,
             shortcuts: Rc<std::cell::RefCell<Vec<String>>>,
-            key: impl Fn(gpui::Keystroke) + 'static,
+            send: impl Fn(super::PageEvent) + 'static,
         ) -> Option<Host> {
             let mtm = MainThreadMarker::new()?;
             let web = view.webview();
@@ -854,12 +1005,24 @@ mod host {
             let monitor = block2::RcBlock::new(move |event: NonNull<NSEvent>| {
                 // SAFETY: AppKit hands the monitor a live event, on the main thread
                 let e = unsafe { event.as_ref() };
-                let in_page = watched
+                if e.r#type() != NSEventType::KeyDown {
+                    // what the click lands on, in the window's coordinates, as AppKit would hit-test it
+                    let hit = watched
+                        .window()
+                        .filter(|w| e.window(mtm).as_ref() == Some(w))
+                        .and_then(|w| w.contentView())
+                        .and_then(|content| content.hitTest(e.locationInWindow()));
+                    if hit.is_some_and(|v| !watched.isHidden() && v.isDescendantOf(&watched)) {
+                        send(super::PageEvent::Clicked);
+                    }
+                    return event.as_ptr();
+                }
+                let responder = watched
                     .window()
                     .filter(|w| e.window(mtm).as_ref() == Some(w))
                     .and_then(|w| w.firstResponder())
                     .and_then(|r| r.downcast::<NSView>().ok())
-                    .is_some_and(|v| !watched.isHidden() && v.isDescendantOf(&watched));
+                    .filter(|v| !watched.isHidden() && v.isDescendantOf(&watched));
                 let flags = e.modifierFlags();
                 let mods = crate::web::Mods {
                     cmd: flags.contains(NSEventModifierFlags::Command),
@@ -871,23 +1034,30 @@ mod host {
                 // ⌥ left out, as `charactersIgnoringModifiers` would)
                 let as_cmd = NSEventModifierFlags::Command | (flags & NSEventModifierFlags::Shift);
                 let characters = e.charactersByApplyingModifiers(as_cmd).map(|c| c.to_string()).unwrap_or_default();
-                if !in_page {
+                let Some(responder) = responder else {
                     return event.as_ptr();
-                }
+                };
                 if let Some(keystroke) = crate::web::shepherds_key(mods, &characters, &shortcuts.borrow()) {
-                    key(keystroke);
+                    send(super::PageEvent::Key(keystroke));
                     return std::ptr::null_mut();
                 }
                 // ⌘C, ⌘V and the rest go to the page's first responder, as an Edit menu's items would send them
                 let edit = crate::web::edit_action(mods, &characters).map(objc2::runtime::Sel::register);
                 // SAFETY: an action sent up the responder chain, on the main thread
-                match edit.filter(|&sel| unsafe { NSApplication::sharedApplication(mtm).sendAction_to_from(sel, None, None) }) {
-                    Some(_) => std::ptr::null_mut(),
-                    None => event.as_ptr(),
+                if edit.is_some_and(|sel| unsafe { NSApplication::sharedApplication(mtm).sendAction_to_from(sel, None, None) }) {
+                    return std::ptr::null_mut();
                 }
+                // an arrow, ⌃ or ⌥ chord would reach GPUI's view as a key equivalent first, which types it into the
+                // page as a character or runs Shepherd's binding: the page takes it straight; other ⌘ chords stay on
+                // AppKit's way, to WebKit's key equivalents and the menu
+                if mods.cmd && !flags.contains(NSEventModifierFlags::Function) {
+                    return event.as_ptr();
+                }
+                responder.keyDown(e);
+                std::ptr::null_mut()
             });
             // SAFETY: the block lives as long as the monitor, which `Drop` removes
-            let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &monitor) };
+            let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown | NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown, &monitor) };
             Some(Host(host, monitor))
         }
 

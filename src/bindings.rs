@@ -54,6 +54,9 @@ app_actions! {
     CommandPanel: "Command panel",
     AgentsPanel: "Agents",
     WorkspacesPanel: "Workspaces",
+    ReloadPage: "Reload page",
+    FocusAddress: "Focus page address",
+    CopyPageUrl: "Copy page URL",
     Quit: "Quit",
 }
 
@@ -93,6 +96,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("CommandPanel", "cmd-k"),
     ("CommandPanel", "cmd-shift-p"),
     ("AgentsPanel", "cmd-shift-a"),
+    ("ReloadPage", "cmd-r"),
+    ("FocusAddress", "cmd-l"),
+    ("CopyPageUrl", "cmd-shift-c"),
     ("Quit", "cmd-q"),
 ];
 
