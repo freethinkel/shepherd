@@ -162,6 +162,8 @@ pub struct SettingsView {
     worktrees: Option<Result<Vec<ProjectFields>, String>>,
     /// Why the worktree hooks were not saved.
     worktree_note: Option<String>,
+    /// Saves of the worktree hooks started, so one overtaken by a later one is dropped.
+    worktree_saves: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ping: Option<String>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -354,6 +356,7 @@ impl SettingsView {
             places: None,
             worktrees: None,
             worktree_note: None,
+            worktree_saves: Default::default(),
             ping: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,

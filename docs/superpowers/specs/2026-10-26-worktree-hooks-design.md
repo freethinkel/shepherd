@@ -118,7 +118,9 @@ with `sed`. *ponytail: the sed path breaks on paths containing `"` or escapes; j
 6. Claim: `mkdir state/applied/<key>` where key = `cksum` of the checkout path; if it exists, already ran → exit.
    Unless the claim is stale: when the checkout's `.git` file is newer than the claim (`[ .git -nt claim ]`), the
    worktree was removed outside herdr and made again at the same path; drop the claim and go on. *(My call.)* Save the
-   project's name to `state/map/<key>`.
+   project's name to `state/map/<key>`. A worktree whose `.git` is not newer than `.installed` in the config dir
+   (Shepherd writes it on the first save) was there before the hooks and is left alone: without it, the first focus
+   or `workspace.created` on every existing worktree would run its `created` commands over its files.
 7. Run each `created` command with `sh -c` in the checkout, env `PROJECT`, `MAIN` (the expanded `dir`), `WORKTREE`,
    `EVENT=created`; stop at the first non-zero exit. On failure remove the claim, so the next event retries.
 8. Mark a focused workspace decided.

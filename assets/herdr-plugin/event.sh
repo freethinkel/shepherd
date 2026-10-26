@@ -10,6 +10,8 @@
 # Commands run with sh -c and $PROJECT, $MAIN, $WORKTREE, $EVENT in the environment.
 
 conf="${HERDR_PLUGIN_CONFIG_DIR:?}/hooks.conf"
+# Shepherd touches it when it installs the plugin: worktrees made before then are not new
+installed="$HERDR_PLUGIN_CONFIG_DIR/.installed"
 state="${HERDR_PLUGIN_STATE_DIR:-${TMPDIR:-/tmp}/shepherd-worktree-hooks}"
 herdr="${HERDR_BIN_PATH:-herdr}"
 event="${HERDR_PLUGIN_EVENT:-}"
@@ -141,6 +143,8 @@ created() {
     # the focus event carries only an id; a brand-new worktree's workspace has 1 tab with 1 pane
     [ -n "$ws" ] || exit 0
     info=$("$herdr" workspace get "$ws" 2>/dev/null)
+    # herdr did not answer: not decided, the next focus asks again
+    [ -n "$info" ] || { log "workspace get $ws failed"; exit 0; }
     checkout=$(field "$info" checkout_path)
     root=$(field "$info" repo_root)
     name=$(field "$info" repo_name)
@@ -155,7 +159,9 @@ created() {
       claim="$state/applied/$k"
       # a .git newer than the claim: removed outside herdr and made again at the same path
       [ -d "$claim" ] && [ "$checkout/.git" -nt "$claim" ] && rmdir "$claim"
-      if mkdir "$claim" 2>/dev/null; then
+      if [ -e "$installed" ] && ! [ "$checkout/.git" -nt "$installed" ]; then
+        log "made before the hooks were installed: $checkout"
+      elif mkdir "$claim" 2>/dev/null; then
         printf '%s\n' "$project" > "$state/map/$k"
         log "created [$project] -> $checkout"
         run "$project" created "$checkout" "$checkout" || rmdir "$claim" # failed: the next event retries

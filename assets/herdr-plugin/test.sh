@@ -134,6 +134,26 @@ run_cases() {
   event worktree.created "$(created_json)"
   [ "$(cat "$LOG")" = "$T/bin/fakepnpm" ] && ok || fail "ran.log: $(cat "$LOG")"
 
+  CASE=preexisting_worktree_skips; setup
+  project 'created = echo ran >> "$LOG"'
+  sleep 1; : > "$T/conf/.installed"
+  event workspace.created "$(created_json)"
+  [ ! -s "$LOG" ] && ok || fail "ran for a worktree made before the install"
+
+  CASE=worktree_after_install_runs; setup
+  project 'created = echo ran >> "$LOG"'
+  : > "$T/conf/.installed"; sleep 1; rm "$WT/.git"; : > "$WT/.git"
+  event worktree.created "$(created_json)"
+  [ "$(lines ran "$LOG")" = 1 ] && ok || fail "ran $(lines ran "$LOG") times"
+
+  CASE=failed_query_retries; setup
+  project 'created = echo ran >> "$LOG"'
+  : > "$T/ws.json"
+  event workspace.focused "$(focused_json)"
+  ws_json 1 1 true
+  event workspace.focused "$(focused_json)"
+  [ "$(lines ran "$LOG")" = 1 ] && ok || fail "ran $(lines ran "$LOG") times"
+
   CASE=no_projects_exits_quietly; setup
   conf "# nothing yet"
   event workspace.focused "$(focused_json)" && [ ! -s "$T/calls.log" ] && ok || fail "calls: $(cat "$T/calls.log")"

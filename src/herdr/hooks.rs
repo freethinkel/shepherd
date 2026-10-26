@@ -4,6 +4,7 @@
 use anyhow::{Context, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 pub const PLUGIN_ID: &str = "shepherd.worktree-hooks";
 const MANIFEST: &str = include_str!("../../assets/herdr-plugin/herdr-plugin.toml");
@@ -85,19 +86,49 @@ pub fn load() -> anyhow::Result<Vec<Project>> {
 }
 
 /// Installs or updates the plugin, links it into herdr if it is not yet, and writes `projects` to `hooks.conf`.
-pub fn save(projects: &[Project]) -> anyhow::Result<()> {
-    save_in(&super::config::dir(), &super::session::binary(), projects)
+pub fn save(projects: &[Project], stale: impl Fn() -> bool) -> anyhow::Result<()> {
+    save_in(&super::config::dir(), &super::session::binary(), projects, &stale)
 }
 
-fn save_in(herdr_dir: &Path, herdr: &str, projects: &[Project]) -> anyhow::Result<()> {
-    install(herdr_dir, herdr)?;
+fn save_in(herdr_dir: &Path, herdr: &str, projects: &[Project], stale: &dyn Fn() -> bool) -> anyhow::Result<()> {
+    // one save at a time, and only the latest: an older one let through after it would put back what it removed
+    static SAVING: Mutex<()> = Mutex::new(());
+    let _one = SAVING.lock().unwrap_or_else(|e| e.into_inner());
+    if stale() {
+        return Ok(());
+    }
     let conf = conf_in(herdr_dir);
     let dir = conf.parent().expect("hooks.conf is in a folder");
     std::fs::create_dir_all(dir)?;
+    // event.sh leaves worktrees older than this alone: they were there before the hooks
+    let installed = dir.join(".installed");
+    if !installed.exists() {
+        std::fs::write(&installed, "")?;
+    }
     // written whole and renamed into place, so event.sh never reads half of one
     let tmp = dir.join(".hooks.conf.tmp");
-    std::fs::write(&tmp, render(projects))?;
-    std::fs::rename(&tmp, &conf).with_context(|| format!("cannot write {}", conf.display()))
+    std::fs::write(&tmp, render(&unique(projects)))?;
+    std::fs::rename(&tmp, &conf).with_context(|| format!("cannot write {}", conf.display()))?;
+    // after the file, so what was typed is kept when herdr cannot be run; the next save installs again
+    install(herdr_dir, herdr)
+}
+
+/// Projects of one name would be one to event.sh: the later ones get `-2`, `-3`.
+fn unique(projects: &[Project]) -> Vec<Project> {
+    let mut seen = std::collections::HashSet::new();
+    projects
+        .iter()
+        .map(|p| {
+            let mut p = p.clone();
+            let base = p.name.clone();
+            let mut n = 1;
+            while !seen.insert(p.name.clone()) {
+                n += 1;
+                p.name = format!("{base}-{n}");
+            }
+            p
+        })
+        .collect()
 }
 
 /// Writes the plugin's files where they differ from this Shepherd's and links it into herdr: when herdr does not list
@@ -227,14 +258,14 @@ removed = docker compose -p "$(basename "$WORKTREE")" down -v
         let dir = tempfile::tempdir().unwrap();
         let herdr = stub_herdr(dir.path());
         let projects = vec![project("app", "/a", &["make"], &[])];
-        save_in(dir.path(), &herdr, &projects).unwrap();
+        save_in(dir.path(), &herdr, &projects, &|| false).unwrap();
         let root = root_in(dir.path());
         assert_eq!(std::fs::read_to_string(root.join("event.sh")).unwrap(), EVENT_SH);
         assert_eq!(std::fs::read_to_string(root.join("herdr-plugin.toml")).unwrap(), MANIFEST);
         assert_eq!(parse(&std::fs::read_to_string(conf_in(dir.path())).unwrap()), projects);
         let calls = || std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
         assert!(calls().contains(&format!("plugin link {}", root.display())), "{}", calls());
-        save_in(dir.path(), &herdr, &projects).unwrap();
+        save_in(dir.path(), &herdr, &projects, &|| false).unwrap();
         assert_eq!(calls().matches("plugin link").count(), 1, "linked again: {}", calls());
     }
 
@@ -243,12 +274,51 @@ removed = docker compose -p "$(basename "$WORKTREE")" down -v
     fn a_changed_manifest_is_linked_again() {
         let dir = tempfile::tempdir().unwrap();
         let herdr = stub_herdr(dir.path());
-        save_in(dir.path(), &herdr, &[]).unwrap();
+        save_in(dir.path(), &herdr, &[], &|| false).unwrap();
         std::fs::write(root_in(dir.path()).join("herdr-plugin.toml"), "old").unwrap();
         refresh_in(dir.path(), &herdr).unwrap();
         let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
         assert!(calls.contains(&format!("plugin unlink {PLUGIN_ID}")), "{calls}");
         assert_eq!(calls.matches("plugin link").count(), 2, "{calls}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_marks_the_install_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr = stub_herdr(dir.path());
+        let marker = conf_in(dir.path()).with_file_name(".installed");
+        save_in(dir.path(), &herdr, &[], &|| false).unwrap();
+        let first = std::fs::metadata(&marker).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        save_in(dir.path(), &herdr, &[], &|| false).unwrap();
+        assert_eq!(std::fs::metadata(&marker).unwrap().modified().unwrap(), first);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_names_are_made_unique() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr = stub_herdr(dir.path());
+        let projects = [project("frontend", "/a/frontend", &[], &[]), project("frontend", "/b/frontend", &[], &[])];
+        save_in(dir.path(), &herdr, &projects, &|| false).unwrap();
+        let names: Vec<String> = parse(&std::fs::read_to_string(conf_in(dir.path())).unwrap()).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["frontend", "frontend-2"]);
+    }
+
+    #[test]
+    fn a_stale_save_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        save_in(dir.path(), "/nonexistent/herdr", &[project("a", "/a", &[], &[])], &|| true).unwrap();
+        assert!(!conf_in(dir.path()).exists());
+    }
+
+    #[test]
+    fn hooks_are_kept_when_herdr_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = vec![project("a", "/a", &["make"], &[])];
+        assert!(save_in(dir.path(), "/nonexistent/herdr", &projects, &|| false).is_err());
+        assert_eq!(parse(&std::fs::read_to_string(conf_in(dir.path())).unwrap()), projects);
     }
 
     #[test]

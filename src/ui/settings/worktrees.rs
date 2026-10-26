@@ -77,7 +77,6 @@ impl SettingsView {
     }
 
     /// Writes the projects to `hooks.conf` (installing herdr's plugin the first time) off the main thread.
-    // ponytail: two quick saves may land out of order; the next field left writes again
     fn save_worktrees(&mut self, cx: &mut Context<Self>) {
         let Some(Ok(fields)) = &self.worktrees else { return };
         let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
@@ -98,7 +97,10 @@ impl SettingsView {
                 })
             })
             .collect();
-        let saving = cx.background_spawn(async move { hooks::save(&projects) });
+        // a save that a later one overtook writes nothing (Blur, then a bin's click, start two at once)
+        let saves = self.worktree_saves.clone();
+        let this_save = saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let saving = cx.background_spawn(async move { hooks::save(&projects, || saves.load(std::sync::atomic::Ordering::SeqCst) != this_save) });
         cx.spawn(async move |this, cx| {
             let result = saving.await;
             let _ = this.update(cx, |v, cx| {
