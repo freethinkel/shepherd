@@ -21,9 +21,11 @@ use serde_json::{Value, json};
 mod render;
 mod select;
 mod web;
+mod worktrees;
 mod widgets;
 use web::*;
 use widgets::*;
+use worktrees::ProjectFields;
 
 /// The app's tokio runtime, for calls made from windows (the herdr connection test).
 pub struct Tokio(pub tokio::runtime::Handle);
@@ -44,12 +46,13 @@ enum Section {
     Integrations,
     WebPages,
     Herdr,
+    Worktrees,
     Shortcuts,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 10] = [
+    const ALL: [Section; 11] = [
         Section::General,
         Section::Terminal,
         Section::Appearance,
@@ -58,6 +61,7 @@ impl Section {
         Section::Integrations,
         Section::WebPages,
         Section::Herdr,
+        Section::Worktrees,
         Section::Shortcuts,
         Section::About,
     ];
@@ -72,6 +76,7 @@ impl Section {
             Section::Integrations => "Integrations",
             Section::WebPages => "Web pages",
             Section::Herdr => "herdr",
+            Section::Worktrees => "Worktrees",
             Section::Shortcuts => "Shortcuts",
             Section::About => "About",
         }
@@ -87,6 +92,7 @@ impl Section {
             Section::Integrations => "icons/widget.svg",
             Section::WebPages => "icons/solar/global.svg",
             Section::Herdr => "icons/solar/server-2.svg",
+            Section::Worktrees => "icons/git-branch.svg",
             Section::Shortcuts => "icons/keyboard.svg",
             Section::About => "icons/info-circle.svg",
         }
@@ -152,6 +158,10 @@ pub struct SettingsView {
     web_fields: Vec<WebFields>,
     /// The places a web page can be listed in, as (key, name), once herdr has listed them.
     places: Option<Vec<(String, String)>>,
+    /// Each worktree hooks project's fields, once Worktrees was shown; why `hooks.conf` could not be read.
+    worktrees: Option<Result<Vec<ProjectFields>, String>>,
+    /// Why the worktree hooks were not saved.
+    worktree_note: Option<String>,
     ping: Option<String>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -342,6 +352,8 @@ impl SettingsView {
             recording: None,
             web_fields: Vec::new(),
             places: None,
+            worktrees: None,
+            worktree_note: None,
             ping: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,

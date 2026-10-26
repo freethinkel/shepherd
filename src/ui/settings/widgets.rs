@@ -273,6 +273,41 @@ pub(super) fn number_field(theme: &Theme, i: usize, input: &Entity<InputState>) 
         .child(div().flex_none().flex().flex_col().child(chevron(1., "icons/alt-arrow-up.svg")).child(chevron(-1., "icons/alt-arrow-down.svg")))
 }
 
+/// A field of several lines, as tall as its text.
+pub(super) fn text_area(theme: &Theme, input: &Entity<gpui_base::input::TextareaState>) -> Div {
+    div().w_full().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme.wash(0.06)).child(gpui_base::input::Textarea::new(input))
+}
+
+/// A control under its caption, sharing its row's width with its neighbours: the fields of a web page or a project.
+pub(super) fn labelled(theme: &Theme, label: &'static str, control: impl IntoElement) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(div().text_size(px(12.)).line_height(px(16.)).text_color(theme.text_muted).child(label))
+        .child(control)
+}
+
+/// The red bin beside a web page's or a project's fields that removes it.
+pub(super) fn remove_button(theme: &Theme, id: impl Into<SharedString>) -> Stateful<Div> {
+    let danger = theme.danger;
+    div()
+        .id(id.into())
+        .flex_none()
+        // level with the fields under the first row's captions
+        .mt(px(22.))
+        .size(px(32.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.))
+        .cursor_pointer()
+        .hover(move |s| s.bg(danger.opacity(0.12)))
+        .child(gpui::svg().path("icons/solar/trash-bin-minimalistic.svg").size(px(16.)).text_color(danger))
+}
+
 pub(super) fn field(theme: &Theme, input: &Entity<InputState>) -> Div {
     div().w(px(240.)).flex_none().h(px(32.)).px(px(10.)).flex().items_center().rounded(px(8.)).bg(theme.wash(0.06)).child(Input::new(input))
 }

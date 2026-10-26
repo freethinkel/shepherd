@@ -70,17 +70,7 @@ impl SettingsView {
         let settings = &SettingsGlobal::of(cx).settings;
         let (entries, outside, inside) = (settings.web_entries.clone(), settings.web_links_outside, settings.web_links_inside);
         let muted = theme.text_muted;
-        // a control under its caption, sharing its row's width with its neighbour
-        let labelled = |label: &'static str, control: Div| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(div().text_size(px(12.)).line_height(px(16.)).text_color(muted).child(label))
-                .child(control)
-        };
+        let labelled = |label: &'static str, control: Div| labelled(theme, label, control);
         let pair = |left: Div, right: Div| div().flex().gap(px(12.)).child(left).child(right);
         let rows: Vec<Div> = self
             .web_fields
@@ -116,21 +106,7 @@ impl SettingsView {
                 };
                 let from = FROM.iter().position(|(f, _)| *f == entry.open_from);
                 let open_from = self.select(theme, web_select_id("from", &id), FROM.iter().map(|(_, l)| SharedString::from(*l)).collect(), from, "".into(), |_| None, pick_from, cx);
-                let danger = theme.danger;
-                let remove = div()
-                    .id(SharedString::from(format!("web-remove-{id}")))
-                    .flex_none()
-                    // level with the fields under the first row's captions
-                    .mt(px(22.))
-                    .size(px(32.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(danger.opacity(0.12)))
-                    .child(gpui::svg().path("icons/solar/trash-bin-minimalistic.svg").size(px(16.)).text_color(danger))
-                    .on_click(move |_, _, cx| update(cx, |s| s.web_entries.retain(|e| e.id != id)));
+                let remove = remove_button(theme, format!("web-remove-{id}")).on_click(move |_, _, cx| update(cx, |s| s.web_entries.retain(|e| e.id != id)));
                 div()
                     .mx(px(16.))
                     .py(px(14.))

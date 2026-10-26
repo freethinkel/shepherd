@@ -5,6 +5,9 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::reap_popup(&mut self.open_select, window);
         self.sync_web_fields(window, cx);
+        if self.section == Section::Worktrees {
+            self.load_worktrees(window, cx);
+        }
         let theme = Theme::of(cx).clone();
         let global = SettingsGlobal::of(cx);
         let settings = global.settings.clone();
@@ -412,6 +415,7 @@ impl Render for SettingsView {
                     "Local tools, listed in the sidebar above the workspaces and shown in place of the tabs and panes.",
                 ))
                 .child(self.web_pages(&theme, cx)),
+            Section::Worktrees => self.worktrees_page(&theme, cx),
             Section::Herdr => div()
                 .child(page_header(&theme, "herdr", "Where Shepherd finds herdr. Empty fields use herdr's defaults."))
                 .child(
