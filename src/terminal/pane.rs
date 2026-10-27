@@ -162,6 +162,20 @@ const FAST_WHEEL: f32 = 5.0;
 /// After our own scroll, herdr's reported offset lags behind it: the thumb keeps ours this long, then re-syncs.
 const SCROLL_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How often a drag past the pane's edge scrolls it while the pointer stays there.
+const AUTOSCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(30);
+/// Most lines one autoscroll tick scrolls, however far past the edge the pointer is.
+const AUTOSCROLL_MAX: i64 = 40;
+
+/// Lines an autoscroll tick scrolls for a pointer `past` pixels beyond the pane's edge: a line just past it, more
+/// the further out it is. The pace is by ear, after Ghostty.
+pub fn autoscroll_lines(past: f32, line_h: f32) -> i64 {
+    if !(past > 0.0 && line_h > 0.0) {
+        return 0;
+    }
+    (1 + (past / line_h / 2.0) as i64).min(AUTOSCROLL_MAX)
+}
+
 /// A left-button press: armed once the pointer travels past the drag threshold.
 #[derive(Debug, Clone, Copy)]
 struct Drag {
@@ -212,6 +226,9 @@ pub struct PaneTerminal {
     /// Until then `scroll.offset_from_bottom` is our own prediction, not herdr's (stale) report.
     scroll_local_until: Option<std::time::Instant>,
     _scroll_settle: Option<Task<()>>,
+    /// A drag past the top or bottom edge keeps scrolling the pane: the task runs while `autoscrolling` is set.
+    autoscroll: Option<Task<()>>,
+    autoscrolling: bool,
     /// The frame that lays out a resize `HELD_RESIZE` held back.
     _resize_catchup: Option<Task<()>>,
     _pump: Option<Task<()>>,
@@ -275,6 +292,8 @@ impl PaneTerminal {
             _scrollbar_drag: scrollbar_drag,
             scroll_local_until: None,
             _scroll_settle: None,
+            autoscroll: None,
+            autoscrolling: false,
             _resize_catchup: None,
             _pump: None,
             search: None,
@@ -417,6 +436,7 @@ impl PaneTerminal {
             return;
         }
         if resized {
+            self.stop_autoscroll();
             self.leave_history(); // the copy is wrapped at the old width
             self.emulator.resize(cols, rows);
             self.resized_at = Some(std::time::Instant::now());
@@ -511,7 +531,10 @@ impl PaneTerminal {
                 // the grid must be the one the history was read at, or its lines land wrong
                 match text.filter(|_| (pane.emulator.cols(), pane.emulator.rows()) == size) {
                     Some(text) => {
-                        let history = Emulator::with_history(&text, size.0 as u16, size.1 as u16);
+                        let mut history = Emulator::with_history(&text, size.0 as u16, size.1 as u16);
+                        // a selection made on the live grid goes on with its text in the copy
+                        let shift = history.history_lines() as isize - pane.emulator.history_lines() as isize;
+                        history.restore_selection(pane.emulator.selection_state(), shift);
                         pane.live = Some(std::mem::replace(&mut pane.emulator, history));
                         pane.scroll_by(delta, None, cx);
                     }
@@ -527,7 +550,10 @@ impl PaneTerminal {
     // ponytail: the copy is not refreshed while it is shown; new output shows once you are back at the bottom
     fn leave_history(&mut self) {
         self.history_pending = None;
-        if let Some(live) = self.live.take() {
+        if let Some(mut live) = self.live.take() {
+            // a selection made in the copy comes back to the live grid on its text
+            let shift = live.history_lines() as isize - self.emulator.history_lines() as isize;
+            live.restore_selection(self.emulator.selection_state(), shift);
             self.emulator = live;
             self.scroll.offset_from_bottom = 0;
         }
@@ -586,6 +612,7 @@ impl PaneTerminal {
 
     /// Typing goes back to the live bottom, as in a terminal.
     fn typed(&mut self, cx: &mut Context<Self>) {
+        self.stop_autoscroll();
         if self.live.is_some() || self.history_pending.is_some() {
             self.leave_history();
             cx.notify();
@@ -789,6 +816,87 @@ impl PaneTerminal {
             self.emulator.update_selection(point, side);
             cx.notify();
         }
+        self.autoscroll_edge(cx);
+    }
+
+    /// Whether a selection is being dragged out: the window's move events come here while it is.
+    pub fn selecting(&self) -> bool {
+        self.drag.is_some_and(|d| d.armed && d.select)
+    }
+
+    /// A selection drag's pointer, outside the pane: the pane's own move handler gets no events there (gpui sends
+    /// moves only over the element), so the window's come here instead.
+    pub fn drag_outside(&mut self, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        if !self.selecting() || self.geometry.is_some_and(|g| g.bounds.contains(&position)) {
+            return; // inside: on_mouse_move has it
+        }
+        self.pointer = Some(position);
+        if let Some((_, _, point, side)) = self.hit(position) {
+            self.emulator.update_selection(point, side);
+            cx.notify();
+        }
+        self.autoscroll_edge(cx);
+    }
+
+    /// Lines per autoscroll tick for the pointer past the pane's top or bottom edge: positive up, negative down,
+    /// 0 inside.
+    fn edge_lines(&self) -> i64 {
+        let (Some(g), Some(p)) = (self.geometry, self.pointer) else { return 0 };
+        let (top, bottom, y) = (f32::from(g.bounds.top()), f32::from(g.bounds.bottom()), f32::from(p.y));
+        if y < top {
+            autoscroll_lines(top - y, g.line_h)
+        } else if y > bottom {
+            -autoscroll_lines(y - bottom, g.line_h)
+        } else {
+            0
+        }
+    }
+
+    /// Starts scrolling for a selection drag whose pointer is past an edge. Shift-less drags an app reads the mouse
+    /// for never select, so they never get here.
+    fn autoscroll_edge(&mut self, cx: &mut Context<Self>) {
+        if self.autoscrolling || self.edge_lines() == 0 || !self.drag.is_some_and(|d| d.armed && d.select) || self.emulator.alt_screen() {
+            return;
+        }
+        self.autoscrolling = true;
+        self.autoscroll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTOSCROLL_TICK).await;
+                if !this.update(cx, |pane, cx| pane.autoscroll_step(cx)).unwrap_or(false) {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |pane, _| pane.autoscrolling = false);
+        }));
+    }
+
+    /// One autoscroll tick: scrolls the pane, then moves the selection's end to the pointer. False ends the scrolling.
+    fn autoscroll_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let lines = self.edge_lines();
+        if lines == 0 || !self.drag.is_some_and(|d| d.armed && d.select) || self.emulator.alt_screen() {
+            return false;
+        }
+        let lines = if lines > 0 && self.live.is_some() {
+            // stops at the top of the history read: the grid has nothing above, and herdr is not asked for more
+            lines.min(self.emulator.history_lines() as i64 - self.emulator.display_offset() as i64)
+        } else if lines < 0 && self.live.is_none() && self.scroll.offset_from_bottom == 0 {
+            0 // at the live bottom already
+        } else {
+            lines
+        };
+        self.scroll_by(lines, None, cx);
+        if let Some(p) = self.pointer
+            && let Some((_, _, point, side)) = self.hit(p)
+        {
+            self.emulator.update_selection(point, side);
+        }
+        cx.notify();
+        true
+    }
+
+    fn stop_autoscroll(&mut self) {
+        self.autoscrolling = false;
+        self.autoscroll = None;
     }
 
     /// A move with no button held goes to an app that captures the mouse (herdr drops it unless the app asked for
@@ -804,6 +912,7 @@ impl PaneTerminal {
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.take().filter(|d| d.button == event.button) else { return };
+        self.stop_autoscroll();
         if drag.to_app {
             self.mouse("up", drag.button, event.position, &event.modifiers, cx);
         }
@@ -859,6 +968,7 @@ async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionE
                     SessionEvent::MouseCapture(enabled) => pane.mouse_capture = enabled,
                     SessionEvent::KeyboardFlags(flags) => pane.keyboard_flags = flags,
                     SessionEvent::Size(cols, rows) => {
+                        pane.stop_autoscroll();
                         pane.leave_history();
                         pane.emulator.resize(cols, rows)
                     }
@@ -1093,6 +1203,15 @@ mod tests {
     }
 
     #[test]
+    fn autoscroll_starts_at_a_line_and_speeds_up_with_distance() {
+        // just past the edge: one line; far past it: many, capped
+        assert_eq!(autoscroll_lines(0.5, 18.0), 1);
+        assert_eq!(autoscroll_lines(90.0, 18.0), 3);
+        assert_eq!(autoscroll_lines(10_000.0, 18.0), AUTOSCROLL_MAX);
+        assert_eq!(autoscroll_lines(0.0, 18.0), 0);
+    }
+
+    #[test]
     fn wheel_lines_accumulate_fractions() {
         let mut acc = 0.0;
         assert_eq!(wheel_lines(&mut acc, 6.0, 17.0), 0); // a trackpad tick under one line
@@ -1101,3 +1220,4 @@ mod tests {
         assert_eq!(wheel_lines(&mut acc, -40.0, 17.0), -2);
     }
 }
+
