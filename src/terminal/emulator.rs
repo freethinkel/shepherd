@@ -147,6 +147,14 @@ struct Anchor {
     side: Side,
 }
 
+/// A selection in screen points, for [`Emulator::restore_selection`]: the anchor of one being made and the
+/// installed ends, top-left first.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectionState {
+    anchor: Option<Anchor>,
+    ends: Option<(GridPoint, GridPoint)>,
+}
+
 /// The emulator: a pure fold of PTY bytes into a renderable grid.
 pub struct Emulator {
     term: Terminal,
@@ -275,13 +283,20 @@ impl Emulator {
     // as output scrolls the grid. What stays here is the anchor of the one
     // being made, so each pointer move rebuilds it from anchor to pointer.
 
-    fn grid_ref(&self, point: GridPoint) -> Option<GridRef<'_>> {
-        let (x, y) = (u16::try_from(point.col).ok()?, u32::try_from(point.row).ok()?);
+    /// A cell of the viewport (row 0 = top of the visible area).
+    fn viewport_ref(&self, row: usize, col: usize) -> Option<GridRef<'_>> {
+        let (x, y) = (u16::try_from(col).ok()?, u32::try_from(row).ok()?);
         self.term.grid_ref(Point::Viewport(PointCoordinate { x, y })).ok()
     }
 
+    /// A cell by its screen point: the history and the screen, so it stays on its text as the viewport moves.
+    fn grid_ref(&self, point: GridPoint) -> Option<GridRef<'_>> {
+        let (x, y) = (u16::try_from(point.col).ok()?, u32::try_from(point.row).ok()?);
+        self.term.grid_ref(Point::Screen(PointCoordinate { x, y })).ok()
+    }
+
     fn point_of(&self, grid_ref: &GridRef<'_>) -> Option<GridPoint> {
-        let c = self.term.point_from_grid_ref(grid_ref, PointSpace::Viewport).ok()??;
+        let c = self.term.point_from_grid_ref(grid_ref, PointSpace::Screen).ok()??;
         Some(GridPoint { row: c.y as usize, col: c.x as usize })
     }
 
@@ -292,9 +307,28 @@ impl Emulator {
         Some((a.min(b), a.max(b)))
     }
 
-    /// The grid point under a viewport cell (row 0 = top of the visible area).
+    /// The screen point under a viewport cell. Selections keep these, so they hold on their text when the view
+    /// scrolls.
     pub fn grid_point(&self, viewport_row: usize, col: usize) -> GridPoint {
-        GridPoint { row: viewport_row, col: col.min(self.cols().saturating_sub(1)) }
+        let col = col.min(self.cols().saturating_sub(1));
+        self.viewport_ref(viewport_row, col)
+            .and_then(|r| self.point_of(&r))
+            .unwrap_or(GridPoint { row: viewport_row, col })
+    }
+
+    /// The selection as it stands, in screen points: what [`Self::restore_selection`] carries to another grid.
+    pub fn selection_state(&self) -> SelectionState {
+        SelectionState { anchor: self.anchor, ends: self.bounds(self.term.selection().ok().flatten()) }
+    }
+
+    /// Installs a selection taken from another grid, its rows moved by `shift` (the history difference between
+    /// the two). A row that falls off the top of this grid drops the selection.
+    pub fn restore_selection(&mut self, state: SelectionState, shift: isize) {
+        let moved = |p: GridPoint| Some(GridPoint { row: p.row.checked_add_signed(shift)?, ..p });
+        self.anchor = state.anchor.and_then(|a| Some(Anchor { point: moved(a.point)?, ..a }));
+        let ends = state.ends.and_then(|(a, b)| Some((moved(a)?, moved(b)?)));
+        let selection = ends.and_then(|(start, end)| Some(Selection::new(self.grid_ref(start)?, self.grid_ref(end)?, false)));
+        let _ = self.term.set_selection(selection.as_ref());
     }
 
     /// Begin a selection. `ty` picks the granularity: [`SelectionType::Simple`]
@@ -448,7 +482,7 @@ impl Emulator {
     }
 
     fn hyperlink(&self, row: usize, col: usize) -> Option<String> {
-        let grid_ref = self.grid_ref(GridPoint { row, col })?;
+        let grid_ref = self.viewport_ref(row, col)?;
         let mut buf = vec![0; 512];
         let len = match grid_ref.hyperlink_uri(&mut buf) {
             Err(Error::OutOfSpace { required }) => {
@@ -548,6 +582,39 @@ mod tests {
         assert!(!e.line(0)[1].selected);
         e.resize(6, 3);
         assert_eq!(e.line(0).len(), 6);
+    }
+
+    #[test]
+    fn a_selection_stays_on_its_text_as_the_view_scrolls() {
+        // a, b, c scroll into the history of a two-row copy: the screen shows d and e
+        let mut e = Emulator::with_history("a\nb\nc\nd\ne", 10, 2);
+        e.start_selection(SelectionType::Simple, e.grid_point(0, 0), Side::Left);
+        e.update_selection(e.grid_point(0, 0), Side::Right);
+        assert_eq!(e.selection_text().as_deref(), Some("d"));
+        e.clear_selection();
+        e.start_selection(SelectionType::Simple, e.grid_point(1, 0), Side::Left);
+        e.update_selection(e.grid_point(1, 0), Side::Right);
+        e.scroll_to_offset(2);
+        assert_eq!((e.row_text(0), e.row_text(1)), ("b".into(), "c".into()));
+        assert_eq!(e.selection_text().as_deref(), Some("e"));
+        // the anchor sits on "e" with its left half: the drag up to "b" takes b, c and d, and e stays out
+        e.update_selection(e.grid_point(0, 0), Side::Left);
+        assert_eq!(e.selection_text().as_deref(), Some("b\nc\nd"));
+    }
+
+    #[test]
+    fn a_selection_moves_to_another_grid_with_its_text() {
+        let mut live = Emulator::new(10, 2);
+        live.feed(b"d\r\ne");
+        live.start_selection(SelectionType::Simple, live.grid_point(1, 0), Side::Left);
+        live.update_selection(live.grid_point(1, 0), Side::Right);
+        let state = live.selection_state();
+        let mut copy = Emulator::with_history("a\nb\nc\nd\ne", 10, 2);
+        copy.restore_selection(state, copy.history_lines() as isize - live.history_lines() as isize);
+        assert_eq!(copy.selection_text().as_deref(), Some("e"));
+        // moved above the top of the grid, the selection goes
+        copy.restore_selection(copy.selection_state(), -5);
+        assert_eq!(copy.selection_text(), None);
     }
 
     #[test]

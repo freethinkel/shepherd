@@ -496,6 +496,16 @@ impl gpui::Element for TerminalElement {
             bounds.left() + px(TERM_PADDING),
             bounds.top() + px(TERM_PADDING),
         );
+        // A selection drag that leaves the pane still follows the pointer: gpui's element move handlers only hear
+        // moves over the element, so the window's go to the panel while a drag is out.
+        if self.panel.read(cx).selecting() {
+            let panel = self.panel.downgrade();
+            window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Bubble {
+                    let _ = panel.update(cx, |panel, cx| panel.drag_outside(event.position, cx));
+                }
+            });
+        }
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             for quad in prepaint.bg_quads.drain(..) {
                 window.paint_quad(quad);
