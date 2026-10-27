@@ -539,6 +539,8 @@ impl Shell {
         }
         // the address field being typed in keeps the keyboard too
         let popup = self.popup_open() || self.browser.editing();
+        // the page that takes the keyboard takes it after the others let go: `focus_parent` would take it back
+        let mut takes = None;
         for (key, page) in &mut self.pages.live {
             // WebKit's own word, which also ends a load that failed before it began (no Finished comes for one)
             #[cfg(target_os = "macos")]
@@ -558,7 +560,17 @@ impl Shell {
             let focused = visible && !popup;
             if page.focused != focused {
                 page.focused = focused;
-                let _ = if focused { page.view.focus() } else { page.view.focus_parent() };
+                match focused {
+                    true => takes = Some(page.view.clone()),
+                    false => drop(page.view.focus_parent()),
+                }
+            }
+        }
+        if let Some(view) = takes {
+            let _ = view.focus();
+            // a chord the page's monitor lets by reaches GPUI: from a pane the page hides it would reach no handler
+            if !self.focus.contains_focused(window, cx) {
+                window.focus(&self.focus, cx);
             }
         }
     }
