@@ -11,9 +11,10 @@ use crate::herdr::{Client, Mode, PaneInput, Session, SessionEvent};
 use crate::theme::Theme;
 use crate::ui::Popup;
 use gpui::{
-    App, AsyncApp, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, Focusable, IntoElement, KeyDownEvent, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
-    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Subscription, Task, WeakEntity, Window, div, prelude::*, px,
+    App, AsyncApp, Bounds, ClipboardItem, Context, Entity, EntityInputHandler, ExternalPaths, FocusHandle, Focusable,
+    IntoElement, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString, Styled, Subscription, Task, UTF16Selection,
+    WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
 use std::ops::Range;
@@ -47,6 +48,8 @@ pub struct GridSnapshot {
     /// Search matches on screen: (row, cells, the current one).
     pub marks: Vec<(usize, Range<usize>, bool)>,
     pub images: Vec<PaneImage>,
+    /// The IME's composing text and the cursor cell (row, col) it is drawn at.
+    pub marked: Option<(String, usize, usize)>,
 }
 
 /// While true (a divider or the sidebar is being dragged), panes reflow at most every `HELD_RESIZE`, so the
@@ -246,6 +249,8 @@ pub struct PaneTerminal {
     pub takes_over: bool,
     /// Kitty images herdr shows on the pane (from the window's client shell), drawn over the grid.
     images: Vec<PaneImage>,
+    /// What an IME (Pinyin, Kana, a dead key) composes before it commits: shown, not yet typed.
+    marked: Option<String>,
 }
 
 impl PaneTerminal {
@@ -304,6 +309,7 @@ impl PaneTerminal {
             reader: None,
             takes_over: false,
             images: Vec::new(),
+            marked: None,
         }
         // Attaching waits for the first measured grid (`on_grid_metrics`): herdr resizes the real PTY to
         // whatever size the attach names.
@@ -589,7 +595,8 @@ impl PaneTerminal {
         let back = self.live.as_ref().map_or(0, |_| self.emulator.display_offset() as u16);
         let images = self.images.iter().map(|i| PaneImage { y: i.y.saturating_add(back), ..i.clone() }).collect();
         let cursor = if self.live.is_some() { None } else { self.emulator.cursor() };
-        Some(GridSnapshot { lines, cursor, marks, images })
+        let marked = self.marked.clone().zip(self.emulator.cursor_cell()).map(|(text, (row, col))| (text, row, col));
+        Some(GridSnapshot { lines, cursor, marks, images, marked })
     }
 
     /// A key as herdr's semantic event over the window's client shell (see [`TypingShell`]), which encodes it for
@@ -608,6 +615,11 @@ impl PaneTerminal {
     fn via_shell(&self, event: PaneInput, cx: &App) -> bool {
         let controlled = self.session.is_some() && !self.observing;
         controlled && cx.try_global::<TypingShell>().is_some_and(|t| t.0.pane_input(&self.pane_id, vec![event]))
+    }
+
+    /// The reader or an image is open over the pane: it takes the keys, nothing is typed under it.
+    fn dialog_open(&self) -> bool {
+        self.reader.as_ref().is_some_and(Popup::is_open) || self.preview.as_ref().is_some_and(Popup::is_open)
     }
 
     /// Typing goes back to the live bottom, as in a terminal.
@@ -997,6 +1009,64 @@ impl Focusable for PaneTerminal {
     }
 }
 
+/// The platform's text input (`TerminalElement` registers it while the pane has focus): an IME (Pinyin, Kana, a dead
+/// key) composes here and the text it commits is typed into the pane. Keys it leaves alone still come as key downs.
+impl EntityInputHandler for PaneTerminal {
+    fn text_for_range(&mut self, _: Range<usize>, _: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+        Some(UTF16Selection { range: 0..0, reversed: false })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked.as_ref().map(|m| 0..m.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        cx.notify();
+    }
+
+    fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        if !text.is_empty() && !self.dialog_open() {
+            self.input(text.as_bytes(), cx);
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = (!text.is_empty() && !self.dialog_open()).then(|| text.to_string());
+        self.typed(cx);
+        cx.notify();
+    }
+
+    // ponytail: a cell per UTF-16 unit from the cursor (Zed's terminal does the same); the candidate window only
+    // has to land by the composition.
+    fn bounds_for_range(&mut self, range: Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        let (g, (row, col)) = (self.geometry?, self.emulator.cursor_cell()?);
+        let at = g.origin + gpui::point(px(g.cell_w * (col + range.start) as f32), px(g.line_h * row as f32));
+        Some(Bounds::new(at, gpui::size(px(g.cell_w), px(g.line_h))))
+    }
+
+    fn character_index_for_point(&mut self, _: gpui::Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        None
+    }
+
+    fn accepts_text_input(&self, _: &mut Window, _: &mut Context<Self>) -> bool {
+        !self.dialog_open()
+    }
+}
+
 impl Render for PaneTerminal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -1146,6 +1216,22 @@ mod tests {
         cx.update(|cx| cx.set_global(GridHold(false)));
         pane.update(cx, |p, cx| p.on_grid_metrics(geometry(100, 40), cx));
         pane.read_with(cx, |p, _| assert_eq!(p.emulator.cols(), 100));
+    }
+
+    #[gpui::test]
+    fn an_ime_composes_and_types_what_it_commits(cx: &mut gpui::TestAppContext) {
+        // Pinyin: "ni" is drawn at the cursor, not typed, until a candidate commits 你.
+        let pane = cx.new(|cx| PaneTerminal::new("w1:p1".into(), cx));
+        cx.add_empty_window().update(|window, cx| {
+            pane.update(cx, |p, cx| {
+                p.replace_and_mark_text_in_range(None, "ni", None, window, cx);
+                assert_eq!(p.marked_text_range(window, cx), Some(0..2));
+                assert!(p.held.is_empty(), "typed the composition: {:?}", p.held);
+                p.replace_text_in_range(None, "你", window, cx);
+                assert_eq!(p.marked_text_range(window, cx), None);
+                assert_eq!(p.held, "你".as_bytes());
+            })
+        });
     }
 
     #[test]
