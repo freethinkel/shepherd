@@ -278,6 +278,25 @@ fn grouped_agents_follow_workspace_order_ties_in_status_order() {
 }
 
 #[test]
+fn grouped_agents_keep_a_repos_worktrees_together_and_idle_ones_show_a_time() {
+    let mut s = fixture();
+    for p in &mut s.panes {
+        p.agent = Some("claude".into());
+    }
+    s.workspaces = vec![ws("mochi", 1, Some(("m", false))), ws("plain", 2, None), ws("mochi-a", 3, Some(("m", true)))];
+    for (p, (ws, status)) in s.panes.iter_mut().zip([("mochi-a", AgentStatus::Blocked), ("plain", AgentStatus::Working), ("mochi", AgentStatus::Idle)]) {
+        (p.workspace_id, p.agent_status) = (ws.into(), status);
+    }
+    let ids = |agents: Vec<&shepherd::model::Pane>| agents.iter().map(|p| p.pane_id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(s.agents_by(AgentSort::Grouped, &Since::new())), ["w1:p1", "w1:p3", "w1:p2"], "mochi and its worktree, then plain");
+    assert_eq!(s.project_of("mochi-a").map(|w| w.workspace_id.as_str()), Some("mochi"));
+    let mut since = Since::new();
+    s.track(&mut since, std::time::Instant::now());
+    let timed: Vec<bool> = s.panes.iter().map(|p| shepherd::model::timed_since(&since, p).is_some()).collect();
+    assert_eq!(timed, [true, false, true], "blocked and idle show a time, working doesn't");
+}
+
+#[test]
 fn waiting_agents_count_from_their_status_change_longest_first() {
     use std::time::{Duration, Instant};
     let mut s = fixture();

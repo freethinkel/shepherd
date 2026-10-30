@@ -156,6 +156,40 @@ impl Shell {
             )
             .with_priority(1)
         }))
+        .children(self.agent_menu.as_ref().map(|menu| {
+            let (pane_id, at) = menu.value.clone();
+            // the row's own title on top, so the menu says which agent it closes
+            let title = snapshot
+                .as_ref()
+                .and_then(|s| s.panes.iter().find(|p| p.pane_id == pane_id))
+                .and_then(|p| p.terminal_title_stripped.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "Agent".to_string());
+            gpui::deferred(
+                gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
+                    "agent-menu-in",
+                    menu,
+                    menu_card(theme, "agent-menu", 180.)
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            if let Some(m) = this.agent_menu.as_mut() { m.close() }
+                            cx.notify();
+                        }))
+                        .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).max_w(px(240.)).truncate().text_size(px(11.)).text_color(theme.text_faint).child(title))
+                        .child(
+                            row(theme, false, "agent-menu-close")
+                                .h(px(28.))
+                                .rounded(px(6.))
+                                .text_color(theme.danger)
+                                .child("Close agent")
+                                .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    if let Some(m) = this.agent_menu.as_mut() { m.close() }
+                                    this.send(Command::ClosePane { pane_id: pane_id.clone() }, cx, |_, _, _| {});
+                                })),
+                        ),
+                )),
+            )
+            .with_priority(1)
+        }))
         .children(self.place_menu.as_ref().map(|menu| {
             let (place, at) = menu.value.clone();
             let (edit, doomed) = (place.clone(), place.clone());

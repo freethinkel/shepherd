@@ -388,6 +388,21 @@ pub(super) fn fold_chevron(theme: &Theme, id: &str, open: bool, full: f32, tween
         })
 }
 
+/// A group's body at its height: open, folded, or tweening between. Zeron's disclosure: the height tweens, the rows
+/// fade up from 35 % and slide 3 px.
+pub(super) fn fold_body(body: Div, key: &str, open: bool, full: f32, tween: Option<FoldMotion>) -> gpui::AnyElement {
+    match tween {
+        None => body.h(px(if open { full } else { 0. })).into_any_element(),
+        Some(m) => body
+            .with_animation(SharedString::from(format!("fold-{key}-{}", m.epoch)), fold_animation(), move |el, t| {
+                let h = m.from + (m.to - m.from) * t;
+                let reveal = (h / full).clamp(0., 1.);
+                el.h(px(h)).opacity(0.35 + 0.65 * reveal).relative().top(px(-3. * (1. - reveal)))
+            })
+            .into_any_element(),
+    }
+}
+
 /// Collie's sidebar row: 32 px, 8 px radius, a wash under the selected one.
 pub(crate) fn row(theme: &Theme, selected: bool, id: impl Into<gpui::ElementId>) -> Stateful<Div> {
     let hover = theme.hover;

@@ -27,6 +27,17 @@ pub fn waiting_since(since: &Since, pane: &Pane) -> Option<Instant> {
     (*status == pane.agent_status && crate::notify::wants_attention(*status)).then_some(*at)
 }
 
+/// Statuses the agents list shows a time beside: a wait (blocked, done) or an idle spell.
+pub fn timed(status: AgentStatus) -> bool {
+    crate::notify::wants_attention(status) || status == AgentStatus::Idle
+}
+
+/// Since when the agents list counts `pane`'s status, when it is one it shows a time for.
+pub fn timed_since(since: &Since, pane: &Pane) -> Option<Instant> {
+    let (status, at) = since.get(&pane.pane_id)?;
+    (*status == pane.agent_status && timed(*status)).then_some(*at)
+}
+
 /// A wait as the sidebar shows it: "now", "4m", "1h", "2d".
 pub fn ago(wait: Duration) -> String {
     match wait.as_secs() / 60 {
@@ -272,7 +283,8 @@ impl Snapshot {
         }
     }
 
-    /// The agents in `sort` order, ties in status order. `since` orders [`AgentSort::Waiting`].
+    /// The agents in `sort` order, ties in status order: [`AgentSort::Grouped`] by project, as the sidebar groups
+    /// workspaces. `since` orders [`AgentSort::Waiting`].
     pub fn agents_by(&self, sort: AgentSort, since: &Since) -> Vec<&Pane> {
         let mut agents = self.agents();
         match sort {
@@ -282,11 +294,21 @@ impl Snapshot {
                 (at.is_none(), at)
             }),
             AgentSort::Grouped => {
-                let order: Vec<_> = self.workspace_tree().into_iter().map(|(w, _)| w.workspace_id.as_str()).collect();
-                agents.sort_by_key(|p| order.iter().position(|id| *id == p.workspace_id).unwrap_or(usize::MAX));
+                let groups = groups(self.workspace_tree());
+                let group = |p: &Pane| groups.iter().position(|(w, kids)| std::iter::once(w).chain(kids).any(|w| w.workspace_id == p.workspace_id));
+                agents.sort_by_key(|p| group(p).unwrap_or(usize::MAX));
             }
         }
         agents
+    }
+
+    /// The project `workspace_id` is in: its sidebar group's top-level workspace (a worktree's repo checkout, else
+    /// itself).
+    pub fn project_of(&self, workspace_id: &str) -> Option<&Workspace> {
+        groups(self.workspace_tree())
+            .into_iter()
+            .find(|(w, kids)| std::iter::once(w).chain(kids).any(|w| w.workspace_id == workspace_id))
+            .map(|(w, _)| w)
     }
 
     /// Like `pick_tab`, but a gone choice falls back within `workspace` (its active tab, then its first) before

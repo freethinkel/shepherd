@@ -493,7 +493,7 @@ impl Shell {
         let mut agents = super::sidebar::agent_entries(snapshot, self.agent_sort, &Default::default());
         let any_agents = !agents.is_empty();
         if settings.attention_agents {
-            agents.retain(|(p, _, _)| crate::notify::wants_attention(p.agent_status));
+            agents.retain(|e| crate::notify::wants_attention(e.pane.agent_status));
         }
         let agents = (settings.show_agents && any_agents).then(|| {
             let heading = div().px(px(16.)).pt(px(12.)).pb(px(4.)).border_t_1().border_color(theme.border).text_size(px(11.)).text_color(theme.text_faint).child("Agents");
@@ -511,7 +511,7 @@ impl Shell {
                 .when(agents.is_empty(), |el| {
                     el.child(div().px(px(8.)).py(px(6.)).text_size(px(11.)).text_color(theme.text_faint).child("Nothing needs you"))
                 })
-                .children(super::sidebar::agent_rows(agents, self.agent_sort, settings.compact_agents, None, theme, |row, _| row))
+                .children(self.agent_rows(agents, settings.compact_agents, None, false, theme, |row, _| row, |heading, _, _| heading))
                 .child(div().flex_none().h(px(4.)));
             [heading.into_any_element(), list.into_any_element()]
         });

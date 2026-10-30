@@ -184,6 +184,7 @@ impl Shell {
             self.web_menu.is_some(),
             self.new_tab_menu.is_some(),
             self.pane_menu.is_some(),
+            self.agent_menu.is_some(),
             self.spent_menu.is_some(),
             self.usage_menu.is_some(),
             self.statusbar_menu.is_some(),

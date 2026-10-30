@@ -16,6 +16,7 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.web_menu, window);
         crate::ui::reap_popup(&mut self.new_tab_menu, window);
         crate::ui::reap_popup(&mut self.pane_menu, window);
+        crate::ui::reap_popup(&mut self.agent_menu, window);
         crate::ui::reap_popup(&mut self.spent_menu, window);
         crate::ui::reap_popup(&mut self.usage_menu, window);
         crate::ui::reap_popup(&mut self.statusbar_menu, window);

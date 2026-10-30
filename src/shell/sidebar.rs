@@ -8,10 +8,7 @@ impl Shell {
     /// Folds or unfolds a worktree group, tweening from wherever its body is now.
     pub(super) fn toggle_fold(&mut self, id: &str, full: f32, cx: &mut Context<Self>) {
         let open = !self.folded.contains(id);
-        let prev = self.fold_motion.get(id).copied();
-        let from = prev.filter(|m| m.animating()).map(FoldMotion::current).unwrap_or(if open { full } else { 0. });
-        let epoch = prev.map_or(1, |m| m.epoch + 1);
-        self.fold_motion.insert(id.to_string(), FoldMotion { epoch, from, to: if open { 0. } else { full }, started: Instant::now() });
+        self.start_fold_motion(id, open, full);
         if open {
             self.folded.insert(id.to_string());
         } else {
@@ -71,6 +68,7 @@ impl Shell {
                     || open(shell.web_menu.as_ref().map(|m| m.is_open()))
                     || open(shell.view_menu.as_ref().map(|m| m.is_open()))
                     || open(shell.agents_menu.as_ref().map(|m| m.is_open()))
+                    || open(shell.agent_menu.as_ref().map(|m| m.is_open()))
                     || open(shell.place_menu.as_ref().map(|m| m.is_open()));
                 if !shell.peek_hovered && !menu {
                     shell.set_peek(false, cx);
@@ -169,6 +167,29 @@ impl Shell {
     pub(super) fn show_agent(&mut self, tab_id: String, pane_id: String, cx: &mut Context<Self>) {
         self.select_tab(Some(tab_id));
         self.focus_next = Some(pane_id);
+        cx.notify();
+    }
+
+    /// Starts the tween of group `key`'s body as it folds (`folding`) or opens, from wherever it is now.
+    fn start_fold_motion(&mut self, key: &str, folding: bool, full: f32) {
+        let prev = self.fold_motion.get(key).copied();
+        let from = prev.filter(|m| m.animating()).map(FoldMotion::current).unwrap_or(if folding { full } else { 0. });
+        let epoch = prev.map_or(1, |m| m.epoch + 1);
+        self.fold_motion.insert(key.to_string(), FoldMotion { epoch, from, to: if folding { 0. } else { full }, started: Instant::now() });
+    }
+
+    /// Folds or unfolds a project in the agents list, tweening like a worktree group.
+    pub(super) fn toggle_agents_fold(&mut self, id: &str, full: f32, cx: &mut Context<Self>) {
+        let folding = !self.agents_folded.contains(id);
+        self.start_fold_motion(&format!("agents-{id}"), folding, full);
+        if folding {
+            self.agents_folded.insert(id.to_string());
+        } else {
+            self.agents_folded.remove(id);
+        }
+        let mut folded: Vec<String> = self.agents_folded.iter().cloned().collect();
+        folded.sort();
+        save_from_sidebar(cx, |s| s.agents_folded = folded);
         cx.notify();
     }
 
@@ -401,21 +422,7 @@ impl Shell {
                 .gap(px(2.))
                 .children(kids.iter().map(|k| ws_row(k, true, None, None, cx).into_any_element()).collect::<Vec<_>>())
                 .children(pending.iter().map(|b| pending_worktree_row(theme, b).h(px(kid_h)).into_any_element()));
-            let body = match tween {
-                None => body.h(px(if open { full } else { 0. })).into_any_element(),
-                // Zeron's disclosure: the height tweens, the rows fade up from 35 % and slide 3 px.
-                Some(m) => body
-                    .with_animation(
-                        SharedString::from(format!("fold-{}-{}", w.workspace_id, m.epoch)),
-                        fold_animation(),
-                        move |el, t| {
-                            let h = m.from + (m.to - m.from) * t;
-                            let reveal = (h / full).clamp(0., 1.);
-                            el.h(px(h)).opacity(0.35 + 0.65 * reveal).relative().top(px(-3. * (1. - reveal)))
-                        },
-                    )
-                    .into_any_element(),
-            };
+            let body = fold_body(body, &w.workspace_id, open, full, tween);
             (w.workspace_id.clone(), div().flex().flex_col().flex_none().child(header).child(body).into_any_element())
         }).collect::<Vec<_>>()
     }
@@ -456,7 +463,7 @@ impl Shell {
         // the section stays while any agent runs, so its menu can turn the filter off again
         let any_agents = !agents.is_empty();
         if SettingsGlobal::of(cx).settings.attention_agents {
-            agents.retain(|(p, _, _)| crate::notify::wants_attention(p.agent_status));
+            agents.retain(|e| crate::notify::wants_attention(e.pane.agent_status));
         }
         let hover_bg = theme.hover;
         let active = window.is_window_active();
@@ -636,9 +643,20 @@ impl Shell {
                             .when(agents.is_empty(), |el| {
                                 el.child(div().px(px(8.)).py(px(6.)).text_size(px(11.)).text_color(theme.text_faint).child("Nothing needs you"))
                             })
-                            .children(agent_rows(agents, self.agent_sort, SettingsGlobal::of(cx).settings.compact_agents, shown_tab.as_deref(), theme, |row, pane| {
+                            .children(self.agent_rows(agents, SettingsGlobal::of(cx).settings.compact_agents, shown_tab.as_deref(), true, theme, |row, pane| {
                                 let (tab_id, pane_id) = (pane.tab_id.clone(), pane.pane_id.clone());
+                                let menu = pane_id.clone();
                                 row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.show_agent(tab_id.clone(), pane_id.clone(), cx)))
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                            this.agent_menu = Some(crate::ui::Popup::new((menu.clone(), e.position)));
+                                            cx.notify();
+                                        }),
+                                    )
+                            }, |heading, id, full| {
+                                let id = id.to_string();
+                                heading.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_agents_fold(&id, full, cx)))
                             }))
                             // the last row scrolls clear of the list's faded edge
                             .child(div().flex_none().h(px(4.)))),
@@ -847,80 +865,114 @@ impl Shell {
     }
 }
 
-/// The agents list's entries for `s`, in `sort`'s order: each agent with its workspace's label and how long it has
-/// waited.
-pub(super) fn agent_entries(s: &Snapshot, sort: AgentSort, since: &crate::model::Since) -> Vec<(crate::model::Pane, String, Option<String>)> {
+/// An agents list entry: the agent, its workspace's label, its project (id and label: see
+/// [`Snapshot::project_of`]) and how long it has had its status.
+pub(super) struct AgentEntry {
+    pub pane: crate::model::Pane,
+    pub workspace: String,
+    pub project: (String, String),
+    pub time: Option<String>,
+}
+
+/// The agents list's entries for `s`, in `sort`'s order.
+pub(super) fn agent_entries(s: &Snapshot, sort: AgentSort, since: &crate::model::Since) -> Vec<AgentEntry> {
+    let label = |id: &str| s.workspaces.iter().find(|w| w.workspace_id == id).map(|w| w.label.clone()).unwrap_or_default();
     s.agents_by(sort, since)
         .into_iter()
-        .map(|p| {
-            let ws = s.workspaces.iter().find(|w| w.workspace_id == p.workspace_id);
-            let waited = crate::model::waiting_since(since, p).map(|at| crate::model::ago(at.elapsed()));
-            (p.clone(), ws.map(|w| w.label.clone()).unwrap_or_default(), waited)
+        .map(|p| AgentEntry {
+            pane: p.clone(),
+            workspace: label(&p.workspace_id),
+            project: s.project_of(&p.workspace_id).map_or_else(|| (p.workspace_id.clone(), label(&p.workspace_id)), |w| (w.workspace_id.clone(), w.label.clone())),
+            time: crate::model::timed_since(since, p).map(|at| crate::model::ago(at.elapsed())),
         })
         .collect()
 }
 
-/// The agents list's rows, `act` making each one do something (the swipe's preview of another place leaves them inert).
-pub(super) fn agent_rows(
-    agents: Vec<(crate::model::Pane, String, Option<String>)>,
-    sort: AgentSort,
-    compact: bool,
-    shown_tab: Option<&str>,
-    theme: &Theme,
-    act: impl Fn(Stateful<Div>, &crate::model::Pane) -> Stateful<Div>,
-) -> Vec<gpui::AnyElement> {
-    let workspaces: Vec<String> = agents.iter().map(|(p, _, _)| p.workspace_id.clone()).collect();
-    let grouped = sort == AgentSort::Grouped;
-    agents
-        .into_iter()
-        .enumerate()
-        .flat_map(|(i, (pane, workspace, waited))| {
-            // Grouped: a heading where the workspace changes, which the rows then leave out.
-            let heading = (grouped && (i == 0 || workspaces[i - 1] != pane.workspace_id)).then(|| {
-                div()
-                    .flex_none()
-                    .px(px(8.))
-                    .pt(px(if i == 0 { 2. } else { 8. }))
-                    .pb(px(2.))
-                    .truncate()
-                    .text_size(px(11.))
-                    .text_color(theme.text_faint)
-                    .child(workspace.clone())
-                    .into_any_element()
-            });
-            let selected = shown_tab == Some(pane.tab_id.as_str());
-            let title = pane.terminal_title_stripped.clone().unwrap_or_default();
-            let mark = crate::ui::command_panel::agent_icon(pane.agent.as_deref().unwrap_or_default());
-            let mark = || gpui::svg().path(mark).size(px(14.)).flex_none().text_color(crate::ui::command_panel::icon_ink(mark, theme.text_muted));
-            let agent = row(theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
-                .h(px(if compact { 30. } else { 44. }))
-                .child(status_dot(pane.agent_status, theme))
-                .when(compact, |el| {
-                    el.child(mark())
-                        .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme.text_muted).child(title.clone()))
-                        .children(waited.clone().map(|w| div().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(w)))
-                })
-                .when(!compact, |el| {
-                    el.child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(6.))
-                                    .items_center()
-                                    .child(mark())
-                                    .when(!grouped, |el| el.child(div().min_w_0().truncate().text_color(theme.text_faint).child(workspace)))
-                                    .children(waited.map(|w| div().ml_auto().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(w))),
-                            )
-                            .child(div().truncate().text_size(px(11.)).text_color(theme.text_muted).child(title)),
-                    )
-                });
-            heading.into_iter().chain([act(agent, &pane).into_any_element()])
-        })
-        .collect()
+impl Shell {
+    /// The agents list's rows, `act` making each one do something and `fold` each project heading (given its body's
+    /// full height); `live` false is the swipe's preview of another place, inert and without tweens.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn agent_rows(
+        &self,
+        agents: Vec<AgentEntry>,
+        compact: bool,
+        shown_tab: Option<&str>,
+        live: bool,
+        theme: &Theme,
+        act: impl Fn(Stateful<Div>, &crate::model::Pane) -> Stateful<Div>,
+        fold: impl Fn(Stateful<Div>, &str, f32) -> Stateful<Div>,
+    ) -> Vec<gpui::AnyElement> {
+        let grouped = self.agent_sort == AgentSort::Grouped;
+        let row_h = if compact { 30. } else { 44. };
+        let mut out = Vec::new();
+        // Grouped: a heading per project, which folds its rows away like a worktree group; otherwise one run of rows.
+        for (i, group) in agents.chunk_by(|a, b| !grouped || a.project.0 == b.project.0).enumerate() {
+            let (id, project) = &group[0].project;
+            let key = format!("agents-{id}");
+            let open = !grouped || !self.agents_folded.contains(id);
+            let full = group.len() as f32 * (row_h + 2.);
+            let tween = self.fold_motion.get(&key).copied().filter(|m| live && m.animating());
+            let rows = (open || tween.is_some()).then(|| group.iter().map(|AgentEntry { pane, workspace, project, time }| {
+                let selected = shown_tab == Some(pane.tab_id.as_str());
+                let title = pane.terminal_title_stripped.clone().unwrap_or_default();
+                let mark = crate::ui::command_panel::agent_icon(pane.agent.as_deref().unwrap_or_default());
+                let mark = || gpui::svg().path(mark).size(px(14.)).flex_none().text_color(crate::ui::command_panel::icon_ink(mark, theme.text_muted));
+                // under a project heading, only a worktree's own name says where the agent is
+                let place = (!grouped || workspace != &project.1).then(|| workspace.clone());
+                let agent = row(theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
+                    .h(px(row_h))
+                    .child(status_dot(pane.agent_status, theme))
+                    .when(compact, |el| {
+                        el.child(mark())
+                            .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme.text_muted).child(title.clone()))
+                            .children(time.clone().map(|w| div().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(w)))
+                    })
+                    .when(!compact, |el| {
+                        el.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap(px(6.))
+                                        .items_center()
+                                        .child(mark())
+                                        .children(place.map(|w| div().min_w_0().truncate().text_color(theme.text_faint).child(w)))
+                                        .children(time.clone().map(|w| div().ml_auto().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(w))),
+                                )
+                                .child(div().truncate().text_size(px(11.)).text_color(theme.text_muted).child(title)),
+                        )
+                    });
+                act(agent, pane).into_any_element()
+            }).collect::<Vec<_>>());
+            if !grouped {
+                out.extend(rows.into_iter().flatten());
+                continue;
+            }
+            let heading = div()
+                .id(SharedString::from(format!("agents-project-{id}")))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .pt(px(if i == 0 { 2. } else { 8. }))
+                .pb(px(2.))
+                .cursor_pointer()
+                .text_size(px(11.))
+                .text_color(theme.text_faint)
+                .child(div().flex_1().min_w_0().truncate().child(project.clone()))
+                // folded: how many, and the most urgent status (the group's first)
+                .when(!open, |el| el.child(status_dot(group[0].pane.agent_status, theme)).child(group.len().to_string()))
+                .child(fold_chevron(theme, &key, open, full, tween));
+            // the body's top padding stands in for the gap a heading had above its first row
+            let body = div().w_full().flex_none().overflow_hidden().flex().flex_col().pt(px(2.)).gap(px(2.)).children(rows.into_iter().flatten());
+            out.push(div().flex().flex_col().flex_none().child(fold(heading, id, full)).child(fold_body(body, &key, open, full, tween)).into_any_element());
+        }
+        out
+    }
 }
 

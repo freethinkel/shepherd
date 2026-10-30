@@ -88,6 +88,8 @@ pub struct Settings {
     pub sidebar_open: bool,
     /// Worktree groups folded in the sidebar, by workspace id.
     pub folded: Vec<String>,
+    /// Projects folded in the agents list, by their top-level workspace's id.
+    pub agents_folded: Vec<String>,
     /// Web pages listed in the sidebar above the workspaces and shown in place of the tabs and panes.
     pub web_entries: Vec<WebEntry>,
     /// Links to another site open in the system browser instead of in the page.
@@ -298,6 +300,7 @@ impl Default for Settings {
             window_buttons: true,
             sidebar_open: true,
             folded: Vec::new(),
+            agents_folded: Vec::new(),
             web_entries: Vec::new(),
             web_links_outside: false,
             web_links_inside: false,

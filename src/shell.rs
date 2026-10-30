@@ -100,6 +100,8 @@ pub struct Shell {
     /// The tab or workspace label being edited in place.
     renaming: Option<Rename>,
     folded: std::collections::HashSet<String>,
+    /// Projects folded in the agents list, by their top-level workspace's id.
+    agents_folded: std::collections::HashSet<String>,
     /// A workspace's right-click menu and where it opened.
     ws_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// A web page's right-click menu in the sidebar: its entry's id, and where it was clicked.
@@ -183,6 +185,8 @@ pub struct Shell {
     tab_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// A pane's right-click menu: the pane and where it was clicked.
     pane_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
+    /// An agent row's right-click menu: the agent's pane and where it was clicked.
+    agent_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// The status bar's spend popup, opened at this point (its bottom-left).
     spent_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// The spend popup lists the most tokens first.
@@ -463,6 +467,7 @@ impl Shell {
                     settling: None,
                     renaming: None,
                     folded: SettingsGlobal::of(cx).settings.folded.iter().cloned().collect(),
+                    agents_folded: SettingsGlobal::of(cx).settings.agents_folded.iter().cloned().collect(),
                     fold_motion: Default::default(),
                     seam_hover: Default::default(),
                     ws_menu: None,
@@ -499,6 +504,7 @@ impl Shell {
                     show_submenu_bounds: Default::default(),
                     agents_menu: None,
                     pane_menu: None,
+                    agent_menu: None,
                     spent_menu: None,
                     usage_menu: None,
                     statusbar_menu: None,
@@ -555,12 +561,12 @@ impl Shell {
                 shell.refresh_places(cx);
                 shell.refresh_plugin_actions(cx);
                 cx.set_global(browser::Links(cx.entity().downgrade()));
-                // Waiting times move on between snapshots.
+                // Waiting and idle times move on between snapshots.
                 // ponytail: a minute from launch, not from each wait, so a label can lag by up to a minute.
                 cx.spawn(async move |this, cx| loop {
                     cx.background_executor().timer(Duration::from_secs(60)).await;
                     let alive = this.update(cx, |s, cx| {
-                        if s.since.values().any(|(status, _)| crate::notify::wants_attention(*status)) {
+                        if s.since.values().any(|(status, _)| crate::model::timed(*status)) {
                             cx.notify();
                         }
                     });
