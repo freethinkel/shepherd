@@ -1,18 +1,13 @@
 //! The tab bar: Zeron's terminal-panel tabs (28 px, 8 px radius, a wash under the active one) with what runs in
 //! each tab as colored favicons, one per kind of agent or program (Superlogical's tabs), sized to their labels. A
-//! new tab grows in, a closed one stays mounted while it shrinks out (the `Popup` recipe), the active wash slides
-//! between tabs, a reorder slides the tabs to their new places, and a dropped tab flies from where it was let go
-//! back into its slot.
+//! new tab grows in and a closed one stays mounted while it shrinks out (the `Popup` recipe); a switch, a reorder
+//! and a drop take effect at once, as a tab sliding made it hard to follow which one was which.
 use super::*;
 use std::cell::RefCell;
 
-/// Zeron's `motion::COLLAPSE` for a tab growing in or shrinking out; the wash and a reorder slide a bit quicker
-/// than its `TAB_SLIDE`.
+/// Zeron's `motion::COLLAPSE` for a tab growing in or shrinking out.
 const ENTER: Duration = Duration::from_millis(180);
 const EXIT: Duration = Duration::from_millis(150);
-const SLIDE: Duration = Duration::from_millis(110);
-/// A dropped tab's flight home.
-const LAND: Duration = Duration::from_millis(220);
 /// How long a dropped order is shown, at most, before herdr's own catches up.
 const PENDING: Duration = Duration::from_millis(1500);
 
@@ -41,8 +36,8 @@ const MIN_W: f32 = 96.;
 const MAX_W: f32 = 220.;
 const FONT_SIZE: f32 = 12.5;
 
-/// Tab-bar state that outlives a frame: the scroll, the tabs as last drawn (closing ones included), the wash,
-/// and the tab being dragged with its ghost's top-left in the window (written by the ghost as it follows the pointer).
+/// Tab-bar state that outlives a frame: the scroll, the tabs as last drawn (closing ones included), and the tab
+/// being dragged with its ghost's top-left in the window (written by the ghost as it follows the pointer).
 #[derive(Default)]
 pub(super) struct TabBar {
     /// What each plain pane runs, by pane id; a pane at its shell's prompt has none.
@@ -50,7 +45,6 @@ pub(super) struct TabBar {
     pub scroll: gpui::ScrollHandle,
     workspace: Option<String>,
     entries: Vec<Entry>,
-    wash: Option<Wash>,
     drag: Rc<RefCell<Option<(String, gpui::Point<Pixels>)>>>,
     /// The tab last scrolled into view; the bar follows a newly shown tab once, then leaves the scroll to you.
     revealed: Option<String>,
@@ -58,8 +52,6 @@ pub(super) struct TabBar {
     pub held: Option<(String, usize)>,
     /// The order a drop asked for, shown until herdr's is it.
     pending: Option<(Vec<String>, Instant)>,
-    /// The tabs' order as last drawn, so a change of it slides them.
-    order: Vec<String>,
 }
 
 /// A favicon: the mark and its tile and mark colors.
@@ -95,23 +87,13 @@ struct Entry {
     tab: Shown,
     enter: Option<Instant>,
     exit: Option<Instant>,
-    /// Off its slot: sliding after a reorder, or flying home after a drop (`lifted`, drawn over everything).
-    moved: Option<Move>,
-    /// Where it was drawn last frame: content x and the offset from the bar's row.
-    drawn: (f32, f32),
-}
-
-#[derive(Clone, Copy)]
-struct Move {
-    from: (f32, f32),
-    started: Instant,
-    duration: Duration,
-    lifted: bool,
+    /// Where it is drawn: content x.
+    drawn: f32,
 }
 
 impl Entry {
     fn new(tab: Shown, enter: Option<Instant>) -> Self {
-        Entry { tab, enter, exit: None, moved: None, drawn: (0., 0.) }
+        Entry { tab, enter, exit: None, drawn: 0. }
     }
 
     /// How far the tab is in: 0 collapsed, 1 full width.
@@ -125,27 +107,12 @@ impl Entry {
 
     fn moving(&self, now: Instant) -> bool {
         let running = |since: Instant, d: Duration| now.duration_since(since) < d;
-        self.exit.is_some_and(|s| running(s, EXIT))
-            || self.enter.is_some_and(|s| running(s, ENTER))
-            || self.moved.is_some_and(|m| running(m.started, m.duration))
-    }
-
-    /// Mid-flight home after a drop.
-    fn lifted(&self, now: Instant) -> bool {
-        self.moved.is_some_and(|m| m.lifted && now.duration_since(m.started) < m.duration)
+        self.exit.is_some_and(|s| running(s, EXIT)) || self.enter.is_some_and(|s| running(s, ENTER))
     }
 }
 
 fn progress(since: Instant, d: Duration, now: Instant) -> f32 {
     (now.duration_since(since).as_secs_f32() / d.as_secs_f32()).min(1.)
-}
-
-/// The active wash: where it slides from, when it set off, and where it was last drawn (x, width).
-struct Wash {
-    tab: String,
-    from: (f32, f32),
-    started: Instant,
-    shown: (f32, f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -389,12 +356,6 @@ fn name_text(t: &Shown, theme: &Theme) -> gpui::StyledText {
     gpui::StyledText::new(t.name.0.clone()).with_highlights(t.name.1.iter().map(|r| (r.clone(), faint)).collect::<Vec<_>>())
 }
 
-/// `a` toward `b` by `t`, channel by channel.
-fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
-    let l = |x: f32, y: f32| x + (y - x) * t;
-    gpui::hsla(l(a.h, b.h), l(a.s, b.s), l(a.l, b.l), l(a.a, b.a))
-}
-
 /// The scroll (px scrolled from the left) that brings the slot `x..x + w` into a `view`-wide bar, with a
 /// fade's width to spare; `None` when it already shows.
 fn reveal(scrolled: f32, view: f32, x: f32, w: f32) -> Option<f32> {
@@ -421,21 +382,15 @@ fn zoom_mark(theme: &Theme) -> gpui::Svg {
 }
 
 impl TabBar {
-    /// Takes this frame's tabs; another workspace's tabs replace the old ones without motion. A reorder slides
-    /// the tabs from where they were drawn.
+    /// Takes this frame's tabs; another workspace's tabs replace the old ones without motion.
     fn sync(&mut self, workspace: Option<&str>, tabs: Vec<Shown>, now: Instant) {
         if self.workspace.as_deref() != workspace {
             self.workspace = workspace.map(str::to_string);
             self.entries = tabs.into_iter().map(|tab| Entry::new(tab, None)).collect();
-            self.wash = None;
             return;
         }
         let prev: Vec<&str> = self.entries.iter().map(|e| e.tab.id.as_str()).collect();
         let ids: Vec<&str> = tabs.iter().map(|t| t.id.as_str()).collect();
-        let kept = |list: &[&str]| -> Vec<String> {
-            list.iter().filter(|id| prev.contains(id) && ids.contains(id)).map(|id| id.to_string()).collect()
-        };
-        let reordered = kept(&prev) != kept(&ids);
         let order = merge(&prev, &ids);
         let entries = order
             .into_iter()
@@ -444,17 +399,7 @@ impl TabBar {
                 let fresh = || tabs.iter().find(|t| t.id == id).cloned();
                 match phase {
                     Phase::New => Some(Entry::new(fresh()?, Some(now))),
-                    Phase::Stay => {
-                        let old = old?;
-                        let moved = if reordered {
-                            let lifted = old.lifted(now);
-                            let duration = if lifted { LAND } else { SLIDE };
-                            Some(Move { from: old.drawn, started: now, duration, lifted })
-                        } else {
-                            old.moved
-                        };
-                        Some(Entry { tab: fresh()?, exit: None, moved, ..old.clone() })
-                    }
+                    Phase::Stay => Some(Entry { tab: fresh()?, exit: None, ..old?.clone() }),
                     Phase::Gone => {
                         let old = old?;
                         let exit = old.exit.unwrap_or(now);
@@ -466,23 +411,15 @@ impl TabBar {
         self.entries = entries;
     }
 
-    /// Sends the tab `id` flying home from `from` (content x, offset from the row).
-    fn land(&mut self, id: &str, from: (f32, f32), now: Instant) {
-        if let Some(e) = self.entries.iter_mut().find(|e| e.tab.id == id) {
-            e.moved = Some(Move { from, started: now, duration: LAND, lifted: true });
-        }
-    }
-
     /// Each entry's slot x (where the row lays it out), full width and presence, and records where each is drawn:
     /// in the order shown, which is the list's, or with the tab `held` (its id, and its middle's x) in the slot its
-    /// middle has reached, the others closing up around its gap, or a dropped order until the list's is it; a tab
-    /// whose place in that order changed slides there. True when the held tab took another slot.
+    /// middle has reached, the others closing up around its gap, or a dropped order until the list's is it. True
+    /// when the held tab took another slot.
     fn layout(&mut self, now: Instant, held: Option<(&str, f32)>) -> (Vec<(f32, f32, f32)>, bool) {
         let ks: Vec<f32> = self.entries.iter().map(|e| e.presence(now)).collect();
         let step = |i: usize| (self.entries[i].tab.width + GAP) * ks[i];
         let live: Vec<usize> = (0..self.entries.len()).filter(|i| self.entries[*i].exit.is_none()).collect();
-        let ids = |order: &[usize]| order.iter().map(|i| self.entries[*i].tab.id.clone()).collect::<Vec<_>>();
-        let list = ids(&live);
+        let list: Vec<String> = live.iter().map(|i| self.entries[*i].tab.id.clone()).collect();
         let mut slid = false;
         let shown: Vec<usize> = match held.and_then(|(id, mid)| Some((live.iter().position(|i| self.entries[*i].tab.id == id)?, mid))) {
             Some((from, mid)) => {
@@ -535,33 +472,15 @@ impl TabBar {
             targets[i] = x;
             x += step(i);
         }
-        let now_order = ids(&shown);
-        let prev = std::mem::replace(&mut self.order, now_order.clone());
-        let kept = |a: &[String], b: &[String]| a.iter().filter(|id| b.contains(id)).cloned().collect::<Vec<_>>();
-        if kept(&prev, &now_order) != kept(&now_order, &prev) {
-            for i in &shown {
-                let e = &mut self.entries[*i];
-                // a move started this frame (a drop's flight, herdr's reorder) already heads for the new slot
-                if prev.contains(&e.tab.id) && e.moved.is_none_or(|m| m.started != now) {
-                    e.moved = Some(Move { from: e.drawn, started: now, duration: SLIDE, lifted: false });
-                }
-            }
-        }
         let mut natural = 0.;
         let layout = self
             .entries
             .iter_mut()
             .enumerate()
             .map(|(i, e)| {
-                let (at, to) = (natural, targets[i]);
+                let at = natural;
                 natural += (e.tab.width + GAP) * ks[i];
-                e.drawn = match e.moved {
-                    Some(m) => {
-                        let t = ease_out(progress(m.started, m.duration, now));
-                        (m.from.0 + (to - m.from.0) * t, m.from.1 * (1. - t))
-                    }
-                    None => (to, 0.),
-                };
+                e.drawn = targets[i];
                 (at, e.tab.width, ks[i])
             })
             .collect();
@@ -580,33 +499,6 @@ impl TabBar {
             self.pending = Some((order, now));
             (from, slot)
         })
-    }
-
-    /// Where the active wash is drawn this frame (x, width): sliding from where it was toward `selected`.
-    /// Hidden while the tab is dragged or flies home (the tab carries its own look), it then reappears in the
-    /// slot without sliding.
-    fn wash(&mut self, selected: Option<&str>, dragged: Option<&str>, layout: &[(f32, f32, f32)], now: Instant) -> Option<(f32, f32)> {
-        let i = self.entries.iter().position(|e| Some(e.tab.id.as_str()) == selected && e.exit.is_none())?;
-        if dragged == selected || self.entries[i].lifted(now) {
-            self.wash = None;
-            return None;
-        }
-        let (_, w, k) = layout[i];
-        let target = (self.entries[i].drawn.0, w * k);
-        let wash = match self.wash.take() {
-            Some(w) if w.tab == self.entries[i].tab.id => w,
-            Some(w) => Wash { tab: self.entries[i].tab.id.clone(), from: w.shown, started: now, shown: w.shown },
-            None => Wash { tab: self.entries[i].tab.id.clone(), from: target, started: now - SLIDE, shown: target },
-        };
-        let t = ease_out(progress(wash.started, SLIDE, now));
-        let lerp = |a: f32, b: f32| a + (b - a) * t;
-        let shown = (lerp(wash.from.0, target.0), lerp(wash.from.1, target.1));
-        self.wash = Some(Wash { shown, ..wash });
-        Some(shown)
-    }
-
-    fn sliding(&self, now: Instant) -> bool {
-        self.wash.as_ref().is_some_and(|w| now.duration_since(w.started) < SLIDE)
     }
 }
 
@@ -691,7 +583,7 @@ pub(super) struct DraggedTab {
 
 impl Render for DraggedTab {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        // gpui draws the ghost at the pointer less the grab: remember it, a drop flies home from there
+        // gpui draws the ghost at the pointer less the grab: remember it, the held tab's gap follows it
         *self.drag.borrow_mut() = Some((self.tab.id.clone(), window.mouse_position() - self.grab));
         let theme = &self.theme;
         face(theme, &self.tab, self.tab.width, true)
@@ -809,14 +701,12 @@ impl Shell {
             .collect();
         self.tab_bar.sync(shown_ws.as_deref(), tabs, now);
 
-        // The drag ended (dropped on a tab or anywhere): the tab flies home from where its ghost was let go.
-        let bar = self.tab_bar.scroll.bounds();
-        let (bar_x, bar_y) = (f32::from(bar.origin.x) + f32::from(self.tab_bar.scroll.offset().x), f32::from(bar.origin.y) + TAB_TOP);
+        let bar_x = f32::from(self.tab_bar.scroll.bounds().origin.x) + f32::from(self.tab_bar.scroll.offset().x);
         let dragging = cx.has_active_drag();
         let dragged = self.tab_bar.drag.borrow().clone();
-        if let (false, Some((id, at))) = (dragging, &dragged) {
+        // the drag ended, dropped on a tab or anywhere
+        if !dragging {
             self.tab_bar.drag.borrow_mut().take();
-            self.tab_bar.land(id, (f32::from(at.x) - bar_x, f32::from(at.y) - bar_y), now);
         }
         // the held tab's middle, where its ghost is, in the row
         let held = dragged.as_ref().filter(|_| dragging).and_then(|(id, at)| {
@@ -829,7 +719,6 @@ impl Shell {
         if slid {
             haptic();
         }
-        let wash = self.tab_bar.wash(shown_tab.as_deref(), lifted_id.as_deref(), &layout, now);
         // A newly shown tab scrolls into view, followed while it grows in (gpui clamps the offset to the content).
         if let Some(i) = self.tab_bar.entries.iter().position(|e| Some(&e.tab.id) == shown_tab.as_ref() && e.exit.is_none()) {
             let entry = &self.tab_bar.entries[i];
@@ -837,19 +726,18 @@ impl Shell {
                 let scroll = &self.tab_bar.scroll;
                 let view = f32::from(scroll.bounds().size.width);
                 if view > 0. {
-                    if let Some(to) = reveal(-f32::from(scroll.offset().x), view, entry.drawn.0, entry.tab.width) {
+                    if let Some(to) = reveal(-f32::from(scroll.offset().x), view, entry.drawn, entry.tab.width) {
                         scroll.set_offset(gpui::point(px(-to), scroll.offset().y));
                     }
                     self.tab_bar.revealed = shown_tab.clone();
                 }
             }
         }
-        if self.tab_bar.entries.iter().any(|e| e.moving(now)) || self.tab_bar.sliding(now) {
+        if self.tab_bar.entries.iter().any(|e| e.moving(now)) {
             window.request_animation_frame();
         }
 
         let mut items = Vec::new();
-        let mut flying = Vec::new();
         for (entry, (slot_x, full_w, k)) in self.tab_bar.entries.clone().into_iter().zip(layout) {
             let t = entry.tab.clone();
             let closing = entry.exit.is_some();
@@ -857,30 +745,8 @@ impl Shell {
             let editing = (!closing).then(|| self.rename_field(&RenameTarget::Tab(t.id.clone()), cx)).flatten();
             let draggable = editing.is_none();
             let full_w = if draggable { full_w } else { MAX_W };
-            // While dragged, the ghost carries the tab; while it flies home, a copy over everything does.
-            // held, a placeholder keeps its gap; flying home, a copy over everything carries it
+            // held, a placeholder keeps its gap and the ghost carries the tab
             let holding = lifted_id.as_deref() == Some(t.id.as_str());
-            let lifted = holding || entry.lifted(now);
-            if entry.lifted(now) {
-                let t_land = ease_out(entry.moved.map_or(1., |m| progress(m.started, m.duration, now)));
-                let at = gpui::point(px(bar_x + entry.drawn.0), px(bar_y + entry.drawn.1));
-                flying.push(
-                    gpui::deferred(
-                        gpui::anchored().position(at).child(
-                            face(theme, &t, full_w, selected)
-                                // the card settles into the tab's own look: the wash if active, else bare
-                                .bg(mix(theme.card, if selected { theme.selected } else { theme.card.opacity(0.) }, t_land))
-                                .border_1()
-                                .border_color(theme.border.opacity(1. - t_land))
-                                .child(div().flex_1().min_w_0().truncate().child(name_text(&t, theme)))
-                                .when(t.zoomed, |el| el.child(zoom_mark(theme)))
-                                .child(dot_slot(theme, &t)),
-                        ),
-                    )
-                    .with_priority(1)
-                    .into_any_element(),
-                );
-            }
             let group = SharedString::from(format!("tab-row-{}", t.id));
             // The face keeps its full width and is clipped while the tab grows or shrinks.
             let content = face(theme, &t, full_w, selected)
@@ -927,13 +793,14 @@ impl Shell {
                 .id(SharedString::from(format!("tab-{}", t.id)))
                 .group(group)
                 .relative()
-                .left(px(entry.drawn.0 - slot_x))
+                .left(px(entry.drawn - slot_x))
                 .flex_none()
                 .h(px(TAB_H))
                 .w(px(full_w * k))
                 .mr(px(GAP * k))
                 .overflow_hidden()
-                .opacity(if lifted && !holding { 0. } else { k })
+                .opacity(k)
+                .when(selected && !holding, |el| el.bg(theme.selected))
                 .when(holding, |el| el.border_1().border_color(theme.border).bg(theme.wash(0.04)))
                 .rounded(px(8.))
                 .cursor_pointer()
@@ -1033,19 +900,6 @@ impl Shell {
                             .on_drop(cx.listener(|this, _: &DraggedTab, _, cx| this.tab_dropped(cx)))
                             // re-render so the edge fades follow the scroll position
                             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-                            // the active wash, drawn under the tabs, slides between them
-                            .when_some(wash, |el, (x, w)| {
-                                el.child(
-                                    div()
-                                        .absolute()
-                                        .top(px(TAB_TOP))
-                                        .left(px(x))
-                                        .w(px(w))
-                                        .h(px(TAB_H))
-                                        .rounded(px(8.))
-                                        .bg(theme.selected),
-                                )
-                            })
                             .children(items),
                     )
                     // ponytail: gpui has no alpha mask, so the fades are gradients of the bar's own color over the tabs
@@ -1062,7 +916,6 @@ impl Shell {
                             .when(offset < max - 0.5, |el| el.child(fade(270.).right_0()))
                     }),
             )
-            .children(flying)
             // `+` stays in view; only the tabs scroll
             .when_some(shown_ws, |el, ws| {
                 let menu_ws = ws.clone();
@@ -1191,24 +1044,15 @@ mod tests {
     }
 
     #[test]
-    fn reordered_and_dropped_tabs_slide_home() {
+    fn reordered_tabs_are_in_their_slots_at_once() {
         let t0 = Instant::now();
         let mut bar = TabBar::default();
         bar.sync(Some("w"), vec![tab("a"), tab("b")], t0);
         bar.layout(t0, None);
         bar.sync(Some("w"), vec![tab("b"), tab("a")], t0);
         bar.layout(t0, None);
-        // `a` starts where it was drawn and ends in its new slot
-        assert_eq!(bar.entries[1].drawn, (0., 0.));
-        bar.layout(t0 + SLIDE, None);
-        assert_eq!(bar.entries[1].drawn, (102., 0.));
-        // dropped 40 px below the bar, `b` flies home from there
-        bar.land("b", (300., 40.), t0);
-        bar.layout(t0, None);
-        assert_eq!(bar.entries[0].drawn, (300., 40.));
-        assert!(bar.entries[0].lifted(t0));
-        bar.layout(t0 + LAND, None);
-        assert_eq!(bar.entries[0].drawn, (0., 0.));
+        assert_eq!((bar.entries[0].drawn, bar.entries[1].drawn), (0., 102.));
+        assert!(!bar.entries.iter().any(|e| e.moving(t0)));
     }
 
     #[test]
@@ -1228,16 +1072,15 @@ mod tests {
         // held there, it stays: its left edge (60) is past b's middle (50) now b has closed up
         let (_, slid) = bar.layout(t0, Some(("a", 110.)));
         assert!(!slid);
-        // b springs into a's place
-        bar.layout(t0 + SLIDE, Some(("a", 110.)));
-        assert_eq!((bar.entries[0].drawn.0, bar.entries[1].drawn.0), (102., 0.));
+        // b is in a's place
+        assert_eq!((bar.entries[0].drawn, bar.entries[1].drawn), (102., 0.));
         // let go: the move asked for, and that order kept until herdr's is it
-        assert_eq!(bar.drop_held(t0 + SLIDE), Some((0, 1)));
-        bar.layout(t0 + SLIDE * 2, None);
-        assert_eq!((bar.entries[0].drawn.0, bar.entries[1].drawn.0), (102., 0.));
-        bar.sync(Some("w"), vec![tab("b"), tab("a"), tab("c")], t0 + SLIDE * 2);
-        bar.layout(t0 + SLIDE * 3, None);
-        assert_eq!((bar.entries[0].drawn.0, bar.entries[1].drawn.0), (0., 102.));
+        assert_eq!(bar.drop_held(t0), Some((0, 1)));
+        bar.layout(t0, None);
+        assert_eq!((bar.entries[0].drawn, bar.entries[1].drawn), (102., 0.));
+        bar.sync(Some("w"), vec![tab("b"), tab("a"), tab("c")], t0);
+        bar.layout(t0, None);
+        assert_eq!((bar.entries[0].drawn, bar.entries[1].drawn), (0., 102.));
         assert!(bar.pending.is_none());
     }
 }
