@@ -9,6 +9,23 @@ Solar icon set, Linear style (assets/solar-linear.json)
   By 480 Design (https://www.figma.com/community/file/1166831539721848736), Creative Commons Attribution 4.0
   International (https://creativecommons.org/licenses/by/4.0/); taken as published at https://iconify.design.
 
+Simple Icons (assets/icons/<name>-mark.svg for: bat, bazel, bun, cloudflare, cmake, consul, dart, deno, docker, dotnet, elixir, ffmpeg, flutter, git, github, gitlab, go, helix, htop, java, kubernetes, lua, mongodb, mysql, neovim, nextflow, nginx, nix, node, nomad, ollama, packer, php, podman, postgresql, python, rclone, redis, ruby, rust, sqlite, supabase, swift, tailscale, task, terraform, tmux, turbo, uv, vagrant, vault, vim, zig)
+  From https://simpleicons.org (simple-icons 16.36.0), with their <title> removed. CC0 1.0, except:
+    deno-mark: MIT, https://github.com/denoland/docs/blob/5dee713844c7447f80acd4093caa9d350d80bf36/static/img/logo.svg
+    git-mark: CC-BY-3.0, https://git-scm.com/community/logos
+    java-mark: BSD-3-Clause, https://hg.openjdk.java.net/duke/duke/file/ca00f100dafc/vector/Agent.svg
+    neovim-mark: CC-BY-SA-3.0, https://neovim.io
+    nix-mark: CC-BY-4.0, https://brand.nixos.org/logos/nixos-logomark-black-flat-minimal.svg
+    php-mark: CC-BY-SA-4.0, https://php.net/download-logos.php
+    ruby-mark: CC-BY-SA-2.5, https://www.ruby-lang.org/en/about/logo/
+    rust-mark: CC-BY-SA-4.0, https://www.rust-lang.org
+    zig-mark: CC-BY-SA-4.0, https://github.com/ziglang/logo/blob/6446ba8e37a0651da720d8869e1ce9264fa0c0b9/zig-mark.svg
+  The marks are their projects' trademarks; they name the program running in a tab.
+
+Rex (assets/icons/<name>-mark.svg for: btop, d2, fx, gnu, kakoune, moon, pixi, proto, yazi)
+  Logos of those open-source projects as drawn in the icon catalog of Rex Beta.app (Superlogical), read out as SVG,
+  with their viewBoxes made square. They name the program running in a tab.
+
 Zeron
   The theme families (the zeron-theme crate), the theme tokens in src/theme.rs (via Collie) the terminal code
   in src/terminal/, the sidebar, settings and tab icons (agent marks) in assets/icons/, the settings page layout, the sidebar fold motion, the project icon (src/ui/project_icon.rs) the scroll-edge fade (src/ui/edge_fade.rs) the loaders (src/ui/loader.rs) and the markdown drawing and its text selection (src/ui/markdown.rs, over the

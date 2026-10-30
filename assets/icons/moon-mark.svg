@@ -1,0 +1,18 @@
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 392 392">
+ <defs>
+  <linearGradient id="linearGradient-1" y1="99.3239%" x2="100%" y2="0.676076%">
+   <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
+   <stop offset="100%" stop-color="#ffffff" stop-opacity="0.603437"/>
+  </linearGradient>
+  <linearGradient id="linearGradient-2" x1="50%" x2="50%" y2="100%">
+   <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
+   <stop offset="100%" stop-color="#ffffff" stop-opacity="0.751072"/>
+  </linearGradient>
+ </defs>
+ <g fill="none" fill-rule="evenodd" id="proto" stroke="none" stroke-width="1">
+  <g id="Group" transform="translate(30, 31)">
+   <path d="M147.258 34.9161C168.559 34.9161 188.804 39.4387 207.084 47.576C206.085 51.4797 205.451 55.5293 205.218 59.686C172.759 62.3895 147.258 89.5912 147.258 122.749C147.258 157.699 175.591 186.032 210.541 186.032C244.285 186.032 271.859 159.622 273.724 126.345C276.871 126.083 279.955 125.59 282.956 124.884C290.4 142.492 294.517 161.852 294.517 182.175C294.517 263.503 228.587 329.433 147.258 329.433C65.9298 329.433 7.67386e-13 263.503 7.67386e-13 182.175C7.67386e-13 100.846 65.9298 34.9161 147.258 34.9161Z" fill="url(#linearGradient-1)" id="Combined-Shape"/>
+   <circle cx="268.4" cy="63.283" fill="url(#linearGradient-2)" id="e" r="63.283"/>
+  </g>
+ </g>
+</svg>

@@ -565,6 +565,11 @@
    }
   ]
  },
+ "programs": {
+  "p2": "nvim",
+  "p3": "lazygit",
+  "p10": "cargo"
+ },
  "waited": {
   "p4": 260,
   "p5": 75,

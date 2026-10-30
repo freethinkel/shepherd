@@ -1,7 +1,8 @@
 //! The tab bar: Zeron's terminal-panel tabs (28 px, 8 px radius, a wash under the active one) with what runs in
-//! each tab as a colored favicon (Superlogical's tabs), sized to their labels. A new tab grows in, a closed one
-//! stays mounted while it shrinks out (the `Popup` recipe), the active wash slides between tabs, a reorder
-//! slides the tabs to their new places, and a dropped tab flies from where it was let go back into its slot.
+//! each tab as colored favicons, one per kind of agent or program (Superlogical's tabs), sized to their labels. A
+//! new tab grows in, a closed one stays mounted while it shrinks out (the `Popup` recipe), the active wash slides
+//! between tabs, a reorder slides the tabs to their new places, and a dropped tab flies from where it was let go
+//! back into its slot.
 use super::*;
 use std::cell::RefCell;
 
@@ -23,8 +24,16 @@ const GAP: f32 = 2.;
 const PAD_L: f32 = 6.;
 const PAD_R: f32 = 4.;
 const INNER_GAP: f32 = 6.;
-/// The favicon tile.
-const ICON: f32 = 18.;
+/// The favicon tile: Rex's shape, wider than tall.
+const TILE_W: f32 = 20.;
+const TILE_H: f32 = 16.;
+/// How far each tile of a stack sits right of the one over it, and the gap the bar's color cuts around it.
+const STACK_STEP: f32 = 15.;
+const STACK_RING: f32 = 1.5;
+/// The most tiles a tab shows, as Rex's horizontal tabs; the rest of its panes go unmarked.
+const MAX_MARKS: usize = 5;
+/// How often the shown workspace's plain panes are asked what they run.
+const PROGRAMS_EVERY: Duration = Duration::from_secs(2);
 /// The trailing slot: the status dot, swapped in place for `×` while the tab is hovered.
 const SLOT: f32 = 20.;
 const ZOOM_MARK: f32 = 12.;
@@ -36,6 +45,8 @@ const FONT_SIZE: f32 = 12.5;
 /// and the tab being dragged with its ghost's top-left in the window (written by the ghost as it follows the pointer).
 #[derive(Default)]
 pub(super) struct TabBar {
+    /// What each plain pane runs, by pane id; a pane at its shell's prompt has none.
+    pub programs: HashMap<String, String>,
     pub scroll: gpui::ScrollHandle,
     workspace: Option<String>,
     entries: Vec<Entry>,
@@ -51,15 +62,23 @@ pub(super) struct TabBar {
     order: Vec<String>,
 }
 
+/// A favicon: the mark and its tile and mark colors.
+type Mark = (&'static str, (Hsla, Hsla));
+
 /// One tab as drawn.
 #[derive(Clone)]
 struct Shown {
     id: String,
+    /// The label as herdr has it: what a rename starts from.
     label: String,
+    /// The label as drawn and its faint ranges: [`name_spans`].
+    name: (String, Vec<std::ops::Range<usize>>),
     status: AgentStatus,
     icon: &'static str,
     /// The favicon's tile and mark colors.
     tint: (Hsla, Hsla),
+    /// The tiles after the favicon: what else runs in the tab's panes.
+    more: Vec<Mark>,
     /// One of its panes is zoomed to fill it: the other panes are hidden.
     zoomed: bool,
     /// The full width: label measured, clamped.
@@ -164,7 +183,6 @@ fn agent_icon(agent: Option<&str>) -> &'static str {
 /// The favicon's tile and mark: the brand's colors (black for monochrome brands, as their app icons are), an
 /// inverted tile for agents without a mark, a muted one for a shell.
 fn agent_tint(agent: Option<&str>, theme: &Theme) -> (Hsla, Hsla) {
-    let brand = |bg: u32, fg: u32| (gpui::rgb(bg).into(), gpui::rgb(fg).into());
     match agent {
         None => (theme.text_muted.opacity(0.55), theme.surface),
         Some("claude") => brand(0xD97757, 0xFFFFFF),
@@ -186,6 +204,191 @@ fn agent_tint(agent: Option<&str>, theme: &Theme) -> (Hsla, Hsla) {
     }
 }
 
+fn brand(bg: u32, fg: u32) -> (Hsla, Hsla) {
+    (gpui::rgb(bg).into(), gpui::rgb(fg).into())
+}
+
+/// A program's favicon, by the name of its process: its own or that of the language or tool it belongs to, with
+/// Simple Icons' brand colors. `None` for a program without a mark: its tab keeps the terminal's.
+fn program_mark(name: &str, theme: &Theme) -> Option<Mark> {
+    const WHITE: u32 = 0xFFFFFF;
+    const INK: u32 = 0x1A1A1A;
+    const BLACK: u32 = 0x0A0A0A;
+    let name = name.to_lowercase();
+    Some(match name.as_str() {
+        // editors
+        "nvim" | "neovim" => ("icons/neovim-mark.svg", brand(0x57A143, WHITE)),
+        "vim" | "vi" => ("icons/vim-mark.svg", brand(0x019733, WHITE)),
+        "hx" | "helix" => ("icons/helix-mark.svg", brand(0x281733, WHITE)),
+        "kak" | "kakoune" => ("icons/kakoune-mark.svg", brand(BLACK, WHITE)),
+        // version control and forges
+        "git" | "lazygit" | "gitui" | "tig" => ("icons/git-mark.svg", brand(0xF03C2E, WHITE)),
+        "gh" => ("icons/github-mark.svg", brand(BLACK, WHITE)),
+        "glab" => ("icons/gitlab-mark.svg", brand(0xFC6D26, WHITE)),
+        // languages and their tools
+        "node" | "npm" | "npx" | "pnpm" | "yarn" => ("icons/node-mark.svg", brand(0x5FA04E, WHITE)),
+        "bun" | "bunx" => ("icons/bun-mark.svg", brand(BLACK, WHITE)),
+        "deno" => ("icons/deno-mark.svg", brand(BLACK, WHITE)),
+        "cargo" | "rustc" | "rustup" => ("icons/rust-mark.svg", brand(BLACK, WHITE)),
+        "go" => ("icons/go-mark.svg", brand(0x00ADD8, WHITE)),
+        "flutter" | "fvm" => ("icons/flutter-mark.svg", brand(0x02569B, WHITE)),
+        "dart" => ("icons/dart-mark.svg", brand(0x0175C2, WHITE)),
+        "swift" | "xcodebuild" => ("icons/swift-mark.svg", brand(0xF05138, WHITE)),
+        "ruby" | "irb" | "bundle" | "rake" => ("icons/ruby-mark.svg", brand(0xCC342D, WHITE)),
+        "php" | "composer" => ("icons/php-mark.svg", brand(0x777BB4, WHITE)),
+        "elixir" | "iex" | "mix" => ("icons/elixir-mark.svg", brand(0x8847B9, WHITE)),
+        "lua" | "luajit" => ("icons/lua-mark.svg", brand(0x000080, WHITE)),
+        "zig" => ("icons/zig-mark.svg", brand(0xF7A41D, INK)),
+        "java" | "javac" => ("icons/java-mark.svg", brand(BLACK, WHITE)),
+        "dotnet" => ("icons/dotnet-mark.svg", brand(0x512BD4, WHITE)),
+        "uv" | "uvx" => ("icons/uv-mark.svg", brand(0xDE5FE9, WHITE)),
+        "pixi" => ("icons/pixi-mark.svg", brand(0xF7D038, INK)),
+        "proto" => ("icons/proto-mark.svg", brand(0x6E56CF, WHITE)),
+        "ipython" => ("icons/python-mark.svg", brand(0x3776AB, WHITE)),
+        python if python.starts_with("python") => ("icons/python-mark.svg", brand(0x3776AB, WHITE)),
+        // builds
+        "cmake" => ("icons/cmake-mark.svg", brand(0x064F8C, WHITE)),
+        "bazel" => ("icons/bazel-mark.svg", brand(0x43A047, WHITE)),
+        "turbo" => ("icons/turbo-mark.svg", brand(0xFF1E56, WHITE)),
+        "make" | "gmake" => ("icons/gnu-mark.svg", brand(0xA42E2B, WHITE)),
+        "task" => ("icons/task-mark.svg", brand(0x29BEB0, WHITE)),
+        "moon" => ("icons/moon-mark.svg", brand(0x6F53F3, WHITE)),
+        "nextflow" => ("icons/nextflow-mark.svg", brand(0x0DC09D, WHITE)),
+        // containers and infrastructure
+        "docker" | "docker-compose" | "lazydocker" => ("icons/docker-mark.svg", brand(0x2496ED, WHITE)),
+        "podman" => ("icons/podman-mark.svg", brand(0x892CA0, WHITE)),
+        "kubectl" | "k9s" => ("icons/kubernetes-mark.svg", brand(0x326CE5, WHITE)),
+        "terraform" => ("icons/terraform-mark.svg", brand(0x844FBA, WHITE)),
+        "packer" => ("icons/packer-mark.svg", brand(0x02A8EF, WHITE)),
+        "vault" => ("icons/vault-mark.svg", brand(0xFFEC6E, INK)),
+        "consul" => ("icons/consul-mark.svg", brand(0xF24C53, WHITE)),
+        "nomad" => ("icons/nomad-mark.svg", brand(0x00CA8E, INK)),
+        "vagrant" => ("icons/vagrant-mark.svg", brand(0x1868F2, WHITE)),
+        "nix" | "nix-shell" => ("icons/nix-mark.svg", brand(0x5277C3, WHITE)),
+        "nginx" => ("icons/nginx-mark.svg", brand(0x009639, WHITE)),
+        "cloudflared" => ("icons/cloudflare-mark.svg", brand(0xF38020, WHITE)),
+        "tailscale" => ("icons/tailscale-mark.svg", brand(BLACK, WHITE)),
+        "supabase" => ("icons/supabase-mark.svg", brand(0x3FCF8E, INK)),
+        // databases
+        "psql" | "pgcli" | "postgres" => ("icons/postgresql-mark.svg", brand(0x4169E1, WHITE)),
+        "mysql" | "mysqld" | "mariadb" => ("icons/mysql-mark.svg", brand(0x4479A1, WHITE)),
+        "sqlite3" => ("icons/sqlite-mark.svg", brand(0x003B57, WHITE)),
+        "redis-cli" | "redis-server" => ("icons/redis-mark.svg", brand(0xFF4438, WHITE)),
+        "mongosh" | "mongod" => ("icons/mongodb-mark.svg", brand(0x47A248, WHITE)),
+        // the rest
+        "ollama" => ("icons/ollama-mark.svg", brand(BLACK, WHITE)),
+        "tmux" => ("icons/tmux-mark.svg", brand(0x1BB91F, WHITE)),
+        "ffmpeg" | "ffprobe" => ("icons/ffmpeg-mark.svg", brand(0x007808, WHITE)),
+        "rclone" => ("icons/rclone-mark.svg", brand(0x3F79AD, WHITE)),
+        "yazi" => ("icons/yazi-mark.svg", brand(0xF5C518, INK)),
+        "bat" => ("icons/bat-mark.svg", brand(0x31369E, WHITE)),
+        "d2" => ("icons/d2-mark.svg", brand(0x0D32B2, WHITE)),
+        "fx" => ("icons/fx-mark.svg", brand(BLACK, WHITE)),
+        "btop" => ("icons/btop-mark.svg", brand(0x1E1E20, 0xF03030)),
+        "htop" => ("icons/htop-mark.svg", brand(0x009020, WHITE)),
+        // no mark of their own: a pulse, in htop's green
+        "top" | "btm" | "glances" => ("icons/solar/pulse.svg", brand(0x009020, WHITE)),
+        "ssh" | "mosh" | "mosh-client" => ("icons/remote-server.svg", agent_tint(None, theme)),
+        _ => return None,
+    })
+}
+
+/// A tab's favicons from what its panes run, as (agent, program): agents, then programs, each kind once, the
+/// terminal's only when nothing else shows.
+fn marks(panes: &[(Option<&str>, Option<&str>)], theme: &Theme) -> Vec<Mark> {
+    let agents = panes.iter().filter_map(|p| p.0).map(|a| (agent_icon(Some(a)), agent_tint(Some(a), theme)));
+    let programs = panes.iter().filter(|p| p.0.is_none()).filter_map(|p| program_mark(p.1?, theme));
+    let mut out: Vec<Mark> = Vec::new();
+    for mark in agents.chain(programs) {
+        if out.len() < MAX_MARKS && !out.iter().any(|m| m.0 == mark.0) {
+            out.push(mark);
+        }
+    }
+    if out.is_empty() {
+        out.push((agent_icon(None), agent_tint(None, theme)));
+    }
+    out
+}
+
+/// The program a pane runs, from herdr's `pane.process_info`: the leader of its foreground group, `None` when that
+/// is the shell itself.
+// ponytail: a script shows as its interpreter (`brew` as ruby, `pnpm` as node); its `argv[1]` can name it if that matters.
+fn foreground(info: &serde_json::Value) -> Option<String> {
+    let group = info["foreground_process_group_id"].as_u64()?;
+    if info["shell_pid"].as_u64() == Some(group) {
+        return None;
+    }
+    let leader = info["foreground_processes"].as_array()?.iter().find(|p| p["pid"].as_u64() == Some(group))?;
+    Some(leader["name"].as_str()?.to_string())
+}
+
+/// Keeps [`TabBar::programs`] current for the shown workspace. herdr's snapshot and events don't say when a pane's
+/// foreground program changes, so this asks, also while another app has the focus: the window may still be in view.
+pub(super) async fn watch_programs(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, client: Client, cx: &mut gpui::AsyncApp) {
+    loop {
+        cx.background_executor().timer(PROGRAMS_EVERY).await;
+        let Ok(panes) = this.update(cx, |s, _| s.plain_panes()) else { return };
+        let client = client.clone();
+        let found = rt
+            .spawn(async move {
+                let mut found = Vec::new();
+                for pane_id in panes {
+                    if let Ok(r) = client.call("pane.process_info", json!({"pane_id": pane_id})).await {
+                        found.push((pane_id, foreground(&r["process_info"])));
+                    }
+                }
+                found
+            })
+            .await
+            .expect("tokio");
+        let alive = this.update(cx, |s, cx| {
+            let mut changed = false;
+            for (pane_id, program) in found {
+                changed |= match program {
+                    Some(program) => s.tab_bar.programs.insert(pane_id, program.clone()) != Some(program),
+                    None => s.tab_bar.programs.remove(&pane_id).is_some(),
+                };
+            }
+            if changed {
+                cx.notify();
+            }
+        });
+        if alive.is_err() {
+            return;
+        }
+    }
+}
+
+/// A label to draw and its faint ranges. `herdr.auto-title` writes `1 · branch › claude › task`: the task stays in
+/// the tab's color, the number and the branch after it go faint, and the agents' own segments go, since the
+/// favicon says them. A label without those comes back whole.
+fn name_spans(label: &str, agents: &[&str]) -> (String, Vec<std::ops::Range<usize>>) {
+    let (number, rest) = match label.split_once(" · ") {
+        Some((n, rest)) if n.chars().all(|c| c.is_ascii_digit()) => (Some(n), rest),
+        _ => (None, label),
+    };
+    let mut parts: Vec<&str> = rest.split(" › ").filter(|p| !agents.contains(p)).collect();
+    let Some(name) = parts.pop() else { return (label.to_string(), Vec::new()) };
+    let mut text = number.map_or_else(String::new, |n| format!("{n} · "));
+    let mut faint = Vec::new();
+    if !text.is_empty() {
+        faint.push(0..text.len());
+    }
+    text.push_str(name);
+    if !parts.is_empty() {
+        let from = text.len();
+        text = format!("{text}  {}", parts.join(" › "));
+        faint.push(from..text.len());
+    }
+    (text, faint)
+}
+
+/// A tab's name, its faint spans drawn so.
+fn name_text(t: &Shown, theme: &Theme) -> gpui::StyledText {
+    let faint = gpui::HighlightStyle { color: Some(theme.text_faint), ..Default::default() };
+    gpui::StyledText::new(t.name.0.clone()).with_highlights(t.name.1.iter().map(|r| (r.clone(), faint)).collect::<Vec<_>>())
+}
+
 /// `a` toward `b` by `t`, channel by channel.
 fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let l = |x: f32, y: f32| x + (y - x) * t;
@@ -205,9 +408,11 @@ fn reveal(scrolled: f32, view: f32, x: f32, w: f32) -> Option<f32> {
     }
 }
 
-fn tab_width(label_w: f32, zoomed: bool) -> f32 {
+/// `more` tiles after the favicon widen the tab past [`MAX_W`], so they don't take the label's room.
+fn tab_width(label_w: f32, zoomed: bool, more: usize) -> f32 {
     let mark = if zoomed { ZOOM_MARK + INNER_GAP } else { 0. };
-    (PAD_L + ICON + INNER_GAP + label_w + mark + INNER_GAP + SLOT + PAD_R).clamp(MIN_W, MAX_W).ceil()
+    let tiles = more as f32 * STACK_STEP;
+    (PAD_L + TILE_W + tiles + INNER_GAP + label_w + mark + INNER_GAP + SLOT + PAD_R).clamp(MIN_W, MAX_W + tiles).ceil()
 }
 
 /// After the label of a tab with a zoomed pane, the zoom action's icon.
@@ -405,15 +610,24 @@ impl TabBar {
     }
 }
 
-/// The favicon: the mark on a filled tile of its color, the same size for every kind.
-fn favicon(t: &Shown) -> Div {
+/// The favicon: the mark on a filled tile of its color, the same size for every kind; with more marks, a stack.
+fn favicon(t: &Shown, ring: Hsla) -> Div {
     if t.loading {
-        return div().size(px(ICON)).flex_none().flex().items_center().justify_center().child(crate::ui::loader::glyph_spinner(3., [t.tint.1; 3]));
+        return div().w(px(TILE_W)).h(px(TILE_H)).flex_none().flex().items_center().justify_center().child(crate::ui::loader::glyph_spinner(3., [t.tint.1; 3]));
     }
     match &t.image {
-        Some(image) => div().size(px(ICON)).flex_none().flex().items_center().justify_center().child(gpui::img(image.clone()).size(px(16.)).rounded(px(3.))),
-        None => tile(t.icon, t.tint),
+        Some(image) => div().w(px(TILE_W)).h(px(TILE_H)).flex_none().flex().items_center().justify_center().child(gpui::img(image.clone()).size(px(16.)).rounded(px(3.))),
+        None if t.more.is_empty() => tile(t.icon, t.tint),
+        None => stack(t, ring),
     }
+}
+
+/// A tab's tiles overlapped, the favicon on top, each in a `ring` of what's behind them.
+fn stack(t: &Shown, ring: Hsla) -> Div {
+    let marks: Vec<Mark> = std::iter::once((t.icon, t.tint)).chain(t.more.iter().copied()).collect();
+    div().relative().flex_none().w(px(TILE_W + t.more.len() as f32 * STACK_STEP)).h(px(TILE_H)).children(marks.into_iter().enumerate().rev().map(|(i, (icon, tint))| {
+        div().absolute().left(px(i as f32 * STACK_STEP - STACK_RING)).top(px(-STACK_RING)).p(px(STACK_RING)).rounded(px(5. + STACK_RING)).bg(ring).child(tile(icon, tint))
+    }))
 }
 
 /// A tab's favicon for `agent`, for lists of agents elsewhere.
@@ -423,20 +637,27 @@ pub(crate) fn agent_favicon(agent: Option<&str>, theme: &Theme) -> Div {
 
 fn tile(icon: &'static str, (bg, fg): (Hsla, Hsla)) -> Div {
     div()
-        .size(px(ICON))
+        .w(px(TILE_W))
+        .h(px(TILE_H))
         .flex_none()
         .rounded(px(5.))
         .flex()
         .items_center()
         .justify_center()
-        .bg(bg)
-        // a black tile would sink into a dark bar: a hairline keeps its edge
-        .when(bg.l < 0.1, |el| el.border_1().border_color(gpui::white().opacity(0.14)))
+        // lit from above, as Rex's tiles are; the hairline keeps a dark tile's edge on a dark bar. A tile without a
+        // color (a browser tab's) stays bare.
+        .when(bg.a > 0., |el| {
+            el.bg(linear_gradient(180., linear_color_stop(bg.blend(gpui::white().opacity(0.07)), 0.), linear_color_stop(bg.blend(gpui::black().opacity(0.12)), 1.)))
+                .border_1()
+                .border_color(gpui::white().opacity(0.12))
+        })
         .child(gpui::svg().path(icon).size(px(11.)).text_color(fg))
 }
 
 /// A tab's face at full width: favicon, label, trailing slot.
 fn face(theme: &Theme, t: &Shown, width: f32, selected: bool) -> Div {
+    // ponytail: a hovered tab's wash and a dragged tab's card differ a shade from this; the group hover can follow if it shows
+    let ring = if selected { theme.surface.blend(theme.selected) } else { theme.surface };
     div()
         .w(px(width))
         .h(px(TAB_H))
@@ -450,7 +671,7 @@ fn face(theme: &Theme, t: &Shown, width: f32, selected: bool) -> Div {
         .font_family(theme.font_ui.clone())
         .text_size(px(FONT_SIZE))
         .text_color(if selected { theme.text } else { theme.text_muted })
-        .child(favicon(t))
+        .child(favicon(t, ring))
 }
 
 /// The trailing slot: the agent's status dot; a browser tab's stays empty.
@@ -478,13 +699,19 @@ impl Render for DraggedTab {
             .border_1()
             .border_color(theme.border)
             .shadow_lg()
-            .child(div().flex_1().min_w_0().truncate().child(self.tab.label.clone()))
+            .child(div().flex_1().min_w_0().truncate().child(name_text(&self.tab, theme)))
             .when(self.tab.zoomed, |el| el.child(zoom_mark(theme)))
             .child(dot_slot(theme, &self.tab))
     }
 }
 
 impl Shell {
+    /// The shown workspace's panes without an agent: an agent's pane shows its mark.
+    fn plain_panes(&self) -> Vec<String> {
+        let (Some(s), Some(ws)) = (&self.snapshot, &self.tab_bar.workspace) else { return Vec::new() };
+        s.panes.iter().filter(|p| p.workspace_id == *ws && p.agent.is_none()).map(|p| p.pane_id.clone()).collect()
+    }
+
     /// The held tab let go of over the bar: it lands in the slot its gap holds, browser tabs and herdr's alike.
     fn tab_dropped(&mut self, cx: &mut Context<Self>) {
         // the tabs a drop reorders: (id, browser tab or not), closing ones left out
@@ -529,20 +756,27 @@ impl Shell {
         };
         let herdr: Vec<Shown> = match (&self.snapshot, &shown_ws) {
             (Some(s), Some(ws)) => {
-                let agents = s.agents();
                 s.tabs_of(ws)
                     .into_iter()
                     .map(|t| {
-                        let agent = agents.iter().find(|p| p.tab_id == t.tab_id).and_then(|p| p.agent.as_deref());
+                        let programs = &self.tab_bar.programs;
+                        let panes: Vec<_> =
+                            s.panes.iter().filter(|p| p.tab_id == t.tab_id).map(|p| (p.agent.as_deref(), programs.get(&p.pane_id).map(String::as_str))).collect();
+                        let agents: Vec<&str> = panes.iter().filter_map(|p| p.0).collect();
+                        let name = name_spans(&t.label, &agents);
+                        let mut more = marks(&panes, theme);
+                        let (icon, tint) = more.remove(0);
                         let zoomed = s.layouts.iter().any(|l| l.tab_id == t.tab_id && l.zoomed);
                         Shown {
                             id: t.tab_id.clone(),
                             label: t.label.clone(),
                             status: t.agent_status,
-                            icon: agent_icon(agent),
-                            tint: agent_tint(agent, theme),
+                            icon,
+                            tint,
                             zoomed,
-                            width: tab_width(measure(&t.label), zoomed),
+                            width: tab_width(measure(&name.0), zoomed, more.len()),
+                            name,
+                            more,
                             browser: false,
                             image: None,
                             loading: false,
@@ -559,8 +793,9 @@ impl Shell {
             .unwrap_or_default()
             .into_iter()
             .map(|(id, label, image, after, loading)| {
-                let width = tab_width(measure(&label), false);
-                (Shown { id, label, status: AgentStatus::Idle, icon: "icons/solar/global.svg", tint: (theme.surface.opacity(0.), theme.text_muted), zoomed: false, width, browser: true, image, loading }, after)
+                let width = tab_width(measure(&label), false, 0);
+                let name = (label.clone(), Vec::new());
+                (Shown { id, label, name, status: AgentStatus::Idle, icon: "icons/solar/global.svg", tint: (theme.surface.opacity(0.), theme.text_muted), more: Vec::new(), zoomed: false, width, browser: true, image, loading }, after)
             })
             .collect();
         let herdr_ids: Vec<&str> = herdr.iter().map(|t| t.id.as_str()).collect();
@@ -637,7 +872,7 @@ impl Shell {
                                 .bg(mix(theme.card, if selected { theme.selected } else { theme.card.opacity(0.) }, t_land))
                                 .border_1()
                                 .border_color(theme.border.opacity(1. - t_land))
-                                .child(div().flex_1().min_w_0().truncate().child(t.label.clone()))
+                                .child(div().flex_1().min_w_0().truncate().child(name_text(&t, theme)))
                                 .when(t.zoomed, |el| el.child(zoom_mark(theme)))
                                 .child(dot_slot(theme, &t)),
                         ),
@@ -651,7 +886,7 @@ impl Shell {
             let content = face(theme, &t, full_w, selected)
                 .map(|el| match editing {
                     Some(field) => el.child(field),
-                    None => el.child(div().flex_1().min_w_0().truncate().child(t.label.clone())),
+                    None => el.child(div().flex_1().min_w_0().truncate().child(name_text(&t, theme))),
                 })
                 .when(t.zoomed && draggable, |el| el.child(zoom_mark(theme)))
                 .child(
@@ -871,7 +1106,7 @@ mod tests {
     use super::*;
 
     fn tab(id: &str) -> Shown {
-        Shown { id: id.into(), label: id.into(), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), zoomed: false, width: 100., browser: false, image: None, loading: false }
+        Shown { id: id.into(), label: id.into(), name: (id.into(), Vec::new()), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), more: Vec::new(), zoomed: false, width: 100., browser: false, image: None, loading: false }
     }
 
     #[test]
@@ -902,6 +1137,42 @@ mod tests {
         assert_eq!(agent_icon(Some("codex")), "icons/openai-mark.svg");
         assert_eq!(agent_icon(Some("kimi")), "icons/kimi-mark.svg");
         assert_eq!(agent_icon(Some("letta")), "icons/bot-filled.svg");
+    }
+
+    #[test]
+    fn a_tab_shows_each_kind_once_agents_first() {
+        let theme = Theme::for_appearance(gpui::WindowAppearance::Dark);
+        let icons = |panes: &[(Option<&str>, Option<&str>)]| marks(panes, &theme).into_iter().map(|m| m.0).collect::<Vec<_>>();
+        assert_eq!(icons(&[(None, None), (None, None)]), ["icons/prompt.svg"]);
+        assert_eq!(icons(&[(None, Some("nvim")), (Some("claude"), None), (None, None), (None, Some("nvim"))]), ["icons/claude-mark.svg", "icons/neovim-mark.svg"]);
+        // a program without a mark, and an agent's stale program, are nothing to show
+        assert_eq!(icons(&[(None, Some("some-tool"))]), ["icons/prompt.svg"]);
+        assert_eq!(icons(&[(Some("claude"), Some("nvim"))]), ["icons/claude-mark.svg"]);
+        assert_eq!(icons(&[(None, Some("Python")), (None, Some("python3.14"))]), ["icons/python-mark.svg"]);
+        assert_eq!(icons(&[(None, Some("btop"))]), ["icons/btop-mark.svg"]);
+        assert_eq!(icons(&[(None, Some("top"))]), ["icons/solar/pulse.svg"]);
+        let many: Vec<_> = ["git", "go", "cargo", "node", "docker", "tmux"].map(|p| (None, Some(p))).to_vec();
+        assert_eq!(icons(&many).len(), MAX_MARKS);
+    }
+
+    #[test]
+    fn a_pane_runs_its_foreground_groups_leader() {
+        let info = |group: u64| json!({"shell_pid": 10, "foreground_process_group_id": group, "foreground_processes": [{"pid": 12, "name": "rg"}, {"pid": 11, "name": "nvim"}]});
+        assert_eq!(foreground(&info(11)).as_deref(), Some("nvim"));
+        assert_eq!(foreground(&info(10)), None); // the shell's prompt
+        assert_eq!(foreground(&info(99)), None); // gone already
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn a_label_loses_the_agent_and_fades_the_rest() {
+        assert_eq!(name_spans("harness", &[]), ("harness".to_string(), vec![]));
+        assert_eq!(name_spans("1 · claude › Новый GUI", &["claude"]), ("1 · Новый GUI".to_string(), vec![0..5]));
+        assert_eq!(name_spans("2 · main › claude › Task", &["claude"]), ("2 · Task  main".to_string(), vec![0..5, 9..15]));
+        assert_eq!(name_spans("3 · mochi › nvim", &[]), ("3 · nvim  mochi".to_string(), vec![0..5, 9..16]));
+        // only the agent: nothing else to name the tab
+        assert_eq!(name_spans("1 · claude", &["claude"]), ("1 · claude".to_string(), vec![]));
+        assert_eq!(name_spans("v2 · draft", &[]), ("v2 · draft".to_string(), vec![]));
     }
 
     #[test]

@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/9b3f5fae-8eee-4697-89b4-37d232250117
 - Under the sidebar, herdr sessions and saved SSH machines sit in a bar, like Arc's spaces. A two-finger swipe goes to the next one.
 - The agents list at the bottom shows every agent herdr detects in any workspace, with its status (working, blocked, done, idle), the task in its title and how long it has waited. Click one to jump to its pane.
 - When an agent you can't see starts waiting or finishes, macOS shows a notification and the Dock icon counts it until you look at that tab. Approve on the notification answers the agent without opening Shepherd.
-- Tabs show the agent or shell running in them. Drag tabs to reorder them. Drag a pane by its grip onto another pane to split or swap, or onto a tab to move it there.
+- Tabs show what runs in their panes: an agent, or a program such as Neovim, `cargo` or `btop`, each with its logo. Drag tabs to reorder them. Drag a pane by its grip onto another pane to split or swap, or onto a tab to move it there.
 - Dividers between panes snap to the cell grid herdr lays out, and the terminal reflows while you drag.
 - The terminal draws ligatures, Kitty images and box drawing on its own. Shepherd reads scrollback from herdr once and scrolls it locally. `⌘`-click opens links, files, folders and images.
 - herdr's own `[keys]` work in Shepherd, and its popups float over the panes.

@@ -7,9 +7,10 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
     // up, after a minute if it could not be run at all.
     let (mut next_start, mut spawned, mut start_error, mut downloaded) = (Instant::now(), None::<Instant>, None::<String>, false);
     // a fixture (`SHEPHERD_MOCK`) is the one snapshot there is
-    if let Some((snapshot, waited)) = crate::mock::snapshot() {
+    if let Some((snapshot, waited, programs)) = crate::mock::snapshot() {
         let _ = this.update(cx, |s, cx| {
             let now = Instant::now();
+            s.tab_bar.programs = programs;
             snapshot.track(&mut s.since, now);
             for (id, secs) in waited {
                 if let Some((_, at)) = s.since.get_mut(&id) {
@@ -21,6 +22,11 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
         });
         return;
     }
+    // dropped with this loop, so a switch of session stops it too
+    let _programs = cx.spawn({
+        let (this, rt, client) = (this.clone(), rt.clone(), client.clone());
+        async move |cx| super::tab_bar::watch_programs(this, rt, client, cx).await
+    });
     // the agents' panes, whose status the subscription follows: herdr only sends that per pane
     let mut watched: Vec<String> = Vec::new();
     loop {

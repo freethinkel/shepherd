@@ -672,7 +672,7 @@ pub fn spent_card<L: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(
                 .h_auto()
                 .py(px(6.))
                 .items_start()
-                .child(crate::shell::agent_favicon(p.agent.as_deref(), theme).mt(px(1.)))
+                .child(crate::shell::agent_favicon(p.agent.as_deref(), theme).mt(px(2.)))
                 .child(
                     div()
                         .flex_1()
