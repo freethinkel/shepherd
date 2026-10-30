@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    App, Bounds, Entity, GlobalElementId, Hsla, LayoutId, PaintQuad, Pixels, Point, RenderImage,
+    App, Bounds, Entity, Focusable, GlobalElementId, Hsla, LayoutId, PaintQuad, Pixels, Point, RenderImage,
     ShapedLine, SharedString, Style, TextRun, Window, fill, font, outline, point, px, relative,
     size,
 };
@@ -230,6 +230,8 @@ pub struct TerminalPrepaint {
     /// The focused block cursor is opaque, so it goes under the text (whose
     /// cell flips to the background color); the unfocused outline goes over.
     cursor_under_text: bool,
+    /// The IME's composing text, underlined over the grid from the cursor cell.
+    marked: Option<(Point<Pixels>, ShapedLine)>,
 }
 
 impl gpui::IntoElement for TerminalElement {
@@ -331,6 +333,7 @@ impl gpui::Element for TerminalElement {
                 trail: None,
                 images: Vec::new(),
                 cursor_under_text: false,
+                marked: None,
             };
         };
 
@@ -463,6 +466,21 @@ impl gpui::Element for TerminalElement {
             .map(|i| (image_bounds(i, origin, cell_w, line_h, scale), i.image.clone(), i.z < 0))
             .collect();
 
+        let marked = snapshot.marked.map(|(text, row, col)| {
+            let color = theme.terminal.foreground;
+            let underline = gpui::UnderlineStyle { color: Some(color), thickness: px(1.0), wavy: false };
+            let run = TextRun {
+                len: text.len(),
+                font: mono.clone(),
+                color,
+                background_color: None,
+                underline: Some(underline),
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(text.into(), font_size, &[run], None);
+            (point(origin.x + cell_w * col as f32, origin.y + line_h * row as f32), line)
+        });
+
         TerminalPrepaint {
             bg_quads,
             sel_quads,
@@ -478,6 +496,7 @@ impl gpui::Element for TerminalElement {
             trail,
             images,
             cursor_under_text: block_cursor.is_some(),
+            marked,
         }
     }
 
@@ -555,7 +574,15 @@ impl gpui::Element for TerminalElement {
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
             }
+            // over the cursor and the text under it, on the terminal's background
+            if let Some((at, line)) = prepaint.marked.take() {
+                let theme = Theme::of(cx);
+                window.paint_quad(fill(Bounds::new(at, size(line.width, line_h)), theme.terminal.background));
+                let _ = line.paint(at, line_h, gpui::TextAlign::Left, None, window, cx);
+            }
         });
+        let focus = self.panel.read(cx).focus_handle(cx);
+        window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, self.panel.clone()), cx);
     }
 }
 

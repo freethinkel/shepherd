@@ -478,7 +478,14 @@ impl Emulator {
             CursorVisualStyle::BlockHollow => CursorShape::HollowBlock,
             _ => CursorShape::Block,
         };
-        Some(CursorSnapshot { row: self.term.cursor_y().ok()? as usize, col: self.term.cursor_x().ok()? as usize, shape })
+        let (row, col) = self.cursor_cell()?;
+        Some(CursorSnapshot { row, col, shape })
+    }
+
+    /// The cursor's (row, col) in viewport coordinates, shown or hidden: an IME composes there (agent TUIs hide the
+    /// cursor and park it at their input).
+    pub fn cursor_cell(&self) -> Option<(usize, usize)> {
+        Some((self.term.cursor_y().ok()? as usize, self.term.cursor_x().ok()? as usize))
     }
 
     fn hyperlink(&self, row: usize, col: usize) -> Option<String> {
