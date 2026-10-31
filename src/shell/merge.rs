@@ -448,6 +448,8 @@ mod tests {
         let sh = |dir: &str, args: &[&str]| git(dir, args).unwrap();
         std::fs::create_dir(root).unwrap();
         sh(root, &["init", "-q", "-b", "main"]);
+        // Windows' git checks a.txt out with \r\n otherwise
+        sh(root, &["config", "core.autocrlf", "false"]);
         sh(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
         sh(root, &["worktree", "add", "-q", "-b", "feature", wt]);
         std::fs::write(format!("{wt}/a.txt"), "feature\n").unwrap();
