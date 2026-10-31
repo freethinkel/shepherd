@@ -11,6 +11,7 @@
 //!   colors — paint never changes layout), and the cursor block.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -120,6 +121,9 @@ pub fn resolve_color(color: CellColor, theme: &Theme) -> Hsla {
 /// threshold.
 pub const SELECTION_DRAG_THRESHOLD: f32 = 2.0;
 
+/// The selection's corner radius as a share of the row height: Zed's.
+const SELECTION_RADIUS: f32 = 0.15;
+
 /// Which cell a pointer landed on, and which edge of it a selection anchors to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellHit {
@@ -206,10 +210,12 @@ impl TerminalElement {
 
 pub struct TerminalPrepaint {
     bg_quads: Vec<PaintQuad>,
-    /// Selection wash. Painted after [`Self::bg_quads`] and before the glyphs:
-    /// it has to tint a cell's own background rather than replace it, and it
-    /// must not wash out the text it is highlighting.
-    sel_quads: Vec<PaintQuad>,
+    /// Search matches' wash, under [`Self::selection`].
+    mark_quads: Vec<PaintQuad>,
+    /// Selection wash, a path per shape. Painted after [`Self::bg_quads`] and
+    /// before the glyphs: it has to tint a cell's own background rather than
+    /// replace it, and it must not wash out the text it is highlighting.
+    selection: Vec<gpui::Path<Pixels>>,
     /// Per row, the shaped segments and the grid COLUMN each one starts at.
     /// Not one line per row: see [`shape_row`].
     lines: Vec<Vec<(usize, ShapedLine)>>,
@@ -323,7 +329,8 @@ impl gpui::Element for TerminalElement {
         let Some(snapshot) = snapshot else {
             return TerminalPrepaint {
                 bg_quads: Vec::new(),
-                sel_quads: Vec::new(),
+                mark_quads: Vec::new(),
+                selection: Vec::new(),
                 lines: Vec::new(),
                 glyphs: Vec::new(),
                 stroke: 1.0,
@@ -338,7 +345,8 @@ impl gpui::Element for TerminalElement {
         };
 
         let mut bg_quads = Vec::new();
-        let mut sel_quads = Vec::new();
+        let mut mark_quads = Vec::new();
+        let mut selected = Vec::new();
         let mut lines = Vec::with_capacity(snapshot.lines.len());
         let mut glyphs = Vec::with_capacity(snapshot.lines.len());
         let cursor_rect = snapshot.cursor.as_ref().map(|c| {
@@ -383,7 +391,7 @@ impl gpui::Element for TerminalElement {
         // Search matches wash their cells under the selection; the current one stands out.
         for (row, cells, current) in &snapshot.marks {
             let color = if *current { theme.accent.opacity(0.6) } else { theme.warning.opacity(0.3) };
-            sel_quads.push(fill(
+            mark_quads.push(fill(
                 Bounds::new(
                     point(origin.x + cell_w * cells.start as f32, origin.y + line_h * *row as f32),
                     size(cell_w * cells.len() as f32, line_h),
@@ -393,25 +401,11 @@ impl gpui::Element for TerminalElement {
         }
         for (row_ix, row) in snapshot.lines.iter().enumerate() {
             let y = origin.y + line_h * row_ix as f32;
-            // Selected runs, merged the same way background runs are: one quad
-            // per contiguous span instead of one per cell.
-            let mut sel_start: Option<usize> = None;
-            for col in 0..=row.len() {
-                let selected = row.get(col).is_some_and(|cell| cell.selected);
-                match (sel_start, selected) {
-                    (None, true) => sel_start = Some(col),
-                    (Some(start), false) => {
-                        sel_quads.push(fill(
-                            Bounds::new(
-                                point(origin.x + cell_w * start as f32, y),
-                                size(cell_w * (col - start) as f32, line_h),
-                            ),
-                            theme.terminal.selection,
-                        ));
-                        sel_start = None;
-                    }
-                    _ => {}
-                }
+            // The emulator's selection is one run per row.
+            if let (Some(start), Some(end)) =
+                (row.iter().position(|cell| cell.selected), row.iter().rposition(|cell| cell.selected))
+            {
+                selected.push((row_ix, start..end + 1));
             }
             // Merge consecutive non-default background cells into quads.
             let mut run_start: Option<(usize, Hsla)> = None;
@@ -460,6 +454,14 @@ impl gpui::Element for TerminalElement {
             path.build().ok().map(|path| (path, theme.cursor))
         });
 
+        let selection = selection_outlines(&selected)
+            .iter()
+            .filter_map(|corners| {
+                let at = |c: &Point<usize>| point(origin.x + cell_w * c.x as f32, origin.y + line_h * c.y as f32);
+                rounded_path(&corners.iter().map(at).collect::<Vec<_>>(), line_h * SELECTION_RADIUS)
+            })
+            .collect();
+
         let images = snapshot
             .images
             .iter()
@@ -483,7 +485,8 @@ impl gpui::Element for TerminalElement {
 
         TerminalPrepaint {
             bg_quads,
-            sel_quads,
+            mark_quads,
+            selection,
             lines,
             glyphs,
             // The font's underline thickness is ~0.05em; Ghostty strokes box
@@ -532,8 +535,12 @@ impl gpui::Element for TerminalElement {
             for (bounds, image, _) in prepaint.images.iter().filter(|i| i.2) {
                 let _ = window.paint_image(*bounds, Default::default(), image.clone(), 0, false);
             }
-            for quad in prepaint.sel_quads.drain(..) {
+            for quad in prepaint.mark_quads.drain(..) {
                 window.paint_quad(quad);
+            }
+            let selection = Theme::of(cx).terminal.selection;
+            for path in prepaint.selection.drain(..) {
+                window.paint_path(path, selection);
             }
             if let Some((path, color)) = prepaint.trail.take() {
                 window.paint_path(path, color);
@@ -584,6 +591,46 @@ impl gpui::Element for TerminalElement {
         let focus = self.panel.read(cx).focus_handle(cx);
         window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, self.panel.clone()), cx);
     }
+}
+
+/// The shapes `rows` (each row with its selected columns, top down) make: every shape's corners
+/// in grid lines, clockwise from the top right. Rows that share a column are one shape; a
+/// selection from the end of a row to the start of the next shares none and is two.
+// ponytail: a selection running past the viewport rounds at its edge too, as Zed's terminal does.
+fn selection_outlines(rows: &[(usize, Range<usize>)]) -> Vec<Vec<Point<usize>>> {
+    rows.chunk_by(|(a, x), (b, y)| a + 1 == *b && x.start < y.end && y.start < x.end)
+        .map(|shape| {
+            let side = |edge: fn(&Range<usize>) -> usize| {
+                shape
+                    .chunk_by(|(_, a), (_, b)| edge(a) == edge(b))
+                    .flat_map(|run| [point(edge(&run[0].1), run[0].0), point(edge(&run[0].1), run[run.len() - 1].0 + 1)])
+                    .collect::<Vec<_>>()
+            };
+            let mut corners = side(|cols| cols.end);
+            corners.extend(side(|cols| cols.start).into_iter().rev());
+            corners
+        })
+        .collect()
+}
+
+/// A filled path through `corners`, each one rounded by `radius`, those facing in as well as out.
+fn rounded_path(corners: &[Point<Pixels>], radius: Pixels) -> Option<gpui::Path<Pixels>> {
+    let mut path = gpui::PathBuilder::fill();
+    for (ix, &at) in corners.iter().enumerate() {
+        // the sides are square to the grid; half a side at most, so that a narrow one's two corners don't cross
+        let toward = |to: Point<Pixels>| {
+            let t = (radius / ((to.x - at.x).abs() + (to.y - at.y).abs())).min(0.5);
+            point(at.x + (to.x - at.x) * t, at.y + (to.y - at.y) * t)
+        };
+        let enter = toward(corners[(ix + corners.len() - 1) % corners.len()]);
+        match ix {
+            0 => path.move_to(enter),
+            _ => path.line_to(enter),
+        }
+        path.curve_to(toward(corners[(ix + 1) % corners.len()]), at);
+    }
+    path.close();
+    path.build().ok()
 }
 
 /// Ghostty's cursor_smear shader (DURATION 0.2, TRAIL_SIZE 0.8, EaseOutCirc): the cursor jumps,
@@ -934,6 +981,25 @@ mod tests {
         assert_eq!((c[1].x, c[2].x), (px(109.5), px(109.5)));
         assert!(c[0].x > px(0.5) && c[0].x < px(100.5), "{c:?}");
         assert!(trail.step(cell(10.), at(200)).is_none(), "and it is gone after DURATION");
+    }
+
+    #[test]
+    fn a_selection_is_one_shape_while_its_rows_touch() {
+        let corners = |rows: &[(usize, Range<usize>)]| {
+            let shapes = selection_outlines(rows);
+            shapes.iter().map(|s| s.iter().map(|c| (c.x, c.y)).collect::<Vec<_>>()).collect::<Vec<_>>()
+        };
+        assert_eq!(corners(&[(2, 3..7)]), [[(7, 2), (7, 3), (3, 3), (3, 2)]], "a row is a rectangle");
+        assert_eq!(
+            corners(&[(0, 3..10), (1, 0..10), (2, 0..5)]),
+            [[(10, 0), (10, 2), (5, 2), (5, 3), (0, 3), (0, 1), (3, 1), (3, 0)]],
+            "first and last rows step in, full rows leave no corners"
+        );
+        assert_eq!(
+            corners(&[(0, 8..10), (1, 0..8)]),
+            [[(10, 0), (10, 1), (8, 1), (8, 0)], [(8, 1), (8, 2), (0, 2), (0, 1)]],
+            "rows that only meet at a corner are two shapes"
+        );
     }
 
     #[test]
