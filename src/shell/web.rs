@@ -191,6 +191,8 @@ impl Shell {
             self.tab_menu.is_some(),
             self.worktree_dialog.is_some(),
             self.remove_confirm.is_some(),
+            self.merge_delete.is_some(),
+            self.merge_failure.is_some(),
             self.merge_confirm.is_some(),
             self.session_dialog.is_some(),
             self.place_menu.is_some(),

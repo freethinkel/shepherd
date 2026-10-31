@@ -23,6 +23,8 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.tab_menu, window);
         crate::ui::reap_popup(&mut self.worktree_dialog, window);
         crate::ui::reap_popup(&mut self.remove_confirm, window);
+        crate::ui::reap_popup(&mut self.merge_delete, window);
+        crate::ui::reap_popup(&mut self.merge_failure, window);
         crate::ui::reap_popup(&mut self.merge_confirm, window);
         crate::ui::reap_popup(&mut self.session_dialog, window);
         crate::ui::reap_popup(&mut self.place_menu, window);
@@ -31,6 +33,7 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.command_panel, window);
         if let Some(s) = &self.snapshot {
             self.removing.retain(|id| s.workspaces.iter().any(|w| &w.workspace_id == id));
+            self.merging.retain(|id, _| s.workspaces.iter().any(|w| &w.workspace_id == id));
         }
         reapply_traffic_lights(window);
         let theme = Theme::of(cx).clone();

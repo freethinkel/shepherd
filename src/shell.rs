@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 mod browser;
 mod divider;
 mod floating;
+mod merge;
 mod motion;
 mod pane_drag;
 mod popups;
@@ -176,6 +177,12 @@ pub struct Shell {
     removing: std::collections::HashSet<String>,
     /// Remove a worktree? The workspace, its label, and whether herdr found changes (then removal is forced).
     remove_confirm: Option<crate::ui::Popup<(String, String, bool)>>,
+    /// Merge and delete?, asked over the window.
+    merge_delete: Option<crate::ui::Popup<merge::MergeDelete>>,
+    /// Worktrees being merged and deleted, or whose merge failed, by workspace: their rows show the step or a `!`.
+    merging: HashMap<String, merge::Merging>,
+    /// A failed merge's popover, opened from its row's `!` at this point.
+    merge_failure: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// The New worktree dialog, open over the window.
     worktree_dialog: Option<crate::ui::Popup<WorktreeDialog>>,
     /// Worktrees herdr is still creating, as (workspace the dialog was opened on, branch): herdr answers
@@ -515,6 +522,9 @@ impl Shell {
                     worktree_dialog: None,
                     removing: Default::default(),
                     remove_confirm: None,
+                    merge_delete: None,
+                    merging: HashMap::new(),
+                    merge_failure: None,
                     pending_worktrees: Vec::new(),
                     agents_scroll: gpui::ScrollHandle::new(),
                     tab_bar: Default::default(),

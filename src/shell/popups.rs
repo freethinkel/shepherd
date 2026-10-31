@@ -553,6 +553,22 @@ impl Shell {
                             ))
                         })
                         .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
+                        .when(linked, |el| {
+                            el.child(
+                                row(theme, false, "ws-menu-merge")
+                                    .h(px(28.))
+                                    .rounded(px(6.))
+                                    .text_color(theme.danger)
+                                    .child("Merge and delete")
+                                    .on_pick(at, cx.listener({
+                                        let id = id.clone();
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            if let Some(m) = this.ws_menu.as_mut() { m.close() }
+                                            this.ask_merge_delete(id.clone(), window, cx);
+                                        }
+                                    })),
+                            )
+                        })
                         .child(
                             row(theme, false, "ws-menu-close")
                                 .h(px(28.))
@@ -781,6 +797,8 @@ impl Shell {
                 );
             modal("remove-dialog", confirm, window, card)
         }))
+        .children(self.merge_delete_dialog(theme, window, cx))
+        .children(self.merge_failure_popover(theme, cx))
         .children(self.merge_confirm.as_ref().map(|confirm| {
             let ask = &confirm.value;
             let into = if ask.base.is_empty() { "its base branch".to_string() } else { ask.base.clone() };
