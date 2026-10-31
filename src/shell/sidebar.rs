@@ -269,6 +269,8 @@ impl Shell {
             // Zeron's card: the name, and under it the branch with what it changed; one line when compact
             // a worktree always has its branch line, so a folding group knows its height
             let two = !compact && (nested || branch.is_some() || extras.is_some());
+            // a worktree being merged and deleted shows its step in place of its branch, or what failed
+            let merging = self.merging.get(&w.workspace_id).filter(|_| live);
             let (inline, below) = if two { (None, extras) } else { (extras, None) };
             // a repo's own artwork or its monogram; its worktrees, indented under its name, go without
             // compact, a worktree has no branch line: a branch mark in front of its name tells it apart
@@ -327,23 +329,57 @@ impl Shell {
                                     .text_size(px(11.))
                                     .text_color(theme.text_muted)
                                     .when(show.icon && !nested, |el| el.pl(px(22.)))
-                                    .children(branch.map(|b| {
-                                        div()
-                                            .min_w_0()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(4.))
-                                            .child(gpui::svg().path("icons/git-branch.svg").size(px(11.)).flex_none().text_color(theme.text_muted))
-                                            .child(div().min_w_0().truncate().child(b))
-                                    }))
-                                    .children(sync)
-                                    .child(div().flex_1())
-                                    .children(below),
+                                    .map(|el| match merging {
+                                        Some(m) => el.child(
+                                            div().min_w_0().truncate().when(m.failed.is_some(), |el| el.text_color(theme.danger)).child(m.step().to_string()),
+                                        ),
+                                        None => el
+                                            .children(branch.map(|b| {
+                                                div()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.))
+                                                    .child(gpui::svg().path("icons/git-branch.svg").size(px(11.)).flex_none().text_color(theme.text_muted))
+                                                    .child(div().min_w_0().truncate().child(b))
+                                            }))
+                                            .children(sync)
+                                            .child(div().flex_1())
+                                            .children(below),
+                                    }),
                             )
                         }),
                 )
                 .map(|el| {
-                    if live && self.removing.contains(&w.workspace_id) {
+                    if let Some(m) = merging {
+                        match m.failed {
+                            None => el.child(spinner(theme, format!("ws-merging-{}", w.workspace_id))),
+                            // the `!` opens what failed, with Force delete
+                            Some(_) => el.child(
+                                div()
+                                    .id(SharedString::from(format!("ws-merge-failed-{}", w.workspace_id)))
+                                    .size(px(16.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(theme.danger.opacity(0.18))
+                                    .text_color(theme.danger)
+                                    .text_size(px(11.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .cursor_pointer()
+                                    .child("!")
+                                    .on_click(cx.listener({
+                                        let id = w.workspace_id.clone();
+                                        move |this, e: &ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.open_merge_failure(id.clone(), e.position(), cx);
+                                        }
+                                    })),
+                            ),
+                        }
+                    } else if live && self.removing.contains(&w.workspace_id) {
                         el.text_color(theme.text_faint).child(spinner(theme, format!("ws-removing-{}", w.workspace_id)))
                     } else {
                         el.when(show.status, |el| el.child(status_dot(w.agent_status, theme)))

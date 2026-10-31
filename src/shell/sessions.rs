@@ -572,6 +572,7 @@ impl Shell {
         self.settling = None;
         self.pending_worktrees.clear();
         self.removing.clear();
+        self.merging.clear();
         self.unseen.clear();
         self.since = Default::default();
         self.connect(cx);

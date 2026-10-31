@@ -87,6 +87,9 @@ pub struct Worktree {
     pub is_linked_worktree: bool,
     #[serde(default)]
     pub checkout_path: String,
+    /// The repo's main checkout.
+    #[serde(default)]
+    pub repo_root: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
