@@ -2,7 +2,7 @@
 //! (herdr's docs: events have no shared sequence with snapshots, so never replay them onto one).
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How the sidebar orders its agents (its `…` menu); saved in the settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -20,6 +20,10 @@ pub enum AgentSort {
 
 /// Since when each agent pane has had its status, as Shepherd saw it change: herdr's snapshot carries no time.
 pub type Since = HashMap<String, (AgentStatus, Instant)>;
+
+/// Agent times as saved, so a restart keeps them: by pane id, the status, herdr's `state_change_seq` then, and since
+/// when (unix ms).
+pub type SavedTimes = HashMap<String, (AgentStatus, u64, u64)>;
 
 /// When the pane's agent started waiting or finished, while it still is.
 pub fn waiting_since(since: &Since, pane: &Pane) -> Option<Instant> {
@@ -48,7 +52,7 @@ pub fn ago(wait: Duration) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentStatus {
     Idle,
@@ -281,6 +285,38 @@ impl Snapshot {
                 since.insert(p.pane_id.clone(), (p.agent_status, now));
             }
         }
+    }
+
+    /// `since` across restarts: an agent just tracked (at `now`) that `saved` has at the same state change (status and
+    /// `state_change_seq`; a pane id herdr gives out again comes with another) takes its saved time back. Returns what
+    /// to save now; `wall` is `now` on the clock.
+    pub fn remember(&self, since: &mut Since, saved: &SavedTimes, now: Instant, wall: SystemTime) -> SavedTimes {
+        let wall_ms = wall.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        self.agents()
+            .into_iter()
+            .filter_map(|p| {
+                let (status, at) = since.get_mut(&p.pane_id)?;
+                let kept = saved.get(&p.pane_id).filter(|(s, seq, _)| s == status && *seq == p.state_change_seq);
+                let ms = match kept {
+                    Some(&(_, _, ms)) => {
+                        if *at == now {
+                            *at = now.checked_sub(Duration::from_millis(wall_ms.saturating_sub(ms))).unwrap_or(now);
+                        }
+                        ms
+                    }
+                    None => wall_ms.saturating_sub(now.duration_since(*at).as_millis() as u64),
+                };
+                Some((p.pane_id.clone(), (*status, p.state_change_seq, ms)))
+            })
+            .collect()
+    }
+
+    /// The agent "next waiting agent" shows: the one waiting longest, or when `shown` waits too, the one after it,
+    /// round again after the last.
+    pub fn next_waiting(&self, since: &Since, shown: Option<&str>) -> Option<&Pane> {
+        let waiting: Vec<_> = self.agents_by(AgentSort::Waiting, since).into_iter().filter(|p| crate::notify::wants_attention(p.agent_status)).collect();
+        let next = waiting.iter().position(|p| Some(p.pane_id.as_str()) == shown).map_or(0, |i| (i + 1) % waiting.len());
+        waiting.get(next).copied()
     }
 
     /// The agents in `sort` order, ties in status order: [`AgentSort::Grouped`] by project, as the sidebar groups

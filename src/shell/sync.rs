@@ -108,7 +108,9 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                         if let Some(tab) = moved_focus(old, snapshot.focused_tab_id.as_deref()) {
                             s.selected_tab = Some(tab.into());
                         }
-                        snapshot.track(&mut s.since, Instant::now());
+                        let now = Instant::now();
+                        snapshot.track(&mut s.since, now);
+                        s.keep_agent_times(&snapshot, now, cx);
                         s.snapshot = Some(snapshot);
                         s.error = None;
                         s.connecting = None;
@@ -192,6 +194,32 @@ impl Shell {
             self.rt.spawn(async move { client.call("tab.focus", json!({"tab_id": id})).await });
         }
         self.focused_tab = Some(tab);
+    }
+}
+
+/// Agent times by place (`herdr_machine`, else `herdr_socket`), so a restart keeps them.
+fn agent_times_path() -> std::path::PathBuf {
+    crate::settings::cache_dir().join("agent-times.json")
+}
+
+pub(super) fn load_agent_times() -> HashMap<String, crate::model::SavedTimes> {
+    std::fs::read(agent_times_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+impl Shell {
+    /// The shown place's saved agent times back into `since`, and saved again when they changed.
+    // ponytail: a place removed leaves its few lines in the file
+    fn keep_agent_times(&mut self, snapshot: &Snapshot, now: Instant, cx: &mut Context<Self>) {
+        let settings = &SettingsGlobal::of(cx).settings;
+        let place = settings.herdr_machine.clone().map(|m| format!("machine:{m}")).or_else(|| settings.herdr_socket.clone()).unwrap_or_default();
+        let saved = self.agent_times.entry(place).or_default();
+        let fresh = snapshot.remember(&mut self.since, saved, now, std::time::SystemTime::now());
+        if fresh != *saved {
+            *saved = fresh;
+            let path = agent_times_path();
+            let _ = std::fs::create_dir_all(crate::settings::cache_dir());
+            let _ = std::fs::write(path, serde_json::to_vec(&self.agent_times).unwrap_or_default());
+        }
     }
 }
 

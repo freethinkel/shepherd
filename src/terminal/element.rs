@@ -121,7 +121,7 @@ pub fn resolve_color(color: CellColor, theme: &Theme) -> Hsla {
 /// threshold.
 pub const SELECTION_DRAG_THRESHOLD: f32 = 2.0;
 
-/// The selection's corner radius as a share of the row height: Zed's.
+/// The corner radius of the selection and search marks as a share of the row height: Zed's.
 const SELECTION_RADIUS: f32 = 0.15;
 
 /// Which cell a pointer landed on, and which edge of it a selection anchors to.
@@ -397,7 +397,8 @@ impl gpui::Element for TerminalElement {
                     size(cell_w * cells.len() as f32, line_h),
                 ),
                 color,
-            ));
+            )
+            .corner_radii(line_h * SELECTION_RADIUS));
         }
         for (row_ix, row) in snapshot.lines.iter().enumerate() {
             let y = origin.y + line_h * row_ix as f32;
@@ -440,9 +441,12 @@ impl gpui::Element for TerminalElement {
             glyphs.push(row_glyphs);
         }
 
-        let cursor = cursor_rect.map(|rect| match self.focused {
-            true => fill(rect, theme.cursor),
-            false => outline(rect, theme.cursor, gpui::BorderStyle::Solid),
+        let cursor = cursor_rect.map(|rect| {
+            match self.focused {
+                true => fill(rect, theme.cursor),
+                false => outline(rect, theme.cursor, gpui::BorderStyle::Solid),
+            }
+            .corner_radii(px(1.))
         });
         let trail = trail.and_then(|corners| {
             let mut path = gpui::PathBuilder::fill();

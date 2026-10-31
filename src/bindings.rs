@@ -53,6 +53,7 @@ app_actions! {
     ToggleSecureInput: "Secure keyboard entry",
     CommandPanel: "Command panel",
     AgentsPanel: "Agents",
+    NextWaitingAgent: "Next waiting agent",
     WorkspacesPanel: "Workspaces",
     ReloadPage: "Reload page",
     FocusAddress: "Focus page address",
@@ -96,6 +97,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("CommandPanel", "cmd-k"),
     ("CommandPanel", "cmd-shift-p"),
     ("AgentsPanel", "cmd-shift-a"),
+    ("NextWaitingAgent", "cmd-j"),
     ("ReloadPage", "cmd-r"),
     ("FocusAddress", "cmd-l"),
     ("CopyPageUrl", "cmd-shift-c"),
@@ -139,6 +141,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("OpenSettings", "ctrl-,"),
     ("CommandPanel", "ctrl-shift-p"),
     ("AgentsPanel", "ctrl-shift-a"),
+    ("NextWaitingAgent", "ctrl-shift-j"),
     ("Quit", "ctrl-shift-q"),
 ];
 
@@ -240,6 +243,7 @@ fn menus(secure_input: bool) -> Vec<gpui::Menu> {
             I::separator(),
             I::action("Command Panel", CommandPanel),
             I::action("Agents", AgentsPanel),
+            I::action("Next Waiting Agent", NextWaitingAgent),
             I::action("Workspaces", WorkspacesPanel),
             I::separator(),
             I::action("Enter Full Screen", ToggleFullScreen),

@@ -328,18 +328,24 @@ impl Shell {
         let menu = self.new_tab_menu.as_ref()?;
         let (ws, at) = menu.value.clone();
         type Pick = Box<dyn Fn(&mut Shell, String, &mut Window, &mut Context<Shell>)>;
-        let item = |key: &'static str, label: &'static str, pick: Pick| {
+        // each with the mark its tab gets: the command panel's terminal, a browser tab's globe
+        let item = |key: &'static str, icon: &'static str, label: &'static str, pick: Pick| {
             let ws = ws.clone();
-            row(theme, false, key).h(px(28.)).rounded(px(6.)).child(label).on_pick(
-                at,
-                cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    if let Some(m) = this.new_tab_menu.as_mut() {
-                        m.close()
-                    }
-                    pick(this, ws.clone(), window, cx);
-                    cx.notify();
-                }),
-            )
+            row(theme, false, key)
+                .h(px(28.))
+                .rounded(px(6.))
+                .child(gpui::svg().path(icon).size(px(14.)).flex_none().text_color(theme.text_muted))
+                .child(label)
+                .on_pick(
+                    at,
+                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        if let Some(m) = this.new_tab_menu.as_mut() {
+                            m.close()
+                        }
+                        pick(this, ws.clone(), window, cx);
+                        cx.notify();
+                    }),
+                )
         };
         let card = menu_card(theme, "new-tab-menu", 160.)
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -348,8 +354,8 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            .child(item("new-tab-terminal", "Terminal", Box::new(|this, ws, _, cx| this.new_tab(ws, cx))))
-            .child(item("new-tab-browser", "Browser", Box::new(|this, ws, window, cx| {
+            .child(item("new-tab-terminal", "icons/terminal.svg", "Terminal", Box::new(|this, ws, _, cx| this.new_tab(ws, cx))))
+            .child(item("new-tab-browser", "icons/solar/global.svg", "Browser", Box::new(|this, ws, window, cx| {
                 // at the end of the bar
                 let last = this.snapshot.as_ref().and_then(|s| s.tabs_of(&ws).last().map(|t| t.tab_id.clone()));
                 this.new_browser_tab(ws, last, None, window, cx)

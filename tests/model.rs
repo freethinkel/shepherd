@@ -322,6 +322,39 @@ fn waiting_agents_count_from_their_status_change_longest_first() {
     assert_eq!(labels, ["now", "now", "1m", "59m", "1h", "23h", "1d"]);
 }
 
+#[test]
+fn the_next_waiting_agent_goes_round_and_saved_times_survive_a_restart() {
+    use std::time::{Duration, Instant, SystemTime};
+    let mut s = fixture();
+    for p in &mut s.panes {
+        p.agent = Some("claude".into());
+    }
+    let (t0, mut since) = (Instant::now(), Since::new());
+    s.panes[1].agent_status = AgentStatus::Blocked;
+    s.track(&mut since, t0);
+    s.panes[0].agent_status = AgentStatus::Done;
+    s.track(&mut since, t0 + Duration::from_secs(5));
+    let next = |shown| s.next_waiting(&since, shown).map(|p| p.pane_id.clone());
+    assert_eq!(next(None).as_deref(), Some("w1:p2"), "the longest wait first");
+    assert_eq!(next(Some("w1:p2")).as_deref(), Some("w1:p1"));
+    assert_eq!(next(Some("w1:p1")).as_deref(), Some("w1:p2"), "round again");
+    assert_eq!(next(Some("w1:p3")).as_deref(), Some("w1:p2"), "from an agent not waiting, the first");
+
+    // Shepherd restarts: herdr's panes are the same, ten minutes on
+    let (wall, now) = (SystemTime::now(), t0 + Duration::from_secs(5));
+    let saved = s.remember(&mut since, &Default::default(), now, wall);
+    s.panes[2].state_change_seq = 7; // p3's id came back for another agent
+    let mut saved_p3 = saved.clone();
+    saved_p3.get_mut("w1:p3").unwrap().1 = 6;
+    let later = now + Duration::from_secs(3600);
+    let mut fresh = Since::new();
+    s.track(&mut fresh, later);
+    let again = s.remember(&mut fresh, &saved_p3, later, wall + Duration::from_secs(600));
+    assert_eq!(later.duration_since(fresh["w1:p2"].1), Duration::from_secs(605), "blocked since before the restart");
+    assert_eq!(fresh["w1:p3"].1, later, "another state change starts afresh");
+    assert_eq!(again["w1:p2"], saved["w1:p2"], "the saved time stays as it was");
+}
+
 fn ws(id: &str, number: u32, repo: Option<(&str, bool)>) -> shepherd::model::Workspace {
     serde_json::from_value(serde_json::json!({
         "workspace_id": id, "label": id, "number": number, "agent_status": "idle",

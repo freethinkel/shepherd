@@ -185,8 +185,8 @@ pub struct Shell {
     tab_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// A pane's right-click menu: the pane and where it was clicked.
     pane_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
-    /// An agent row's right-click menu: the agent's pane and where it was clicked.
-    agent_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
+    /// The agents list's right-click menu, for a row or a project's heading, and where it was clicked.
+    agent_menu: Option<crate::ui::Popup<(sidebar::AgentMenu, gpui::Point<Pixels>)>>,
     /// The status bar's spend popup, opened at this point (its bottom-left).
     spent_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// The spend popup lists the most tokens first.
@@ -220,6 +220,8 @@ pub struct Shell {
     resize_hold: gpui::Task<()>,
     /// Since when each agent has had its status: how long the waiting ones have waited.
     since: crate::model::Since,
+    /// `since` as saved for each place, so a restart keeps it.
+    agent_times: HashMap<String, crate::model::SavedTimes>,
     /// The loop that keeps the window in step with herdr; replacing it (a switch of session) stops the last one.
     sync: gpui::Task<()>,
     /// Wakes the sync loop for a fresh snapshot without an event: a command named a tab or pane herdr no longer has.
@@ -528,6 +530,7 @@ impl Shell {
                     frame_save: gpui::Task::ready(()),
                     resize_hold: gpui::Task::ready(()),
                     since: Default::default(),
+                    agent_times: sync::load_agent_times(),
                     sync: gpui::Task::ready(()),
                     resync: Default::default(),
                     floating: None,
