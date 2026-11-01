@@ -5,6 +5,7 @@
 use super::web::{Page, PageEvent, PageKey};
 use super::*;
 use crate::annotations::{BrowserAnnotation, Poll, annotation_prompt, default_recipient};
+use crate::model::AgentScope;
 use gpui_base::input::{Textarea, TextareaState};
 use std::hash::BuildHasher;
 
@@ -17,6 +18,13 @@ const POLL: Duration = Duration::from_millis(100);
 const MAX_PICKS: usize = 24;
 /// Unreadable polls (about two seconds' worth) before the session gives up.
 const MAX_MISSES: u32 = 20;
+
+/// The `…` menu's choices of which agents the panel lists: the choice, its id, icon and label.
+const SCOPES: [(AgentScope, &str, &str, &str); 3] = [
+    (AgentScope::Worktree, "annotation-agents-worktree", "icons/git-branch.svg", "This worktree"),
+    (AgentScope::Project, "annotation-agents-project", "icons/folder.svg", "This project"),
+    (AgentScope::All, "annotation-agents-all", "icons/bot.svg", "All agents"),
+];
 
 /// While the user picks on the page. Dropping it stops the poll.
 struct Session {
@@ -199,10 +207,12 @@ impl Shell {
         cx.notify();
     }
 
-    /// The agents to send to, in `Snapshot::agents`'s order, each with its workspace's label.
-    fn recipients(&self) -> Vec<(crate::model::Pane, String)> {
-        let Some(snapshot) = &self.snapshot else { return Vec::new() };
-        snapshot.agents().into_iter().map(|p| (p.clone(), self.workspace_label(&p.workspace_id))).collect()
+    /// The agents page `key`'s tab can send to, as the panel's `…` menu chose, in `Snapshot::agents`'s order, each with
+    /// its workspace's label.
+    fn recipients(&self, key: &PageKey, cx: &App) -> Vec<(crate::model::Pane, String)> {
+        let (Some(snapshot), Some(tab)) = (&self.snapshot, self.browser.tabs.iter().find(|t| t.id == key.0)) else { return Vec::new() };
+        let scope = SettingsGlobal::of(cx).settings.annotation_agents;
+        snapshot.agents_in(&tab.workspace, scope).into_iter().map(|p| (p.clone(), self.workspace_label(&p.workspace_id))).collect()
     }
 
     fn workspace_label(&self, id: &str) -> String {
@@ -211,15 +221,15 @@ impl Shell {
     }
 
     /// The agent page `key`'s prompt goes to.
-    fn recipient(&self, key: &PageKey) -> Option<crate::model::Pane> {
-        let agents = self.snapshot.as_ref()?.agents();
-        let tab = self.browser.tabs.iter().find(|t| t.id == key.0);
-        default_recipient(&agents, self.pages.recipients.get(key).map(String::as_str), tab.map(|t| t.workspace.as_str())).cloned()
+    fn recipient(&self, key: &PageKey, cx: &App) -> Option<crate::model::Pane> {
+        let tab = self.browser.tabs.iter().find(|t| t.id == key.0)?;
+        let agents = self.snapshot.as_ref()?.agents_in(&tab.workspace, SettingsGlobal::of(cx).settings.annotation_agents);
+        default_recipient(&agents, self.pages.recipients.get(key).map(String::as_str), Some(tab.workspace.as_str())).cloned()
     }
 
     /// Only a click in the panel comes here. Sent, the draft and its markers go; failed, it all stays.
     fn send_annotations(&mut self, key: &PageKey, cx: &mut Context<Self>) {
-        let Some(agent) = self.recipient(key) else { return };
+        let Some(agent) = self.recipient(key, cx) else { return };
         let Some(page) = self.pages.live.get_mut(key).filter(|p| !p.annotations.sending && !p.annotations.items.is_empty()) else { return };
         let draft = &mut page.annotations;
         draft.sending = true;
@@ -274,8 +284,13 @@ impl Shell {
         let draft = &page.annotations;
         let rows: Vec<Stateful<Div>> = draft.items.iter().map(|item| self.annotation_row(key, item, theme, cx)).collect();
         let hint = draft.items.is_empty().then(|| div().p(px(8.)).text_color(theme.text_faint).child("Click an element or drag over an area."));
-        let chosen = self.recipient(key).map(|p| p.pane_id);
-        let recipients = self.recipients();
+        let chosen = self.recipient(key, cx).map(|p| p.pane_id);
+        let recipients = self.recipients(key, cx);
+        let (heading, empty) = match SettingsGlobal::of(cx).settings.annotation_agents {
+            AgentScope::Worktree => ("Agents in this worktree", "No agents in this worktree."),
+            AgentScope::Project => ("Agents in this project", "No agents in this project."),
+            AgentScope::All => ("All agents", "No agents running."),
+        };
         let none = recipients.is_empty();
         let agents = recipients.into_iter().map(|(pane, workspace)| {
             let (id, picked, key) = (pane.pane_id.clone(), chosen.as_deref() == Some(pane.pane_id.as_str()), key.clone());
@@ -324,8 +339,35 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(2.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .px(px(8.))
+                                .pb(px(2.))
+                                .text_size(px(11.))
+                                .text_color(theme.text_faint)
+                                .child(heading)
+                                .child(
+                                    icon_button(theme, "annotation-agents-view", "")
+                                        .tooltip(tip("Which agents to show", None))
+                                        .size(px(20.))
+                                        .child(gpui::svg().path("icons/more-horizontal.svg").size(px(14.)).text_color(theme.text_faint))
+                                        .when(self.annotation_agents_menu.as_ref().is_some_and(|m| m.is_open()), |el| el.bg(theme.hover))
+                                        // capture, like the sidebar's `…`: a press on the open menu's trigger closes it
+                                        .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            match this.annotation_agents_menu.as_mut() {
+                                                Some(menu) if menu.is_open() => menu.close(),
+                                                _ => this.annotation_agents_menu = Some(crate::ui::Popup::new(e.position)),
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
                         .children(agents)
-                        .when(none, |el| el.child(div().px(px(8.)).text_color(theme.text_faint).child("No agents to send to: none is running here."))),
+                        .when(none, |el| el.child(div().px(px(8.)).text_color(theme.text_faint).child(empty))),
                 )
                 .child(
                     div().flex_none().p(px(8.)).pt(px(0.)).child(
@@ -345,6 +387,30 @@ impl Shell {
                     ),
                 ),
         )
+    }
+
+    /// The panel's `…` menu: which agents it lists.
+    pub(super) fn annotation_agents_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let menu = self.annotation_agents_menu.as_ref()?;
+        let scope = SettingsGlobal::of(cx).settings.annotation_agents;
+        let card = menu_card(theme, "annotation-agents-menu", 160.)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if let Some(m) = this.annotation_agents_menu.as_mut() {
+                    m.close()
+                }
+                cx.notify();
+            }))
+            .children(SCOPES.map(|(choice, id, icon, label)| {
+                menu_choice(theme, id, icon, label, scope == choice).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    save_from_sidebar(cx, |s| s.annotation_agents = choice);
+                    if let Some(m) = this.annotation_agents_menu.as_mut() {
+                        m.close()
+                    }
+                    cx.notify();
+                }))
+            }));
+        let menu_el = crate::ui::menu_motion("annotation-agents-menu-in", menu, card);
+        Some(gpui::deferred(gpui::anchored().position(menu.value).anchor(gpui::Anchor::BottomRight).snap_to_window_with_margin(px(8.)).child(menu_el)).with_priority(1).into_any_element())
     }
 
     /// An annotation's row: hovered, its element's outline deepens on the page.

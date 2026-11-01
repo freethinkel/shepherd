@@ -186,6 +186,7 @@ impl Shell {
         let popups = [
             self.view_menu.is_some(),
             self.agents_menu.is_some(),
+            self.annotation_agents_menu.is_some(),
             self.ws_menu.is_some(),
             self.web_menu.is_some(),
             self.new_tab_menu.is_some(),

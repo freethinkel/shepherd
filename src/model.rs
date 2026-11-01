@@ -4,6 +4,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Which agents a browser tab's annotations can go to (their panel's `…` menu); saved in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentScope {
+    /// Those of the tab's project: the repo's checkout and worktrees (see [`Snapshot::project_of`]).
+    Project,
+    All,
+    /// Those of its workspace. Also what an unknown (old or future) value reads as.
+    #[default]
+    #[serde(other)]
+    Worktree,
+}
+
 /// How the sidebar orders its agents (its `…` menu); saved in the settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -348,6 +361,17 @@ impl Snapshot {
             .into_iter()
             .find(|(w, kids)| std::iter::once(w).chain(kids).any(|w| w.workspace_id == workspace_id))
             .map(|(w, _)| w)
+    }
+
+    /// The agents `scope` takes in from `workspace_id`, in [`Self::agents`]'s order.
+    pub fn agents_in(&self, workspace_id: &str, scope: AgentScope) -> Vec<&Pane> {
+        let project = |id: &str| self.project_of(id).map(|w| w.workspace_id.as_str());
+        let agents = self.agents().into_iter();
+        match scope {
+            AgentScope::Worktree => agents.filter(|p| p.workspace_id == workspace_id).collect(),
+            AgentScope::Project => agents.filter(|p| project(workspace_id).is_some() && project(&p.workspace_id) == project(workspace_id)).collect(),
+            AgentScope::All => agents.collect(),
+        }
     }
 
     /// Like `pick_tab`, but a gone choice falls back within `workspace` (its active tab, then its first) before
