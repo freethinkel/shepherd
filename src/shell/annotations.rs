@@ -10,7 +10,6 @@ use gpui_base::input::{Textarea, TextareaState};
 use std::hash::BuildHasher;
 
 const SCRIPT: &str = include_str!("../../assets/annotate.js");
-const PANEL_W: f32 = 300.;
 /// How often an active pick is polled. Nothing polls otherwise.
 const POLL: Duration = Duration::from_millis(100);
 /// One session's picks. The page's script answers the polls, so a hostile page could otherwise stream picks into the
@@ -278,7 +277,7 @@ impl Shell {
             })
     }
 
-    /// The panel beside the page, while picking and while picks wait to be sent.
+    /// The notes under the page, which needs the panel's width, while picking and while picks wait to be sent.
     pub(super) fn render_annotations(&self, key: &PageKey, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
         let page = self.pages.live.get(key).filter(|p| p.annotations.session.is_some() || !p.annotations.items.is_empty())?;
         let draft = &page.annotations;
@@ -310,13 +309,13 @@ impl Shell {
         let hovered = theme.accent.opacity(0.85);
         Some(
             div()
-                .w(px(PANEL_W))
+                .w_full()
+                .h(relative(0.4))
                 .flex_none()
-                .h_full()
                 .flex()
                 .flex_col()
                 .bg(theme.surface)
-                .border_l_1()
+                .border_t_1()
                 .border_color(theme.border)
                 .text_size(px(12.))
                 .capture_key_down(cx.listener(move |this, e: &gpui::KeyDownEvent, _, cx| {
