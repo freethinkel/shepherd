@@ -43,6 +43,22 @@ fn pane_frames_are_fractions_of_the_tab_area() {
 }
 
 #[test]
+fn a_pane_has_neighbors_only_away_from_the_tab_edge() {
+    use shepherd::commands::Direction::*;
+    let mut s = fixture();
+    let (left, right) = (s.layouts[0].clone(), "w1:p2");
+    assert!(left.has_neighbor("w1:p1", Right));
+    assert!(left.has_neighbor(right, Left));
+    for side in [Left, Up, Down] {
+        assert!(!left.has_neighbor("w1:p1", side));
+    }
+    assert!(!left.has_neighbor(right, Right));
+    assert!(!left.has_neighbor("w7:p7", Right), "unknown pane");
+    s.layouts[0].zoomed = true;
+    assert!(!s.layouts[0].has_neighbor("w1:p1", Right), "a zoomed pane hides the others");
+}
+
+#[test]
 fn zoomed_tab_shows_only_the_focused_pane_full_size() {
     let mut s = fixture();
     s.layouts[0].zoomed = true;

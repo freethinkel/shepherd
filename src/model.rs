@@ -145,6 +145,21 @@ pub struct Layout {
     pub splits: Vec<LayoutSplit>,
 }
 
+impl Layout {
+    /// Whether a pane lies on that side of `pane_id`: panes tile the area, so everywhere but at its edge.
+    pub fn has_neighbor(&self, pane_id: &str, direction: crate::commands::Direction) -> bool {
+        use crate::commands::Direction::*;
+        let Some(pane) = self.panes.iter().find(|p| p.pane_id == pane_id).filter(|_| !self.zoomed) else { return false };
+        let (r, a) = (&pane.rect, &self.area);
+        match direction {
+            Left => r.x > a.x,
+            Right => r.x + r.width < a.x + a.width,
+            Up => r.y > a.y,
+            Down => r.y + r.height < a.y + a.height,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LayoutSplit {
     /// `split_<n>_root` or `split_<n>_<0|1…>`: the path from the tab's root (0 = first, 1 = second).

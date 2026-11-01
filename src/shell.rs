@@ -905,6 +905,18 @@ impl Shell {
         }
     }
 
+    /// Ghostty's `performable:goto_split`: focus the pane on that side of the terminal you are in; with none there,
+    /// the key goes on to whatever has focus, so Ctrl+L still clears a shell and Ctrl+H still deletes in a field.
+    fn navigate(&mut self, direction: Direction, window: &Window, cx: &mut Context<Self>) {
+        let focused = self.panes.iter().find(|(_, pane)| pane.read(cx).focus_handle(cx).is_focused(window)).map(|(id, _)| id.clone());
+        let tab = self.shown_tab().map(|t| t.tab_id);
+        let layout = self.snapshot.as_ref().and_then(|s| s.layouts.iter().find(|l| Some(&l.tab_id) == tab.as_ref()));
+        match focused.filter(|id| self.pages.shown.is_none() && layout.is_some_and(|l| l.has_neighbor(id, direction))) {
+            Some(pane_id) => self.send(Command::FocusPane { pane_id, direction }, cx, |_, _, _| {}),
+            None => cx.propagate(),
+        }
+    }
+
     /// herdr paints the terminals' default colors itself: it is told the theme's over the popup watch, which then
     /// is the client in front again (back from herdr's TUI on another machine, say).
     fn push_host_theme(&self, cx: &App) {
