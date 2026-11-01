@@ -32,6 +32,7 @@ mod popups;
 mod render;
 mod reorder;
 mod review;
+mod right_panel;
 mod sessions;
 mod sidebar;
 mod sync;
@@ -129,6 +130,7 @@ pub struct Shell {
     sidebar_drag: bool,
     /// The drag hit a width limit (-1 min, +1 max) at this instant: the edge nudges past it and springs back.
     sidebar_edge: Option<(f32, Instant)>,
+    right: right_panel::RightPanel,
     /// The review panel on the right shows; saved in the settings.
     review_open: bool,
     /// Saved in the settings when a drag ends.
@@ -436,7 +438,7 @@ impl Shell {
                         cx.background_executor().timer(Duration::from_millis(120)).await;
                         let _ = this.update(cx, |s, cx| {
                             // a drag or the sidebar's fold owns the hold now
-                            if s.divider.is_none() && !s.sidebar_drag && !s.review_drag && s.sidebar_motion.is_none() {
+                            if s.divider.is_none() && !s.sidebar_drag && !s.review_drag && !s.right.drag && s.sidebar_motion.is_none() {
                                 cx.set_global(GridHold(false));
                                 cx.refresh_windows();
                             }
@@ -493,6 +495,7 @@ impl Shell {
                     peek_hovered: false,
                     sidebar_drag: false,
                     sidebar_edge: None,
+                    right: right_panel::RightPanel::new(SettingsGlobal::of(cx).settings.right_panel_width),
                     review_open: SettingsGlobal::of(cx).settings.review_open,
                     review_width: SettingsGlobal::of(cx).settings.review_width,
                     review_drag: false,
@@ -1073,7 +1076,7 @@ impl Shell {
     fn resize_cursor(&self) -> Option<impl IntoElement> {
         let vertical = if let Some(d) = &self.divider {
             d.vertical
-        } else if self.sidebar_drag || self.review_drag {
+        } else if self.sidebar_drag || self.review_drag || self.right.drag {
             true
         } else if self.agents_drag.is_some() {
             false

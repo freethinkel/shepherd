@@ -862,6 +862,8 @@ impl Shell {
         }
 
         let scroll = &self.tab_bar.scroll;
+        let panel_shown = self.right_panel_shown(window);
+        let toggle = shown_ws.is_some() && !panel_shown;
         div()
             .h(px(TITLEBAR_HEIGHT))
             .flex_none()
@@ -872,7 +874,7 @@ impl Shell {
             .gap(px(2.))
             // the 28 px `+` sits as far from the right edge as from the top and bottom, and clear of the window's
             // buttons while no review panel sits under them
-            .pr(px(TAB_TOP + if self.review_open { 0. } else { window_controls_w(cx) }))
+            .pr(px(TAB_TOP + if self.review_open || panel_shown { 0. } else { window_controls_w(cx) }))
             // clear the traffic lights and the sidebar toggle once the sidebar no longer sits under them
             .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
             .child(
@@ -949,6 +951,16 @@ impl Shell {
                             this.new_tab_menu = Some(crate::ui::Popup::new((menu_ws.clone(), at)));
                             cx.notify();
                         })),
+                )
+            })
+            // the toggle, where the panel's ✕ sits while it's open
+            .when(toggle, |el| {
+                el.child(
+                    titlebar_button(theme, "right-panel-toggle", "icons/sidebar-minimalistic-right.svg")
+                        .ml_auto()
+                        .flex_none()
+                        .tooltip(tip("Toggle right panel", Some("ToggleRightPanel")))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_right_panel(cx))),
                 )
             })
     }

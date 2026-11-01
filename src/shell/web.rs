@@ -190,6 +190,7 @@ impl Shell {
             self.ws_menu.is_some(),
             self.web_menu.is_some(),
             self.new_tab_menu.is_some(),
+            self.right.plus.is_some(),
             self.pane_menu.is_some(),
             self.agent_menu.is_some(),
             self.spent_menu.is_some(),

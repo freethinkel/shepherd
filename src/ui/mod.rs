@@ -7,6 +7,7 @@ pub mod project_icon;
 pub mod review;
 pub mod settings;
 pub mod statusbar;
+pub mod surface_chrome;
 pub mod toast;
 
 use crate::theme::Theme;
