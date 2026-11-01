@@ -1,4 +1,4 @@
-use shepherd::model::{AgentSort, AgentStatus, Frac, Since, Snapshot, ago, attachable, split_path};
+use shepherd::model::{AgentScope, AgentSort, AgentStatus, Frac, Since, Snapshot, ago, attachable, split_path};
 
 fn fixture() -> Snapshot {
     let value: serde_json::Value = serde_json::from_str(include_str!("fixtures/snapshot.json")).unwrap();
@@ -310,6 +310,27 @@ fn grouped_agents_keep_a_repos_worktrees_together_and_idle_ones_show_a_time() {
     s.track(&mut since, std::time::Instant::now());
     let timed: Vec<bool> = s.panes.iter().map(|p| shepherd::model::timed_since(&since, p).is_some()).collect();
     assert_eq!(timed, [true, false, true], "blocked and idle show a time, working doesn't");
+}
+
+#[test]
+fn a_scope_takes_in_the_workspaces_agents_its_projects_or_all() {
+    let mut s = fixture();
+    for p in &mut s.panes {
+        p.agent = Some("claude".into());
+    }
+    s.workspaces = vec![ws("mochi", 1, Some(("m", false))), ws("plain", 2, None), ws("mochi-a", 3, Some(("m", true)))];
+    for (p, (ws, status)) in s.panes.iter_mut().zip([("mochi-a", AgentStatus::Blocked), ("plain", AgentStatus::Working), ("mochi", AgentStatus::Idle)]) {
+        (p.workspace_id, p.agent_status) = (ws.into(), status);
+    }
+    let ids = |workspace: &str, scope| s.agents_in(workspace, scope).iter().map(|p| p.pane_id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids("mochi", AgentScope::Worktree), ["w1:p3"], "the workspace alone");
+    assert_eq!(ids("mochi-a", AgentScope::Worktree), ["w1:p1"]);
+    assert_eq!(ids("mochi", AgentScope::Project), ["w1:p1", "w1:p3"], "the checkout's project, in agents' order");
+    assert_eq!(ids("mochi-a", AgentScope::Project), ids("mochi", AgentScope::Project), "a worktree's is the same project");
+    assert_eq!(ids("plain", AgentScope::Project), ["w1:p2"]);
+    assert_eq!(ids("plain", AgentScope::All), ["w1:p1", "w1:p2", "w1:p3"]);
+    assert!(ids("gone", AgentScope::Worktree).is_empty());
+    assert!(ids("gone", AgentScope::Project).is_empty());
 }
 
 #[test]

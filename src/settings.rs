@@ -1,5 +1,5 @@
 //! Shepherd's settings: a JSON file every field of which has a default, so old, partial or future files load.
-use crate::model::AgentSort;
+use crate::model::{AgentScope, AgentSort};
 use crate::theme::{AppearanceMode, FontSettings, Theme};
 use gpui::{App, Bounds, Global, Pixels, Size, WindowAppearance, point, px, size};
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,8 @@ pub struct Settings {
     /// Its width; dragging its edge sets it.
     pub review_width: f32,
     pub agent_sort: AgentSort,
+    /// Which agents a browser tab's annotations can go to.
+    pub annotation_agents: AgentScope,
     /// The sidebar's Agents section; General settings hide it.
     pub show_agents: bool,
     /// The bottom status bar; General settings hide it.
@@ -279,6 +281,7 @@ impl Default for Settings {
             review_open: false,
             review_width: REVIEW_WIDTH,
             agent_sort: AgentSort::default(),
+            annotation_agents: AgentScope::default(),
             show_agents: true,
             show_status_bar: true,
             status_bar_show: StatusBarShow::default(),
@@ -601,6 +604,15 @@ mod tests {
         assert_eq!(Settings::load(&path).0.font_size, 9.0);
         std::fs::write(&path, r#"{"font_size": 400}"#).unwrap();
         assert_eq!(Settings::load(&path).0.font_size, 32.0);
+    }
+
+    #[test]
+    fn annotations_go_to_the_worktrees_agents_until_told_otherwise() {
+        assert_eq!(Settings::default().annotation_agents, AgentScope::Worktree);
+        let parse = |json: &str| serde_json::from_str::<Settings>(json).unwrap().annotation_agents;
+        assert_eq!(parse(r#"{"annotation_agents": "project"}"#), AgentScope::Project);
+        assert_eq!(parse(r#"{"annotation_agents": "all"}"#), AgentScope::All);
+        assert_eq!(parse(r#"{"annotation_agents": "everyone"}"#), AgentScope::Worktree);
     }
 
     #[test]

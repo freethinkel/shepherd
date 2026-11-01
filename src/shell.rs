@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+mod annotations;
 mod browser;
 mod divider;
 mod floating;
@@ -173,6 +174,8 @@ pub struct Shell {
     show_submenu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The Agents section's `…` menu, open under its button.
     agents_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
+    /// The annotations panel's `…` menu, open under its button.
+    annotation_agents_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// Worktrees herdr is removing: their rows show a spinner until they leave the snapshot.
     removing: std::collections::HashSet<String>,
     /// Remove a worktree? The workspace, its label, and whether herdr found changes (then removal is forced).
@@ -512,6 +515,7 @@ impl Shell {
                     show_submenu: false,
                     show_submenu_bounds: Default::default(),
                     agents_menu: None,
+                    annotation_agents_menu: None,
                     pane_menu: None,
                     agent_menu: None,
                     spent_menu: None,

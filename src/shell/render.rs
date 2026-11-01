@@ -12,6 +12,7 @@ impl Render for Shell {
         secure_input(SettingsGlobal::of(cx).settings.secure_input && cx.active_window().is_some());
         crate::ui::reap_popup(&mut self.view_menu, window);
         crate::ui::reap_popup(&mut self.agents_menu, window);
+        crate::ui::reap_popup(&mut self.annotation_agents_menu, window);
         crate::ui::reap_popup(&mut self.ws_menu, window);
         crate::ui::reap_popup(&mut self.web_menu, window);
         crate::ui::reap_popup(&mut self.new_tab_menu, window);
@@ -124,7 +125,8 @@ impl Render for Shell {
         let (tabbar, web_area) = match &web {
             Some((key, _)) if browsing => {
                 let bar = self.render_browser_bar(key, &theme, window, cx);
-                (tabbar, Some(div().flex_1().min_h_0().flex().flex_col().child(bar).child(self.render_web_area(key, &theme, window, cx))))
+                let page = div().flex_1().min_h_0().flex().child(self.render_web_area(key, &theme, window, cx)).children(self.render_annotations(key, &theme, cx));
+                (tabbar, Some(div().flex_1().min_h_0().flex().flex_col().child(bar).child(page)))
             }
             Some((key, entry)) => (self.render_web_bar(key, entry, &theme, sidebar_w, cx), Some(self.render_web_area(key, &theme, window, cx))),
             None => (tabbar, None),
