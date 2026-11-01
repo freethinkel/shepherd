@@ -102,6 +102,11 @@ pub(super) fn update_strip(theme: &Theme, cx: &App) -> Option<Stateful<Div>> {
     )
 }
 
+/// A menu row's 14 px icon, `color` as its label.
+pub(super) fn menu_mark(icon: &'static str, color: Hsla) -> gpui::Svg {
+    gpui::svg().path(icon).size(px(14.)).flex_none().text_color(color)
+}
+
 /// A popup menu's panel.
 pub(crate) fn menu_card(theme: &Theme, id: &'static str, min_w: f32) -> Stateful<Div> {
     div()
@@ -263,6 +268,11 @@ pub(crate) fn tip(text: impl Into<SharedString>, action: Option<&'static str>) -
 
 /// Zeron's titlebar button: 24 px, a 16 px muted icon, a wash on hover. It occludes the drag strip under it.
 pub(super) fn titlebar_button(theme: &Theme, id: &'static str, icon: &'static str) -> Stateful<Div> {
+    titlebar_button_with(theme, id, gpui::svg().path(icon).size(px(16.)).text_color(theme.text_muted))
+}
+
+/// `titlebar_button` around a glyph of the caller's.
+pub(super) fn titlebar_button_with(theme: &Theme, id: &'static str, glyph: impl IntoElement) -> Stateful<Div> {
     let hover = theme.hover;
     div()
         .id(id)
@@ -275,7 +285,7 @@ pub(super) fn titlebar_button(theme: &Theme, id: &'static str, icon: &'static st
         .hover(move |s| s.bg(hover))
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .child(gpui::svg().path(icon).size(px(16.)).text_color(theme.text_muted))
+        .child(glyph)
 }
 
 /// Off macOS, the window's own buttons at the titlebar's right end, those the desktop offers: minimize, maximize (or
@@ -296,7 +306,7 @@ pub(super) fn window_controls(theme: &Theme, window: &Window) -> Option<Div> {
             .right(px(8.))
             .flex()
             .gap(px(4.))
-            .when(offered.minimize, |el| el.child(button("window-minimize", "icons/minus.svg", WindowControlArea::Min, |w| w.minimize_window())))
+            .when(offered.minimize, |el| el.child(button("window-minimize", "icons/window-minimize.svg", WindowControlArea::Min, |w| w.minimize_window())))
             .when(offered.maximize, |el| el.child(button("window-maximize", maximize, WindowControlArea::Max, |w| w.zoom_window())))
             .child(button("window-close", "icons/close.svg", WindowControlArea::Close, |w| w.remove_window())),
     )

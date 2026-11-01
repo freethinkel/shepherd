@@ -489,7 +489,7 @@ impl Render for Shell {
             })
             .when(!on_page, |el| {
                 el.child(
-                    titlebar_button(&theme, "toggle-sidebar", "icons/sidebar-minimalistic-left.svg")
+                    titlebar_button_with(&theme, "toggle-sidebar", crate::ui::sidebar_glyph(sidebar_w / self.sidebar_width, 16., theme.text_muted))
                         .tooltip(tip("Toggle sidebar", Some("ToggleSidebar")))
                         .absolute()
                         .top(px(TRAFFIC_LIGHTS_CENTER - 12.))

@@ -118,7 +118,7 @@ pub fn init(cx: &mut App) {
 }
 
 /// Zeron's icon for an action.
-fn action_icon(name: &str) -> &'static str {
+pub(crate) fn action_icon(name: &str) -> &'static str {
     match name {
         "NewTab" => "icons/plus.svg",
         "CloseTab" => "icons/close-circle.svg",

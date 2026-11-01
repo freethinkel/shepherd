@@ -61,6 +61,34 @@ const SWITCH_THUMB_WIDTH: f32 = 24.0;
 const SWITCH_THUMB_HEIGHT: f32 = SWITCH_TRACK_HEIGHT - 2.0 * SWITCH_INSET;
 const SWITCH_MARK: f32 = 7.2;
 
+/// Zeron's sidebar glyph (`icons::sidebar_glyph`, from Zeron Icons, drawn as `assets/icons/sidebar-minimalistic-left.svg`
+/// at rest): a rounded frame holding a panel that narrows from 5.5 to 1.75 as `open` falls from 1 to 0. gpui SVGs are
+/// static, so it's drawn from quads in the source's 24-unit space. Past 1 (the edge spring) it stays at full width.
+pub fn sidebar_glyph(open: f32, size: f32, color: gpui::Hsla) -> gpui::Div {
+    use gpui::{ParentElement, Styled};
+    let s = size / 24.;
+    // a centered stroke: the box grows by half of it on each side
+    let stroke = 1.75;
+    let frame = gpui::div()
+        .absolute()
+        .left(px((3. - stroke / 2.) * s))
+        .top(px((4. - stroke / 2.) * s))
+        .w(px((18. + stroke) * s))
+        .h(px((16. + stroke) * s))
+        .rounded(px((4. + stroke / 2.) * s))
+        .border(px(stroke * s))
+        .border_color(color);
+    let panel = gpui::div()
+        .absolute()
+        .left(px(6.5 * s))
+        .top(px(7.5 * s))
+        .w(px((1.75 + 3.75 * open.clamp(0., 1.)) * s))
+        .h(px(9. * s))
+        .rounded(px(0.875 * s))
+        .bg(color);
+    gpui::div().relative().flex_none().size(px(size)).child(frame).child(panel)
+}
+
 /// Zeron's pill switch (`settings::widgets::toggle_switch`, frost tones left out): the on/off marks sit beneath a
 /// thumb that slides over 180 ms. The caller owns the click; `key` keeps the slide across frames.
 pub fn switch(theme: &Theme, on: bool, key: impl Into<gpui::SharedString>) -> SwitchVisual {

@@ -334,7 +334,7 @@ impl Shell {
             row(theme, false, key)
                 .h(px(28.))
                 .rounded(px(6.))
-                .child(gpui::svg().path(icon).size(px(14.)).flex_none().text_color(theme.text_muted))
+                .child(menu_mark(icon, theme.text_muted))
                 .child(label)
                 .on_pick(
                     at,

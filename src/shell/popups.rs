@@ -259,7 +259,7 @@ impl Shell {
                             if let Some(m) = this.place_menu.as_mut() { m.close() }
                             cx.notify();
                         }))
-                        .child(row(theme, false, "place-menu-edit").h(px(28.)).rounded(px(6.)).child("Edit…").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        .child(row(theme, false, "place-menu-edit").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/solar/pen.svg", theme.text_muted)).child("Edit…").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.open_place_edit(edit.clone(), window, cx)
                         })))
                         .when(place.deletable(), |el| {
@@ -269,6 +269,7 @@ impl Shell {
                                     .h(px(28.))
                                     .rounded(px(6.))
                                     .text_color(theme.danger)
+                                    .child(menu_mark("icons/trash.svg", theme.danger))
                                     .child(label)
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         if let Some(m) = this.place_menu.as_mut() { m.close() }
@@ -500,7 +501,7 @@ impl Shell {
                             cx.notify();
                         }))
                         .when(has_repo, |el| {
-                            el.child(row(theme, false, "ws-menu-worktree").h(px(28.)).rounded(px(6.)).child("New worktree").on_pick(at, 
+                            el.child(row(theme, false, "ws-menu-worktree").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/git-branch.svg", theme.text_muted)).child("New worktree").on_pick(at, 
                                 cx.listener({
                                     let id = id.clone();
                                     move |this, _: &ClickEvent, window, cx| {
@@ -509,7 +510,7 @@ impl Shell {
                                     }
                                 }),
                             ))
-                            .child(row(theme, false, "ws-menu-open-worktree").h(px(28.)).rounded(px(6.)).child("Open worktree").on_pick(at,
+                            .child(row(theme, false, "ws-menu-open-worktree").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/solar/folder-git.svg", theme.text_muted)).child("Open worktree").on_pick(at,
                                 cx.listener({
                                     let id = id.clone();
                                     move |this, _: &ClickEvent, window, cx| {
@@ -519,7 +520,7 @@ impl Shell {
                                 }),
                             ))
                         })
-                        .child(row(theme, false, "ws-menu-new-tab").h(px(28.)).rounded(px(6.)).child("New tab").on_pick(at, 
+                        .child(row(theme, false, "ws-menu-new-tab").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/plus.svg", theme.text_muted)).child("New tab").on_pick(at, 
                             cx.listener({
                                 let id = id.clone();
                                 move |this, _: &ClickEvent, _, cx| {
@@ -528,7 +529,7 @@ impl Shell {
                                 }
                             }),
                         ))
-                        .child(row(theme, false, "ws-menu-rename").h(px(28.)).rounded(px(6.)).child("Rename").on_pick(at, 
+                        .child(row(theme, false, "ws-menu-rename").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/solar/pen.svg", theme.text_muted)).child("Rename").on_pick(at, 
                             cx.listener({
                                 let id = id.clone();
                                 move |this, _: &ClickEvent, window, cx| {
@@ -544,7 +545,7 @@ impl Shell {
                             }),
                         ))
                         .when_some(checkout, |el, path| {
-                            el.child(row(theme, false, "ws-menu-reveal").h(px(28.)).rounded(px(6.)).child(if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Show in file manager" }).on_pick(at, 
+                            el.child(row(theme, false, "ws-menu-reveal").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/solar/folder-open.svg", theme.text_muted)).child(if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Show in file manager" }).on_pick(at, 
                                 cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     if let Some(m) = this.ws_menu.as_mut() { m.close() }
                                     cx.reveal_path(std::path::Path::new(&path));
@@ -559,6 +560,7 @@ impl Shell {
                                     .h(px(28.))
                                     .rounded(px(6.))
                                     .text_color(theme.danger)
+                                    .child(menu_mark("icons/git-pull-request.svg", theme.danger))
                                     .child("Merge and delete")
                                     .on_pick(at, cx.listener({
                                         let id = id.clone();
@@ -574,6 +576,7 @@ impl Shell {
                                 .h(px(28.))
                                 .rounded(px(6.))
                                 .text_color(theme.danger)
+                                .child(menu_mark("icons/close-circle.svg", theme.danger))
                                 .child(if linked { "Close worktree" } else { "Close workspace" }) // the checkout stays
                                 .on_pick(at, cx.listener({
                                     let id = id.clone();
@@ -589,6 +592,7 @@ impl Shell {
                                     .h(px(28.))
                                     .rounded(px(6.))
                                     .text_color(theme.danger)
+                                    .child(menu_mark("icons/trash.svg", theme.danger))
                                     .child("Remove worktree")
                                     .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         if let Some(m) = this.ws_menu.as_mut() { m.close() }
@@ -1008,6 +1012,7 @@ impl Shell {
                                 .h(px(28.))
                                 .rounded(px(6.))
                                 .when(close, |el| el.text_color(theme.danger))
+                                .child(menu_mark(crate::ui::command_panel::action_icon(action), if close { theme.danger } else { theme.text_muted }))
                                 .child(div().flex_1().child(label))
                                 .when_some(chord, |el, chord| el.child(div().text_size(px(11.)).text_color(theme.text_faint).child(chord)))
                                 .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
