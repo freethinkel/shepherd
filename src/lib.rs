@@ -11,6 +11,7 @@ pub mod mock;
 pub mod model;
 pub mod notify;
 pub mod process;
+pub mod right_panel;
 pub mod settings;
 pub mod shell;
 pub mod terminal;
