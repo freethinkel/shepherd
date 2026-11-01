@@ -285,6 +285,17 @@ impl Shell {
             .bg(theme.surface)
             .border_b_1()
             .border_color(theme.border)
+            // the address field's Esc ends a pick too
+            .capture_key_down(cx.listener({
+                let key = key.clone();
+                move |this, e: &gpui::KeyDownEvent, _, cx| {
+                    if e.keystroke.key == "escape" && this.annotating(&key) {
+                        cx.stop_propagation();
+                        this.stop_annotation(&key);
+                        cx.notify();
+                    }
+                }
+            }))
             .child(nav_button(theme, view.clone(), "browser-back", "icons/solar/alt-arrow-left.svg", can(wry::WebView::can_go_back), wry::WebView::go_back))
             .child(nav_button(theme, view.clone(), "browser-forward", "icons/solar/alt-arrow-right.svg", can(wry::WebView::can_go_forward), wry::WebView::go_forward))
             .child(self.reload_button(key, "browser-reload", theme, cx))
@@ -302,6 +313,7 @@ impl Shell {
                     .text_size(px(12.5))
                     .child(Input::new(&input)),
             )
+            .child(self.annotate_button(key, theme, cx))
             .child(
                 div()
                     .id("browser-outside")

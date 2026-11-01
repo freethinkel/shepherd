@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+mod annotations;
 mod browser;
 mod divider;
 mod floating;

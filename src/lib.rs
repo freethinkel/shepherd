@@ -2,6 +2,7 @@
 #![allow(clippy::type_complexity, clippy::too_many_arguments)]
 
 pub mod analytics;
+pub mod annotations;
 pub mod assets;
 pub mod bindings;
 pub mod commands;

@@ -124,7 +124,8 @@ impl Render for Shell {
         let (tabbar, web_area) = match &web {
             Some((key, _)) if browsing => {
                 let bar = self.render_browser_bar(key, &theme, window, cx);
-                (tabbar, Some(div().flex_1().min_h_0().flex().flex_col().child(bar).child(self.render_web_area(key, &theme, window, cx))))
+                let page = div().flex_1().min_h_0().flex().child(self.render_web_area(key, &theme, window, cx)).children(self.render_annotations(key, &theme, cx));
+                (tabbar, Some(div().flex_1().min_h_0().flex().flex_col().child(bar).child(page)))
             }
             Some((key, entry)) => (self.render_web_bar(key, entry, &theme, sidebar_w, cx), Some(self.render_web_area(key, &theme, window, cx))),
             None => (tabbar, None),
