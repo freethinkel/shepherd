@@ -109,8 +109,6 @@ pub struct Shell {
     ws_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// A web page's right-click menu in the sidebar: its entry's id, and where it was clicked.
     web_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
-    /// `+`'s menu (a terminal or a browser tab), for the workspace it was opened in.
-    new_tab_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// Groups mid fold or unfold, by workspace id.
     fold_motion: HashMap<String, FoldMotion>,
     /// Resize seams' hover: (hovered, flip count), keyed by the strip id.
@@ -480,7 +478,6 @@ impl Shell {
                     seam_hover: Default::default(),
                     ws_menu: None,
                     web_menu: None,
-                    new_tab_menu: None,
                     shown_workspace: None,
                     sidebar_width: SettingsGlobal::of(cx).settings.sidebar_width,
                     sidebar_open: SettingsGlobal::of(cx).settings.sidebar_open,

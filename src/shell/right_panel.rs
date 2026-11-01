@@ -145,7 +145,7 @@ impl Shell {
             Offer::PullRequest => self.update_panel(cx, |p| p.add(Surface::PullRequest)),
             Offer::Browser => {
                 if let Some(tab) = self.shown_tab() {
-                    self.new_browser_tab(tab.workspace_id, Some(tab.tab_id), None, window, cx);
+                    self.new_browser_tab(tab.workspace_id, None, true, window, cx);
                 }
             }
         }
@@ -159,7 +159,7 @@ impl Shell {
             .iter()
             .map(|s| {
                 let title: SharedString = match s {
-                    Surface::Browser(_) => "Browser".into(),
+                    Surface::Browser(id) => self.browser_label(id).into(),
                     Surface::PullRequest => pull_request_title(shown),
                 };
                 (s.clone(), title)
@@ -168,7 +168,10 @@ impl Shell {
     }
 
     fn close_surface(&mut self, surface: &Surface, cx: &mut Context<Self>) {
-        self.update_panel(cx, |p| p.close(surface));
+        match surface {
+            Surface::Browser(id) => self.close_browser_tab(id, cx),
+            Surface::PullRequest => self.update_panel(cx, |p| p.close(surface)),
+        }
     }
 
     /// The panel and its resize edge.
@@ -178,7 +181,12 @@ impl Shell {
         let strip = self.render_right_strip(theme, shown, window, cx);
         let body = match self.panel().and_then(|p| p.active.clone()) {
             Some(Surface::PullRequest) => self.render_review(theme, shown, window, cx),
-            Some(Surface::Browser(_)) => div().flex_1().min_h_0().into_any_element(),
+            Some(Surface::Browser(id)) => {
+                let key = (id, None);
+                let bar = self.render_browser_bar(&key, theme, window, cx);
+                let page = div().flex_1().min_h_0().flex().child(self.render_web_area(&key, theme, window, cx)).children(self.render_annotations(&key, theme, cx));
+                div().flex_1().min_h_0().flex().flex_col().child(bar).child(page).into_any_element()
+            }
             None => self.render_surface_picker(theme, cx).into_any_element(),
         };
         let panel = div().id("right-panel").w(px(width)).h_full().flex_none().flex().flex_col().overflow_hidden().bg(theme.wash(0.05)).border_l_1().border_color(theme.border).child(strip).child(body);
@@ -257,9 +265,15 @@ impl Shell {
                 Surface::Browser(_) => "icons/solar/global.svg",
                 Surface::PullRequest => "icons/git-pull-request.svg",
             };
-            let leading = match surface {
-                Surface::PullRequest if fetching_review => crate::ui::loader::mini_spinner(2., theme.text_faint, window).into_any_element(),
-                _ => tab_chip_icon(icon, is_active, theme),
+            let spinner = |window: &mut Window| crate::ui::loader::mini_spinner(2., theme.text_faint, window).into_any_element();
+            let leading = match &surface {
+                Surface::PullRequest if fetching_review => spinner(window),
+                Surface::PullRequest => tab_chip_icon(icon, is_active, theme),
+                Surface::Browser(id) => match self.browser_chip(id) {
+                    (_, true) => spinner(window),
+                    (Some(image), false) => gpui::img(image).size(px(12.)).rounded(px(2.)).into_any_element(),
+                    (None, false) => tab_chip_icon(icon, is_active, theme),
+                },
             };
             let drop_workspace = workspace.clone();
             let chip = tab_chip(

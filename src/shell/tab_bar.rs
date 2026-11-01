@@ -75,11 +75,6 @@ struct Shown {
     zoomed: bool,
     /// The full width: label measured, clamped.
     width: f32,
-    /// A browser tab: Shepherd's own page, not herdr's; no status, its site's icon once fetched.
-    browser: bool,
-    image: Option<std::sync::Arc<gpui::Image>>,
-    /// A browser tab's page is loading: a spinner in place of the favicon.
-    loading: bool,
 }
 
 #[derive(Clone)]
@@ -504,14 +499,7 @@ impl TabBar {
 
 /// The favicon: the mark on a filled tile of its color, the same size for every kind; with more marks, a stack.
 fn favicon(t: &Shown, ring: Hsla) -> Div {
-    if t.loading {
-        return div().w(px(TILE_W)).h(px(TILE_H)).flex_none().flex().items_center().justify_center().child(crate::ui::loader::glyph_spinner(3., [t.tint.1; 3]));
-    }
-    match &t.image {
-        Some(image) => div().w(px(TILE_W)).h(px(TILE_H)).flex_none().flex().items_center().justify_center().child(gpui::img(image.clone()).size(px(16.)).rounded(px(3.))),
-        None if t.more.is_empty() => tile(t.icon, t.tint),
-        None => stack(t, ring),
-    }
+    if t.more.is_empty() { tile(t.icon, t.tint) } else { stack(t, ring) }
 }
 
 /// A tab's tiles overlapped, the favicon on top, each in a `ring` of what's behind them.
@@ -536,13 +524,10 @@ fn tile(icon: &'static str, (bg, fg): (Hsla, Hsla)) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        // lit from above, as Rex's tiles are; the hairline keeps a dark tile's edge on a dark bar. A tile without a
-        // color (a browser tab's) stays bare.
-        .when(bg.a > 0., |el| {
-            el.bg(linear_gradient(180., linear_color_stop(bg.blend(gpui::white().opacity(0.07)), 0.), linear_color_stop(bg.blend(gpui::black().opacity(0.12)), 1.)))
-                .border_1()
-                .border_color(gpui::white().opacity(0.12))
-        })
+        // lit from above, as Rex's tiles are; the hairline keeps a dark tile's edge on a dark bar
+        .bg(linear_gradient(180., linear_color_stop(bg.blend(gpui::white().opacity(0.07)), 0.), linear_color_stop(bg.blend(gpui::black().opacity(0.12)), 1.)))
+        .border_1()
+        .border_color(gpui::white().opacity(0.12))
         .child(gpui::svg().path(icon).size(px(11.)).text_color(fg))
 }
 
@@ -566,9 +551,9 @@ fn face(theme: &Theme, t: &Shown, width: f32, selected: bool) -> Div {
         .child(favicon(t, ring))
 }
 
-/// The trailing slot: the agent's status dot; a browser tab's stays empty.
+/// The trailing slot: the agent's status dot.
 fn dot_slot(theme: &Theme, t: &Shown) -> Div {
-    div().size(px(SLOT)).flex_none().flex().items_center().justify_center().when(!t.browser, |el| el.child(status_dot(t.status, theme)))
+    div().size(px(SLOT)).flex_none().flex().items_center().justify_center().child(status_dot(t.status, theme))
 }
 
 /// A tab being dragged along the tab bar: its own face under the pointer, lifted on a card.
@@ -604,30 +589,25 @@ impl Shell {
         s.panes.iter().filter(|p| p.workspace_id == *ws && p.agent.is_none()).map(|p| p.pane_id.clone()).collect()
     }
 
-    /// The held tab let go of over the bar: it lands in the slot its gap holds, browser tabs and herdr's alike.
+    /// The held tab let go of over the bar: it lands in the slot its gap holds.
     fn tab_dropped(&mut self, cx: &mut Context<Self>) {
-        // the tabs a drop reorders: (id, browser tab or not), closing ones left out
-        let order: Vec<(String, bool)> = self.tab_bar.entries.iter().filter(|e| e.exit.is_none()).map(|e| (e.tab.id.clone(), e.tab.browser)).collect();
-        if let Some((from, to)) = self.tab_bar.drop_held(Instant::now()) {
-            self.drop_tab(&order, from, to, cx);
+        // the tabs a drop reorders, closing ones left out
+        let order: Vec<String> = self.tab_bar.entries.iter().filter(|e| e.exit.is_none()).map(|e| e.tab.id.clone()).collect();
+        if let Some((from, to)) = self.tab_bar.drop_held(Instant::now())
+            && let (Some(tab_id), Some(insert_index)) = (order.get(from).cloned(), insert_index(from, to))
+        {
+            self.send(Command::MoveTab { tab_id, insert_index }, cx, |_, _, _| {});
         }
         cx.notify();
     }
 
-    /// The next or previous tab in the tab bar's order, browser tabs among herdr's.
-    pub(super) fn step_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = match self.shown_browser_tab() {
-            Some(t) => Some(t.id.clone()),
-            None => self.shown_tab().map(|t| t.tab_id),
-        };
-        let tabs: Vec<(String, bool)> = self.tab_bar.entries.iter().filter(|e| e.exit.is_none()).map(|e| (e.tab.id.clone(), e.tab.browser)).collect();
-        let Some(i) = tabs.iter().position(|(id, _)| Some(id) == shown.as_ref()) else { return };
+    /// The next or previous tab in the tab bar's order.
+    pub(super) fn step_tab(&mut self, forward: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        let shown = self.shown_tab().map(|t| t.tab_id);
+        let tabs: Vec<String> = self.tab_bar.entries.iter().filter(|e| e.exit.is_none()).map(|e| e.tab.id.clone()).collect();
+        let Some(i) = tabs.iter().position(|id| Some(id) == shown.as_ref()) else { return };
         let n = tabs.len();
-        let (id, browser) = tabs[if forward { (i + 1) % n } else { (i + n - 1) % n }].clone();
-        match browser {
-            true => self.show_web(id, window, cx),
-            false => self.select_tab(Some(id)),
-        }
+        self.select_tab(Some(tabs[if forward { (i + 1) % n } else { (i + n - 1) % n }].clone()));
         cx.notify();
     }
 
@@ -646,7 +626,7 @@ impl Shell {
             let run = gpui::TextRun { len: label.len(), font: font.clone(), color: theme.text, background_color: None, underline: None, strikethrough: None };
             f32::from(window.text_system().shape_line(label.to_string().into(), px(FONT_SIZE), &[run], None).width)
         };
-        let herdr: Vec<Shown> = match (&self.snapshot, &shown_ws) {
+        let tabs: Vec<Shown> = match (&self.snapshot, &shown_ws) {
             (Some(s), Some(ws)) => {
                 s.tabs_of(ws)
                     .into_iter()
@@ -669,36 +649,12 @@ impl Shell {
                             width: tab_width(measure(&name.0), zoomed, more.len()),
                             name,
                             more,
-                            browser: false,
-                            image: None,
-                            loading: false,
                         }
                     })
                     .collect()
             }
             _ => Vec::new(),
         };
-        // the browser tabs among them, each after the herdr tab it follows
-        let browser: Vec<(Shown, Option<String>)> = shown_ws
-            .as_deref()
-            .map(|ws| self.browser_tabs_of(ws))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(id, label, image, after, loading)| {
-                let width = tab_width(measure(&label), false, 0);
-                let name = (label.clone(), Vec::new());
-                (Shown { id, label, name, status: AgentStatus::Idle, icon: "icons/solar/global.svg", tint: (theme.surface.opacity(0.), theme.text_muted), more: Vec::new(), zoomed: false, width, browser: true, image, loading }, after)
-            })
-            .collect();
-        let herdr_ids: Vec<&str> = herdr.iter().map(|t| t.id.as_str()).collect();
-        let anchors: Vec<(&str, Option<&str>)> = browser.iter().map(|(t, after)| (t.id.as_str(), after.as_deref())).collect();
-        let tabs: Vec<Shown> = super::browser::interleave(&herdr_ids, &anchors)
-            .into_iter()
-            .filter_map(|(id, b)| match b {
-                true => browser.iter().map(|(t, _)| t).find(|t| t.id == id).cloned(),
-                false => herdr.iter().find(|t| t.id == id).cloned(),
-            })
-            .collect();
         self.tab_bar.sync(shown_ws.as_deref(), tabs, now);
 
         let bar_x = f32::from(self.tab_bar.scroll.bounds().origin.x) + f32::from(self.tab_bar.scroll.offset().x);
@@ -777,7 +733,7 @@ impl Shell {
                                 .child(gpui::svg().path("icons/close.svg").size(px(12.)).text_color(theme.text_muted)),
                         )
                         .when(!closing, |el| {
-                            let (id, browser) = (t.id.clone(), t.browser);
+                            let id = t.id.clone();
                             // the tab owns a drag: claim the press so it closes instead of starting one
                             el.on_mouse_down(MouseButton::Left, |_, window, cx| {
                                 window.prevent_default();
@@ -785,7 +741,7 @@ impl Shell {
                             })
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 cx.stop_propagation();
-                                this.close_tab(&id, browser, cx);
+                                this.send(Command::CloseTab { tab_id: id.clone() }, cx, |_, _, _| {});
                             }))
                         }),
                 );
@@ -821,21 +777,19 @@ impl Shell {
                 drag: self.tab_bar.drag.clone(),
             });
             let drop_bg = theme.accent.opacity(0.15);
-            let (label, browser) = (t.label.clone(), t.browser);
+            let label = t.label.clone();
             items.push(
-                tab.when(!browser, |el| {
-                    el.on_mouse_down(MouseButton::Right, cx.listener({
-                        let id = id.clone();
-                        move |this, e: &MouseDownEvent, _, cx| {
-                            this.tab_menu = Some(crate::ui::Popup::new((id.clone(), e.position)));
-                            cx.notify();
-                        }
-                    }))
-                })
+                tab.on_mouse_down(MouseButton::Right, cx.listener({
+                    let id = id.clone();
+                    move |this, e: &MouseDownEvent, _, cx| {
+                        this.tab_menu = Some(crate::ui::Popup::new((id.clone(), e.position)));
+                        cx.notify();
+                    }
+                }))
                 // Middle-click closes, like every tab strip (Zeron §1.10).
                 .on_mouse_down(MouseButton::Middle, cx.listener({
                     let id = id.clone();
-                    move |this, _: &MouseDownEvent, _, cx| this.close_tab(&id, browser, cx)
+                    move |this, _: &MouseDownEvent, _, cx| this.send(Command::CloseTab { tab_id: id.clone() }, cx, |_, _, _| {})
                 }))
                 .when_some(dragged, |el, dragged| {
                     el.on_drag(dragged, |d, grab, _, cx| {
@@ -843,13 +797,10 @@ impl Shell {
                         cx.new(|_| d)
                     })
                 })
-                .when(!browser, |el| pane_drag::accept_pane(el, &id, drop_bg, cx))
+                .map(|el| pane_drag::accept_pane(el, &id, drop_bg, cx))
                 // a tab's hitbox hides the bar's from the drop: each takes it too
                 .on_drop(cx.listener(|this, _: &DraggedTab, _, cx| this.tab_dropped(cx)))
                 .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                    if browser {
-                        return this.show_web(id.clone(), window, cx);
-                    }
                     if e.click_count() == 2 {
                         this.start_rename(RenameTarget::Tab(id.clone()), label.clone(), window, cx);
                         return;
@@ -896,8 +847,7 @@ impl Shell {
                             .items_center()
                             .overflow_x_scroll()
                             .track_scroll(scroll)
-                            // the held tab's gap follows the pointer; let go of, it lands in that slot, browser tabs
-                            // and herdr's alike
+                            // the held tab's gap follows the pointer; let go of, it lands in that slot
                             .on_drag_move::<DraggedTab>(cx.listener(|_, _, _, cx| cx.notify()))
                             .on_drop(cx.listener(|this, _: &DraggedTab, _, cx| this.tab_dropped(cx)))
                             // re-render so the edge fades follow the scroll position
@@ -920,7 +870,6 @@ impl Shell {
             )
             // `+` stays in view; only the tabs scroll
             .when_some(shown_ws, |el, ws| {
-                let menu_ws = ws.clone();
                 el.child(
                     icon_button(theme, "new-tab", "+")
                         .tooltip(tip("New tab", Some("NewTab")))
@@ -931,26 +880,6 @@ impl Shell {
                         .when(cfg!(windows), |el| el.occlude()) // as the tabs, off the drag strip
                         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.new_tab(ws.clone(), cx))),
-                )
-                // the chevron: a terminal or a browser tab
-                .child(
-                    icon_button(theme, "new-tab-more", "")
-                        .tooltip(tip("New…", None))
-                        .w(px(16.))
-                        .h(px(TAB_H))
-                        .ml(px(-2.))
-                        .rounded(px(6.))
-                        .when(self.new_tab_menu.is_some(), |el| el.bg(theme.hover))
-                        .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(12.)).text_color(theme.text_muted))
-                        .block_mouse_except_scroll()
-                        .when(cfg!(windows), |el| el.occlude())
-                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                        .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
-                            // under the chevron, the menu's right edge at it
-                            let at = gpui::point(e.position().x + px(8.), px(TITLEBAR_HEIGHT - 2.));
-                            this.new_tab_menu = Some(crate::ui::Popup::new((menu_ws.clone(), at)));
-                            cx.notify();
-                        })),
                 )
             })
             // the toggle, where the panel's ✕ sits while it's open
@@ -966,12 +895,25 @@ impl Shell {
     }
 }
 
+/// herdr's insert index for the tab at `from` dropped on the one at `to`, which counts it still in place; none when
+/// it stays.
+fn insert_index(from: usize, to: usize) -> Option<usize> {
+    (from != to).then_some(if to > from { to + 1 } else { to })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_dropped_tab_goes_to_herdr_counted_still_in_place() {
+        assert_eq!(insert_index(0, 2), Some(3)); // moving right
+        assert_eq!(insert_index(3, 1), Some(1)); // moving left
+        assert_eq!(insert_index(2, 2), None);
+    }
+
     fn tab(id: &str) -> Shown {
-        Shown { id: id.into(), label: id.into(), name: (id.into(), Vec::new()), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), more: Vec::new(), zoomed: false, width: 100., browser: false, image: None, loading: false }
+        Shown { id: id.into(), label: id.into(), name: (id.into(), Vec::new()), status: AgentStatus::Idle, icon: "", tint: (gpui::black(), gpui::white()), more: Vec::new(), zoomed: false, width: 100. }
     }
 
     #[test]

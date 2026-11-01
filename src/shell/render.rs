@@ -15,7 +15,6 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.annotation_agents_menu, window);
         crate::ui::reap_popup(&mut self.ws_menu, window);
         crate::ui::reap_popup(&mut self.web_menu, window);
-        crate::ui::reap_popup(&mut self.new_tab_menu, window);
         crate::ui::reap_popup(&mut self.right.plus, window);
         crate::ui::reap_popup(&mut self.pane_menu, window);
         crate::ui::reap_popup(&mut self.agent_menu, window);
@@ -116,19 +115,13 @@ impl Render for Shell {
         let covered = self.overlay_open(cx);
         self.sync_pages(covered, window, cx);
         let web = self.shown_page(cx);
-        // a browser tab sits among the workspace's tabs; a sidebar page in place of them: no workspace looks selected
-        let browsing = web.as_ref().is_some_and(|(key, _)| browser::is_tab(&key.0));
-        let sidebar_ws = if web.is_some() && !browsing { None } else { shown_ws.clone() };
+        // a sidebar page sits in place of the tabs: no workspace looks selected
+        let sidebar_ws = if web.is_some() { None } else { shown_ws.clone() };
         let sidebar = self.render_sidebar(&theme, &snapshot, &sidebar_ws, &shown_tab, window, cx);
         let (docked, peeking) = if sidebar_w > 0. { (Some(sidebar), None) } else { (None, Some(sidebar)) };
 
-        let tabbar = self.render_tab_bar(&theme, shown_ws.clone(), if browsing { self.pages.shown.clone() } else { shown_tab.clone() }, sidebar_w, window, cx);
+        let tabbar = self.render_tab_bar(&theme, shown_ws.clone(), shown_tab.clone(), sidebar_w, window, cx);
         let (tabbar, web_area) = match &web {
-            Some((key, _)) if browsing => {
-                let bar = self.render_browser_bar(key, &theme, window, cx);
-                let page = div().flex_1().min_h_0().flex().child(self.render_web_area(key, &theme, window, cx)).children(self.render_annotations(key, &theme, cx));
-                (tabbar, Some(div().flex_1().min_h_0().flex().flex_col().child(bar).child(page)))
-            }
             Some((key, entry)) => (self.render_web_bar(key, entry, &theme, sidebar_w, cx), Some(self.render_web_area(key, &theme, window, cx))),
             None => (tabbar, None),
         };
@@ -330,9 +323,6 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
-                if let Some(id) = this.shown_browser_tab().map(|t| t.id.clone()) {
-                    return this.close_browser_tab(&id, cx);
-                }
                 if let Some(tab) = this.shown_tab().filter(|_| this.pages.shown.is_none()) {
                     this.send(Command::CloseTab { tab_id: tab.tab_id }, cx, |_, _, _| {});
                 }
@@ -340,13 +330,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
             .on_action(cx.listener(|this, _: &SplitRight, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: false })))
             .on_action(cx.listener(|this, _: &SplitDown, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: true })))
-            .on_action(cx.listener(|this, _: &ClosePane, w, cx| {
-                // a browser tab is its own one pane, as in Safari
-                if let Some(id) = this.shown_browser_tab().map(|t| t.id.clone()) {
-                    return this.close_browser_tab(&id, cx);
-                }
-                this.pane_command(w, cx, |pane_id| Command::ClosePane { pane_id })
-            }))
+            .on_action(cx.listener(|this, _: &ClosePane, w, cx| this.pane_command(w, cx, |pane_id| Command::ClosePane { pane_id })))
             .on_action(cx.listener(|this, _: &ToggleZoom, w, cx| this.pane_command(w, cx, |pane_id| Command::Zoom { pane_id })))
             .on_action(cx.listener(|this, _: &FocusLeft, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Left })))
             .on_action(cx.listener(|this, _: &FocusRight, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Right })))
@@ -372,9 +356,9 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.toggle_right_panel(cx)))
             .on_action(cx.listener(|this, _: &ToggleReview, _, cx| this.toggle_review(cx)))
-            .on_action(cx.listener(|this, _: &ReloadPage, _, cx| this.reload_shown_page(cx)))
+            .on_action(cx.listener(|this, _: &ReloadPage, w, cx| this.reload_shown_page(w, cx)))
             .on_action(cx.listener(|this, _: &FocusAddress, w, cx| this.focus_address(w, cx)))
-            .on_action(cx.listener(|this, _: &CopyPageUrl, _, cx| this.copy_page_url(cx)))
+            .on_action(cx.listener(|this, _: &CopyPageUrl, w, cx| this.copy_page_url(w, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
             .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
             .on_action(cx.listener(|this, _: &ChangeTheme, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Themes, w, cx)))

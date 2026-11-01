@@ -1,8 +1,9 @@
-//! Browser tabs: web pages in a workspace's tab bar beside herdr's tabs, opened from `+`'s menu or by a link clicked
+//! Browser tabs: web pages in a workspace's right panel beside the panes, opened from the panel or by a link clicked
 //! in a terminal while the setting says so. They are Shepherd's own (herdr doesn't know them) and last until Shepherd
 //! quits; the pages themselves are `web.rs`'s, as the sidebar's are.
 use super::*;
 use super::web::{Favicon, PageKey, nav_button};
+use crate::right_panel::Surface;
 use crate::settings::WebEntry;
 
 /// Browser tabs' ids start with this, so they never meet a web entry's.
@@ -15,8 +16,6 @@ pub(super) struct BrowserTab {
     pub(super) workspace: String,
     /// What it opened on; where its links lead from there is the page's business.
     url: String,
-    /// The herdr tab it follows in the tab bar; `None` before them all.
-    pub(super) after: Option<String>,
 }
 
 #[derive(Default)]
@@ -27,8 +26,6 @@ pub(super) struct Browser {
     address: Option<Address>,
     /// A link clicked in a terminal, opened by the next render, which has the window.
     pending: Option<String>,
-    /// Each workspace's herdr tabs as last seen, so a tab whose herdr tab closed follows the one before it.
-    seen: HashMap<String, Vec<String>>,
 }
 
 struct Address {
@@ -60,7 +57,7 @@ pub(super) struct Links(pub(super) gpui::WeakEntity<Shell>);
 
 impl gpui::Global for Links {}
 
-/// A link clicked in a terminal: a web one to a browser tab beside the shown tab while the setting says so, anything
+/// A link clicked in a terminal: a web one to a browser tab in the right panel while the setting says so, anything
 /// else to the system.
 pub(crate) fn open_link(url: &str, cx: &mut App) {
     let web = url.starts_with("http://") || url.starts_with("https://");
@@ -99,88 +96,55 @@ fn typed_url(text: &str) -> Option<String> {
 }
 
 impl Shell {
-    /// A new browser tab in workspace `ws` on `url`, shown, after herdr tab `after` (and the browser tabs already
-    /// there); without a URL, an empty tab with its address field to type in.
-    pub(super) fn new_browser_tab(&mut self, ws: String, after: Option<String>, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    /// A new browser tab in workspace `ws`'s panel, on `url` or empty, the panel opened on it; `focus_address` gives its
+    /// address field the keyboard. A page that can't be made leaves no tab behind.
+    pub(super) fn new_browser_tab(&mut self, ws: String, url: Option<String>, focus_address: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.browser.made += 1;
         let id = format!("{PREFIX}{}", self.browser.made);
-        let blank = url.is_none();
-        self.browser.tabs.push(BrowserTab { id: id.clone(), workspace: ws, url: url.unwrap_or_else(|| BLANK.into()), after });
-        self.show_web(id.clone(), window, cx);
-        if blank {
+        self.browser.tabs.push(BrowserTab { id: id.clone(), workspace: ws.clone(), url: url.unwrap_or_else(|| BLANK.into()) });
+        if !self.ensure_page(&id, window, cx) {
+            self.browser.tabs.retain(|t| t.id != id);
+            return;
+        }
+        self.right.panels.entry(ws).or_default().add(Surface::Browser(id.clone()));
+        if focus_address {
             let input = self.address(&id, window, cx);
             input.update(cx, |input, cx| input.focus(window, cx));
-        }
-    }
-
-    /// Closes browser tab `id`; shown, the workspace's tabs come back. Its page goes with it in `sync_pages`.
-    pub(super) fn close_browser_tab(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.browser.tabs.retain(|t| t.id != id);
-        if self.pages.shown.as_deref() == Some(id) {
-            self.pages.shown = None;
         }
         cx.notify();
     }
 
-    /// Closes tab `id` of the tab bar: a browser tab here, a herdr tab in herdr.
-    pub(super) fn close_tab(&mut self, id: &str, browser: bool, cx: &mut Context<Self>) {
-        match browser {
-            true => self.close_browser_tab(id, cx),
-            false => self.send(Command::CloseTab { tab_id: id.to_string() }, cx, |_, _, _| {}),
+    /// Closes browser tab `id` and its panel's tab. Its page goes in `sync_pages`.
+    pub(super) fn close_browser_tab(&mut self, id: &str, cx: &mut Context<Self>) {
+        let surface = Surface::Browser(id.to_string());
+        for panel in self.right.panels.values_mut() {
+            panel.close(&surface);
         }
+        self.browser.tabs.retain(|t| t.id != id);
+        cx.notify();
     }
 
-    /// Once per render, before the pages sync: a link clicked in a terminal opens its tab; tabs of workspaces gone
-    /// close.
+    /// Once per render, before the pages sync: a link clicked in a terminal opens its tab, the keyboard staying in the
+    /// terminal; workspaces gone take their tabs and panels along.
     pub(super) fn sync_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(url) = self.browser.pending.take() {
-            // beside the terminal it was clicked in
             match self.shown_tab() {
-                Some(tab) => self.new_browser_tab(tab.workspace_id, Some(tab.tab_id), Some(url), window, cx),
+                Some(tab) => self.new_browser_tab(tab.workspace_id, Some(url), false, window, cx),
                 None => cx.open_url(&url),
             }
         }
         let Some(s) = self.snapshot.as_ref().filter(|s| !s.workspaces.is_empty()) else { return };
         // ponytail: another place shown (a session, a machine) closes this one's browser tabs; keyed by place if missed
         self.browser.tabs.retain(|t| s.workspaces.iter().any(|w| w.workspace_id == t.workspace));
-        let Browser { tabs, seen, .. } = &mut self.browser;
-        for t in tabs.iter_mut() {
-            let now: Vec<String> = s.tabs_of(&t.workspace).into_iter().map(|h| h.tab_id.clone()).collect();
-            t.after = follows(t.after.take(), seen.get(&t.workspace).map(Vec::as_slice).unwrap_or_default(), &now);
+        self.right.panels.retain(|ws, _| s.workspaces.iter().any(|w| w.workspace_id == *ws));
+        for (ws, panel) in &mut self.right.panels {
+            let live: Vec<&str> = self.browser.tabs.iter().filter(|t| t.workspace == *ws).map(|t| t.id.as_str()).collect();
+            panel.retain_browsers(&live);
         }
-        seen.clear();
-        for t in tabs.iter() {
-            seen.entry(t.workspace.clone()).or_insert_with(|| s.tabs_of(&t.workspace).into_iter().map(|h| h.tab_id.clone()).collect());
-        }
-    }
-
-    /// A tab dragged in the tab bar from `from` to `to` in `order` (each tab's id, and whether it is a browser
-    /// tab): herdr is told a herdr tab's new place, and every browser tab follows the herdr tab now before it.
-    pub(super) fn drop_tab(&mut self, order: &[(String, bool)], from: usize, to: usize, cx: &mut Context<Self>) {
-        let (moved, anchors) = dropped(order, from, to);
-        if let Some((tab_id, insert_index)) = moved {
-            self.send(Command::MoveTab { tab_id, insert_index }, cx, |_, _, _| {});
-        }
-        // in their new order, after the workspace's other browser tabs
-        let ids: Vec<&String> = anchors.iter().map(|(id, _)| id).collect();
-        let (mut kept, mut ours): (Vec<BrowserTab>, Vec<BrowserTab>) = std::mem::take(&mut self.browser.tabs).into_iter().partition(|t| !ids.contains(&&t.id));
-        ours.sort_by_key(|t| ids.iter().position(|id| **id == t.id));
-        for (t, (_, after)) in ours.iter_mut().zip(&anchors) {
-            t.after = after.clone();
-        }
-        kept.extend(ours);
-        self.browser.tabs = kept;
-        cx.notify();
-    }
-
-    /// The browser tab shown, if a page shown is one.
-    pub(super) fn shown_browser_tab(&self) -> Option<&BrowserTab> {
-        let id = self.pages.shown.as_deref()?;
-        self.browser.tabs.iter().find(|t| t.id == id)
     }
 
     /// Tab `id`'s label: its page's title, else its site, else New Tab.
-    fn browser_label(&self, id: &str) -> String {
+    pub(super) fn browser_label(&self, id: &str) -> String {
         let page = self.pages.live.get(&(id.to_string(), None));
         let title = page.and_then(|p| p.title.clone());
         let url = page.and_then(|p| p.view.url().ok()).filter(|u| u != BLANK);
@@ -227,9 +191,9 @@ impl Shell {
         input
     }
 
-    /// The shown browser tab's address field takes the keyboard, its text selected; a sidebar page has none.
+    /// The panel's browser tab's address field takes the keyboard, its text selected; a sidebar page has none.
     pub(super) fn focus_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.shown_browser_tab().map(|t| t.id.clone()) else { return };
+        let Some((id, _)) = self.panel_page(window) else { return };
         let input = self.address(&id, window, cx);
         input.update(cx, |input, cx| {
             input.focus(window, cx);
@@ -255,18 +219,17 @@ impl Shell {
         }
     }
 
-    /// The browser tabs of workspace `ws` for the tab bar: id, label, the site's icon once fetched, the herdr tab each
-    /// follows, and whether its page is loading.
-    pub(super) fn browser_tabs_of(&self, ws: &str) -> Vec<(String, String, Option<std::sync::Arc<gpui::Image>>, Option<String>, bool)> {
-        let icon = |id: &String| match self.pages.favicons.get(&(id.clone(), None)) {
+    /// Tab `id`'s site icon once fetched, and whether its page is loading.
+    pub(super) fn browser_chip(&self, id: &str) -> (Option<std::sync::Arc<gpui::Image>>, bool) {
+        let key = (id.to_string(), None);
+        let icon = match self.pages.favicons.get(&key) {
             Some((_, Favicon::Image(image))) => Some(image.clone()),
             _ => None,
         };
-        let loading = |id: &String| self.pages.live.get(&(id.clone(), None)).is_some_and(|p| p.loading);
-        self.browser.tabs.iter().filter(|t| t.workspace == ws).map(|t| (t.id.clone(), self.browser_label(&t.id), icon(&t.id), t.after.clone(), loading(&t.id))).collect()
+        (icon, self.pages.live.get(&key).is_some_and(|p| p.loading))
     }
 
-    /// The shown browser tab's row under the tab bar: back, forward, reload, the address and Open in Browser.
+    /// The active browser tab's row over its page: back, forward, reload, the address and Open in Browser.
     pub(super) fn render_browser_bar(&mut self, key: &PageKey, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let input = self.address(&key.0, window, cx);
         if !self.browser.editing() && input.read(cx).value().is_empty() {
@@ -335,95 +298,6 @@ impl Shell {
             )
     }
 
-    /// `+`'s menu: a new terminal tab or a browser tab in workspace `ws`.
-    pub(super) fn new_tab_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let menu = self.new_tab_menu.as_ref()?;
-        let (ws, at) = menu.value.clone();
-        type Pick = Box<dyn Fn(&mut Shell, String, &mut Window, &mut Context<Shell>)>;
-        // each with the mark its tab gets: the command panel's terminal, a browser tab's globe
-        let item = |key: &'static str, icon: &'static str, label: &'static str, pick: Pick| {
-            let ws = ws.clone();
-            row(theme, false, key)
-                .h(px(28.))
-                .rounded(px(6.))
-                .child(menu_mark(icon, theme.text_muted))
-                .child(label)
-                .on_pick(
-                    at,
-                    cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        if let Some(m) = this.new_tab_menu.as_mut() {
-                            m.close()
-                        }
-                        pick(this, ws.clone(), window, cx);
-                        cx.notify();
-                    }),
-                )
-        };
-        let card = menu_card(theme, "new-tab-menu", 160.)
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                if let Some(m) = this.new_tab_menu.as_mut() {
-                    m.close()
-                }
-                cx.notify();
-            }))
-            .child(item("new-tab-terminal", "icons/terminal.svg", "Terminal", Box::new(|this, ws, _, cx| this.new_tab(ws, cx))))
-            .child(item("new-tab-browser", "icons/solar/global.svg", "Browser", Box::new(|this, ws, window, cx| {
-                // at the end of the bar
-                let last = this.snapshot.as_ref().and_then(|s| s.tabs_of(&ws).last().map(|t| t.tab_id.clone()));
-                this.new_browser_tab(ws, last, None, window, cx)
-            })));
-        let menu = crate::ui::menu_motion("new-tab-menu-in", menu, card);
-        Some(
-            gpui::deferred(gpui::anchored().position(at).anchor(gpui::Anchor::TopRight).snap_to_window_with_margin(px(8.)).child(menu))
-                .with_priority(1)
-                .into_any_element(),
-        )
-    }
-}
-
-/// The herdr tab a browser tab follows once herdr's tabs are `now` (they were `before`): its own while there, else
-/// the nearest before it that still is, else none (the bar's start).
-fn follows(after: Option<String>, before: &[String], now: &[String]) -> Option<String> {
-    let after = after?;
-    if now.contains(&after) {
-        return Some(after);
-    }
-    let at = before.iter().position(|id| *id == after)?;
-    before[..at].iter().rev().find(|id| now.contains(id)).cloned()
-}
-
-/// The bar's tabs (id, browser or not) in the order shown: herdr's in their order, each browser tab after the herdr
-/// tab it follows; one following a tab not there goes last.
-pub(super) fn interleave<'a>(herdr: &[&'a str], browser: &[(&'a str, Option<&str>)]) -> Vec<(&'a str, bool)> {
-    let after = |anchor: Option<&str>| -> Vec<(&'a str, bool)> { browser.iter().filter(|(_, a)| *a == anchor).map(|(id, _)| (*id, true)).collect() };
-    let mut order = after(None);
-    for h in herdr {
-        order.push((h, false));
-        order.extend(after(Some(h)));
-    }
-    order.extend(browser.iter().filter(|(_, a)| a.is_some_and(|a| !herdr.contains(&a))).map(|(id, _)| (*id, true)));
-    order
-}
-
-/// The tab at `from` dropped on the one at `to`, taking its place: the herdr tab moved, with herdr's insert index
-/// (counted before it is taken out), if herdr's order changed; and each browser tab, in the new order, with the herdr
-/// tab before it.
-fn dropped(order: &[(String, bool)], from: usize, to: usize) -> (Option<(String, usize)>, Vec<(String, Option<String>)>) {
-    let mut now = order.to_vec();
-    let tab = now.remove(from);
-    now.insert(to, tab.clone());
-    let herdr_at = |list: &[(String, bool)], i: usize| list[..i].iter().filter(|(_, b)| !b).count();
-    let moved = (!tab.1).then(|| (herdr_at(order, from), herdr_at(&now, to))).filter(|(was, is)| was != is);
-    let moved = moved.map(|(was, is)| (tab.0.clone(), if is > was { is + 1 } else { is }));
-    let mut before = None;
-    let mut anchors = Vec::new();
-    for (id, browser) in now {
-        match browser {
-            true => anchors.push((id, before.clone())),
-            false => before = Some(id),
-        }
-    }
-    (moved, anchors)
 }
 
 #[cfg(test)]
@@ -439,33 +313,5 @@ mod tests {
         assert_eq!(typed_url("rust lifetimes").as_deref(), Some("https://duckduckgo.com/?q=rust%20lifetimes"));
         assert_eq!(typed_url("  "), None);
         assert_eq!(site("https://x.dev:8080/a?b").as_deref(), Some("https://x.dev:8080"));
-    }
-
-    #[test]
-    fn browser_tabs_sit_after_their_herdr_tab() {
-        let order = interleave(&["h1", "h2"], &[("b1", Some("h1")), ("b0", None), ("b2", Some("gone")), ("b3", Some("h1"))]);
-        assert_eq!(order, [("b0", true), ("h1", false), ("b1", true), ("b3", true), ("h2", false), ("b2", true)]);
-    }
-
-    #[test]
-    fn a_closed_herdr_tab_hands_its_browser_tabs_to_the_one_before() {
-        let ids = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let (before, now) = (ids(&["h1", "h2", "h3"]), ids(&["h1", "h3"]));
-        assert_eq!(follows(Some("h2".into()), &before, &now).as_deref(), Some("h1"));
-        assert_eq!(follows(Some("h3".into()), &before, &now).as_deref(), Some("h3"));
-        assert_eq!(follows(Some("h1".into()), &before, &ids(&["h3"])), None);
-        assert_eq!(follows(None, &before, &now), None);
-    }
-
-    #[test]
-    fn a_dropped_tab_moves_herdr_and_reanchors_browser_tabs() {
-        let order: Vec<(String, bool)> = [("h1", false), ("b1", true), ("h2", false), ("h3", false)].iter().map(|(i, b)| (i.to_string(), *b)).collect();
-        let anchors = |l: &[(&str, Option<&str>)]| l.iter().map(|(i, a)| (i.to_string(), a.map(str::to_string))).collect::<Vec<_>>();
-        // a browser tab dropped on the last tab: herdr untouched
-        assert_eq!(dropped(&order, 1, 3), (None, anchors(&[("b1", Some("h3"))])));
-        // the first herdr tab dropped on h2, moving right: herdr's index counts it still in place
-        assert_eq!(dropped(&order, 0, 2), (Some(("h1".into(), 2)), anchors(&[("b1", None)])));
-        // h3 dropped on the browser tab, moving left: it lands between h1 and the browser tab
-        assert_eq!(dropped(&order, 3, 1), (Some(("h3".into(), 1)), anchors(&[("b1", Some("h3"))])));
     }
 }
