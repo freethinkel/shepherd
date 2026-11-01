@@ -40,7 +40,8 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                 rx
             }
             Err(err) => {
-                let no_server = crate::herdr::no_server(&err);
+                // the other backends start their own server
+                let no_server = client.backend() == crate::settings::Backend::Herdr && crate::herdr::no_server(&err);
                 // a server that answers but won't subscribe may speak another protocol: its ping says which
                 let outdated = if no_server { None } else { check_protocol(&this, &rt, &client, cx).await };
                 if no_server && Instant::now() >= next_start {

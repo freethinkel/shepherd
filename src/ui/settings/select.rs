@@ -194,6 +194,15 @@ impl SettingsView {
         self.select(theme, "editor-select", labels, index, fallback, |_| None, |i, cx| update(cx, |s| s.editor = EDITORS[i].0.map(String::from)), cx)
     }
 
+    /// herdr, herdr-core or Rex: every window moves there at once.
+    pub(super) fn backend_select(&self, theme: &Theme, current: crate::settings::Backend, cx: &mut Context<Self>) -> Div {
+        use crate::settings::Backend;
+        const BACKENDS: [(Backend, &str); 3] = [(Backend::Herdr, "herdr"), (Backend::Hc, "herdr-core (hc)"), (Backend::Rex, "Rex")];
+        let labels = BACKENDS.iter().map(|(_, label)| SharedString::from(*label)).collect();
+        let index = BACKENDS.iter().position(|(b, _)| *b == current);
+        self.select(theme, "backend-select", labels, index, SharedString::default(), |_| None, |i, cx| crate::shell::set_backend(BACKENDS[i].0, cx), cx)
+    }
+
     /// Every installed family (Zed's font picker); a family named in settings.json that is not installed shows as itself.
     // ponytail: proportional families are listed too; filter by fixed advances (Zeron's fontdb check) if picking one bites.
     pub(super) fn font_select(&self, theme: &Theme, current: &str, cx: &mut Context<Self>) -> Div {

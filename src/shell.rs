@@ -454,12 +454,10 @@ impl Shell {
                     touched: Instant::now(),
                     selected_tab: std::env::var("SHEPHERD_TAB").ok(),
                     should_move: Rc::new(Cell::new(false)),
-                    client: SettingsGlobal::of(cx)
-                        .settings
-                        .herdr_socket
-                        .clone()
-                        .filter(|p| !p.trim().is_empty())
-                        .map_or_else(Client::local, |p| Client::at(p.into())),
+                    client: match crate::settings::Backend::active() {
+                        crate::settings::Backend::Herdr => SettingsGlobal::of(cx).settings.herdr_socket.clone().filter(|p| !p.trim().is_empty()).map_or_else(Client::local, |p| Client::at(p.into())),
+                        other => Client::of(other),
+                    },
                     rt: rt.clone(),
                     plugin_actions: Vec::new(),
                     grid_bounds: Rc::new(Cell::new(None)),
@@ -610,9 +608,14 @@ impl Shell {
             return;
         }
         cx.set_global(PaneQueries(client.clone(), rt.clone()));
+        let herdr = client.backend() == crate::settings::Backend::Herdr;
         self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, resync, cx).await);
         self.floating = None;
-        self.popup_watch = cx.spawn(async move |this, cx| floating::popup_loop(this, cx).await);
+        // only herdr has a client shell: elsewhere no popups, `keys.command`s or images over it
+        self.popup_watch = if herdr { cx.spawn(async move |this, cx| floating::popup_loop(this, cx).await) } else { gpui::Task::ready(()) };
+        if !herdr {
+            self.forget_popups(cx);
+        }
     }
 
     fn toggle_settings_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -898,6 +901,14 @@ impl Shell {
         if let Some((surface, _)) = &self.popup_surface {
             surface.theme(floating::host_theme(Theme::of(cx)));
         }
+        let hex = |c: Hsla| {
+            let c = gpui::Rgba::from(c);
+            let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            format!("#{:02x}{:02x}{:02x}", b(c.r), b(c.g), b(c.b))
+        };
+        let terminal = &Theme::of(cx).terminal;
+        crate::hc::set_colors(hex(terminal.foreground), hex(terminal.background));
+        crate::rex::set_colors(hex(terminal.foreground), hex(terminal.background));
     }
 
     fn refresh_plugin_actions(&mut self, cx: &mut Context<Self>) {
@@ -1120,6 +1131,15 @@ fn remember_shown(recent: &mut Vec<String>, shown: &[PaneFrame], live: impl Fn(&
 
 /// Saves a choice made in the sidebar, or where the window was moved. A settings file that failed to load is the user's to fix: the sidebar must
 /// not overwrite it with defaults.
+/// Settings' Backend: the windows move to it. Deferred: the click that picked it is inside an update of one of them.
+pub fn set_backend(backend: crate::settings::Backend, cx: &mut App) {
+    cx.defer(move |cx| {
+        for window in cx.windows().into_iter().filter_map(|w| w.downcast::<Shell>()) {
+            let _ = window.update(cx, |shell, _, cx| shell.set_backend(backend, cx));
+        }
+    });
+}
+
 fn save_from_sidebar(cx: &mut App, change: impl FnOnce(&mut crate::settings::Settings)) {
     if SettingsGlobal::of(cx).error.is_none() {
         crate::ui::settings::update(cx, change);

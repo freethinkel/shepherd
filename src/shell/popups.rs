@@ -653,6 +653,7 @@ impl Shell {
                     format!("herdr forgets {}. Its session keeps running on {}.", m.label, m.target),
                     "Forget",
                 ),
+                sessions::Place::Core | sessions::Place::Rex => unreachable!("a backend is not deletable"),
             };
             let card = dialog_card(theme, "session-delete-dialog", title)
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_delete(false, cx)))

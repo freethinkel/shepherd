@@ -344,6 +344,10 @@ impl PaneTerminal {
             return; // the fixture's text is laid out by `on_grid_metrics`; there is no herdr to attach to
         }
         let (cols, rows) = (self.emulator.cols() as u16, self.emulator.rows() as u16);
+        // the core sends its screen and history anew; Rex's snapshot takes this emulator's place when it comes
+        if crate::settings::Backend::active() == crate::settings::Backend::Hc {
+            self.emulator = Emulator::raw(cols, rows);
+        }
         let px = self.geometry.map_or((0, 0), |g| g.cell_px);
         let pane_id = self.pane_id.clone();
         let mode = match (takeover || self.takes_over, yielded(cx)) {
@@ -456,6 +460,18 @@ impl PaneTerminal {
 
     /// Ask herdr where its view sits in the scrollback. One request at a time; a burst of frames costs one more.
     fn refresh_scroll(&mut self, cx: &mut Context<Self>) {
+        if self.session.as_ref().is_some_and(Session::raw) {
+            let scroll = ScrollState {
+                offset_from_bottom: self.emulator.display_offset() as u32,
+                max_offset_from_bottom: self.emulator.history_lines() as u32,
+                viewport_rows: self.emulator.rows() as u32,
+            };
+            if scroll != self.scroll {
+                self.scroll = scroll;
+                cx.notify();
+            }
+            return;
+        }
         let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>() else { return };
         if self.scroll_fetching {
             self.scroll_stale = true;
@@ -495,9 +511,33 @@ impl PaneTerminal {
         if self.session.is_none() || delta == 0 {
             return;
         }
+        if self.session.as_ref().is_some_and(Session::raw) {
+            return self.scroll_raw(delta, at, cx);
+        }
         if let Some(rest) = self.scroll_locally(delta, cx) {
             self.scroll_herdr(rest, at, cx);
         }
+    }
+
+    /// The wheel over a program's own stream: to the program if it reads the mouse, as arrows on its full screen,
+    /// else through the emulator's history.
+    fn scroll_raw(&mut self, delta: i64, at: Option<(u16, u16)>, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else { return };
+        let (col, row) = at.unwrap_or((0, 0));
+        if self.mouse_capture || self.emulator.alt_screen() {
+            let step = if self.mouse_capture {
+                self.emulator.mouse_report("down", if delta > 0 { "up" } else { "down" }, col, row, 0)
+            } else {
+                let key = if self.emulator.app_cursor_mode() { b'O' } else { b'[' };
+                vec![0x1b, key, if delta > 0 { b'A' } else { b'B' }]
+            };
+            session.input(&step.repeat(delta.unsigned_abs().min(50) as usize));
+            return;
+        }
+        let top = self.emulator.history_lines() as i64;
+        self.emulator.scroll_to_offset((self.emulator.display_offset() as i64 + delta).clamp(0, top) as usize);
+        self.scroll_due = true;
+        cx.notify();
     }
 
     /// Scrolls through herdr's history without herdr: up from the live bottom reads it once (`pane.read`, at most
@@ -625,6 +665,11 @@ impl PaneTerminal {
     /// Typing goes back to the live bottom, as in a terminal.
     fn typed(&mut self, cx: &mut Context<Self>) {
         self.stop_autoscroll();
+        if self.session.as_ref().is_some_and(Session::raw) && self.emulator.display_offset() > 0 {
+            self.emulator.scroll_to_offset(0);
+            self.scroll_due = true;
+            cx.notify();
+        }
         if self.live.is_some() || self.history_pending.is_some() {
             self.leave_history();
             cx.notify();
@@ -747,10 +792,12 @@ impl PaneTerminal {
             MouseButton::Middle => "middle",
             _ => "left",
         };
-        if let (Some(session), Some((row, col, _, _))) = (&self.session, self.hit(position))
-            && !self.via_shell(PaneInput::mouse(action, button, col, row, mouse_mods(mods)), cx)
-        {
-            session.mouse(action, button, col, row, mouse_mods(mods));
+        if let (Some(session), Some((row, col, _, _))) = (&self.session, self.hit(position)) {
+            if session.raw() {
+                session.input(&self.emulator.mouse_report(action, button, col, row, mouse_mods(mods)));
+            } else if !self.via_shell(PaneInput::mouse(action, button, col, row, mouse_mods(mods)), cx) {
+                session.mouse(action, button, col, row, mouse_mods(mods));
+            }
         }
     }
 
@@ -976,7 +1023,17 @@ async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionE
                 match event {
                     // Replies (DSR, DA…) are dropped: frames are herdr's re-render, and herdr already
                     // answered the app's own queries.
-                    SessionEvent::Frame(bytes) => drop(pane.live.as_mut().unwrap_or(&mut pane.emulator).feed(&bytes)),
+                    SessionEvent::Frame(bytes) => {
+                        drop(pane.live.as_mut().unwrap_or(&mut pane.emulator).feed(&bytes));
+                        if pane.session.as_ref().is_some_and(Session::raw) {
+                            pane.mouse_capture = pane.emulator.mouse_capture();
+                            pane.keyboard_flags = pane.emulator.keyboard_flags();
+                        }
+                    }
+                    SessionEvent::Snapshot(bytes) => match Emulator::restored(&bytes, pane.emulator.cols() as u16, pane.emulator.rows() as u16) {
+                        Ok(emulator) => pane.emulator = emulator,
+                        Err(e) => eprintln!("shepherd: a terminal's snapshot does not decode, so it starts blank: {e:#}"),
+                    },
                     SessionEvent::MouseCapture(enabled) => pane.mouse_capture = enabled,
                     SessionEvent::KeyboardFlags(flags) => pane.keyboard_flags = flags,
                     SessionEvent::Size(cols, rows) => {

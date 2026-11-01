@@ -340,6 +340,7 @@ impl Render for Shell {
                 this.pane_command(w, cx, |pane_id| Command::ClosePane { pane_id })
             }))
             .on_action(cx.listener(|this, _: &ToggleZoom, w, cx| this.pane_command(w, cx, |pane_id| Command::Zoom { pane_id })))
+            .on_action(cx.listener(|this, _: &crate::bindings::SwitchBackend, _, cx| this.next_backend(cx)))
             .on_action(cx.listener(|this, _: &FocusLeft, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Left })))
             .on_action(cx.listener(|this, _: &FocusRight, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Right })))
             .on_action(cx.listener(|this, _: &FocusUp, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Up })))

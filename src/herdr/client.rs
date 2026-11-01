@@ -1,3 +1,4 @@
+use crate::settings::Backend;
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -22,17 +23,28 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone)]
 pub struct Client {
     path: PathBuf,
+    /// What answers: herdr on `path`, or a backend that takes the same calls.
+    backend: Backend,
 }
 
 impl Client {
     /// Same resolution as herdr for the default session: `HERDR_SOCKET_PATH`, else `herdr.sock` in herdr's folder.
     pub fn local() -> Self {
         let path = std::env::var_os("HERDR_SOCKET_PATH").map(PathBuf::from).unwrap_or_else(|| super::config::dir().join("herdr.sock"));
-        Self { path }
+        Self::at(path)
     }
 
     pub fn at(path: PathBuf) -> Self {
-        Self { path }
+        Self { path, backend: Backend::Herdr }
+    }
+
+    /// herdr-core or Rex, which have no socket of herdr's.
+    pub fn of(backend: Backend) -> Self {
+        Self { path: PathBuf::new(), backend }
+    }
+
+    pub fn backend(&self) -> Backend {
+        self.backend
     }
 
     pub fn path(&self) -> &Path {
@@ -53,6 +65,11 @@ impl Client {
     }
 
     pub async fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        match self.backend {
+            Backend::Hc => return crate::hc::call(method, params).await,
+            Backend::Rex => return crate::rex::call(method, params).await,
+            Backend::Herdr => {}
+        }
         let (_w, mut lines) = self.send(method, params).await?;
         let line = lines.next_line().await?.ok_or_else(|| anyhow!("herdr closed the connection"))?;
         into_result(serde_json::from_str(&line)?)
@@ -60,6 +77,11 @@ impl Client {
 
     /// `types`, and `pane.agent_status_changed` for each of `panes`.
     pub async fn subscribe(&self, types: &[&str], panes: &[String]) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
+        match self.backend {
+            Backend::Hc => return crate::hc::subscribe().await,
+            Backend::Rex => return crate::rex::subscribe().await,
+            Backend::Herdr => {}
+        }
         let statuses = panes.iter().map(|p| json!({"type": "pane.agent_status_changed", "pane_id": p}));
         let subscriptions: Vec<Value> = types.iter().map(|t| json!({"type": t})).chain(statuses).collect();
         let (w, mut lines) = self.send("events.subscribe", json!({"subscriptions": subscriptions})).await?;

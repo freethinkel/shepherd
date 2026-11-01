@@ -48,18 +48,18 @@ fn api_socket() -> PathBuf {
 }
 
 pub(super) fn binary() -> String {
-    std::env::var("SHEPHERD_HERDR").ok().or_else(|| BINARY.read().unwrap().clone()).unwrap_or_else(find_herdr)
+    let found = || find_program("herdr").map_or_else(|| "herdr".into(), |p| p.to_string_lossy().into_owned());
+    std::env::var("SHEPHERD_HERDR").ok().or_else(|| BINARY.read().unwrap().clone()).unwrap_or_else(found)
 }
 
-/// `herdr` on PATH, else where its installers put it: an app opened from Finder gets launchd's bare PATH.
-fn find_herdr() -> String {
+/// A program on PATH, else where installers put it: an app opened from Finder gets launchd's bare PATH.
+pub fn find_program(name: &str) -> Option<PathBuf> {
     let home = crate::settings::home();
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .chain([home.join(".local/bin"), home.join(".cargo/bin"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()])
-        .map(|dir| dir.join(format!("herdr{}", std::env::consts::EXE_SUFFIX)))
+        .map(|dir| dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
         .find(|p| p.is_file())
-        .map_or_else(|| "herdr".into(), |p| p.to_string_lossy().into_owned())
 }
 
 /// Nothing listens on herdr's socket: it is missing, or a server died and left it behind.
@@ -187,6 +187,8 @@ fn session_command(args: &[&str]) -> anyhow::Result<()> {
 pub enum SessionEvent {
     /// Terminal bytes to feed the emulator.
     Frame(Vec<u8>),
+    /// The terminal as it is, in Ghostty's snapshot format: a new emulator, before any frame (Rex).
+    Snapshot(Vec<u8>),
     /// Whether the pane's app asks for mouse reporting (socket sessions only).
     MouseCapture(bool),
     /// The kitty keyboard flags the pane's app asked for (socket sessions only).
@@ -214,11 +216,21 @@ pub enum Mode {
 enum Transport {
     Socket(Mutex<Stream>),
     Cli { child: Option<Child>, stdin: Mutex<Option<ChildStdin>> },
+    Hc(crate::hc::Attached),
+    Rex(crate::rex::Attached),
 }
 
 impl Session {
     /// `cell_px` is a cell in device pixels ((0, 0) while unknown): herdr gives the pane's app the pixel size from it.
     pub fn spawn(pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), mode: Mode) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
+        if crate::settings::Backend::active() == crate::settings::Backend::Rex {
+            let (attached, rx) = crate::rex::attach(pane, cols, rows, cell_px, mode == Mode::Observe)?;
+            return Ok((Session { transport: Transport::Rex(attached) }, rx));
+        }
+        if crate::settings::Backend::active() == crate::settings::Backend::Hc {
+            let (attached, rx) = crate::hc::attach(pane, cols, rows, cell_px, mode == Mode::Observe)?;
+            return Ok((Session { transport: Transport::Hc(attached) }, rx));
+        }
         match Self::spawn_socket(pane, cols, rows, cell_px, mode) {
             Some(session) => Ok(session),
             None => Self::spawn_cli(pane, cols, rows, mode),
@@ -281,10 +293,21 @@ impl Session {
 
     /// Whether this session reports [`SessionEvent::MouseCapture`] (the socket does, the CLI cannot).
     pub fn knows_mouse_capture(&self) -> bool {
-        matches!(self.transport, Transport::Socket(_))
+        !matches!(self.transport, Transport::Cli { .. })
+    }
+
+    /// The stream is the program's own output, not a screen rendered for this client (herdr-core, Rex): the emulator has
+    /// the modes and history, and the mouse and wheel go to the program as a terminal encodes them.
+    pub fn raw(&self) -> bool {
+        matches!(self.transport, Transport::Hc(_) | Transport::Rex(_))
     }
 
     pub fn input(&self, bytes: &[u8]) {
+        match &self.transport {
+            Transport::Hc(attached) => return attached.input(bytes),
+            Transport::Rex(attached) => return attached.input(bytes),
+            _ => {}
+        }
         self.send(
             ClientMessage::Input { data: bytes.to_vec() },
             || json!({"type": "terminal.input", "bytes": B64.encode(bytes)}),
@@ -292,6 +315,11 @@ impl Session {
     }
 
     pub fn resize(&self, cols: u16, rows: u16, (cell_width_px, cell_height_px): (u32, u32)) {
+        match &self.transport {
+            Transport::Hc(attached) => return attached.resize(cols, rows, (cell_width_px, cell_height_px)),
+            Transport::Rex(attached) => return attached.resize(cols, rows, (cell_width_px, cell_height_px)),
+            _ => {}
+        }
         self.send(
             ClientMessage::Resize { cols, rows, cell_width_px, cell_height_px, pixel_mouse: false },
             || json!({"type": "terminal.resize", "cols": cols, "rows": rows}),
@@ -325,6 +353,7 @@ impl Session {
                     let _ = writeln!(stdin, "{}", record());
                 }
             }
+            Transport::Hc(_) | Transport::Rex(_) => {}
         }
     }
 }
@@ -389,6 +418,7 @@ impl Drop for Session {
                 return;
             }
             Transport::Cli { child, stdin } => (child, stdin),
+            Transport::Hc(_) | Transport::Rex(_) => return,
         };
         // Closing stdin ends the session cleanly. Waiting for herdr happens off this thread: drops run on
         // GPUI's main thread, several at once on a tab switch. A child that ignores the close is killed.

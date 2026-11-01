@@ -422,6 +422,11 @@ impl Render for SettingsView {
                     card(&theme)
                         .child(
                             card_row(&theme, true)
+                                .child(row_text(&theme, "Backend", "What runs the terminals. Each keeps its own workspaces; plugins and popups are herdr's."))
+                                .child(self.backend_select(&theme, settings.backend, cx)),
+                        )
+                        .child(
+                            card_row(&theme, false)
                                 .child(row_text(&theme, "herdr binary", "A path to herdr, or the one on PATH."))
                                 .child(field(&theme, &self.herdr_bin)),
                         )

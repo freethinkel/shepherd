@@ -8,13 +8,13 @@ pub mod keys;
 pub mod popup;
 mod remote;
 mod session;
-mod socket;
+pub(crate) mod socket;
 mod wire;
 pub use wire::Rgb;
 pub use install::{install, missing};
 pub use client::{Client, EVENT_TYPES};
 pub use config::{HerdrConfig, config_path};
-pub use session::{Mode, Session, SessionEvent, SessionInfo, current_session, delete_session, new_session, no_server, sessions, valid_session_name, set_binary, set_socket, start_server};
+pub use session::{Mode, Session, SessionEvent, SessionInfo, current_session, delete_session, find_program, new_session, no_server, sessions, valid_session_name, set_binary, set_socket, start_server};
 pub use wire::PaneInput;
 pub use remote::{
     Machine, Tunnel, add_machine, find_file, forward, git, locate, machines, quote, read_file, relay, remove_machine, rename_machine, show_machine,

@@ -25,7 +25,7 @@ use ghostty_vt::screen::{CellContentTag, CellWide, GridRef, Screen};
 use ghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordBetweenOptions, Selection};
 use ghostty_vt::style::{Style, StyleColor, Underline};
 use ghostty_vt::terminal::{Mode, Point, PointCoordinate, PointSpace, ScrollViewport};
-use ghostty_vt::{Error, Event, RenderState, Terminal, TerminalOptions};
+use ghostty_vt::{Error, Event, RenderState, Terminal, TerminalOptions, key, mouse};
 
 /// A cell in viewport coordinates (row 0 = top). herdr owns scrollback, so the
 /// viewport is the whole local grid and a point needs no history offset.
@@ -161,7 +161,12 @@ pub struct Emulator {
     render: RefCell<Render>,
     anchor: Option<Anchor>,
     bell: bool,
+    /// Fed a program's own bytes rather than herdr's frames ([`Self::raw`]).
+    raw: bool,
 }
+
+/// Ghostty's default scrollback cap (bytes, an estimate): far more than the lines either backend hands over.
+const SCROLLBACK: usize = 10_000_000;
 
 impl Emulator {
     pub fn new(cols: u16, rows: u16) -> Self {
@@ -169,12 +174,26 @@ impl Emulator {
         Self::sized(cols, rows, 0)
     }
 
+    /// For a program's own output, as herdr-core streams it: this terminal is the real one, with its history and
+    /// its reflow on a resize.
+    pub fn raw(cols: u16, rows: u16) -> Self {
+        Self { raw: true, ..Self::sized(cols, rows, SCROLLBACK) }
+    }
+
+    /// A terminal as a snapshot holds it, history included, as Rex's stream starts; `cols` and `rows` are the pane's,
+    /// which may have changed since. It reads on as [`Self::raw`] does.
+    pub fn restored(snapshot: &[u8], cols: u16, rows: u16) -> anyhow::Result<Self> {
+        let term = ghostty_vt::snapshot::Decoder::from_slice(snapshot).decode()?;
+        let mut restored = Self { term, ..Self::raw(cols, rows) };
+        restored.resize(cols, rows);
+        Ok(restored)
+    }
+
     /// herdr's history as `pane.read` gives it (`source: recent`, `format: ansi`): the lines above its screen, then
     /// the screen, wrapped at this width, no newline after the last. The grid holds them all, viewed at the live
     /// bottom, so [`Self::scroll_to_offset`] walks back through them without asking herdr.
     pub fn with_history(text: &str, cols: u16, rows: u16) -> Self {
-        // Ghostty's default scrollback cap (bytes, an estimate): far more than herdr's 1000 lines read
-        let mut e = Self::sized(cols, rows, 10_000_000);
+        let mut e = Self::sized(cols, rows, SCROLLBACK);
         for (i, line) in text.split('\n').enumerate() {
             if i > 0 {
                 e.feed(b"\r\n");
@@ -200,6 +219,7 @@ impl Emulator {
             render: RefCell::new(render),
             anchor: None,
             bell: false,
+            raw: false,
         }
     }
 
@@ -220,6 +240,10 @@ impl Emulator {
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         // ponytail: no pixel size; only CSI 14/16 t size reports would want it.
+        if self.raw {
+            let _ = self.term.resize(cols.max(2), rows.max(1), 0, 0);
+            return;
+        }
         // No reflow: herdr repaints the whole grid at the new size, and until then a reflow shows its frame at the
         // old width rewrapped (Ghostty reflows only under wraparound).
         let wrap = self.term.mode(Mode::WRAPAROUND).unwrap_or(true);
@@ -257,6 +281,58 @@ impl Emulator {
     }
 
     /// Pastes should be wrapped in `ESC [200~` / `ESC [201~`.
+    /// The program reads the mouse.
+    pub fn mouse_capture(&self) -> bool {
+        self.term.is_mouse_tracking().unwrap_or(false)
+    }
+
+    /// The kitty keyboard flags the program asked for.
+    pub fn keyboard_flags(&self) -> u16 {
+        self.term.kitty_keyboard_flags().map_or(0, |f| u16::from(f.bits()))
+    }
+
+    /// A mouse event as the program asked to hear it, nothing if it did not: `action` is `down`, `up`, `drag` or
+    /// `move`, `button` `left`, `right`, `middle`, or `up` or `down` for the wheel; `mods` as herdr's (1 shift, 2
+    /// ctrl, 4 alt). Empty for a program that does not read this.
+    pub fn mouse_report(&self, action: &str, button: &str, col: u16, row: u16, mods: u8) -> Vec<u8> {
+        // cells stand in for pixels: only the SGR-pixels format would tell them apart
+        const CELL: u32 = 10;
+        let (Ok(mut encoder), Ok(mut event)) = (mouse::Encoder::new(), mouse::Event::new()) else { return Vec::new() };
+        encoder.set_options_from_terminal(&self.term).set_any_button_pressed(action == "drag").set_size(mouse::EncoderSize {
+            screen_width: self.cols() as u32 * CELL,
+            screen_height: self.rows() as u32 * CELL,
+            cell_width: CELL,
+            cell_height: CELL,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        });
+        event.set_action(match action {
+            "down" => mouse::Action::Press,
+            "up" => mouse::Action::Release,
+            _ => mouse::Action::Motion,
+        });
+        event.set_button(match (action, button) {
+            ("move", _) => None,
+            (_, "right") => Some(mouse::Button::Right),
+            (_, "middle") => Some(mouse::Button::Middle),
+            (_, "up") => Some(mouse::Button::Four),
+            (_, "down") => Some(mouse::Button::Five),
+            _ => Some(mouse::Button::Left),
+        });
+        let mut held = key::Mods::empty();
+        held.set(key::Mods::SHIFT, mods & 1 != 0);
+        held.set(key::Mods::CTRL, mods & 2 != 0);
+        held.set(key::Mods::ALT, mods & 4 != 0);
+        event.set_mods(held);
+        let at = |cell: u16| (u32::from(cell) * CELL + CELL / 2) as f32;
+        event.set_position(mouse::Position { x: at(col), y: at(row) });
+        let mut bytes = Vec::new();
+        let _ = encoder.encode_to_vec(&event, &mut bytes);
+        bytes
+    }
+
     pub fn bracketed_paste_mode(&self) -> bool {
         self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false)
     }
@@ -561,6 +637,56 @@ impl std::fmt::Debug for Emulator {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_raw_stream_tells_the_mouse_and_keyboard_it_wants() {
+        let mut e = Emulator::raw(80, 24);
+        assert!(!e.mouse_capture());
+        assert_eq!(e.mouse_report("down", "left", 3, 2, 0), b"", "the program did not ask");
+        e.feed(b"\x1b[?1002h\x1b[?1006h\x1b[>1u");
+        assert!(e.mouse_capture());
+        assert_eq!(e.keyboard_flags(), 1);
+        assert_eq!(e.mouse_report("down", "left", 3, 2, 0), b"\x1b[<0;4;3M");
+        assert_eq!(e.mouse_report("up", "left", 3, 2, 0), b"\x1b[<0;4;3m");
+        assert_eq!(e.mouse_report("drag", "left", 4, 2, 0), b"\x1b[<32;5;3M");
+        assert_eq!(e.mouse_report("down", "up", 0, 0, 0), b"\x1b[<64;1;1M", "the wheel");
+        assert_eq!(e.mouse_report("down", "down", 0, 0, 1), b"\x1b[<69;1;1M", "with shift");
+    }
+
+    #[test]
+    fn a_snapshot_brings_the_screen_and_its_history() {
+        let mut e = Emulator::raw(10, 3);
+        for i in 0..20 {
+            e.feed(format!("line {i}\r\n").as_bytes());
+        }
+        e.feed(b"\x1b[?1000h");
+        let snapshot = ghostty_vt::snapshot::encode(&e.term).unwrap();
+        let mut restored = Emulator::restored(&snapshot, 12, 3).unwrap();
+        assert_eq!((restored.cols(), restored.rows()), (12, 3), "the pane's size, not the snapshot's");
+        assert_eq!(restored.row_text(1).trim(), "line 19");
+        assert!(restored.history_lines() > 10, "{}", restored.history_lines());
+        assert!(restored.mouse_capture(), "its modes came too");
+        restored.feed(b"more");
+        assert_eq!(restored.row_text(2).trim(), "more");
+        assert!(Emulator::restored(b"not a snapshot", 12, 3).is_err());
+    }
+
+    #[test]
+    fn a_raw_stream_keeps_its_history_and_rewraps_it() {
+        let mut e = Emulator::raw(10, 4);
+        for i in 0..20 {
+            e.feed(format!("{i}\r\n").as_bytes());
+        }
+        assert!(e.history_lines() >= 16);
+        e.scroll_to_offset(e.history_lines());
+        assert_eq!(e.row_text(0).trim(), "0");
+        e.scroll_to_offset(0);
+        let mut wide = Emulator::raw(10, 4);
+        wide.feed(b"0123456789abcde");
+        assert_eq!((wide.row_text(0).trim(), wide.row_text(1).trim()), ("0123456789", "abcde"));
+        wide.resize(20, 4);
+        assert_eq!(wide.row_text(0).trim(), "0123456789abcde", "a program's own lines reflow, herdr's frames do not");
+    }
+
     use super::*;
 
     #[test]

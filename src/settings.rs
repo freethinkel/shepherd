@@ -5,6 +5,7 @@ use gpui::{App, Bounds, Global, Pixels, Size, WindowAppearance, point, px, size}
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -20,6 +21,8 @@ pub struct Settings {
     #[serde(skip_serializing)]
     pub theme_family: Option<String>,
     pub appearance: AppearanceMode,
+    /// What runs the terminals.
+    pub backend: Backend,
     /// The herdr binary; `None` is `herdr` on PATH.
     pub herdr_bin: Option<String>,
     /// herdr's API socket; `None` is herdr's own default.
@@ -98,6 +101,46 @@ pub struct Settings {
     pub web_links_inside: bool,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
+}
+
+/// What runs the terminals. An unknown (future) value reads as herdr.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    Hc,
+    Rex,
+    #[default]
+    #[serde(other)]
+    Herdr,
+}
+
+static ACTIVE: AtomicU8 = AtomicU8::new(0);
+
+impl Backend {
+    /// What the windows run on now.
+    pub fn active() -> Self {
+        match ACTIVE.load(Ordering::Relaxed) {
+            1 => Backend::Hc,
+            2 => Backend::Rex,
+            _ => Backend::Herdr,
+        }
+    }
+
+    /// Moves the windows' panes to this one. The one left loses its connection; its server runs on.
+    pub fn activate(self) {
+        let at = match self {
+            Backend::Herdr => 0,
+            Backend::Hc => 1,
+            Backend::Rex => 2,
+        };
+        ACTIVE.store(at, Ordering::Relaxed);
+        if self != Backend::Hc {
+            crate::hc::disconnect();
+        }
+        if self != Backend::Rex {
+            crate::rex::disconnect();
+        }
+    }
 }
 
 /// An agent whose plan limits Shepherd reads. An unknown (future) value reads as Claude.
@@ -269,6 +312,7 @@ impl Default for Settings {
             theme_family: None,
             appearance: AppearanceMode::System,
             herdr_bin: None,
+            backend: Backend::Herdr,
             herdr_socket: None,
             herdr_machine: None,
             place_looks: BTreeMap::new(),

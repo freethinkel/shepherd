@@ -45,6 +45,18 @@ Settings → Appearance can make the window translucent (your compositor decides
 
 Shepherd needs macOS 14 or later, or Linux. It talks to the herdr server over `~/.config/herdr/herdr.sock` and starts the server if nothing answers there. If herdr isn't installed, Shepherd downloads the build for your system from herdr.dev, checks its SHA-256 and puts it in `~/.local/bin`, as herdr's `install.sh` does. You can point it at another binary or socket in Settings.
 
+### herdr-core
+
+Shepherd can also run on [herdr-core](https://herdr.dev/core) (`hc`), the terminal runtime under the Herdr app, as an experiment. Switch from herdr to it and back with its `H` in the bar under the sidebar, Switch backend in the command panel, or Settings → herdr → Backend. Your herdr sessions keep running either way.
+
+The two don't share anything: herdr-core has terminals, not workspaces, so Shepherd keeps its own workspaces, tabs and splits in a document in the core, and shows only the terminals it started. Plugins, popups, Kitty images and resuming agents after a reboot are herdr's and don't work there. Worktrees do: Shepherd makes them with git in `~/.herdr/worktrees` and runs a project's commands from Settings → Worktrees itself, so there they run only while Shepherd is open. An agent shows its status only if it reports it (Claude Code and pi do).
+
+### Rex
+
+Shepherd can also run on [Rex](https://www.superlogical.com/rex/docs), as an experiment, on a Mac with Rex installed. Switch to it with its `R` in the bar, Switch backend in the command panel, or Settings → herdr → Backend. Shepherd starts Rex's server if nothing answers.
+
+Shepherd shows the same sessions as Rex.app: a session is a workspace, a window a tab, a block a pane. A pane in Shepherd's front window sets its terminal's size, and Rex.app follows it until Shepherd goes to the background. Rex's floating layers don't show, a pane moves only within its session, and plugins, popups and Kitty images are herdr's. Worktrees work as on herdr-core, and an agent shows its status only if it reports it.
+
 ## Keys
 
 | Keys | Action |

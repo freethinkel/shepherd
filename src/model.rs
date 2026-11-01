@@ -81,7 +81,7 @@ pub struct Workspace {
     pub worktree: Option<Worktree>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Worktree {
     pub repo_key: String,
     pub is_linked_worktree: bool,
