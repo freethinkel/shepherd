@@ -891,8 +891,8 @@ impl Shell {
     }
 
     fn pane_command(&mut self, window: &Window, cx: &mut Context<Self>, make: impl FnOnce(String) -> Command) {
-        // a page shown hides the panes: nothing unseen is split or closed
-        if self.pages.shown.is_some() {
+        // a page shown hides the panes, and the keyboard in the panel isn't theirs: nothing unseen is split or closed
+        if self.pages.shown.is_some() || self.panel_focused() {
             return;
         }
         if let Some(pane_id) = self.active_pane(window, cx) {

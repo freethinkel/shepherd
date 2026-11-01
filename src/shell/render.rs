@@ -70,7 +70,7 @@ impl Render for Shell {
         if std::mem::take(&mut self.popup_closed) && !self.panes.values().any(|p| p.read(cx).focus_handle(cx).is_focused(window)) {
             self.focused = None;
         }
-        let overlaid = self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open()) || self.floating_open();
+        let overlaid = self.panel_focused() || self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open()) || self.floating_open();
         for f in &shown {
             if !self.panes.contains_key(&f.pane_id) {
                 let id = f.pane_id.clone();
@@ -134,10 +134,17 @@ impl Render for Shell {
         let edges: Vec<f32> = splits.iter().map(|s| crate::model::split_edge(&frames, s)).collect();
         let floating = self.render_floating(&theme, window, cx);
         let grid = div()
+            .id("pane-grid")
             .flex_1()
             .min_h_0()
             .relative()
             .overflow_hidden()
+            // the pane under the click focuses itself
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                if this.right.focused.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .bg(theme.terminal.background)
             .child(
                 canvas(move |bounds, _, _| grid_bounds.set(Some(bounds)), |_, _, _, _| {})
@@ -323,6 +330,9 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
+                if this.panel_focused() {
+                    return this.close_active_surface(cx);
+                }
                 if let Some(tab) = this.shown_tab().filter(|_| this.pages.shown.is_none()) {
                     this.send(Command::CloseTab { tab_id: tab.tab_id }, cx, |_, _, _| {});
                 }
@@ -330,10 +340,24 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
             .on_action(cx.listener(|this, _: &SplitRight, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: false })))
             .on_action(cx.listener(|this, _: &SplitDown, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: true })))
-            .on_action(cx.listener(|this, _: &ClosePane, w, cx| this.pane_command(w, cx, |pane_id| Command::ClosePane { pane_id })))
+            .on_action(cx.listener(|this, _: &ClosePane, w, cx| {
+                if this.panel_focused() {
+                    return this.close_active_surface(cx);
+                }
+                this.pane_command(w, cx, |pane_id| Command::ClosePane { pane_id })
+            }))
             .on_action(cx.listener(|this, _: &ToggleZoom, w, cx| this.pane_command(w, cx, |pane_id| Command::Zoom { pane_id })))
-            .on_action(cx.listener(|this, _: &FocusLeft, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Left })))
-            .on_action(cx.listener(|this, _: &FocusRight, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Right })))
+            .on_action(cx.listener(|this, _: &FocusLeft, w, cx| {
+                if this.panel_focused() {
+                    return this.focus_panel(false, w, cx);
+                }
+                this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Left })
+            }))
+            .on_action(cx.listener(|this, _: &FocusRight, w, cx| {
+                if !this.enter_panel(w, cx) {
+                    this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Right })
+                }
+            }))
             .on_action(cx.listener(|this, _: &FocusUp, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Up })))
             .on_action(cx.listener(|this, _: &FocusDown, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Down })))
             .on_action(cx.listener(|this, _: &NavigateLeft, w, cx| this.navigate(Direction::Left, w, cx)))
@@ -349,8 +373,8 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &Tab7, _, cx| this.go_to_tab(6, cx)))
             .on_action(cx.listener(|this, _: &Tab8, _, cx| this.go_to_tab(7, cx)))
             .on_action(cx.listener(|this, _: &Tab9, _, cx| this.go_to_tab(8, cx)))
-            .on_action(cx.listener(|this, _: &PreviousTab, w, cx| this.step_tab(false, w, cx)))
-            .on_action(cx.listener(|this, _: &NextTab, w, cx| this.step_tab(true, w, cx)))
+            .on_action(cx.listener(|this, _: &PreviousTab, _, cx| this.step_tab(false, cx)))
+            .on_action(cx.listener(|this, _: &NextTab, _, cx| this.step_tab(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.step_workspace(false, cx)))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))

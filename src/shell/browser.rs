@@ -108,6 +108,7 @@ impl Shell {
         }
         self.right.panels.entry(ws).or_default().add(Surface::Browser(id.clone()));
         if focus_address {
+            self.focus_panel(true, window, cx);
             let input = self.address(&id, window, cx);
             input.update(cx, |input, cx| input.focus(window, cx));
         }
@@ -194,6 +195,7 @@ impl Shell {
     /// The panel's browser tab's address field takes the keyboard, its text selected; a sidebar page has none.
     pub(super) fn focus_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((id, _)) = self.panel_page(window) else { return };
+        self.focus_panel(true, window, cx);
         let input = self.address(&id, window, cx);
         input.update(cx, |input, cx| {
             input.focus(window, cx);

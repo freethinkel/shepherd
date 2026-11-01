@@ -88,6 +88,12 @@ impl PanelState {
     }
 }
 
+/// Whether a visible page holds the keyboard: a sidebar page has the window to itself, a panel page beside the panes
+/// only once it's asked to, and `popup` (a menu, the address field, a note) keeps it from either.
+pub fn page_takes_keyboard(sidebar_page: bool, focus_in_panel: bool, popup: bool) -> bool {
+    (sidebar_page || focus_in_panel) && !popup
+}
+
 /// What the picker and the `+` list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Offer {

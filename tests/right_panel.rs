@@ -127,3 +127,13 @@ fn tab_drags_quantise_and_slide() {
     assert_eq!(slide_offset(1, 2, 0), 1.);
     assert_eq!(slide_offset(0, 0, 2), 0.);
 }
+
+#[test]
+fn a_visible_page_keeps_its_hands_off_the_keyboard_until_asked() {
+    use shepherd::right_panel::page_takes_keyboard as takes;
+    assert!(takes(true, false, false)); // a sidebar page has the window to itself, as today
+    assert!(!takes(false, false, false)); // a panel page beside a terminal
+    assert!(takes(false, true, false)); // clicked into
+    assert!(!takes(false, true, true)); // a popup, the address field or a note holds it
+    assert!(!takes(true, false, true));
+}

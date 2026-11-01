@@ -601,8 +601,11 @@ impl Shell {
         cx.notify();
     }
 
-    /// The next or previous tab in the tab bar's order.
-    pub(super) fn step_tab(&mut self, forward: bool, _window: &mut Window, cx: &mut Context<Self>) {
+    /// The next or previous tab: the panel's with the keyboard in it, else the tab bar's.
+    pub(super) fn step_tab(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.panel_focused() {
+            return self.update_panel(cx, |p| p.step(forward));
+        }
         let shown = self.shown_tab().map(|t| t.tab_id);
         let tabs: Vec<String> = self.tab_bar.entries.iter().filter(|e| e.exit.is_none()).map(|e| e.tab.id.clone()).collect();
         let Some(i) = tabs.iter().position(|id| Some(id) == shown.as_ref()) else { return };

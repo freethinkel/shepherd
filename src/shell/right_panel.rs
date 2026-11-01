@@ -22,6 +22,8 @@ pub(super) struct RightPanel {
     pub(super) drag: bool,
     /// The strip's `+` menu and where it opened.
     pub(super) plus: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
+    /// The workspace whose panel has the keyboard, not its panes.
+    pub(super) focused: Option<String>,
     scroll: gpui::ScrollHandle,
     tab_drag: Option<TabDrag>,
     /// What the picker and the `+` offered at the last render.
@@ -30,7 +32,7 @@ pub(super) struct RightPanel {
 
 impl RightPanel {
     pub(super) fn new(width: f32) -> Self {
-        RightPanel { panels: HashMap::new(), width, drag: false, plus: None, scroll: Default::default(), tab_drag: None, offers: Vec::new() }
+        RightPanel { panels: HashMap::new(), width, drag: false, plus: None, focused: None, scroll: Default::default(), tab_drag: None, offers: Vec::new() }
     }
 }
 
@@ -118,6 +120,50 @@ impl Shell {
         clamp_width(self.right.width, f32::from(window.viewport_size().width), self.sidebar_now())
     }
 
+    pub(super) fn panel_focused(&self) -> bool {
+        self.right.focused.is_some()
+    }
+
+    /// The keyboard to the panel, or back to the panes.
+    pub(super) fn focus_panel(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match on {
+            true => {
+                self.right.focused = self.shown_tab().map(|t| t.workspace_id);
+                // a pane hands its keys over; `sync_pages` gives them to the page
+                window.focus(&self.focus, cx);
+            }
+            false => self.release_panel(),
+        }
+        cx.notify();
+    }
+
+    /// The keyboard back to the panes: forgetting the pane focused has the next render focus it again.
+    pub(super) fn release_panel(&mut self) {
+        if self.right.focused.take().is_some() {
+            self.focused = None;
+        }
+    }
+
+    /// `FocusRight` past the rightmost pane; false when a pane lies that way, or there's no panel.
+    pub(super) fn enter_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let tab = self.shown_tab().map(|t| t.tab_id);
+        let layout = self.snapshot.as_ref().and_then(|s| s.layouts.iter().find(|l| Some(&l.tab_id) == tab.as_ref()));
+        let pane = self.active_pane(window, cx);
+        let beside = pane.is_some_and(|p| layout.is_some_and(|l| l.has_neighbor(&p, Direction::Right)));
+        let enters = !beside && !self.panel_focused() && self.right_panel_shown(window);
+        if enters {
+            self.focus_panel(true, window, cx);
+        }
+        enters
+    }
+
+    /// `CloseTab` and `ClosePane` with the keyboard in the panel.
+    pub(super) fn close_active_surface(&mut self, cx: &mut Context<Self>) {
+        if let Some(surface) = self.panel().and_then(|p| p.active.clone()) {
+            self.close_surface(&surface, cx);
+        }
+    }
+
     pub(super) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
         self.update_panel(cx, PanelState::toggle);
     }
@@ -167,7 +213,7 @@ impl Shell {
             .collect()
     }
 
-    fn close_surface(&mut self, surface: &Surface, cx: &mut Context<Self>) {
+    pub(super) fn close_surface(&mut self, surface: &Surface, cx: &mut Context<Self>) {
         match surface {
             Surface::Browser(id) => self.close_browser_tab(id, cx),
             Surface::PullRequest => self.update_panel(cx, |p| p.close(surface)),
@@ -185,7 +231,17 @@ impl Shell {
                 let key = (id, None);
                 let bar = self.render_browser_bar(&key, theme, window, cx);
                 let page = div().flex_1().min_h_0().flex().child(self.render_web_area(&key, theme, window, cx)).children(self.render_annotations(&key, theme, cx));
-                div().flex_1().min_h_0().flex().flex_col().child(bar).child(page).into_any_element()
+                // the page's own clicks reach `PageEvent::Clicked`; this takes the bar's and the notes'
+                div()
+                    .id("right-panel-browser")
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| this.focus_panel(true, window, cx)))
+                    .child(bar)
+                    .child(page)
+                    .into_any_element()
             }
             None => self.render_surface_picker(theme, cx).into_any_element(),
         };
@@ -281,9 +337,11 @@ impl Shell {
                 theme,
                 cx.listener(move |this, _, _, cx| this.close_surface(&close, cx)),
             )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 cx.stop_propagation();
                 this.update_panel(cx, |p| p.activate(&activate));
+                // a page takes the keyboard from a click on its tab; the pull request has no use for it
+                this.focus_panel(matches!(activate, Surface::Browser(_)), window, cx);
             }))
             .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.close_surface(&middle, cx)))
             .on_drag(DraggedChip { workspace: workspace.clone(), from: ix, title }, |chip, _, _, cx| {

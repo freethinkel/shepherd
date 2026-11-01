@@ -212,6 +212,7 @@ impl Shell {
 
     /// Every user selection of a tab goes through here; it leaves the page for the tabs.
     pub(super) fn select_tab(&mut self, tab: Option<String>) {
+        self.release_panel();
         self.selected_tab = tab;
         self.pages.shown = None;
     }
@@ -503,6 +504,9 @@ impl Shell {
             }
             // the address field let go, as a click elsewhere in Shepherd would
             PageEvent::Clicked => {
+                if self.panel_page(window).as_ref() == Some(&key) {
+                    self.focus_panel(true, window, cx);
+                }
                 if self.browser.editing() || self.note_focused(window, cx) {
                     window.focus(&self.focus, cx);
                 }
@@ -569,6 +573,11 @@ impl Shell {
         if self.shown_page(cx).is_none() {
             self.pages.shown = None;
         }
+        // a panel gone from under the keyboard, or left for another workspace, gives it back
+        if self.right.focused.is_some() && (self.right.focused != self.shown_tab().map(|t| t.workspace_id) || !self.right_panel_shown(window)) {
+            self.release_panel();
+            cx.notify();
+        }
         let shown = self.visible_page(window, cx);
         // the page shown has no web view and no forward under its key now (the machine shown changed under it, its web
         // view dropped): one is made, as a click makes it; a browser tab that can't have one closes
@@ -600,7 +609,7 @@ impl Shell {
                 }
             }
             // the keyboard goes with the page, to a menu or dialog open over it, and back to Shepherd when it hides
-            let focused = visible && !popup;
+            let focused = visible && crate::right_panel::page_takes_keyboard(self.pages.shown.is_some(), self.right.focused.is_some(), popup);
             if page.focused != focused {
                 page.focused = focused;
                 match focused {
