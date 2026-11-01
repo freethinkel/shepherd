@@ -702,7 +702,7 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(2.))
-            .pr(px(TAB_TOP + if self.review_open { 0. } else { window_controls_w(cx) }))
+            .pr(px(TAB_TOP + window_controls_w(cx)))
             .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
             .child(nav_button(theme, view.clone(), "web-back", "icons/solar/alt-arrow-left.svg", can(wry::WebView::can_go_back), wry::WebView::go_back))
             .child(nav_button(theme, view.clone(), "web-forward", "icons/solar/alt-arrow-right.svg", can(wry::WebView::can_go_forward), wry::WebView::go_forward))

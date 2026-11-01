@@ -1,6 +1,8 @@
 //! The right panel, Zeron's: a column of tabs beside the panes, one set per workspace. The logic is
 //! `crate::right_panel`'s; the strip, the picker and the `+` here are ported from Zeron's shell.
 use super::review::ShownReview;
+use crate::ui::review::Review;
+use crate::ui::statusbar::fetching;
 use super::*;
 use crate::right_panel::{Offer, PanelState, Surface, clamp_width, drop_index, fits, offered, slide_offset};
 use crate::settings::RIGHT_PANEL_WIDTH;
@@ -70,6 +72,15 @@ impl Render for ChipGhost {
     }
 }
 
+/// The pull request chip's title: the request's own once known.
+fn pull_request_title(shown: &ShownReview) -> SharedString {
+    match &shown.review {
+        Some(Review::Found { request: Some(r), .. }) if r.pr.gitlab => format!("MR !{}", r.pr.number).into(),
+        Some(Review::Found { request: Some(r), .. }) => format!("PR #{}", r.pr.number).into(),
+        _ => "Pull request".into(),
+    }
+}
+
 fn offer_row(offer: Offer) -> (&'static str, &'static str) {
     match offer {
         Offer::Browser => ("icons/solar/global.svg", "Browser"),
@@ -95,6 +106,16 @@ impl Shell {
     pub(super) fn right_panel_shown(&self, window: &Window) -> bool {
         let room = fits(f32::from(window.viewport_size().width), self.sidebar_now());
         self.settings.is_none() && self.pages.shown.is_none() && room && self.panel().is_some_and(|p| p.open)
+    }
+
+    /// Whether the panel shows the pull request.
+    pub(super) fn pull_request_shown(&self, window: &Window) -> bool {
+        self.right_panel_shown(window) && self.panel().is_some_and(|p| p.active == Some(Surface::PullRequest))
+    }
+
+    /// The width the panel is drawn at.
+    pub(super) fn right_panel_width(&self, window: &Window) -> f32 {
+        clamp_width(self.right.width, f32::from(window.viewport_size().width), self.sidebar_now())
     }
 
     pub(super) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
@@ -131,17 +152,17 @@ impl Shell {
     }
 
     /// The strip's tabs with their titles, in order.
-    fn surface_rows(&self) -> Vec<(Surface, SharedString)> {
+    fn surface_rows(&self, shown: &ShownReview) -> Vec<(Surface, SharedString)> {
         let Some(panel) = self.panel() else { return Vec::new() };
         panel
             .tabs
             .iter()
             .map(|s| {
-                let title = match s {
-                    Surface::Browser(_) => "Browser",
-                    Surface::PullRequest => "Pull request",
+                let title: SharedString = match s {
+                    Surface::Browser(_) => "Browser".into(),
+                    Surface::PullRequest => pull_request_title(shown),
                 };
-                (s.clone(), title.into())
+                (s.clone(), title)
             })
             .collect()
     }
@@ -151,14 +172,14 @@ impl Shell {
     }
 
     /// The panel and its resize edge.
-    pub(super) fn render_right_panel(&mut self, theme: &Theme, _shown: &ShownReview, has_remote: bool, window: &mut Window, cx: &mut Context<Self>) -> [AnyElement; 2] {
+    pub(super) fn render_right_panel(&mut self, theme: &Theme, shown: &ShownReview, has_remote: bool, window: &mut Window, cx: &mut Context<Self>) -> [AnyElement; 2] {
         self.right.offers = offered(has_remote, true);
-        let window_w = f32::from(window.viewport_size().width);
-        let width = clamp_width(self.right.width, window_w, self.sidebar_now());
-        let strip = self.render_right_strip(theme, cx);
+        let width = self.right_panel_width(window);
+        let strip = self.render_right_strip(theme, shown, window, cx);
         let body = match self.panel().and_then(|p| p.active.clone()) {
-            Some(_) => div().flex_1().min_h_0(),
-            None => self.render_surface_picker(theme, cx),
+            Some(Surface::PullRequest) => self.render_review(theme, shown, window, cx),
+            Some(Surface::Browser(_)) => div().flex_1().min_h_0().into_any_element(),
+            None => self.render_surface_picker(theme, cx).into_any_element(),
         };
         let panel = div().id("right-panel").w(px(width)).h_full().flex_none().flex().flex_col().overflow_hidden().bg(theme.wash(0.05)).border_l_1().border_color(theme.border).child(strip).child(body);
         let edge = div()
@@ -192,12 +213,13 @@ impl Shell {
     }
 
     /// The titlebar band over the panel: one chip per tab and the `+`, as t3code's `RightPanelTabs`, and the ✕.
-    fn render_right_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn render_right_strip(&mut self, theme: &Theme, shown: &ShownReview, window: &mut Window, cx: &mut Context<Self>) -> Div {
         // the pointer let go outside the strip
         if self.right.tab_drag.is_some() && !cx.has_active_drag() {
             self.right.tab_drag = None;
         }
-        let rows = self.surface_rows();
+        let rows = self.surface_rows(shown);
+        let fetching_review = shown.key.as_deref().is_some_and(|k| fetching::<Review>(k, cx));
         let count = rows.len();
         let active = self.panel().and_then(|p| p.active.clone());
         let workspace = self.shown_tab().map(|t| t.workspace_id).unwrap_or_default();
@@ -235,7 +257,10 @@ impl Shell {
                 Surface::Browser(_) => "icons/solar/global.svg",
                 Surface::PullRequest => "icons/git-pull-request.svg",
             };
-            let leading = tab_chip_icon(icon, is_active, theme);
+            let leading = match surface {
+                Surface::PullRequest if fetching_review => crate::ui::loader::mini_spinner(2., theme.text_faint, window).into_any_element(),
+                _ => tab_chip_icon(icon, is_active, theme),
+            };
             let drop_workspace = workspace.clone();
             let chip = tab_chip(
                 TabChip { id: "right-surface-tab", close_id: "right-surface-close", ix, active: is_active, title: title.clone(), leading },

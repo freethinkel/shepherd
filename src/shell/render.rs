@@ -250,8 +250,9 @@ impl Render for Shell {
             .children(floating);
 
         let show_bar = SettingsGlobal::of(cx).settings.show_status_bar;
+        let pull_request_shown = self.pull_request_shown(window);
         // the picker offers the pull request by what this says, so an open panel needs it too
-        let shown = if show_bar || self.review_open || self.right_panel_shown(window) { self.shown_review(snapshot.as_ref(), window, cx) } else { Default::default() };
+        let shown = if show_bar || self.right_panel_shown(window) { self.shown_review(snapshot.as_ref(), window, cx) } else { Default::default() };
         let statusbar = show_bar.then(|| {
             let pane = self.active_pane(window, cx);
             let on_branch = cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -286,16 +287,15 @@ impl Render for Shell {
                     this.statusbar_menu = Some(crate::ui::Popup::new(e.position));
                     cx.notify();
                 }))
-                .child(crate::ui::statusbar::bar(show, snapshot.as_ref(), pane.as_deref(), shown.review.as_ref(), &theme, open, self.review_open, on_branch, on_spent, on_usage, on_review, window, cx))
+                .child(crate::ui::statusbar::bar(show, snapshot.as_ref(), pane.as_deref(), shown.review.as_ref(), &theme, open, pull_request_shown, on_branch, on_spent, on_usage, on_review, window, cx))
         });
         let spring_back = self.pane_spring_back(window);
         let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
         let on_page = settings_page.is_some();
         // nothing to show outside a repo with a remote, and no PR label to close it from: it waits for one
         let has_remote = shown.key.is_some() && !matches!(shown.review, Some(crate::ui::review::Review::NoRemote));
-        let review = (self.review_open && !on_page && has_remote).then(|| self.render_review(&theme, &shown, window, cx));
         let right_panel = self.right_panel_shown(window).then(|| self.render_right_panel(&theme, &shown, has_remote, window, cx));
-        if review.is_none() {
+        if !pull_request_shown {
             // a hidden panel's selection is not Cmd+C's to copy
             crate::ui::markdown::forget("review-");
         }
@@ -385,21 +385,18 @@ impl Render for Shell {
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
                 this.drag_divider(e.position, cx);
                 this.drag_sidebar(e.position.x, cx);
-                this.drag_review(e.position.x, w, cx);
                 this.drag_right_panel(e.position.x, w, cx);
                 this.drag_agents(e.position.y, w, cx);
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
                 this.end_sidebar_drag(cx);
-                this.end_review_drag(cx);
                 this.end_right_panel_drag(cx);
                 this.end_agents_drag(cx);
             }))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
                 this.end_sidebar_drag(cx);
-                this.end_review_drag(cx);
                 this.end_right_panel_drag(cx);
                 this.end_agents_drag(cx);
             }))
@@ -425,7 +422,6 @@ impl Render for Shell {
                     None => el.child(grid),
                 }).children(statusbar)),
             })
-            .children(review.into_iter().flatten())
             .children(right_panel.into_iter().flatten())
             // The sidebar closed: the window's left edge brings it out floating over the panes, as Arc's does.
             .when(!self.sidebar_open && sidebar_w == 0. && !on_page, |el| {
