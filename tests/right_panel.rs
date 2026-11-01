@@ -137,3 +137,11 @@ fn a_visible_page_keeps_its_hands_off_the_keyboard_until_asked() {
     assert!(!takes(false, true, true)); // a popup, the address field or a note holds it
     assert!(!takes(true, false, true));
 }
+
+#[test]
+fn closing_a_tab_another_panel_holds_leaves_an_empty_open_panel_open() {
+    let mut p = PanelState::default();
+    p.open = true;
+    p.close(&b("1"));
+    assert!(p.open);
+}

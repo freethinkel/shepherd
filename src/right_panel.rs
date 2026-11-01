@@ -41,6 +41,9 @@ impl PanelState {
 
     /// Closes a tab: the last one visited shows instead, and the last one closes the panel.
     pub fn close(&mut self, surface: &Surface) {
+        if !self.tabs.contains(surface) {
+            return;
+        }
         self.tabs.retain(|s| s != surface);
         self.history.retain(|s| s != surface);
         if self.active.as_ref() == Some(surface) {
