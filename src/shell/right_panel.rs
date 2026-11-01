@@ -164,6 +164,8 @@ impl Shell {
         }
     }
 
+    // ponytail: opens at once, unlike the sidebar: nobody has watched a native page follow a slide; a `FoldMotion` on
+    // the width if the jump bothers
     pub(super) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
         self.update_panel(cx, PanelState::toggle);
     }
@@ -222,7 +224,7 @@ impl Shell {
 
     /// The panel and its resize edge.
     pub(super) fn render_right_panel(&mut self, theme: &Theme, shown: &ShownReview, has_remote: bool, window: &mut Window, cx: &mut Context<Self>) -> [AnyElement; 2] {
-        self.right.offers = offered(has_remote, true);
+        self.right.offers = offered(has_remote, super::web::embeds_pages(window));
         let width = self.right_panel_width(window);
         let strip = self.render_right_strip(theme, shown, window, cx);
         let body = match self.panel().and_then(|p| p.active.clone()) {

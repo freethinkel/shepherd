@@ -12,6 +12,12 @@ use wry::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 /// A page by its entry's id and, for one opened on a machine, that machine's SSH target.
 pub(super) type PageKey = (String, Option<String>);
 
+/// Whether a web view can sit in the window: not in a Wayland one.
+pub(super) fn embeds_pages(window: &Window) -> bool {
+    use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    !matches!(HasWindowHandle::window_handle(window).map(|h| h.as_raw()), Ok(RawWindowHandle::Wayland(_)))
+}
+
 /// What a web view reports, sent from its handlers (which run without a `cx`) to the Shell.
 pub(super) enum PageEvent {
     Title(String),
@@ -252,8 +258,7 @@ impl Shell {
         let entries = SettingsGlobal::of(cx).settings.web_entries.iter().cloned().chain(self.browser.entries());
         let Some(entry) = entries.into_iter().find(|e| e.id == id) else { return false };
         let url = normalize(&entry.url);
-        use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        if matches!(HasWindowHandle::window_handle(window).map(|h| h.as_raw()), Ok(RawWindowHandle::Wayland(_))) {
+        if !embeds_pages(window) {
             cx.open_url(&url);
             return false;
         }
