@@ -2,7 +2,7 @@
 use super::*;
 
 /// What herdr's `pane.read` gives at most (it caps `lines`, with no paging), so what search sees of a history.
-pub(super) const READ_LINES: u32 = 1000;
+pub(super) const READ_LINES: usize = 1000;
 
 pub(super) struct Search {
     input: Entity<InputState>,
@@ -85,11 +85,10 @@ impl PaneTerminal {
         search.current = None;
         search._read = None;
         cx.notify();
-        let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>().filter(|_| !query.is_empty()) else { return };
-        let (client, pane_id) = (client.clone(), self.pane_id.clone());
+        let Some(PaneQueries(backend, rt)) = cx.try_global::<PaneQueries>().filter(|_| !query.is_empty()) else { return };
+        let (backend, pane_id) = (backend.clone(), self.pane_id.clone());
         let read = rt.spawn(async move {
-            let read = client.call("pane.read", serde_json::json!({"pane_id": pane_id, "source": "recent", "lines": READ_LINES})).await;
-            let text = read.ok().and_then(|r| r["read"]["text"].as_str().map(str::to_owned)).unwrap_or_default();
+            let text = backend.mux.read(pane_id, READ_LINES, false).await.unwrap_or_default();
             let lines = text.lines().enumerate();
             let hits = lines.flat_map(|(i, l)| find_all(&l.chars().collect::<Vec<_>>(), &query).into_iter().map(move |r| (i, r)));
             (text.lines().count(), hits.collect::<Vec<_>>())

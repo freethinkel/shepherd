@@ -17,8 +17,8 @@ fn main() {
         let path = shepherd::settings::Settings::path();
         let (settings, error) = shepherd::settings::Settings::load(&path);
         shepherd::herdr::set_binary(settings.herdr_bin.clone());
+        shepherd::hc::set_sync(settings.hc_sync);
         shepherd::herdr::set_socket(settings.herdr_socket.clone());
-        settings.backend.activate();
         // a worktree hooks plugin an older Shepherd installed gets this one's files
         std::thread::spawn(|| {
             if let Err(e) = shepherd::herdr::hooks::refresh() {

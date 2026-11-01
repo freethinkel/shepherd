@@ -653,7 +653,6 @@ impl Shell {
                     format!("herdr forgets {}. Its session keeps running on {}.", m.label, m.target),
                     "Forget",
                 ),
-                sessions::Place::Core | sessions::Place::Rex => unreachable!("a backend is not deletable"),
             };
             let card = dialog_card(theme, "session-delete-dialog", title)
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.finish_delete(false, cx)))
@@ -910,8 +909,8 @@ impl Shell {
             let (pane_id, at) = menu.value.clone();
             let chords = cx.try_global::<ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
             let items: [(&str, fn(String) -> Command); 4] = [
-                ("SplitRight", |pane_id| Command::Split { pane_id, down: false }),
-                ("SplitDown", |pane_id| Command::Split { pane_id, down: true }),
+                ("SplitRight", |pane_id| Command::Split { pane_id, down: false, cwd: None }),
+                ("SplitDown", |pane_id| Command::Split { pane_id, down: true, cwd: None }),
                 ("ToggleZoom", |pane_id| Command::Zoom { pane_id }),
                 ("ClosePane", |pane_id| Command::ClosePane { pane_id }),
             ];

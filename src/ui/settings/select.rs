@@ -194,13 +194,13 @@ impl SettingsView {
         self.select(theme, "editor-select", labels, index, fallback, |_| None, |i, cx| update(cx, |s| s.editor = EDITORS[i].0.map(String::from)), cx)
     }
 
-    /// herdr, herdr-core or Rex: every window moves there at once.
-    pub(super) fn backend_select(&self, theme: &Theme, current: crate::settings::Backend, cx: &mut Context<Self>) -> Div {
-        use crate::settings::Backend;
-        const BACKENDS: [(Backend, &str); 3] = [(Backend::Herdr, "herdr"), (Backend::Hc, "herdr-core (hc)"), (Backend::Rex, "Rex")];
-        let labels = BACKENDS.iter().map(|(_, label)| SharedString::from(*label)).collect();
-        let index = BACKENDS.iter().position(|(b, _)| *b == current);
-        self.select(theme, "backend-select", labels, index, SharedString::default(), |_| None, |i, cx| crate::shell::set_backend(BACKENDS[i].0, cx), cx)
+    /// What runs the terminals: every window moves there at once.
+    pub(super) fn backend_select(&self, theme: &Theme, current: crate::backend::Kind, cx: &mut Context<Self>) -> Div {
+        use crate::backend::Kind;
+        let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|k| k.installed() || *k == current).collect();
+        let labels = kinds.iter().map(|k| SharedString::from(k.name())).collect();
+        let index = kinds.iter().position(|k| *k == current);
+        self.select(theme, "backend-select", labels, index, SharedString::default(), |_| None, move |i, cx| crate::shell::set_backend(kinds[i], cx), cx)
     }
 
     /// Every installed family (Zed's font picker); a family named in settings.json that is not installed shows as itself.

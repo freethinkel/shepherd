@@ -136,8 +136,9 @@ impl Shell {
                     .border_color(theme.border_strong)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        let client = this.client.clone();
-                        this.rt.spawn(async move { client.call("popup.close", json!({})).await });
+                        if let Some(client) = this.backend.herdr() {
+                            this.rt.spawn(async move { client.call("popup.close", json!({})).await });
+                        }
                         cx.notify();
                     }))
                     .child(

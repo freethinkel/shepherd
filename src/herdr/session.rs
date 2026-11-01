@@ -5,6 +5,7 @@
 //! another herdr version, no socket — it falls back to a `herdr terminal session control <pane>` child (base64
 //! frames in, JSON command lines out), where mouse capture stays unknown.
 use super::wire::{self, AttachScrollDirection, AttachScrollSource, ClientMessage, MousePosition, ServerMessage};
+use crate::backend::{Mode, SessionEvent, Terminal};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
@@ -184,53 +185,18 @@ fn session_command(args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub enum SessionEvent {
-    /// Terminal bytes to feed the emulator.
-    Frame(Vec<u8>),
-    /// The terminal as it is, in Ghostty's snapshot format: a new emulator, before any frame (Rex).
-    Snapshot(Vec<u8>),
-    /// Whether the pane's app asks for mouse reporting (socket sessions only).
-    MouseCapture(bool),
-    /// The kitty keyboard flags the pane's app asked for (socket sessions only).
-    KeyboardFlags(u16),
-    /// The grid herdr renders the terminal at (a client shell's popup only): the frames that follow are this size.
-    Size(u16, u16),
-    /// The stream is over: herdr's reason, its stderr, or why it could not run.
-    Ended(String),
-}
-
 pub struct Session {
     transport: Transport,
-}
-
-/// How a session holds its pane. herdr allows one controller, which types into the pane and sets its size;
-/// observers only watch, so herdr's other clients size the pane.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mode {
-    Control,
-    /// Control, replacing another controller.
-    Takeover,
-    Observe,
 }
 
 enum Transport {
     Socket(Mutex<Stream>),
     Cli { child: Option<Child>, stdin: Mutex<Option<ChildStdin>> },
-    Hc(crate::hc::Attached),
-    Rex(crate::rex::Attached),
 }
 
 impl Session {
     /// `cell_px` is a cell in device pixels ((0, 0) while unknown): herdr gives the pane's app the pixel size from it.
     pub fn spawn(pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), mode: Mode) -> anyhow::Result<(Session, UnboundedReceiver<SessionEvent>)> {
-        if crate::settings::Backend::active() == crate::settings::Backend::Rex {
-            let (attached, rx) = crate::rex::attach(pane, cols, rows, cell_px, mode == Mode::Observe)?;
-            return Ok((Session { transport: Transport::Rex(attached) }, rx));
-        }
-        if crate::settings::Backend::active() == crate::settings::Backend::Hc {
-            let (attached, rx) = crate::hc::attach(pane, cols, rows, cell_px, mode == Mode::Observe)?;
-            return Ok((Session { transport: Transport::Hc(attached) }, rx));
-        }
         match Self::spawn_socket(pane, cols, rows, cell_px, mode) {
             Some(session) => Ok(session),
             None => Self::spawn_cli(pane, cols, rows, mode),
@@ -291,42 +257,34 @@ impl Session {
         Ok((Session { transport: Transport::Cli { child: Some(child), stdin } }, rx))
     }
 
-    /// Whether this session reports [`SessionEvent::MouseCapture`] (the socket does, the CLI cannot).
-    pub fn knows_mouse_capture(&self) -> bool {
-        !matches!(self.transport, Transport::Cli { .. })
-    }
-
-    /// The stream is the program's own output, not a screen rendered for this client (herdr-core, Rex): the emulator has
-    /// the modes and history, and the mouse and wheel go to the program as a terminal encodes them.
-    pub fn raw(&self) -> bool {
-        matches!(self.transport, Transport::Hc(_) | Transport::Rex(_))
-    }
-
-    pub fn input(&self, bytes: &[u8]) {
+    fn send(&self, message: ClientMessage, record: impl FnOnce() -> Value) {
         match &self.transport {
-            Transport::Hc(attached) => return attached.input(bytes),
-            Transport::Rex(attached) => return attached.input(bytes),
-            _ => {}
+            Transport::Socket(stream) => drop(wire::write_message(&mut *stream.lock().unwrap(), &message)),
+            Transport::Cli { stdin, .. } => {
+                if let Some(stdin) = stdin.lock().unwrap().as_mut() {
+                    let _ = writeln!(stdin, "{}", record());
+                }
+            }
         }
+    }
+}
+
+impl Terminal for Session {
+    fn input(&self, bytes: &[u8]) {
         self.send(
             ClientMessage::Input { data: bytes.to_vec() },
             || json!({"type": "terminal.input", "bytes": B64.encode(bytes)}),
         );
     }
 
-    pub fn resize(&self, cols: u16, rows: u16, (cell_width_px, cell_height_px): (u32, u32)) {
-        match &self.transport {
-            Transport::Hc(attached) => return attached.resize(cols, rows, (cell_width_px, cell_height_px)),
-            Transport::Rex(attached) => return attached.resize(cols, rows, (cell_width_px, cell_height_px)),
-            _ => {}
-        }
+    fn resize(&self, cols: u16, rows: u16, (cell_width_px, cell_height_px): (u32, u32)) {
         self.send(
             ClientMessage::Resize { cols, rows, cell_width_px, cell_height_px, pixel_mouse: false },
             || json!({"type": "terminal.resize", "cols": cols, "rows": rows}),
         );
     }
 
-    pub fn scroll(&self, up: bool, lines: u16, at: Option<(u16, u16)>) {
+    fn scroll(&self, up: bool, lines: u16, at: Option<(u16, u16)>) {
         let direction = if up { AttachScrollDirection::Up } else { AttachScrollDirection::Down };
         let (column, row) = (at.map(|a| a.0), at.map(|a| a.1));
         self.send(
@@ -336,8 +294,7 @@ impl Session {
         );
     }
 
-    /// `action` is `down` / `up` / `drag` / `move`, `button` is `left` / `right` / `middle` (herdr's CLI names).
-    pub fn mouse(&self, action: &str, button: &str, column: u16, row: u16, modifiers: u8) {
+    fn mouse(&self, action: &str, button: &str, column: u16, row: u16, modifiers: u8) {
         self.send(
             ClientMessage::AttachMouse { kind: wire::mouse_kind(action, button), position: MousePosition::Cell { column, row }, geometry: None, modifiers, lines: 1 },
             || json!({"type": "terminal.mouse", "action": action, "button": button,
@@ -345,16 +302,14 @@ impl Session {
         );
     }
 
-    fn send(&self, message: ClientMessage, record: impl FnOnce() -> Value) {
-        match &self.transport {
-            Transport::Socket(stream) => drop(wire::write_message(&mut *stream.lock().unwrap(), &message)),
-            Transport::Cli { stdin, .. } => {
-                if let Some(stdin) = stdin.lock().unwrap().as_mut() {
-                    let _ = writeln!(stdin, "{}", record());
-                }
-            }
-            Transport::Hc(_) | Transport::Rex(_) => {}
-        }
+    /// Frames are a screen herdr renders for this client.
+    fn raw(&self) -> bool {
+        false
+    }
+
+    /// The socket reports [`SessionEvent::MouseCapture`], the CLI cannot.
+    fn knows_mouse_capture(&self) -> bool {
+        !matches!(self.transport, Transport::Cli { .. })
     }
 }
 
@@ -418,7 +373,6 @@ impl Drop for Session {
                 return;
             }
             Transport::Cli { child, stdin } => (child, stdin),
-            Transport::Hc(_) | Transport::Rex(_) => return,
         };
         // Closing stdin ends the session cleanly. Waiting for herdr happens off this thread: drops run on
         // GPUI's main thread, several at once on a tab switch. A child that ignores the close is killed.

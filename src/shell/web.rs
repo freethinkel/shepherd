@@ -105,7 +105,10 @@ pub(super) struct Pages {
 impl Shell {
     /// The key of the place shown in the bar (`Place::key`), once herdr has listed the places.
     pub(super) fn shown_place_key(&self) -> Option<String> {
-        self.places.iter().find(|p| self.places_shown(p)).map(sessions::Place::key)
+        match self.backend.kind() {
+            crate::backend::Kind::Herdr => self.places.iter().find(|p| self.places_shown(p)).map(sessions::Place::key),
+            kind => Some(kind.key().into()),
+        }
     }
 
     /// The entries the sidebar lists for the place shown.

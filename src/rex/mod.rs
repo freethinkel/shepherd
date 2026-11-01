@@ -4,10 +4,11 @@
 //! own bytes, which the pane's emulator reads as a terminal would.
 mod api;
 mod conn;
+pub mod facts;
 mod ws;
-pub use api::{call, disconnect, subscribe};
+pub use api::Rex;
 
-use crate::herdr::SessionEvent;
+use crate::backend::{SessionEvent, Terminal};
 use anyhow::{Context, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -15,16 +16,13 @@ use conn::Control;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::sync::{Mutex, mpsc};
+use std::sync::mpsc;
 use std::time::Duration;
 
 const TERMINAL: &str = "com.superlogical.terminal";
 const STREAM: &str = "rex.data.terminal.v1";
 /// Bytes of one `write` call: a larger message than the server's limit would close the connection.
 const WRITE: usize = 64 * 1024;
-
-/// The terminal's colors, which Rex answers a program's queries with.
-static COLORS: Mutex<Option<(String, String)>> = Mutex::new(None);
 
 /// The server's socket: `REX_SERVER` as a `rex` command reads it, else where Rex.app's server listens.
 fn socket() -> anyhow::Result<PathBuf> {
@@ -49,11 +47,6 @@ pub fn installed() -> bool {
     crate::mock::dir().is_none() && (socket().is_ok_and(|s| s.exists()) || binary().is_some())
 }
 
-/// The foreground and background, as `#rrggbb`.
-pub fn set_colors(foreground: String, background: String) {
-    *COLORS.lock().unwrap() = Some((foreground, background));
-}
-
 /// Starts the server, which Rex.app otherwise does, when it isn't up. Returns once it answers or it is plain it won't.
 fn start_server() -> anyhow::Result<()> {
     let binary = binary().context("Rex isn't installed")?;
@@ -73,7 +66,7 @@ fn start_server() -> anyhow::Result<()> {
 
 /// A pane's stream on a block, with a client of its own, so the block can be shown twice and its claim ends with the
 /// pane. Dropped, the pane detaches and the program runs on.
-pub struct Attached {
+struct Attached {
     commands: mpsc::Sender<Command>,
 }
 
@@ -82,12 +75,12 @@ enum Command {
     Resize(u16, u16, (u32, u32)),
 }
 
-impl Attached {
-    pub fn input(&self, bytes: &[u8]) {
+impl Terminal for Attached {
+    fn input(&self, bytes: &[u8]) {
         let _ = self.commands.send(Command::Input(bytes.to_vec()));
     }
 
-    pub fn resize(&self, cols: u16, rows: u16, cell_px: (u32, u32)) {
+    fn resize(&self, cols: u16, rows: u16, cell_px: (u32, u32)) {
         let _ = self.commands.send(Command::Resize(cols, rows, cell_px));
     }
 }
@@ -112,7 +105,7 @@ impl Block {
             size["cell_height_px"] = json!(cell_px.1);
         }
         self.call("resize", size)?;
-        if let Some((foreground, background)) = COLORS.lock().unwrap().clone() {
+        if let Some((foreground, background)) = crate::backend::colors() {
             self.call("set_theme", json!({"foreground": foreground, "background": background}))?;
         }
         Ok(())
@@ -144,7 +137,7 @@ fn split(mut text: &str, size: usize) -> Vec<&str> {
 
 /// Attaches to pane `pane`: a snapshot of its terminal first, then what its program writes. Blocks: run it off the
 /// main thread. Unless `observe`, this pane sets the block's size, as Rex.app's does: Rex.app follows it while it lasts.
-pub fn attach(pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), observe: bool) -> anyhow::Result<(Attached, UnboundedReceiver<SessionEvent>)> {
+fn attach(pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), observe: bool) -> anyhow::Result<(Attached, UnboundedReceiver<SessionEvent>)> {
     let (session, block) = api::ids(pane)?;
     let block = Block { control: Control::open(|_| {})?, session: session.to_string(), block: block.to_string() };
     block.control.blocking_call("session.attach", json!({"session_id": session}))?;

@@ -2,10 +2,8 @@
 //! the core, so it outlives Shepherd as the terminals do. Pure: [`super::api`] loads it, edits it and saves it.
 //! A pane is its terminal: its id is the terminal's address (`t7`).
 use crate::model::Worktree;
+use crate::model::AREA;
 use serde::{Deserialize, Serialize};
-
-/// The grid a tab's rects are in. herdr's are cells; [`crate::model`] only ever reads them as fractions of the area.
-pub const AREA: u16 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -123,6 +121,9 @@ pub struct Tab {
     pub focused: String,
     pub zoomed: bool,
     pub root: Node,
+    /// The tab of the client it was taken in from ([`Doc::adopt`]).
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 impl Tab {
@@ -142,6 +143,9 @@ pub struct Workspace {
     /// The checkout it is on; only git knows, so it is asked once and kept.
     #[serde(default)]
     pub worktree: Option<Worktree>,
+    /// The space of the client it was taken in from ([`Doc::adopt`]).
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -151,7 +155,12 @@ pub struct Doc {
     /// The last id given to a workspace or tab: ids are never reused, so a stale one cannot name a new tab.
     pub next: u32,
     pub focused_tab: Option<String>,
+    /// Terminals other clients started: when one is gone, its record is theirs.
+    pub adopted: Vec<String>,
 }
+
+/// The space of terminals no client groups.
+pub const OTHERS: &str = "";
 
 impl Doc {
     fn fresh(&mut self, kind: &str) -> String {
@@ -160,7 +169,7 @@ impl Doc {
     }
 
     fn new_tab(&mut self, terminal: String) -> Tab {
-        Tab { id: self.fresh("tab"), label: String::new(), focused: terminal.clone(), zoomed: false, root: Node::Pane(terminal) }
+        Tab { id: self.fresh("tab"), label: String::new(), focused: terminal.clone(), zoomed: false, root: Node::Pane(terminal), origin: None }
     }
 
     pub fn tabs(&self) -> impl Iterator<Item = &Tab> {
@@ -192,7 +201,7 @@ impl Doc {
     pub fn add_workspace(&mut self, terminal: String) -> (String, String) {
         let tab = self.new_tab(terminal);
         let (id, active_tab) = (self.fresh("ws"), tab.id.clone());
-        self.workspaces.push(Workspace { id: id.clone(), label: String::new(), active_tab: active_tab.clone(), tabs: vec![tab], worktree: None });
+        self.workspaces.push(Workspace { id: id.clone(), label: String::new(), active_tab: active_tab.clone(), tabs: vec![tab], worktree: None, origin: None });
         (id, active_tab)
     }
 
@@ -240,7 +249,7 @@ impl Doc {
     }
 
     /// Drops what emptied, and points at what is left.
-    fn settle(&mut self) {
+    pub(super) fn settle(&mut self) {
         self.workspaces.retain(|w| !w.tabs.is_empty());
         for w in &mut self.workspaces {
             if !w.tabs.iter().any(|t| t.id == w.active_tab) {
@@ -253,13 +262,42 @@ impl Doc {
         }
     }
 
-    /// Keeps the panes whose terminal `live` knows; returns the others, which are gone from the layout.
+    /// Keeps the panes whose terminal `live` knows; returns Shepherd's own among the others, which are gone from the
+    /// layout.
     pub fn retain(&mut self, live: impl Fn(&str) -> bool) -> Vec<String> {
         let gone: Vec<String> = self.tabs().flat_map(|t| t.root.terminals()).filter(|t| !live(t)).collect();
         for terminal in &gone {
             self.remove(terminal);
         }
-        gone
+        let own = gone.into_iter().filter(|t| !self.adopted.contains(t)).collect();
+        self.adopted.retain(|t| live(t));
+        own
+    }
+
+    /// Takes in a terminal another client started: into the tab it shares with others, else a new one in its `space`'s
+    /// workspace ([`OTHERS`] without one). Where it is moved here it stays.
+    // ponytail: read once, so a tab moved to another space in the Herdr app stays where it was here
+    pub fn adopt(&mut self, terminal: &str, space: &str, tab: Option<&str>) {
+        self.adopted.push(terminal.into());
+        let beside = tab.and_then(|origin| self.tabs().find(|t| t.origin.as_deref() == Some(origin))).and_then(|t| t.root.terminals().pop());
+        if let Some(beside) = beside {
+            self.split(&beside, terminal, false, false);
+            return;
+        }
+        let workspace = self.workspaces.iter().find(|w| w.origin.as_deref() == Some(space)).map(|w| w.id.clone());
+        let made = match workspace {
+            Some(workspace) => self.add_tab(&workspace, terminal.into()),
+            None => {
+                let (workspace, made) = self.add_workspace(terminal.into());
+                if let Some(w) = self.workspaces.iter_mut().find(|w| w.id == workspace) {
+                    w.origin = Some(space.into());
+                }
+                Some(made)
+            }
+        };
+        if let Some(made) = made.and_then(|id| self.tab_mut(&id)) {
+            made.origin = tab.map(str::to_string);
+        }
     }
 
     /// Closes the tab; returns its terminals, to end.
@@ -296,11 +334,6 @@ impl Doc {
         if let Some(w) = self.workspaces.iter_mut().find(|w| w.id == id) {
             w.worktree = worktree;
         }
-    }
-
-    /// The workspace on the checkout at `path`.
-    pub fn workspace_at(&self, path: &str) -> Option<String> {
-        self.workspaces.iter().find(|w| w.worktree.as_ref().is_some_and(|t| t.checkout_path == path)).map(|w| w.id.clone())
     }
 
     /// `slot` as herdr's `tab.move` takes it: a place in the list before the move, 0 first, the tab count last.
@@ -400,6 +433,42 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn other_clients_terminals_group_by_space_and_tab() {
+        let mut doc = Doc::default();
+        doc.add_workspace("t9".into());
+        doc.adopt("t1", "dots", Some("claude"));
+        doc.adopt("t2", "dots", Some("logs"));
+        doc.adopt("t3", "dots", Some("claude"));
+        doc.adopt("t4", "home", Some("one"));
+        doc.adopt("t5", OTHERS, None);
+        doc.adopt("t6", OTHERS, None);
+        let tabs = |at: usize| doc.workspaces[at].tabs.iter().map(|t| t.root.terminals()).collect::<Vec<_>>();
+        assert_eq!(doc.workspaces.len(), 4, "Shepherd's own, two spaces and the rest");
+        assert_eq!(tabs(1), [vec!["t1", "t3"], vec!["t2"]], "panes of one tab");
+        assert_eq!(tabs(2), [vec!["t4"]]);
+        assert_eq!(tabs(3), [vec!["t5"], vec!["t6"]], "no tab of their own: one each");
+        assert_eq!(doc.shown_tab().unwrap().root.terminals(), ["t9"], "taking one in moves no focus");
+    }
+
+    #[test]
+    fn a_gone_terminal_of_another_client_is_left_to_it() {
+        let mut doc = Doc::default();
+        doc.add_workspace("t1".into());
+        doc.adopt("t2", "dots", Some("claude"));
+        doc.adopt("t3", "dots", Some("claude"));
+        assert_eq!(doc.retain(|t| t == "t2"), ["t1"], "only Shepherd's own is ended");
+        assert_eq!(doc.tabs().map(|t| t.root.terminals()).collect::<Vec<_>>(), [vec!["t2"]]);
+        assert_eq!(doc.adopted, ["t2"]);
+    }
+
+    #[test]
+    fn a_document_from_before_origins_still_loads() {
+        let old = r#"{"workspaces": [{"id": "ws1", "label": "", "active_tab": "tab1", "tabs": [{"id": "tab1", "label": "", "focused": "t1", "zoomed": false, "root": {"pane": "t1"}}]}], "next": 2}"#;
+        let doc: Doc = serde_json::from_str(old).unwrap();
+        assert_eq!((doc.workspaces[0].origin.as_deref(), doc.adopted.len()), (None, 0));
+    }
 
     /// One workspace, one tab: `t1`, then `t2` beside it and `t3` under `t2`.
     fn three() -> Doc {
