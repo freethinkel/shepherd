@@ -817,7 +817,9 @@ impl Shell {
 
         let scroll = &self.tab_bar.scroll;
         let panel_shown = self.right_panel_shown(window);
-        let toggle = shown_ws.is_some() && !panel_shown;
+        // no room for the panel, no button to open it
+        let room = crate::right_panel::fits(f32::from(window.viewport_size().width), sidebar_w);
+        let toggle = shown_ws.is_some() && !panel_shown && room;
         div()
             .h(px(TITLEBAR_HEIGHT))
             .flex_none()
@@ -892,7 +894,7 @@ impl Shell {
                         .ml_auto()
                         .flex_none()
                         .tooltip(tip("Toggle right panel", Some("ToggleRightPanel")))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_right_panel(cx))),
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_right_panel(window, cx))),
                 )
             })
     }

@@ -71,13 +71,14 @@ impl PanelState {
         }
     }
 
-    pub fn toggle(&mut self) {
-        self.open = !self.open;
+    /// The toggle goes by what's seen: a panel open but hidden (no room, a page in its place) is asked for, not to go.
+    pub fn toggle_seen(&mut self, on_screen: bool) {
+        self.open = !on_screen;
     }
 
-    /// Closes the panel while it shows the pull request, else shows it there. The tab stays.
-    pub fn toggle_pull_request(&mut self) {
-        match self.open && self.active == Some(Surface::PullRequest) {
+    /// Closes the panel while it's seen on the pull request, else shows it there. The tab stays.
+    pub fn toggle_pull_request(&mut self, on_screen: bool) {
+        match on_screen && self.active == Some(Surface::PullRequest) {
             true => self.open = false,
             false => self.add(Surface::PullRequest),
         }

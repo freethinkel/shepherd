@@ -166,8 +166,9 @@ impl Shell {
 
     // ponytail: opens at once, unlike the sidebar: nobody has watched a native page follow a slide; a `FoldMotion` on
     // the width if the jump bothers
-    pub(super) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
-        self.update_panel(cx, PanelState::toggle);
+    pub(super) fn toggle_right_panel(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let seen = self.right_panel_shown(window);
+        self.update_panel(cx, |p| p.toggle_seen(seen));
     }
 
     pub(super) fn drag_right_panel(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
@@ -372,7 +373,7 @@ impl Shell {
                 tab_chip(
                     TabChip { id: "right-surface-new", close_id: "right-surface-new-close", ix: 0, active: false, title: "New".into(), leading: tab_chip_icon("icons/plus.svg", false, theme) },
                     theme,
-                    cx.listener(|this, _, _, cx| this.toggle_right_panel(cx)),
+                    cx.listener(|this, _, window, cx| this.toggle_right_panel(window, cx)),
                 ),
             );
         } else {
@@ -407,7 +408,7 @@ impl Shell {
             .child(
                 titlebar_button(theme, "right-panel-close", "icons/close.svg")
                     .tooltip(tip("Close", Some("ToggleRightPanel")))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_right_panel(cx))),
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_right_panel(window, cx))),
             )
     }
 

@@ -45,7 +45,7 @@ fn closing_the_last_tab_closes_the_panel_and_the_next_open_shows_the_picker() {
     p.close(&b("1"));
     assert!(!p.open);
     assert_eq!(p.active, None);
-    p.toggle();
+    p.toggle_seen(false);
     assert!(p.open);
     assert_eq!(p.active, None);
 }
@@ -78,14 +78,14 @@ fn step_wraps_and_a_lone_tab_stays() {
 #[test]
 fn the_pull_request_toggle_opens_switches_and_closes() {
     let mut p = panel(&[b("1")]);
-    p.toggle(); // closed
-    p.toggle_pull_request();
+    p.toggle_seen(true); // closed
+    p.toggle_pull_request(false);
     assert!(p.open);
     assert_eq!(p.active, Some(Surface::PullRequest));
     p.activate(&b("1"));
-    p.toggle_pull_request();
+    p.toggle_pull_request(true);
     assert_eq!(p.active, Some(Surface::PullRequest));
-    p.toggle_pull_request();
+    p.toggle_pull_request(true);
     assert!(!p.open);
     assert_eq!(p.tabs, [b("1"), Surface::PullRequest]); // the tab stays
 }
@@ -144,4 +144,18 @@ fn closing_a_tab_another_panel_holds_leaves_an_empty_open_panel_open() {
     p.open = true;
     p.close(&b("1"));
     assert!(p.open);
+}
+#[test]
+fn the_toggles_go_by_what_is_on_screen() {
+    let mut p = panel(&[b("1"), Surface::PullRequest]);
+    p.toggle_seen(false); // open but hidden, in a window too narrow: it stays, to come back
+    assert!(p.open);
+    p.toggle_seen(true);
+    assert!(!p.open);
+    p.toggle_seen(false);
+    assert!(p.open);
+    p.toggle_pull_request(false); // on the tab, hidden: stays open
+    assert!(p.open);
+    p.toggle_pull_request(true);
+    assert!(!p.open);
 }

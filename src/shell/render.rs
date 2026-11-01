@@ -279,7 +279,7 @@ impl Render for Shell {
             } else {
                 self.usage_menu.as_ref().is_some_and(|m| m.is_open()).then_some(Item::Usage)
             };
-            let on_review = cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_review(cx));
+            let on_review = cx.listener(|this, _: &ClickEvent, w, cx| this.toggle_review(w, cx));
             let show = SettingsGlobal::of(cx).settings.status_bar_show;
             div()
                 .flex_none()
@@ -378,8 +378,8 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.step_workspace(false, cx)))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            .on_action(cx.listener(|this, _: &ToggleRightPanel, _, cx| this.toggle_right_panel(cx)))
-            .on_action(cx.listener(|this, _: &ToggleReview, _, cx| this.toggle_review(cx)))
+            .on_action(cx.listener(|this, _: &ToggleRightPanel, w, cx| this.toggle_right_panel(w, cx)))
+            .on_action(cx.listener(|this, _: &ToggleReview, w, cx| this.toggle_review(w, cx)))
             .on_action(cx.listener(|this, _: &ReloadPage, w, cx| this.reload_shown_page(w, cx)))
             .on_action(cx.listener(|this, _: &FocusAddress, w, cx| this.focus_address(w, cx)))
             .on_action(cx.listener(|this, _: &CopyPageUrl, w, cx| this.copy_page_url(w, cx)))

@@ -2,7 +2,6 @@
 //! description) and its checks or pipeline jobs, each opening in the browser.
 use super::*;
 use gpui::AnyElement;
-use crate::right_panel::PanelState;
 use crate::ui::review::{Check, CheckState, Request, Review, act, check_icon, duration, markdown, read_review, retry_failed};
 use crate::ui::statusbar::{branch_of, cached, fetching, pane_dir, refetch};
 
@@ -44,8 +43,9 @@ pub(super) struct MergeAsk {
 }
 
 impl Shell {
-    pub(super) fn toggle_review(&mut self, cx: &mut Context<Self>) {
-        self.update_panel(cx, PanelState::toggle_pull_request);
+    pub(super) fn toggle_review(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let seen = self.right_panel_shown(window);
+        self.update_panel(cx, |p| p.toggle_pull_request(seen));
     }
 
     /// Asks gh or glab again about the branch the panel shows while its checks run; called every `REVIEW_POLL`.
