@@ -171,6 +171,8 @@ pub struct SettingsView {
     worktrees: Option<Result<Vec<ProjectFields>, String>>,
     /// herdr's sessions and the repos open in each, once herdr answered.
     worktree_sessions: Option<Vec<SessionRepos>>,
+    /// The repos open on the backend shown, as (name, main checkout), as the window last told.
+    open_repos: Vec<(String, String)>,
     /// The session Worktrees shows, with its machine's SSH target (`None` here); `None` is the one Shepherd is on.
     worktree_session: Option<(Option<String>, String)>,
     /// The projects shown open, as `session/name`; the rest show only their name and path.
@@ -233,6 +235,13 @@ impl SettingsView {
     pub fn show_usage(&mut self, cx: &mut Context<Self>) {
         self.section = Section::Usage;
         cx.notify();
+    }
+
+    pub fn set_repos(&mut self, repos: Vec<(String, String)>, cx: &mut Context<Self>) {
+        if self.open_repos != repos {
+            self.open_repos = repos;
+            cx.notify();
+        }
     }
 
     pub fn show_web_pages(&mut self, cx: &mut Context<Self>) {
@@ -396,6 +405,7 @@ impl SettingsView {
             backend: settings.backend,
             worktrees: None,
             worktree_sessions: None,
+            open_repos: Vec::new(),
             worktree_session: None,
             worktree_open: Default::default(),
             worktree_adds: Vec::new(),
@@ -422,12 +432,12 @@ impl SettingsView {
         view
     }
 
-    /// Where a web page can be listed: herdr's sessions and machines, named as the session bar names them, or the
-    /// backend shown.
+    /// Where a web page can be listed: herdr's sessions and machines, named as the session bar names them. Another
+    /// backend lists every page.
     fn load_places(&mut self, cx: &mut Context<Self>) {
         let kind = SettingsGlobal::of(cx).settings.backend;
         if kind != crate::backend::Kind::Herdr {
-            self.places = Some(vec![(kind.key().into(), kind.name().into())]);
+            self.places = Some(Vec::new());
             return;
         }
         self.places = None;
@@ -487,9 +497,12 @@ impl SettingsView {
             Ok(config) => {
                 self.herdr_config = Ok(config);
                 self.herdr_note = None;
-                self.herdr_call("server.reload_config", json!({}), cx, |v, result| {
-                    v.herdr_note = result.err().map(|e| format!("Saved, but herdr did not reload it: {e:#}"));
-                });
+                // on another backend the one setting left here is the worktrees folder, which Shepherd reads itself
+                if self.backend == crate::backend::Kind::Herdr {
+                    self.herdr_call("server.reload_config", json!({}), cx, |v, result| {
+                        v.herdr_note = result.err().map(|e| format!("Saved, but herdr did not reload it: {e:#}"));
+                    });
+                }
             }
             Err(e) => self.herdr_note = Some(format!("{e:#}")),
         }

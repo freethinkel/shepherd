@@ -50,6 +50,14 @@ fn main() {
             update(cx, |s| s.font_size = shepherd::settings::Settings::default().font_size)
         });
         cx.set_global(shepherd::ui::settings::Tokio(handle.clone()));
+        let (failures, mut failed) = tokio::sync::mpsc::unbounded_channel();
+        shepherd::worktree::report_failures(failures);
+        cx.spawn(async move |cx| {
+            while let Some(message) = failed.recv().await {
+                cx.update(|cx| shepherd::ui::toast::error(cx, message));
+            }
+        })
+        .detach();
         shepherd::update::start(cx);
         shepherd::ui::loader::drive_slow_frames(cx);
         shepherd::analytics::seen([]);

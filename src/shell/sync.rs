@@ -110,6 +110,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                         }
                         snapshot.track(&mut s.since, Instant::now());
                         s.snapshot = Some(snapshot);
+                        s.tell_settings_repos(cx);
                         s.error = None;
                         s.connecting = None;
                     }

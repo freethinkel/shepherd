@@ -665,15 +665,15 @@ impl Render for Panel {
         let empty = self.matches.is_empty().then(|| {
             let (title, hint) = match self.kind {
                 Kind::Commands => ("No results", "Try a command, a workspace or a tab."),
-                Kind::Agents if self.items.is_empty() => ("No agents", "Agents herdr finds in your panes show up here."),
+                Kind::Agents if self.items.is_empty() => ("No agents", "Agents in your panes show up here."),
                 Kind::Agents => ("No results", "Try an agent's task or its workspace."),
-                Kind::Workspaces if self.items.is_empty() => ("No workspaces", "herdr's workspaces show up here."),
+                Kind::Workspaces if self.items.is_empty() => ("No workspaces", "Your workspaces show up here."),
                 Kind::Workspaces => ("No results", "Try a workspace's name."),
                 Kind::Branches if self.items.is_empty() => ("No branches", "This pane isn't in a git repo."),
                 Kind::Branches => ("No results", "Try a branch name."),
                 Kind::Themes => ("No results", "Try a theme name."),
                 // herdr always lists the repo's own checkout, so an empty list is one still on its way
-                Kind::Worktrees if self.items.is_empty() => ("Asking herdr…", "Its worktrees of this repo show up here."),
+                Kind::Worktrees if self.items.is_empty() => ("Looking…", "The worktrees of this repo show up here."),
                 Kind::Worktrees => ("No results", "Try a branch or a folder."),
             };
             div().py(px(24.)).flex().flex_col().items_center().gap(px(6.)).child(title).child(div().text_color(theme.text_muted).child(hint))

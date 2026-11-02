@@ -629,7 +629,16 @@ impl Shell {
         let close = cx.subscribe(&view, |this, _, _: &crate::ui::settings::Close, cx| this.close_settings(cx));
         window.focus(&view.focus_handle(cx), cx);
         self.settings = Some((view, close));
+        self.tell_settings_repos(cx);
         cx.notify();
+    }
+
+    /// Settings lists the repos open on the backend, which only the window knows, for their worktree hooks.
+    fn tell_settings_repos(&self, cx: &mut Context<Self>) {
+        if let (Some((view, _)), Some(snapshot)) = (&self.settings, &self.snapshot) {
+            let repos = crate::worktree::repos(snapshot);
+            view.update(cx, |v, cx| v.set_repos(repos, cx));
+        }
     }
 
     /// Settings on its Usage page, opened if it is not up: the limits popup's way there.

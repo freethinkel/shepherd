@@ -9,12 +9,20 @@ use anyhow::{Context, anyhow, bail};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::spawn_blocking;
 
-/// `<repo>/<branch slug>` go under it in the home folder.
-// ponytail: herdr's default; its `[worktrees] directory` isn't read, so a moved folder isn't followed here
+/// `<repo>/<branch slug>` go under it in the home folder, as on herdr, unless its `worktrees.directory` says otherwise.
 const FOLDER: &str = ".herdr/worktrees";
+
+/// Where the window hears of a hook that failed.
+static FAILURES: OnceLock<UnboundedSender<String>> = OnceLock::new();
+
+/// Sends what goes wrong in a hook, which runs after its worktree opened, to `failures`.
+pub fn report_failures(failures: UnboundedSender<String>) {
+    let _ = FAILURES.set(failures);
+}
 
 /// [`Worktrees`] on a multiplexer: each worktree is a workspace it opens in the checkout.
 pub struct Git(pub Arc<dyn Mux>);
@@ -138,10 +146,27 @@ pub fn repo_name(tree: &Worktree) -> Option<&str> {
     Path::new(root(tree)).file_name()?.to_str()
 }
 
+/// The repos open in `snapshot`, as (name, main checkout), each once and in the sidebar's order.
+pub fn repos(snapshot: &Snapshot) -> Vec<(String, String)> {
+    let mut repos: Vec<(String, String)> = Vec::new();
+    for tree in snapshot.workspaces.iter().filter_map(|w| w.worktree.as_ref()) {
+        if let Some(name) = repo_name(tree).filter(|_| !repos.iter().any(|(_, r)| r == root(tree))) {
+            repos.push((name.to_string(), root(tree).to_string()));
+        }
+    }
+    repos
+}
+
+/// The folder worktrees go in, `set` being herdr's `worktrees.directory`.
+fn folder(set: Option<&str>) -> PathBuf {
+    set.map(str::trim).filter(|s| !s.is_empty()).map_or_else(|| crate::settings::home().join(FOLDER), expanded)
+}
+
 /// Checks `branch` out in a new folder, as a new branch from `source`'s HEAD if there is none: the folder.
 fn create(source: &Worktree, branch: &str) -> anyhow::Result<String> {
     let repo = repo_name(source).context("a repo at the root of the disk")?;
-    let path = crate::settings::home().join(FOLDER).join(repo).join(crate::commands::branch_path_slug(branch));
+    let config = crate::herdr::HerdrConfig::load(&crate::herdr::config_path()).ok();
+    let path = folder(config.as_ref().and_then(|c| c.str("worktrees.directory"))).join(repo).join(crate::commands::branch_path_slug(branch));
     add(&source.checkout_path, branch, &path)
 }
 
@@ -196,6 +221,9 @@ fn fire(event: &'static str, root: String, worktree: String) {
     std::thread::spawn(move || {
         if let Err(e) = run_hooks(event, &root, &worktree) {
             eprintln!("shepherd: worktree hooks: {e:#}");
+            if let Some(failures) = FAILURES.get() {
+                let _ = failures.send(format!("Worktree hook failed: {e:#}"));
+            }
         }
     });
 }
@@ -286,6 +314,85 @@ mod tests {
 
         let again = add(&root, "fix/login", &path).unwrap();
         assert_eq!(of(&again).unwrap().repo_key, main.repo_key, "the branch stayed and checks out again");
+    }
+
+    /// Live: a worktree made and removed on a backend that has no word for them, its hooks run and one that fails heard.
+    /// `XDG_CONFIG_HOME=$(mktemp -d) SHEPHERD_TMUX_SOCKET=shepherd-hooks cargo test --lib worktree::tests::live -- --ignored`,
+    /// or with `HC_SESSION` or `REX_SERVER` in place of the socket.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn live() {
+        use crate::backend::{Backend, Kind};
+        use crate::commands::Command as Run;
+        use std::time::Duration;
+        let set = |name: &str| std::env::var(name).is_ok();
+        let kind = [("HC_SESSION", Kind::Hc), ("REX_SERVER", Kind::Rex), ("SHEPHERD_TMUX_SOCKET", Kind::Tmux)].into_iter().find(|(name, _)| set(name));
+        let (kind, config_is_ours) = (kind.expect("a server of its own: it closes what it opens").1, set("XDG_CONFIG_HOME"));
+        assert!(config_is_ours, "XDG_CONFIG_HOME: it writes herdr's config");
+        let (dir, root) = repo();
+        let trees = std::fs::canonicalize(dir.path()).unwrap().join("trees");
+        let config = crate::herdr::config_path();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, format!("[worktrees]\ndirectory = {:?}\n", trees.to_string_lossy())).unwrap();
+        let hooks = Project {
+            session: Some("default".into()),
+            name: "app".into(),
+            dir: root.clone(),
+            created: vec![r#"printf %s "$PROJECT $EVENT $PWD" > "$ROOT_PATH/created""#.into()],
+            removed: vec![r#"printf %s "$EVENT $PWD $WORKTREE_PATH" > "$ROOT_PATH/removed""#.into(), "echo broken >&2; exit 3".into()],
+        };
+        let conf = hooks::conf_path();
+        std::fs::create_dir_all(conf.parent().unwrap()).unwrap();
+        std::fs::write(&conf, hooks::render(&[hooks])).unwrap();
+        let (failures, mut failed) = tokio::sync::mpsc::unbounded_channel();
+        report_failures(failures);
+        let written = |name: &str| {
+            let path = Path::new(&root).join(name);
+            async move {
+                for _ in 0..600 {
+                    match std::fs::read_to_string(&path) {
+                        Ok(text) if !text.is_empty() => return text,
+                        _ => tokio::time::sleep(Duration::from_millis(100)).await,
+                    }
+                }
+                panic!("no hook wrote {}", path.display());
+            }
+        };
+
+        let backend = Backend::of(kind, None);
+        let first = backend.mux.run(Run::NewWorkspace { cwd: Some(root.clone()) }).await.unwrap().workspace_id.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await; // its shell settles in the folder
+        let made = backend.worktrees.create(first.clone(), "hooked".into()).await.unwrap().workspace_id.unwrap();
+        let path = trees.join("app/hooked");
+        assert!(path.join(".git").exists(), "in the folder herdr's setting names");
+        assert_eq!(written("created").await, format!("app created {}", path.display()));
+
+        backend.worktrees.remove(made, false).await.unwrap();
+        assert_eq!(written("removed").await, format!("removed {root} {}", path.display()));
+        assert!(!path.exists());
+        let failure = tokio::time::timeout(Duration::from_secs(10), failed.recv()).await.unwrap().unwrap();
+        assert!(failure.starts_with("Worktree hook failed") && failure.contains("broken"), "{failure}");
+        backend.mux.run(Run::CloseWorkspace { workspace_id: first }).await.unwrap();
+    }
+
+    #[test]
+    fn repos_are_listed_once_by_their_main_checkout() {
+        let tree = |repo_key: &str, path: &str| Worktree { repo_key: repo_key.into(), is_linked_worktree: false, checkout_path: path.into() };
+        let on = |worktree| crate::model::Workspace { workspace_id: String::new(), label: String::new(), number: 0, active_tab_id: None, agent_status: Default::default(), worktree };
+        let snapshot = Snapshot {
+            workspaces: vec![on(Some(tree("/r/app/.git", "/r/app"))), on(Some(tree("/r/app/.git", "/w/app/fix"))), on(None), on(Some(tree("/r/web/.git", "/r/web")))],
+            ..Default::default()
+        };
+        assert_eq!(repos(&snapshot), [("app".to_string(), "/r/app".to_string()), ("web".to_string(), "/r/web".to_string())]);
+    }
+
+    #[test]
+    fn the_folder_is_herdrs_or_its_default() {
+        let home = crate::settings::home();
+        assert_eq!(folder(None), home.join(FOLDER));
+        assert_eq!(folder(Some("  ")), home.join(FOLDER));
+        assert_eq!(folder(Some("~/trees")), home.join("trees"));
+        assert_eq!(folder(Some("/srv/trees")), PathBuf::from("/srv/trees"));
     }
 
     #[test]

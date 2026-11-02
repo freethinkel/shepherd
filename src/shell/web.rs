@@ -118,14 +118,14 @@ impl Shell {
 
     /// The entries the sidebar lists for the place with key `place`.
     fn entries_in(&self, place: Option<&str>, cx: &App) -> Vec<WebEntry> {
-        listed(&SettingsGlobal::of(cx).settings.web_entries, place).into_iter().cloned().collect()
+        listed(&SettingsGlobal::of(cx).settings.web_entries, self.backend.kind(), place).into_iter().cloned().collect()
     }
 
     /// Fetches the favicons of the entries listed that have none yet, or whose URL changed.
     fn fetch_favicons(&mut self, cx: &mut Context<Self>) {
         for entry in self.listed_entries(cx) {
             // a page opened on a machine fetches its icon through its forward, once that is up
-            if entry.open_from == OpenFrom::Machine {
+            if entry.open_from == OpenFrom::Machine && crate::herdr::shown_machine().is_some() {
                 continue;
             }
             let url = normalize(&entry.url);

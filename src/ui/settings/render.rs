@@ -5,9 +5,6 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::reap_popup(&mut self.open_select, window);
         self.sync_web_fields(window, cx);
-        if self.section == Section::Worktrees {
-            self.load_worktrees(window, cx);
-        }
         let theme = Theme::of(cx).clone();
         let global = SettingsGlobal::of(cx);
         let settings = global.settings.clone();
@@ -18,9 +15,17 @@ impl Render for SettingsView {
             self.load_places(cx);
             self.facts = None;
             self.backend_note = None;
+            self.worktrees = None;
+            self.worktree_sessions = None;
+            self.worktree_session = None;
+            self.worktree_adds.clear();
+            self.open_repos.clear();
             if on_herdr {
                 self.load_integrations(cx);
             }
+        }
+        if self.section == Section::Worktrees {
+            self.load_worktrees(window, cx);
         }
         if self.section == Section::Backend && self.facts.is_none() {
             self.load_facts(settings.backend, cx);
@@ -87,7 +92,7 @@ impl Render for SettingsView {
             Section::General => div().child(page_header(&theme, "General", "The window and what it shows.")).child(
                 card(&theme)
                     .child(
-                        toggle_row(&theme, true, "show-agents", "Agents", "Every agent herdr finds, at the bottom of the sidebar.", settings.show_agents).on_click(cx.listener(
+                        toggle_row(&theme, true, "show-agents", "Agents", "Every agent running, at the bottom of the sidebar.", settings.show_agents).on_click(cx.listener(
                             |_, _: &ClickEvent, _, cx| update(cx, |s| s.show_agents = !s.show_agents),
                         )),
                     )
@@ -286,8 +291,8 @@ impl Render for SettingsView {
                                 .on_click(|_: &ClickEvent, _, _| crate::notify::open_system_settings()),
                         )
                     })))
-                    .child(section_label(&theme, "In herdr's terminal app"))
-                    .child(
+                    .when(on_herdr, |page| page.child(section_label(&theme, "In herdr's terminal app")))
+                    .when(on_herdr, |page| page.child(
                         card(&theme)
                             .mt_0()
                             .child(
@@ -330,8 +335,8 @@ impl Render for SettingsView {
                                     v.edit_herdr("ui.sound.enabled", Some((!sounds).into()), cx)
                                 })),
                             ),
-                    )
-                    .child(note(&theme, herdr_note))
+                    ))
+                    .when(on_herdr, |page| page.child(note(&theme, herdr_note)))
             }
             Section::Usage => {
                 use crate::settings::UsageAgent;
@@ -416,7 +421,6 @@ impl Render for SettingsView {
                     let fields = [
                         ("Shell", "For new panes. Empty is $SHELL."),
                         ("New pane folder", "follow, home, current or a path. follow takes the folder of the pane it opens from."),
-                        ("Worktrees folder", "Where new worktrees are checked out."),
                     ];
                     card(&theme)
                         .mt_0()
