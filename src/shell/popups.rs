@@ -1,6 +1,15 @@
 //! The popups over the window: the sidebar's and agents' menus, workspace, tab and pane menus, dialogs, the
 //! command panel and the status bar's cards, each while it is up.
 use super::*;
+use crate::settings::SidebarStyle;
+
+/// A `…` row other than Show, hovered: the Show submenu goes.
+fn close_show_submenu(this: &mut Shell, on: &bool, _: &mut Window, cx: &mut Context<Shell>) {
+    if *on && this.show_submenu {
+        this.show_submenu = false;
+        cx.notify();
+    }
+}
 
 impl Shell {
     pub(super) fn popups(
@@ -21,7 +30,7 @@ impl Shell {
             // under the `…` button, its left edge on the button's
             let at = gpui::point(px(sidebar_w - 8. - 24.), px(TRAFFIC_LIGHTS_CENTER + 12. + 4.));
             let settings = &SettingsGlobal::of(cx).settings;
-            let (show, compact) = (settings.workspace_show, settings.compact_workspaces);
+            let (show, compact, style) = (settings.workspace_show, settings.compact_workspaces, settings.sidebar_style);
             let show_submenu = self.show_submenu;
             let submenu_bounds = self.show_submenu_bounds.clone();
             let parts: [(&'static str, &'static str, &'static str, fn(&mut crate::settings::WorkspaceShow) -> &mut bool); 5] = [
@@ -43,6 +52,13 @@ impl Shell {
                             if let Some(m) = this.view_menu.as_mut() { m.close() }
                             cx.notify();
                         }))
+                        .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child("SIDEBAR"))
+                        .children([(SidebarStyle::Herdr, "sidebar-herdr", "icons/folder.svg", "Herdr"), (SidebarStyle::T3, "sidebar-t3", "icons/bot.svg", "T3 Code")].map(|(choice, id, icon, label)| {
+                            menu_choice(theme, id, icon, label, style == choice)
+                                .on_hover(cx.listener(close_show_submenu))
+                                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| save_from_sidebar(cx, |s| s.sidebar_style = choice)))
+                        }))
+                        .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
                         .child(
                             // Zeron's submenu: the row opens the choices beside it on hover.
                             div()
@@ -94,12 +110,7 @@ impl Shell {
                         .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
                         .child(
                             row(theme, false, "compact-workspaces")
-                                .on_hover(cx.listener(|this, on: &bool, _, cx| {
-                                    if *on && this.show_submenu {
-                                        this.show_submenu = false;
-                                        cx.notify();
-                                    }
-                                }))
+                                .on_hover(cx.listener(close_show_submenu))
                                 .h(px(30.))
                                 .rounded(px(6.))
                                 .child(div().flex_1().child("Compact"))
@@ -480,6 +491,7 @@ impl Shell {
         .children(self.web_menu(theme, cx))
         .children(self.right_plus_menu(theme, cx))
         .children(self.annotation_agents_menu(theme, cx))
+        .children(self.project_menu(theme, snapshot.as_ref(), cx))
         .children(self.ws_menu.as_ref().map(|menu| {
             let (id, at) = menu.value.clone();
             let worktree = snapshot

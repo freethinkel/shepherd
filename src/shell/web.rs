@@ -201,6 +201,7 @@ impl Shell {
             self.right.plus.is_some(),
             self.pane_menu.is_some(),
             self.agent_menu.is_some(),
+            self.project_menu.is_some(),
             self.spent_menu.is_some(),
             self.usage_menu.is_some(),
             self.statusbar_menu.is_some(),

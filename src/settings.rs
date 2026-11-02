@@ -47,6 +47,10 @@ pub struct Settings {
     pub agent_sort: AgentSort,
     /// Which agents a browser tab's annotations can go to.
     pub annotation_agents: AgentScope,
+    /// Which sidebar the window draws; General settings pick it.
+    pub sidebar_style: SidebarStyle,
+    /// The project the T3 Code sidebar lists, by its top-level workspace's id; `None` is all of them.
+    pub thread_project: Option<String>,
     /// The sidebar's Agents section; General settings hide it.
     pub show_agents: bool,
     /// The bottom status bar; General settings hide it.
@@ -102,6 +106,18 @@ pub struct Settings {
     pub web_links_inside: bool,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
+}
+
+/// How the sidebar lists the work. An unknown (future) value reads as herdr's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarStyle {
+    /// T3 Code's: a project select over a flat list of agents, with Working and Settled shelves under it.
+    T3,
+    /// herdr's workspaces with their worktrees, the Agents section under them.
+    #[default]
+    #[serde(other)]
+    Herdr,
 }
 
 /// An agent whose plan limits Shepherd reads. An unknown (future) value reads as Claude.
@@ -285,6 +301,8 @@ impl Default for Settings {
             right_panel_width: RIGHT_PANEL_WIDTH,
             agent_sort: AgentSort::default(),
             annotation_agents: AgentScope::default(),
+            sidebar_style: SidebarStyle::default(),
+            thread_project: None,
             show_agents: true,
             show_status_bar: true,
             status_bar_show: StatusBarShow::default(),
@@ -410,6 +428,11 @@ impl Settings {
             self.keys.retain(|a, k| a == action || crate::bindings::normalize(k).as_deref() != Some(chord.as_str()));
         }
         self.keys.insert(action.to_string(), chord);
+    }
+
+    /// The T3 Code sidebar's list is its agents, so it has no Agents section.
+    pub fn shows_agents_section(&self) -> bool {
+        self.show_agents && self.sidebar_style == SidebarStyle::Herdr
     }
 
     pub fn font(&self) -> FontSettings {
@@ -625,6 +648,14 @@ mod tests {
         let (s, err) = Settings::load(&path);
         assert!(err.is_none());
         assert_eq!((s.agent_sort, s.font_size, s.usage_agent), (AgentSort::Status, 15.0, UsageAgent::Claude));
+    }
+
+    #[test]
+    fn the_sidebar_is_herdrs_until_told_otherwise() {
+        let style = |json: &str| serde_json::from_str::<Settings>(json).unwrap().sidebar_style;
+        assert_eq!(style("{}"), SidebarStyle::Herdr);
+        assert_eq!(style(r#"{"sidebar_style": "t3"}"#), SidebarStyle::T3);
+        assert_eq!(style(r#"{"sidebar_style": "from-the-future"}"#), SidebarStyle::Herdr);
     }
 
     #[test]

@@ -194,6 +194,14 @@ impl SettingsView {
         self.select(theme, "editor-select", labels, index, fallback, |_| None, |i, cx| update(cx, |s| s.editor = EDITORS[i].0.map(String::from)), cx)
     }
 
+    /// How the sidebar lists the work.
+    pub(super) fn sidebar_select(&self, theme: &Theme, current: SidebarStyle, cx: &mut Context<Self>) -> Div {
+        const STYLES: [(SidebarStyle, &str); 2] = [(SidebarStyle::Herdr, "Herdr"), (SidebarStyle::T3, "T3 Code")];
+        let labels = STYLES.iter().map(|(_, label)| SharedString::from(*label)).collect();
+        let index = STYLES.iter().position(|(style, _)| *style == current);
+        self.select(theme, "sidebar-select", labels, index, SharedString::default(), |_| None, |i, cx| update(cx, |s| s.sidebar_style = STYLES[i].0), cx)
+    }
+
     /// What runs the terminals: every window moves there at once.
     pub(super) fn backend_select(&self, theme: &Theme, current: crate::backend::Kind, cx: &mut Context<Self>) -> Div {
         use crate::backend::Kind;
