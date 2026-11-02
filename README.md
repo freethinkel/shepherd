@@ -11,6 +11,7 @@ https://github.com/user-attachments/assets/9b3f5fae-8eee-4697-89b4-37d232250117
 ## What it does
 
 - The sidebar lists workspaces. A repo's worktrees fold under it with their branch, changes against main and PR state. Right-click creates, opens or removes a worktree.
+- Settings > General switches the sidebar to T3 Code's look: a project select over a flat list of agents, with Working and Settled shelves at the bottom.
 - Under the sidebar, herdr sessions and saved SSH machines sit in a bar, like Arc's spaces. A two-finger swipe goes to the next one. The bar is herdr's: Shepherd shows one backend at a time, and another backend's sessions are its workspaces.
 - The agents list at the bottom shows every agent herdr detects in any workspace, with its status (working, blocked, done, idle), the task in its title and how long it has waited. Click one to jump to its pane.
 - When an agent you can't see starts waiting or finishes, macOS shows a notification and the Dock icon counts it until you look at that tab. Approve on the notification answers the agent without opening Shepherd.

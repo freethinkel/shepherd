@@ -69,6 +69,7 @@ impl Shell {
                     || open(shell.view_menu.as_ref().map(|m| m.is_open()))
                     || open(shell.agents_menu.as_ref().map(|m| m.is_open()))
                     || open(shell.agent_menu.as_ref().map(|m| m.is_open()))
+                    || open(shell.project_menu.as_ref().map(|m| m.is_open()))
                     || open(shell.place_menu.as_ref().map(|m| m.is_open()));
                 if !shell.peek_hovered && !menu {
                     shell.set_peek(false, cx);
@@ -260,10 +261,7 @@ impl Shell {
             let rename_target = RenameTarget::Workspace(w.workspace_id.clone());
             let editing = live.then(|| self.rename_field(&rename_target, cx)).flatten();
             let (ws_id, label) = (w.workspace_id.clone(), w.label.clone());
-            // a workspace herdr knows no worktree of lives where its panes were opened
-            let dir = w.worktree.as_ref().map(|t| t.checkout_path.as_str()).filter(|d| !d.is_empty()).or_else(|| {
-                snapshot.as_ref()?.panes.iter().find(|p| p.workspace_id == w.workspace_id)?.cwd.as_deref()
-            }).map(crate::herdr::locate);
+            let dir = workspace_dir(w, snapshot);
             let git = dir.as_deref().filter(|_| show.branch).and_then(|d| crate::ui::statusbar::git_of(d, cx));
             // herdr's commits ahead of and behind the upstream, also on a compact row
             let sync = git.as_ref().filter(|g| g.ahead > 0 || g.behind > 0).map(|g| {
@@ -380,40 +378,9 @@ impl Shell {
                             )
                         }),
                 )
-                .map(|el| {
-                    if let Some(m) = merging {
-                        match m.failed {
-                            None => el.child(spinner(theme, format!("ws-merging-{}", w.workspace_id))),
-                            // the `!` opens what failed, with Force delete
-                            Some(_) => el.child(
-                                div()
-                                    .id(SharedString::from(format!("ws-merge-failed-{}", w.workspace_id)))
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .bg(theme.danger.opacity(0.18))
-                                    .text_color(theme.danger)
-                                    .text_size(px(11.))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .cursor_pointer()
-                                    .child("!")
-                                    .on_click(cx.listener({
-                                        let id = w.workspace_id.clone();
-                                        move |this, e: &ClickEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.open_merge_failure(id.clone(), e.position(), cx);
-                                        }
-                                    })),
-                            ),
-                        }
-                    } else if live && self.removing.contains(&w.workspace_id) {
-                        el.text_color(theme.text_faint).child(spinner(theme, format!("ws-removing-{}", w.workspace_id)))
-                    } else {
-                        el.when(show.status, |el| el.child(status_dot(w.agent_status, theme)))
-                    }
+                .map(|el| match self.busy_mark(w, live, theme, cx) {
+                    Some(mark) => el.when(merging.is_none(), |el| el.text_color(theme.text_faint)).child(mark),
+                    None => el.when(show.status, |el| el.child(status_dot(w.agent_status, theme))),
                 })
                 .children(chevron)
                 .when(live, |el| {
@@ -441,24 +408,7 @@ impl Shell {
             false => el,
         };
         groups.into_iter().map(|(w, kids)| {
-            // Pending worktrees join the group of the workspace their dialog was opened on.
-            // herdr opens the worktree's workspace before it answers (hooks still run): once
-            // its checkout shows up, the real row replaces the placeholder.
-            let checked_out = |branch: &str| {
-                let slug = crate::commands::branch_path_slug(branch);
-                kids.iter().any(|k| {
-                    k.worktree.as_ref().is_some_and(|t| {
-                        std::path::Path::new(&t.checkout_path).file_name().is_some_and(|n| *n == *slug)
-                    })
-                })
-            };
-            let pending: Vec<String> = self
-                .pending_worktrees
-                .iter()
-                .filter(|(id, _)| *id == w.workspace_id || kids.iter().any(|k| k.workspace_id == *id))
-                .filter(|(_, branch)| live && !checked_out(branch))
-                .map(|(_, branch)| branch.clone())
-                .collect();
+            let pending = self.pending_in(&w, &kids, live);
             if kids.is_empty() && pending.is_empty() {
                 return (w.workspace_id.clone(), draggable(ws_row(&w, false, None, None, cx), &w).into_any_element());
             }
@@ -493,17 +443,78 @@ impl Shell {
         }).collect::<Vec<_>>()
     }
 
+    /// Worktrees being made in group `w`: they join the group of the workspace their dialog was opened on. herdr opens
+    /// the worktree's workspace before it answers (hooks still run): once its checkout shows up, the real row replaces
+    /// the placeholder. A swipe's preview shows none.
+    pub(super) fn pending_in<W: std::borrow::Borrow<crate::model::Workspace>>(&self, w: &crate::model::Workspace, kids: &[W], live: bool) -> Vec<String> {
+        let checked_out = |branch: &str| {
+            let slug = crate::commands::branch_path_slug(branch);
+            kids.iter().any(|k| {
+                k.borrow().worktree.as_ref().is_some_and(|t| {
+                    std::path::Path::new(&t.checkout_path).file_name().is_some_and(|n| *n == *slug)
+                })
+            })
+        };
+        self.pending_worktrees
+            .iter()
+            .filter(|(id, _)| *id == w.workspace_id || kids.iter().any(|k| k.borrow().workspace_id == *id))
+            .filter(|(_, branch)| live && !checked_out(branch))
+            .map(|(_, branch)| branch.clone())
+            .collect()
+    }
+
+    /// What stands for `w`'s status while it is being merged or removed: a spinner, or the `!` that opens what failed.
+    pub(super) fn busy_mark(&self, w: &crate::model::Workspace, live: bool, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let id = &w.workspace_id;
+        match self.merging.get(id).filter(|_| live) {
+            None if live && self.removing.contains(id) => Some(spinner(theme, format!("ws-removing-{id}")).into_any_element()),
+            None => None,
+            Some(m) if m.failed.is_none() => Some(spinner(theme, format!("ws-merging-{id}")).into_any_element()),
+            // the `!` opens what failed, with Force delete
+            Some(_) => Some(
+                div()
+                    .id(SharedString::from(format!("ws-merge-failed-{id}")))
+                    .size(px(16.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(theme.danger.opacity(0.18))
+                    .text_color(theme.danger)
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .cursor_pointer()
+                    .child("!")
+                    .on_click(cx.listener({
+                        let id = id.clone();
+                        move |this, e: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_merge_failure(id.clone(), e.position(), cx);
+                        }
+                    }))
+                    .into_any_element(),
+            ),
+        }
+    }
+
     /// The sidebar's workspace rows, dragged to reorder them: a group dropped on another takes its place in herdr.
+    #[allow(clippy::too_many_arguments)]
     fn workspace_column(
         &self,
         theme: &Theme,
         snapshot: Option<&Snapshot>,
         shown_ws: &Option<String>,
+        shown_tab: Option<&str>,
         active: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let rows = self.workspace_rows(theme, snapshot, shown_ws, true, active, cx);
+        let rows = self.sidebar_rows(theme, snapshot, shown_ws, shown_tab, true, active, cx);
+        // T3 Code's list has its order from the agents, and fills the column so its shelves sit at the bottom
+        if SettingsGlobal::of(cx).settings.sidebar_style == crate::settings::SidebarStyle::T3 {
+            return div().flex_grow(1.).flex().flex_col().gap(px(2.)).children(rows.into_iter().map(|(_, row)| row));
+        }
         let (column, dropped) = reorder::column(&self.ws_reorder, rows, 2., theme, window, cx.has_active_drag());
         let blocks: Vec<Vec<String>> = snapshot
             .map(|s| crate::model::groups(s.workspace_tree()).into_iter().map(|(w, kids)| std::iter::once(w).chain(kids).map(|w| w.workspace_id.clone()).collect()).collect())
@@ -576,6 +587,7 @@ impl Shell {
                     // the place's own snapshot hasn't come yet: the list is its last, or none
                     .when(waiting, |el| el.child(crate::ui::loader::mini_spinner(2., theme.text_faint, window))),
             )
+            .children(self.thread_bar(theme, snapshot.as_ref(), true, cx))
             .child(
                 div()
                     .relative()
@@ -598,10 +610,11 @@ impl Shell {
                     .px(px(8.))
                     .flex()
                     .flex_col()
-                    .child(self.workspace_column(theme, snapshot.as_ref(), shown_ws, active, window, cx))
+                    .child(self.workspace_column(theme, snapshot.as_ref(), shown_ws, shown_tab.as_deref(), active, window, cx))
             ),
             )
-            .child(
+            // T3 Code's bar has this button
+            .when(SettingsGlobal::of(cx).settings.sidebar_style == crate::settings::SidebarStyle::Herdr, |el| el.child(
                 div().flex_none().m(px(8.)).flex().gap(px(4.)).child(
                 div()
                     .id("new-workspace")
@@ -619,8 +632,8 @@ impl Shell {
                     .child("New workspace")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_workspace(cx))),
                 ),
-            )
-            .when(SettingsGlobal::of(cx).settings.show_agents && any_agents, |el| {
+            ))
+            .when(SettingsGlobal::of(cx).settings.shows_agents_section() && any_agents, |el| {
                 let seam = theme.accent;
                 let dragging = self.agents_drag.is_some();
                 el.child(
@@ -928,6 +941,16 @@ impl Shell {
                 )
             })
     }
+}
+
+/// Where `w` lives: a workspace herdr knows no worktree of, where its panes were opened.
+pub(super) fn workspace_dir(w: &crate::model::Workspace, snapshot: Option<&Snapshot>) -> Option<String> {
+    w.worktree
+        .as_ref()
+        .map(|t| t.checkout_path.as_str())
+        .filter(|d| !d.is_empty())
+        .or_else(|| snapshot?.panes.iter().find(|p| p.workspace_id == w.workspace_id)?.cwd.as_deref())
+        .map(crate::herdr::locate)
 }
 
 /// An agents list entry: the agent, its workspace's label, its project (id and label: see

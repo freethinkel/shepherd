@@ -480,6 +480,7 @@ impl Shell {
         .children(self.web_menu(theme, cx))
         .children(self.right_plus_menu(theme, cx))
         .children(self.annotation_agents_menu(theme, cx))
+        .children(self.project_menu(theme, snapshot.as_ref(), cx))
         .children(self.ws_menu.as_ref().map(|menu| {
             let (id, at) = menu.value.clone();
             let worktree = snapshot

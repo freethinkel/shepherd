@@ -414,6 +414,29 @@ impl Snapshot {
             .map(|(w, _)| w)
     }
 
+    /// The T3 Code sidebar's lists, of project `project` or, also when it isn't here (another place's), of them all.
+    pub fn shelves(&self, project: Option<&str>) -> Shelves<'_> {
+        let groups = groups(self.workspace_tree());
+        let project = project.filter(|id| groups.iter().any(|(w, _)| w.workspace_id == *id));
+        let members: Vec<&Workspace> = groups.into_iter().filter(|(w, _)| project.is_none_or(|id| w.workspace_id == id)).flat_map(|(w, kids)| std::iter::once(w).chain(kids)).collect();
+        let agents = self.agents();
+        let mut shelves = Shelves::default();
+        for pane in &agents {
+            let Some(w) = members.iter().find(|w| w.workspace_id == pane.workspace_id) else { continue };
+            let shelf = if pane.agent_status == AgentStatus::Working { &mut shelves.working } else { &mut shelves.active };
+            shelf.push((*w, Some(*pane)));
+        }
+        shelves.settled = members.iter().filter(|w| !agents.iter().any(|p| p.workspace_id == w.workspace_id)).map(|w| (*w, None)).collect();
+        shelves
+    }
+
+    /// Whether the T3 Code sidebar's search for `query`, lowercase, finds `thread`: by its title, workspace or project.
+    pub fn thread_matches(&self, (w, pane): Thread, query: &str) -> bool {
+        let title = pane.and_then(|p| p.terminal_title_stripped.as_deref()).unwrap_or_default();
+        let project = self.project_of(&w.workspace_id).map_or("", |p| p.label.as_str());
+        [title, w.label.as_str(), project].iter().any(|text| text.to_lowercase().contains(query))
+    }
+
     /// The agents `scope` takes in from `workspace_id`, in [`Self::agents`]'s order.
     pub fn agents_in(&self, workspace_id: &str, scope: AgentScope) -> Vec<&Pane> {
         let project = |id: &str| self.project_of(id).map(|w| w.workspace_id.as_str());
@@ -573,6 +596,28 @@ pub fn groups(tree: Vec<(&Workspace, Option<bool>)>) -> Vec<(&Workspace, Vec<&Wo
         }
     }
     out
+}
+
+/// A T3 Code sidebar card: a workspace, and its agent if it has one.
+pub type Thread<'a> = (&'a Workspace, Option<&'a Pane>);
+
+/// The T3 Code sidebar's lists, in [`Snapshot::agents`]'s order. A workspace without an agent has no thread to hang
+/// off, so it settles as itself and stays reachable.
+#[derive(Default)]
+pub struct Shelves<'a> {
+    /// Agents that need you or wait for you, the sidebar's main list.
+    pub active: Vec<Thread<'a>>,
+    pub working: Vec<Thread<'a>>,
+    pub settled: Vec<Thread<'a>>,
+}
+
+/// Whether card `i` of `threads` shows what is on screen: the shown tab's agent, or, on a tab without one, the shown
+/// workspace's first card, so the list always marks where you are.
+pub fn thread_shown(threads: &[Thread], i: usize, workspace: Option<&str>, tab: Option<&str>) -> bool {
+    let (w, pane) = threads[i];
+    let on_tab = |p: Option<&Pane>| p.is_some_and(|p| Some(p.tab_id.as_str()) == tab);
+    workspace == Some(w.workspace_id.as_str())
+        && (on_tab(pane) || (!threads.iter().any(|(o, p)| o.workspace_id == w.workspace_id && on_tab(*p)) && threads.iter().position(|(o, _)| o.workspace_id == w.workspace_id) == Some(i)))
 }
 
 /// Where group `from` (each group its workspaces' ids, the top-level one first) goes when dropped on group `to`:

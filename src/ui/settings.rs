@@ -5,7 +5,7 @@
 //! `config.toml`, which herdr then reloads.
 use crate::bindings::{ACTIONS, effective, rebind, recordable};
 use crate::herdr::{Client, HerdrConfig, config_path, set_binary, set_socket};
-use crate::settings::{OpenFrom, Settings, SettingsGlobal, WebEntry, step_font_size, step_line_height};
+use crate::settings::{OpenFrom, Settings, SettingsGlobal, SidebarStyle, WebEntry, step_font_size, step_line_height};
 use crate::theme::{Appearance, AppearanceMode, StatusIcons, Theme, variants_for};
 use crate::ui::input_style;
 use crate::update::{self as updater, Updates};
@@ -419,7 +419,7 @@ impl SettingsView {
         // SHEPHERD_SELECT=<select id>[:query] opens that list at launch, filtered, for screenshots.
         if let Ok(spec) = std::env::var("SHEPHERD_SELECT") {
             let (id, query) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
-            if let Some(id) = ["light-theme-select", "dark-theme-select", "editor-select", "font-select"].into_iter().find(|s| *s == id) {
+            if let Some(id) = ["light-theme-select", "dark-theme-select", "editor-select", "font-select", "sidebar-select"].into_iter().find(|s| *s == id) {
                 view.open_select = Some(crate::ui::Popup::new(id));
                 view.select_search.update(cx, |input, cx| {
                     input.set_value(query.to_string(), window, cx);

@@ -38,6 +38,7 @@ mod sidebar;
 mod sync;
 mod tab_bar;
 mod tabs;
+mod threads;
 mod web;
 mod widgets;
 mod window;
@@ -194,6 +195,10 @@ pub struct Shell {
     pane_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// The agents list's right-click menu, for a row or a project's heading, and where it was clicked.
     agent_menu: Option<crate::ui::Popup<(sidebar::AgentMenu, gpui::Point<Pixels>)>>,
+    /// The T3 Code sidebar's project select, open where it was pressed.
+    project_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
+    /// The T3 Code sidebar's search, and what redraws the list as it changes.
+    thread_search: (Entity<InputState>, Subscription),
     /// The status bar's spend popup, opened at this point (its bottom-left).
     spent_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// The spend popup lists the most tokens first.
@@ -511,6 +516,8 @@ impl Shell {
                     annotation_agents_menu: None,
                     pane_menu: None,
                     agent_menu: None,
+                    project_menu: None,
+                    thread_search: threads::search_field(window, cx),
                     spent_menu: None,
                     usage_menu: None,
                     statusbar_menu: None,
