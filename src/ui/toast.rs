@@ -17,8 +17,13 @@ struct Toast {
     error: bool,
     /// Runs on a click, before the toast closes.
     action: Option<Rc<dyn Fn(&mut App)>>,
+    /// Draws a card of the caller's in place of the message.
+    content: Option<Content>,
     popup: Popup<()>,
 }
+
+/// A card of its own, given the theme and what closes it.
+pub type Content = Rc<dyn Fn(&Theme, Rc<dyn Fn(&mut App)>) -> gpui::AnyElement>;
 
 #[derive(Default)]
 struct Toasts(Vec<Toast>);
@@ -26,22 +31,31 @@ struct Toasts(Vec<Toast>);
 impl Global for Toasts {}
 
 pub fn error(cx: &mut App, message: impl Into<SharedString>) {
-    push(cx, message.into(), true, None);
+    push(cx, message.into(), true, None, None);
 }
 
 /// A note; `action`, when given, runs on a click.
 pub fn info(cx: &mut App, message: impl Into<SharedString>, action: Option<Rc<dyn Fn(&mut App)>>) {
-    push(cx, message.into(), false, action);
+    push(cx, message.into(), false, action, None);
 }
 
-fn push(cx: &mut App, message: SharedString, error: bool, action: Option<Rc<dyn Fn(&mut App)>>) {
+/// A card drawn by `content`, in the stack until it closes itself.
+pub fn sticky(cx: &mut App, key: impl Into<SharedString>, content: Content) {
+    push(cx, key.into(), false, None, Some(content));
+}
+
+fn push(cx: &mut App, message: SharedString, error: bool, action: Option<Rc<dyn Fn(&mut App)>>, content: Option<Content>) {
     let toasts = &mut cx.default_global::<Toasts>().0;
     // the same message again replaces the open one, so a repeated failure does not pile up
     toasts.retain(|t| t.message != message || !t.popup.is_open());
     let popup = Popup::new(());
     let serial = popup.serial;
-    toasts.push(Toast { message, error, action, popup });
+    let stays = content.is_some();
+    toasts.push(Toast { message, error, action, content, popup });
     cx.refresh_windows();
+    if stays {
+        return;
+    }
     cx.spawn(async move |cx| {
         cx.background_executor().timer(STAY).await;
         cx.update(|cx| close(cx, serial));
@@ -79,26 +93,26 @@ fn card(theme: &Theme, toast: &Toast) -> gpui::AnyElement {
     let serial = toast.popup.serial;
     let action = toast.action.clone();
     let (tone, bg) = if toast.error { (theme.danger, theme.card.blend(theme.danger.opacity(0.14))) } else { (theme.text, theme.card) };
-    let el = div()
-        .id(("toast", serial))
-        .occlude()
-        .relative()
-        .max_w_full()
-        .px_3()
-        .py_2()
-        .rounded(px(10.))
-        .bg(bg)
-        .shadow_lg()
-        .text_size(px(12.))
-        .text_color(tone)
-        .cursor_pointer()
-        .child(toast.message.clone())
-        .on_click(move |_, _, cx| {
-            if let Some(action) = &action {
-                action(cx);
-            }
-            close(cx, serial);
-        });
+    let el = div().id(("toast", serial)).occlude().relative().max_w_full();
+    let el = match &toast.content {
+        Some(content) => el.child(content(theme, Rc::new(move |cx| close(cx, serial)))),
+        None => el
+            .px_3()
+            .py_2()
+            .rounded(px(10.))
+            .bg(bg)
+            .shadow_lg()
+            .text_size(px(12.))
+            .text_color(tone)
+            .cursor_pointer()
+            .child(toast.message.clone())
+            .on_click(move |_, _, cx| {
+                if let Some(action) = &action {
+                    action(cx);
+                }
+                close(cx, serial);
+            }),
+    };
     match toast.popup.closing {
         Some(closing) => {
             let t = gpui::ease_in_out((closing.elapsed().as_secs_f32() / OUT.as_secs_f32()).min(1.0));

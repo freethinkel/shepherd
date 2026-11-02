@@ -65,7 +65,8 @@ const SWITCH_MARK: f32 = 7.2;
 /// Zeron's sidebar glyph (`icons::sidebar_glyph`, from Zeron Icons, drawn as `assets/icons/sidebar-minimalistic-left.svg`
 /// at rest): a rounded frame holding a panel that narrows from 5.5 to 1.75 as `open` falls from 1 to 0. gpui SVGs are
 /// static, so it's drawn from quads in the source's 24-unit space. Past 1 (the edge spring) it stays at full width.
-pub fn sidebar_glyph(open: f32, size: f32, color: gpui::Hsla) -> gpui::Div {
+/// `right` mirrors it.
+pub fn sidebar_glyph(open: f32, right: bool, size: f32, color: gpui::Hsla) -> gpui::Div {
     use gpui::{ParentElement, Styled};
     let s = size / 24.;
     // a centered stroke: the box grows by half of it on each side
@@ -81,12 +82,12 @@ pub fn sidebar_glyph(open: f32, size: f32, color: gpui::Hsla) -> gpui::Div {
         .border_color(color);
     let panel = gpui::div()
         .absolute()
-        .left(px(6.5 * s))
         .top(px(7.5 * s))
         .w(px((1.75 + 3.75 * open.clamp(0., 1.)) * s))
         .h(px(9. * s))
         .rounded(px(0.875 * s))
         .bg(color);
+    let panel = if right { panel.right(px(6.5 * s)) } else { panel.left(px(6.5 * s)) };
     gpui::div().relative().flex_none().size(px(size)).child(frame).child(panel)
 }
 

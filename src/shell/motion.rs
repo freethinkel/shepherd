@@ -48,6 +48,27 @@ pub(super) fn edge_nudge(t: f32) -> f32 {
     5. * if t < out { smooth(t / out) } else { 1. - smooth((t - out) / (1. - out)) }
 }
 
+/// A dragged edge's spring: the limit it's on (-1 the least, 1 the most) and since when.
+pub(super) type EdgeSpring = Option<(f32, Instant)>;
+
+/// Keeps `spring` up with an edge dragged to `wanted`: one spring per arrival at a limit, not one per mouse move while
+/// held there.
+pub(super) fn spring_at_limit(spring: &mut EdgeSpring, wanted: f32, min: f32, max: f32) {
+    let edge = if wanted <= min { -1. } else if wanted >= max { 1. } else { 0. };
+    if edge == 0. {
+        *spring = None;
+    } else if spring.map(|(s, _)| s) != Some(edge) {
+        *spring = Some((edge, Instant::now()));
+    }
+}
+
+/// The spring's offset while it plays.
+pub(super) fn spring_offset(spring: EdgeSpring) -> Option<f32> {
+    let (sign, started) = spring?;
+    let t = started.elapsed().as_secs_f32() / EDGE_SPRING.as_secs_f32();
+    (t < 1.).then(|| sign * edge_nudge(t))
+}
+
 /// Zeron's resize seam (`Shell::resize_handle`): a 1 px line (the accent) `at` px into the hit strip that
 /// fades out toward both ends. Shown while dragged; `hover` (hovered, flip count) fades it in and out like Zeron's
 /// `HOVER_FADE`, restarting on every flip.
@@ -143,6 +164,22 @@ mod tests {
         assert_eq!(edge_nudge(0.), 0.);
         assert_eq!(edge_nudge(0.32), 5.);
         assert_eq!(edge_nudge(1.), 0.);
+    }
+
+    #[test]
+    fn a_limit_springs_once_per_arrival() {
+        let mut spring = None;
+        spring_at_limit(&mut spring, 300., 200., 400.);
+        assert!(spring.is_none());
+        spring_at_limit(&mut spring, 450., 200., 400.);
+        let arrived = spring.unwrap();
+        assert_eq!(arrived.0, 1.);
+        spring_at_limit(&mut spring, 480., 200., 400.); // held there
+        assert_eq!(spring.unwrap().1, arrived.1);
+        spring_at_limit(&mut spring, 300., 200., 400.);
+        assert!(spring.is_none());
+        spring_at_limit(&mut spring, 100., 200., 400.);
+        assert_eq!(spring.unwrap().0, -1.);
     }
 
     #[test]

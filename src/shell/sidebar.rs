@@ -31,9 +31,7 @@ impl Shell {
 
     /// The edge spring's offset while it plays.
     pub(super) fn sidebar_nudge(&self) -> Option<f32> {
-        let (sign, started) = self.sidebar_edge?;
-        let t = started.elapsed().as_secs_f32() / EDGE_SPRING.as_secs_f32();
-        (t < 1.).then(|| sign * edge_nudge(t))
+        spring_offset(self.sidebar_edge)
     }
 
     /// Hides or shows the sidebar with the fold tween; panes keep their grids until it lands.
@@ -102,11 +100,10 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FOLD_DURATION + Duration::from_millis(120)).await;
             let _ = this.update(cx, |shell, cx| {
-                // a later toggle or a drag owns the hold now
-                if shell.sidebar_motion.is_some_and(|m| m.started == motion.started) && !shell.sidebar_drag && shell.divider.is_none() {
+                // a later toggle owns the hold now
+                if shell.sidebar_motion.is_some_and(|m| m.started == motion.started) {
                     shell.sidebar_motion = None;
-                    cx.set_global(GridHold(false));
-                    cx.refresh_windows();
+                    shell.release_grids(cx);
                 }
             });
         })
@@ -114,18 +111,20 @@ impl Shell {
         cx.notify();
     }
 
+    /// Lets the panes' grids go, unless a drag or a slide still holds them.
+    pub(super) fn release_grids(&self, cx: &mut Context<Self>) {
+        if self.divider.is_none() && !self.sidebar_drag && !self.right.drag && self.sidebar_motion.is_none() && self.right.motion.is_none() {
+            cx.set_global(GridHold(false));
+            cx.refresh_windows();
+        }
+    }
+
     pub(super) fn drag_sidebar(&mut self, x: Pixels, cx: &mut Context<Self>) {
         if !self.sidebar_drag {
             return;
         }
         let x = f32::from(x);
-        let edge = if x <= SIDEBAR_MIN { -1. } else if x >= SIDEBAR_MAX { 1. } else { 0. };
-        // one spring per arrival at a limit, not one per mouse move while held there
-        if edge == 0. {
-            self.sidebar_edge = None;
-        } else if self.sidebar_edge.map(|(s, _)| s) != Some(edge) {
-            self.sidebar_edge = Some((edge, Instant::now()));
-        }
+        spring_at_limit(&mut self.sidebar_edge, x, SIDEBAR_MIN, SIDEBAR_MAX);
         self.sidebar_width = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         cx.notify();
     }
@@ -167,6 +166,7 @@ impl Shell {
     /// Brings the agent's tab up and its pane to the keyboard.
     pub(super) fn show_agent(&mut self, tab_id: String, pane_id: String, cx: &mut Context<Self>) {
         self.select_tab(Some(tab_id));
+        self.update_panel(cx, |p| p.expanded = false);
         self.focus_next = Some(pane_id);
         cx.notify();
     }

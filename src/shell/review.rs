@@ -121,7 +121,7 @@ impl Shell {
 
     /// The panel, and its edge: drag to resize, double-click for the default width.
     pub(super) fn render_review(&mut self, theme: &Theme, shown: &ShownReview, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let panel_width = self.right_panel_width(window);
+        let panel_width = self.right_panel_drawn(window);
         let (key, review, branch) = (shown.key.clone(), shown.review.clone(), shown.branch.clone());
         let busy = key.as_deref().is_some_and(|k| fetching::<Review>(k, cx));
 

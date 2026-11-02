@@ -1,4 +1,4 @@
-use shepherd::right_panel::{Offer, PanelState, Surface, clamp_width, fits, offered};
+use shepherd::right_panel::{Offer, PanelState, Surface, clamp_width, fits, offered, slides};
 
 fn b(id: &str) -> Surface {
     Surface::Browser(id.into())
@@ -154,4 +154,29 @@ fn the_toggles_go_by_what_is_on_screen() {
     assert!(p.open);
     p.toggle_pull_request(true);
     assert!(!p.open);
+}
+
+#[test]
+fn the_panel_slides_when_opened_or_closed_in_place_only() {
+    let at = |ws: &str, open| (Some(ws.to_string()), open);
+    assert!(slides(&at("a", false), &at("a", true)));
+    assert!(slides(&at("a", true), &at("a", false)));
+    assert!(!slides(&at("a", true), &at("a", true)));
+    // another workspace brings its own panel, and the first snapshot the one it finds
+    assert!(!slides(&at("a", false), &at("b", true)));
+    assert!(!slides(&(None, false), &at("a", true)));
+}
+
+#[test]
+fn closing_leaves_the_expansion_by_every_way() {
+    let closed = |close: fn(&mut PanelState)| {
+        let mut p = panel(&[Surface::PullRequest]);
+        p.expanded = true;
+        close(&mut p);
+        assert!(!p.open && !p.expanded);
+    };
+    closed(PanelState::shut);
+    closed(|p| p.toggle_seen(true));
+    closed(|p| p.toggle_pull_request(true));
+    closed(|p| p.close(&Surface::PullRequest));
 }

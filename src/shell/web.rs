@@ -227,9 +227,9 @@ impl Shell {
         self.pages.shown = None;
     }
 
-    /// The panel's active browser tab's page, while the panel shows.
+    /// The panel's active browser tab's page, while the panel shows, sliding out included.
     pub(super) fn panel_page(&self, window: &Window) -> Option<PageKey> {
-        match self.panel()?.active.as_ref().filter(|_| self.right_panel_shown(window))? {
+        match self.panel()?.active.as_ref().filter(|_| self.right_panel_now(window) > 0.)? {
             crate::right_panel::Surface::Browser(id) => Some((id.clone(), None)),
             crate::right_panel::Surface::PullRequest => None,
         }

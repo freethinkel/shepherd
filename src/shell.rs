@@ -35,6 +35,7 @@ mod review;
 mod right_panel;
 mod sessions;
 mod sidebar;
+mod star_prompt;
 mod sync;
 mod tab_bar;
 mod tabs;
@@ -166,10 +167,12 @@ pub struct Shell {
     marked_seen: Option<String>,
     /// An agent's pane to give the keyboard once it is shown, over herdr's focused pane of its tab.
     focus_next: Option<String>,
-    /// The `…` menu's Show submenu is out: the pointer went over its row.
-    show_submenu: bool,
-    /// Where the Show submenu was painted: a press there is inside the `…` menu, though outside its card.
-    show_submenu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The `…` menu's submenu that is out: the pointer went over its row.
+    view_submenu: Option<popups::ViewSubmenu>,
+    /// Where that submenu was painted: a press there is inside the `…` menu, though outside its card.
+    view_submenu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The submenu about to replace the open one, unless the pointer moves on first.
+    view_submenu_switch: Option<(Option<popups::ViewSubmenu>, gpui::Task<()>)>,
     /// The Agents section's `…` menu, open under its button.
     agents_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// The annotations panel's `…` menu, open under its button.
@@ -437,11 +440,7 @@ impl Shell {
                     s.resize_hold = cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(Duration::from_millis(120)).await;
                         let _ = this.update(cx, |s, cx| {
-                            // a drag or the sidebar's fold owns the hold now
-                            if s.divider.is_none() && !s.sidebar_drag && !s.right.drag && s.sidebar_motion.is_none() {
-                                cx.set_global(GridHold(false));
-                                cx.refresh_windows();
-                            }
+                            s.release_grids(cx);
                         });
                     });
                 })
@@ -510,8 +509,9 @@ impl Shell {
                     view_menu: None,
                     focus_next: None,
                     marked_seen: None,
-                    show_submenu: false,
-                    show_submenu_bounds: Default::default(),
+                    view_submenu: None,
+                    view_submenu_bounds: Default::default(),
+                    view_submenu_switch: None,
                     agents_menu: None,
                     annotation_agents_menu: None,
                     pane_menu: None,
@@ -887,6 +887,9 @@ impl Shell {
         let (notify, sound) = (settings.notify_agents, settings.notify_sound);
         let Some(old) = self.snapshot.as_ref() else { return };
         for pane in crate::notify::arrivals(old, next) {
+            if pane.agent_status == AgentStatus::Done {
+                star_prompt::agent_done(&pane.pane_id, cx);
+            }
             if in_view.as_deref() == Some(pane.tab_id.as_str()) {
                 continue;
             }

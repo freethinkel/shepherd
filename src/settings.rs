@@ -44,6 +44,8 @@ pub struct Settings {
     pub sidebar_width: f32,
     /// The right panel's width, drawn narrower while the window has no room for it; dragging its edge sets it.
     pub right_panel_width: f32,
+    /// Agents seen through to done, up to the count that asks for a GitHub star.
+    pub agents_done: u32,
     pub agent_sort: AgentSort,
     /// Which agents a browser tab's annotations can go to.
     pub annotation_agents: AgentScope,
@@ -299,6 +301,7 @@ impl Default for Settings {
             keys: BTreeMap::new(),
             sidebar_width: SIDEBAR_WIDTH,
             right_panel_width: RIGHT_PANEL_WIDTH,
+            agents_done: 0,
             agent_sort: AgentSort::default(),
             annotation_agents: AgentScope::default(),
             sidebar_style: SidebarStyle::default(),

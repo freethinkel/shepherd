@@ -3,12 +3,80 @@
 use super::*;
 use crate::settings::SidebarStyle;
 
-/// A `…` row other than Show, hovered: the Show submenu goes.
-fn close_show_submenu(this: &mut Shell, on: &bool, _: &mut Window, cx: &mut Context<Shell>) {
-    if *on && this.show_submenu {
-        this.show_submenu = false;
+/// Which of the `…` menu's submenus is out.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum ViewSubmenu {
+    Sidebar,
+    Show,
+}
+
+/// How long the pointer rests on another `…` row before an open submenu gives way to it: the way from a row to its
+/// submenu's lower choices crosses the rows beneath.
+const VIEW_SUBMENU_SWITCH: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The pointer came to or left a `…` row: the one with `target` as its submenu, none for a row without one.
+fn hover_view_submenu(this: &mut Shell, target: Option<ViewSubmenu>, on: bool, cx: &mut Context<Shell>) {
+    if !on {
+        // the next row's hover may come first, so this only drops the row's own switch
+        if this.view_submenu_switch.as_ref().is_some_and(|(pending, _)| *pending == target) {
+            this.view_submenu_switch = None;
+        }
+    } else if this.view_submenu == target {
+        this.view_submenu_switch = None;
+    } else if this.view_submenu.is_none() {
+        this.view_submenu = target;
         cx.notify();
+    } else {
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(VIEW_SUBMENU_SWITCH).await;
+            let _ = this.update(cx, |this, cx| {
+                this.view_submenu = target;
+                this.view_submenu_switch = None;
+                cx.notify();
+            });
+        });
+        this.view_submenu_switch = Some((target, task));
     }
+}
+
+/// Zeron's submenu: the row opens the choices beside it on hover, one submenu at a time.
+fn view_submenu(
+    shell: &Shell,
+    theme: &Theme,
+    which: ViewSubmenu,
+    (id, card, label): (&'static str, &'static str, &'static str),
+    choices: impl IntoIterator<Item = Stateful<Div>>,
+    cx: &mut Context<Shell>,
+) -> Div {
+    let open = shell.view_submenu == Some(which);
+    let bounds = shell.view_submenu_bounds.clone();
+    div()
+        .relative()
+        .child(
+            row(theme, open, id)
+                .h(px(30.))
+                .rounded(px(6.))
+                .child(div().flex_1().child(label))
+                .child(gpui::svg().path("icons/alt-arrow-right.svg").size(px(12.)).flex_none().text_color(theme.text_faint))
+                .on_hover(cx.listener(move |this, on: &bool, _, cx| hover_view_submenu(this, Some(which), *on, cx)))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.view_submenu_switch = None;
+                    this.view_submenu = (this.view_submenu != Some(which)).then_some(which);
+                    cx.notify();
+                })),
+        )
+        .when(open, |el| {
+            el.child(
+                menu_card(theme, card, 180.)
+                    .absolute()
+                    .top(px(-4.))
+                    .left(gpui::relative(1.))
+                    .ml(px(8.))
+                    .child(canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
+                    .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child(label.to_uppercase()))
+                    .children(choices),
+            )
+        })
 }
 
 impl Shell {
@@ -31,8 +99,6 @@ impl Shell {
             let at = gpui::point(px(sidebar_w - 8. - 24.), px(TRAFFIC_LIGHTS_CENTER + 12. + 4.));
             let settings = &SettingsGlobal::of(cx).settings;
             let (show, compact, style) = (settings.workspace_show, settings.compact_workspaces, settings.sidebar_style);
-            let show_submenu = self.show_submenu;
-            let submenu_bounds = self.show_submenu_bounds.clone();
             let parts: [(&'static str, &'static str, &'static str, fn(&mut crate::settings::WorkspaceShow) -> &mut bool); 5] = [
                 ("show-icon", "icons/folder.svg", "Project icon", |s| &mut s.icon),
                 ("show-branch", "icons/git-branch.svg", "Branch", |s| &mut s.branch),
@@ -46,71 +112,43 @@ impl Shell {
                     menu,
                     menu_card(theme, "view-menu", 200.)
                         .on_mouse_down_out(cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                            if this.show_submenu && this.show_submenu_bounds.get().is_some_and(|b| b.contains(&e.position)) {
+                            if this.view_submenu.is_some() && this.view_submenu_bounds.get().is_some_and(|b| b.contains(&e.position)) {
                                 return;
                             }
                             if let Some(m) = this.view_menu.as_mut() { m.close() }
                             cx.notify();
                         }))
-                        .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child("SIDEBAR"))
-                        .children([(SidebarStyle::Herdr, "sidebar-herdr", "icons/folder.svg", "Herdr"), (SidebarStyle::T3, "sidebar-t3", "icons/bot.svg", "T3 Code")].map(|(choice, id, icon, label)| {
-                            menu_choice(theme, id, icon, label, style == choice)
-                                .on_hover(cx.listener(close_show_submenu))
-                                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| save_from_sidebar(cx, |s| s.sidebar_style = choice)))
-                        }))
-                        .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
-                        .child(
-                            // Zeron's submenu: the row opens the choices beside it on hover.
-                            div()
-                                .relative()
-                                .child(
-                                    row(theme, show_submenu, "workspace-show")
-                                        .h(px(30.))
-                                        .rounded(px(6.))
-                                        .child(div().flex_1().child("Show"))
-                                        .child(gpui::svg().path("icons/alt-arrow-right.svg").size(px(12.)).flex_none().text_color(theme.text_faint))
-                                        .on_hover(cx.listener(|this, on: &bool, _, cx| {
-                                            if *on && !this.show_submenu {
-                                                this.show_submenu = true;
-                                                cx.notify();
-                                            }
-                                        }))
-                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                            this.show_submenu = !this.show_submenu;
-                                            cx.notify();
-                                        })),
-                                )
-                                .when(show_submenu, |el| {
-                                    el.child(
-                                        menu_card(theme, "show-submenu", 180.)
-                                            .absolute()
-                                            .top(px(-4.))
-                                            .left(gpui::relative(1.))
-                                            .ml(px(8.))
-                                            .child(
-                                                canvas(move |b, _, _| submenu_bounds.set(Some(b)), |_, _, _, _| {})
-                                                    .absolute()
-                                                    .top_0()
-                                                    .left_0()
-                                                    .size_full(),
-                                            )
-                                            .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_size(px(11.)).text_color(theme.text_faint).child("SHOW"))
-                                            .children(parts.map(|(id, icon, label, part)| {
-                                                let mut shown = show;
-                                                menu_choice(theme, id, icon, label, *part(&mut shown)).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                                                    save_from_sidebar(cx, |s| {
-                                                        let on = part(&mut s.workspace_show);
-                                                        *on = !*on;
-                                                    })
-                                                }))
-                                            })),
-                                    )
-                                }),
-                        )
+                        .child(view_submenu(
+                            self,
+                            theme,
+                            ViewSubmenu::Sidebar,
+                            ("view-sidebar", "sidebar-submenu", "Sidebar"),
+                            [(SidebarStyle::Herdr, "sidebar-herdr", "icons/folder.svg", "Herdr"), (SidebarStyle::T3, "sidebar-t3", "icons/bot.svg", "T3 Code")].map(|(choice, id, icon, label)| {
+                                menu_choice(theme, id, icon, label, style == choice)
+                                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| save_from_sidebar(cx, |s| s.sidebar_style = choice)))
+                            }),
+                            cx,
+                        ))
+                        .child(view_submenu(
+                            self,
+                            theme,
+                            ViewSubmenu::Show,
+                            ("workspace-show", "show-submenu", "Show"),
+                            parts.map(|(id, icon, label, part)| {
+                                let mut shown = show;
+                                menu_choice(theme, id, icon, label, *part(&mut shown)).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                                    save_from_sidebar(cx, |s| {
+                                        let on = part(&mut s.workspace_show);
+                                        *on = !*on;
+                                    })
+                                }))
+                            }),
+                            cx,
+                        ))
                         .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
                         .child(
                             row(theme, false, "compact-workspaces")
-                                .on_hover(cx.listener(close_show_submenu))
+                                .on_hover(cx.listener(|this, on: &bool, _, cx| hover_view_submenu(this, None, *on, cx)))
                                 .h(px(30.))
                                 .rounded(px(6.))
                                 .child(div().flex_1().child("Compact"))
