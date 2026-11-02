@@ -1,7 +1,7 @@
 //! Web integrations' pages: an entry clicked in the sidebar shows its page in the system web view (wry) in place of
 //! the tabs and panes. A page lives until Shepherd quits or its entry goes; hidden, it keeps its state.
 use super::*;
-use super::tab_bar::{TAB_H, TAB_TOP};
+use super::tabs::{TAB_H, TAB_TOP};
 use crate::settings::{OpenFrom, WebEntry};
 use crate::web::{forwarded, label, listed, normalize, off_site, page_bounds, page_is_current};
 use futures::StreamExt;

@@ -37,6 +37,7 @@ mod sessions;
 mod sidebar;
 mod sync;
 mod tab_bar;
+mod tabs;
 mod web;
 mod widgets;
 mod window;

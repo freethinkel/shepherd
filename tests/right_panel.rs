@@ -1,4 +1,4 @@
-use shepherd::right_panel::{Offer, PanelState, Surface, clamp_width, drop_index, fits, offered, slide_offset};
+use shepherd::right_panel::{Offer, PanelState, Surface, clamp_width, fits, offered};
 
 fn b(id: &str) -> Surface {
     Surface::Browser(id.into())
@@ -118,14 +118,10 @@ fn widths_keep_the_centre_column_and_the_saved_value_survives_a_small_window() {
 }
 
 #[test]
-fn tab_drags_quantise_and_slide() {
-    assert_eq!(drop_index(-10., 116., 3), 0);
-    assert_eq!(drop_index(116., 116., 3), 1);
-    assert_eq!(drop_index(700., 116., 3), 2);
-    assert_eq!(drop_index(50., 116., 0), 0);
-    assert_eq!(slide_offset(1, 0, 2), -1.);
-    assert_eq!(slide_offset(1, 2, 0), 1.);
-    assert_eq!(slide_offset(0, 0, 2), 0.);
+fn a_tab_strip_key_comes_back_as_its_surface() {
+    for surface in [b("browser-3"), Surface::PullRequest] {
+        assert_eq!(Surface::of_key(surface.key()), surface);
+    }
 }
 
 #[test]

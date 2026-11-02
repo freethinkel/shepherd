@@ -11,6 +11,25 @@ pub enum Surface {
     PullRequest,
 }
 
+const PULL_REQUEST_KEY: &str = "pull-request";
+
+impl Surface {
+    /// What the strip knows the tab by.
+    pub fn key(&self) -> &str {
+        match self {
+            Surface::Browser(id) => id,
+            Surface::PullRequest => PULL_REQUEST_KEY,
+        }
+    }
+
+    pub fn of_key(key: &str) -> Self {
+        match key {
+            PULL_REQUEST_KEY => Surface::PullRequest,
+            id => Surface::Browser(id.to_string()),
+        }
+    }
+}
+
 /// A workspace's panel. In memory only: a launch starts with every panel closed.
 #[derive(Debug, Default)]
 pub struct PanelState {
@@ -120,23 +139,4 @@ pub fn fits(window: f32, sidebar: f32) -> bool {
 /// The width to draw a panel saved `width` wide at, leaving the panes theirs.
 pub fn clamp_width(width: f32, window: f32, sidebar: f32) -> f32 {
     width.min(window - sidebar - RIGHT_PANEL_CENTER_MIN).max(RIGHT_PANEL_MIN)
-}
-
-/// Zeron's `drop_index`: the slot a tab dragged `rel_x` into the strip lands in, among `count` tabs `tab_w` apart.
-pub fn drop_index(rel_x: f32, tab_w: f32, count: usize) -> usize {
-    if count == 0 || tab_w <= 0. {
-        return 0;
-    }
-    ((rel_x / tab_w).floor().max(0.) as usize).min(count - 1)
-}
-
-/// Zeron's `slide_offset`: in slots, how far tab `ix` shifts while tab `from` is dragged over slot `over`.
-pub fn slide_offset(ix: usize, from: usize, over: usize) -> f32 {
-    if from < over && ix > from && ix <= over {
-        -1.
-    } else if over < from && ix >= over && ix < from {
-        1.
-    } else {
-        0.
-    }
 }

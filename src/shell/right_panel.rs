@@ -1,17 +1,16 @@
 //! The right panel, Zeron's: a column of tabs beside the panes, one set per workspace. The logic is
-//! `crate::right_panel`'s; the strip, the picker and the `+` here are ported from Zeron's shell.
+//! `crate::right_panel`'s, the strip is `tabs`', the picker and the `+` menu are ported from Zeron's shell.
 use super::review::ShownReview;
 use crate::ui::review::Review;
 use crate::ui::statusbar::fetching;
+use super::tabs::{Leading, Tab, Tabs, new_tab_button, plain_tint, tab_element};
 use super::*;
-use crate::right_panel::{Offer, PanelState, Surface, clamp_width, drop_index, fits, offered, slide_offset};
+use crate::right_panel::{Offer, PanelState, Surface, clamp_width, fits, offered};
 use crate::settings::RIGHT_PANEL_WIDTH;
 use gpui::AnyElement;
-use crate::ui::edge_fade::edge_faded_x;
-use crate::ui::surface_chrome::{TAB_CHIP_HEIGHT, TAB_CHIP_SLOT, TAB_CHIP_WIDTH, TAB_STRIP_FADE, TabChip, tab_chip, tab_chip_icon};
 
-/// A chip sliding aside for the one dragged over it.
-const TAB_SLIDE: Duration = Duration::from_millis(150);
+/// The tab an empty panel shows in its strip, whose `×` closes the panel.
+const NEW: &str = "right-surface-new";
 
 pub(super) struct RightPanel {
     /// By workspace id.
@@ -24,61 +23,22 @@ pub(super) struct RightPanel {
     pub(super) plus: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// The workspace whose panel has the keyboard, not its panes.
     pub(super) focused: Option<String>,
-    scroll: gpui::ScrollHandle,
-    tab_drag: Option<TabDrag>,
+    tabs: Tabs,
     /// What the picker and the `+` offered at the last render.
     offers: Vec<Offer>,
 }
 
 impl RightPanel {
     pub(super) fn new(width: f32) -> Self {
-        RightPanel { panels: HashMap::new(), width, drag: false, plus: None, focused: None, scroll: Default::default(), tab_drag: None, offers: Vec::new() }
+        RightPanel { panels: HashMap::new(), width, drag: false, plus: None, focused: None, tabs: Tabs::default(), offers: Vec::new() }
     }
 }
 
-/// A chip on the move: where it left, and the slot it hovers over; `epoch` restarts the slide as that changes.
-struct TabDrag {
-    from: usize,
-    over: usize,
-    epoch: usize,
-    prev_over: usize,
-}
-
-/// What a dragged chip carries.
-#[derive(Clone)]
-struct DraggedChip {
-    workspace: String,
-    from: usize,
-    title: SharedString,
-}
-
-/// The chip that follows the pointer.
-struct ChipGhost(SharedString);
-
-impl Render for ChipGhost {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .h(px(TAB_CHIP_HEIGHT))
-            .w(px(TAB_CHIP_WIDTH))
-            .px(px(8.))
-            .flex()
-            .items_center()
-            .rounded(px(6.))
-            .bg(theme.surface)
-            .border_1()
-            .border_color(theme.border_strong)
-            .text_size(px(11.5))
-            .text_color(theme.text)
-            .child(div().truncate().child(self.0.clone()))
-    }
-}
-
-/// The pull request chip's title: the request's own once known.
-fn pull_request_title(shown: &ShownReview) -> SharedString {
+/// The pull request tab's title: the request's own once known.
+fn pull_request_title(shown: &ShownReview) -> String {
     match &shown.review {
-        Some(Review::Found { request: Some(r), .. }) if r.pr.gitlab => format!("MR !{}", r.pr.number).into(),
-        Some(Review::Found { request: Some(r), .. }) => format!("PR #{}", r.pr.number).into(),
+        Some(Review::Found { request: Some(r), .. }) if r.pr.gitlab => format!("MR !{}", r.pr.number),
+        Some(Review::Found { request: Some(r), .. }) => format!("PR #{}", r.pr.number),
         _ => "Pull request".into(),
     }
 }
@@ -200,20 +160,23 @@ impl Shell {
         }
     }
 
-    /// The strip's tabs with their titles, in order.
-    fn surface_rows(&self, shown: &ShownReview) -> Vec<(Surface, SharedString)> {
+    /// The strip's tabs, in order.
+    fn surface_tabs(&self, shown: &ShownReview, theme: &Theme, window: &Window, cx: &mut App) -> Vec<Tab> {
         let Some(panel) = self.panel() else { return Vec::new() };
-        panel
-            .tabs
-            .iter()
-            .map(|s| {
-                let title: SharedString = match s {
-                    Surface::Browser(id) => self.browser_label(id).into(),
-                    Surface::PullRequest => pull_request_title(shown),
-                };
-                (s.clone(), title)
-            })
-            .collect()
+        let mark = |icon| Leading::Marks(vec![(icon, plain_tint(theme))]);
+        let fetching_review = shown.key.as_deref().is_some_and(|k| fetching::<Review>(k, cx));
+        let tab = |s: &Surface| {
+            let (title, leading) = match s {
+                Surface::Browser(id) => (self.browser_label(id), match self.browser_chip(id) {
+                    (_, true) => Leading::Spinner,
+                    (Some(image), false) => Leading::Image(image),
+                    (None, false) => mark("icons/solar/global.svg"),
+                }),
+                Surface::PullRequest => (pull_request_title(shown), if fetching_review { Leading::Spinner } else { mark("icons/git-pull-request.svg") }),
+            };
+            Tab::titled(s.key(), title, leading, theme, window)
+        };
+        panel.tabs.iter().map(tab).collect()
     }
 
     pub(super) fn close_surface(&mut self, surface: &Surface, cx: &mut Context<Self>) {
@@ -279,132 +242,70 @@ impl Shell {
         [panel.into_any_element(), edge.into_any_element()]
     }
 
-    /// The titlebar band over the panel: one chip per tab and the `+`, as t3code's `RightPanelTabs`, and the ✕.
+    /// The titlebar band over the panel: its tabs and the `+`, as t3code's `RightPanelTabs`, and the ✕.
     fn render_right_strip(&mut self, theme: &Theme, shown: &ShownReview, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        // the pointer let go outside the strip
-        if self.right.tab_drag.is_some() && !cx.has_active_drag() {
-            self.right.tab_drag = None;
+        let mut tabs = self.surface_tabs(shown, theme, window, cx);
+        let empty = tabs.is_empty();
+        if empty {
+            tabs.push(Tab::titled(NEW, "New".into(), Leading::Marks(vec![("icons/plus.svg", plain_tint(theme))]), theme, window));
         }
-        let rows = self.surface_rows(shown);
-        let fetching_review = shown.key.as_deref().is_some_and(|k| fetching::<Review>(k, cx));
-        let count = rows.len();
-        let active = self.panel().and_then(|p| p.active.clone());
-        let workspace = self.shown_tab().map(|t| t.workspace_id).unwrap_or_default();
-        let drag = self.right.tab_drag.as_ref().map(|d| (d.from, d.over, d.epoch, d.prev_over));
-        let scroll = self.right.scroll.clone();
-        let over_workspace = workspace.clone();
-        let drop_workspace = workspace.clone();
-        let mut strip = div()
-            .id("right-surface-strip")
-            .h_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.))
-            .min_w_0()
-            .overflow_x_scroll()
-            .track_scroll(&self.right.scroll)
-            .when(cfg!(windows), |el| el.occlude()) // as the tab bar's, off the drag strip
-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-            .on_drag_move::<DraggedChip>(cx.listener(move |this, e: &gpui::DragMoveEvent<DraggedChip>, _, cx| {
-                let chip = e.drag(cx);
-                if chip.workspace != over_workspace {
-                    return;
-                }
-                let from = chip.from;
-                let x = f32::from(e.event.position.x) - f32::from(e.bounds.left()) - f32::from(scroll.offset().x);
-                let over = drop_index(x, TAB_CHIP_SLOT, count);
-                this.drag_chip_over(from, over, cx);
-            }))
-            .on_drop::<DraggedChip>(cx.listener(move |this, chip: &DraggedChip, _, cx| this.chip_dropped(chip, &drop_workspace, cx)));
-        for (ix, (surface, title)) in rows.into_iter().enumerate() {
-            let is_active = active.as_ref() == Some(&surface);
-            let (activate, close, middle) = (surface.clone(), surface.clone(), surface.clone());
-            let icon = match surface {
-                Surface::Browser(_) => "icons/solar/global.svg",
-                Surface::PullRequest => "icons/git-pull-request.svg",
-            };
-            let spinner = |window: &mut Window| crate::ui::loader::mini_spinner(2., theme.text_faint, window).into_any_element();
-            let leading = match &surface {
-                Surface::PullRequest if fetching_review => spinner(window),
-                Surface::PullRequest => tab_chip_icon(icon, is_active, theme),
-                Surface::Browser(id) => match self.browser_chip(id) {
-                    (_, true) => spinner(window),
-                    (Some(image), false) => gpui::img(image).size(px(12.)).rounded(px(2.)).into_any_element(),
-                    (None, false) => tab_chip_icon(icon, is_active, theme),
-                },
-            };
-            let drop_workspace = workspace.clone();
-            let chip = tab_chip(
-                TabChip { id: "right-surface-tab", close_id: "right-surface-close", ix, active: is_active, title: title.clone(), leading },
-                theme,
-                cx.listener(move |this, _, _, cx| this.close_surface(&close, cx)),
-            )
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                cx.stop_propagation();
-                this.update_panel(cx, |p| p.activate(&activate));
-                // a page takes the keyboard from a click on its tab; the pull request has no use for it
-                this.focus_panel(matches!(activate, Surface::Browser(_)), window, cx);
-            }))
-            .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _: &MouseDownEvent, _, cx| this.close_surface(&middle, cx)))
-            .on_drag(DraggedChip { workspace: workspace.clone(), from: ix, title }, |chip, _, _, cx| {
-                cx.stop_propagation();
-                let title = chip.title.clone();
-                cx.new(|_| ChipGhost(title))
-            })
-            // the chips tile the strip and block the mouse: the drop has to land on one
-            .on_drop::<DraggedChip>(cx.listener(move |this, chip: &DraggedChip, _, cx| this.chip_dropped(chip, &drop_workspace, cx)));
-            // sliding aside for the chip dragged over; the dragged one leaves a gap, the ghost carrying it
-            let placed = match drag {
-                Some((from, over, epoch, prev_over)) if ix != from => {
-                    let (to, start) = (slide_offset(ix, from, over) * TAB_CHIP_SLOT, slide_offset(ix, from, prev_over) * TAB_CHIP_SLOT);
-                    div()
-                        .relative()
-                        .child(chip.with_animation(("right-tab-slide", (ix as u64) | ((epoch as u64) << 32)), gpui::Animation::new(TAB_SLIDE), move |el, t| el.left(px(start + (to - start) * t))))
-                        .into_any_element()
-                }
-                Some((from, ..)) if ix == from => div().w(px(TAB_CHIP_WIDTH)).h(px(TAB_CHIP_HEIGHT)).flex_none().into_any_element(),
-                _ => chip.into_any_element(),
-            };
-            strip = strip.child(placed);
-        }
-        if count == 0 {
-            strip = strip.child(
-                tab_chip(
-                    TabChip { id: "right-surface-new", close_id: "right-surface-new-close", ix: 0, active: false, title: "New".into(), leading: tab_chip_icon("icons/plus.svg", false, theme) },
-                    theme,
-                    cx.listener(|this, _, window, cx| this.toggle_right_panel(window, cx)),
-                ),
-            );
-        } else {
-            let plus_open = self.right.plus.as_ref().is_some_and(|m| m.is_open());
-            strip = strip.child(
-                icon_button(theme, "right-surface-add", "")
-                    .size(px(24.))
-                    .tooltip(tip("New tab", None))
-                    .when(plus_open, |el| el.bg(theme.hover))
-                    .child(gpui::svg().path("icons/plus.svg").size(px(13.)).text_color(theme.text_muted))
-                    .block_mouse_except_scroll()
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
-                        let at = gpui::point(e.position().x - px(8.), px(TITLEBAR_HEIGHT - 2.));
-                        this.right.plus = Some(crate::ui::Popup::new(at));
-                        cx.notify();
-                    })),
+        let scope = self.shown_tab().map(|t| t.workspace_id);
+        let active = self.panel().and_then(|p| p.active.as_ref()).map(|s| s.key().to_string());
+        let placed = self.right.tabs.frame(scope.as_deref(), tabs, active.as_deref(), window, cx);
+        let mut items = Vec::new();
+        for p in &placed {
+            if p.tab.id == NEW {
+                let close = |this: &mut Shell, cx: &mut Context<Shell>| this.update_panel(cx, |p| p.open = false);
+                items.push(tab_element(p, theme, None, None, close, window, cx).into_any_element());
+                continue;
+            }
+            let surface = Surface::of_key(&p.tab.id);
+            let close = surface.clone();
+            let tab = tab_element(p, theme, None, None, move |this, cx| this.close_surface(&close, cx), window, cx);
+            if p.closing {
+                items.push(tab.into_any_element());
+                continue;
+            }
+            items.push(
+                self.right
+                    .tabs
+                    .liftable(tab, p, theme, Shell::surface_dropped, cx)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.update_panel(cx, |p| p.activate(&surface));
+                        // a page takes the keyboard from a click on its tab; the pull request has no use for it
+                        this.focus_panel(matches!(surface, Surface::Browser(_)), window, cx);
+                    }))
+                    .into_any_element(),
             );
         }
-        let scroll = self.right.scroll.clone();
+        let row = self.tabs_row(&self.right.tabs, "right-surface-strip", theme, items, Shell::surface_dropped, cx);
+        let plus_open = self.right.plus.as_ref().is_some_and(|m| m.is_open());
         div()
             .h(px(TITLEBAR_HEIGHT))
             .flex_none()
+            // opaque, as the tab bar's, for the edge fades
+            .bg(theme.surface)
             .pl(px(8.))
             .pr(px(8. + window_controls_w(cx)))
             .flex()
             .items_center()
-            .gap(px(4.))
+            .gap(px(2.))
             .border_b_1()
             .border_color(theme.border)
-            .child(div().flex_1().min_w_0().h_full().child(edge_faded_x(TAB_STRIP_FADE, &scroll, strip).bottom_only()))
+            .child(row.flex_1())
+            .when(!empty, |el| {
+                el.child(
+                    new_tab_button(theme, "right-surface-add")
+                        .tooltip(tip("New tab", None))
+                        .when(plus_open, |el| el.bg(theme.hover))
+                        .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
+                            let at = gpui::point(e.position().x - px(8.), px(TITLEBAR_HEIGHT - 2.));
+                            this.right.plus = Some(crate::ui::Popup::new(at));
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 titlebar_button(theme, "right-panel-close", "icons/close.svg")
                     .tooltip(tip("Close", Some("ToggleRightPanel")))
@@ -412,27 +313,10 @@ impl Shell {
             )
     }
 
-    fn drag_chip_over(&mut self, from: usize, over: usize, cx: &mut Context<Self>) {
-        match &mut self.right.tab_drag {
-            Some(drag) if drag.over != over => {
-                drag.prev_over = drag.over;
-                drag.over = over;
-                drag.epoch += 1;
-                cx.notify();
-            }
-            Some(_) => {}
-            None => {
-                self.right.tab_drag = Some(TabDrag { from, over, epoch: 0, prev_over: from });
-                cx.notify();
-            }
-        }
-    }
-
-    /// A chip let go of on the strip: it lands in the slot it was over, in the panel it came from.
-    fn chip_dropped(&mut self, chip: &DraggedChip, workspace: &str, cx: &mut Context<Self>) {
-        let to = self.right.tab_drag.take().map_or(chip.from, |d| d.over);
-        if chip.workspace == workspace {
-            self.update_panel(cx, |p| p.reorder(chip.from, to));
+    /// A tab let go of on the strip: it lands in the slot its gap holds.
+    fn surface_dropped(&mut self, cx: &mut Context<Self>) {
+        if let Some((from, to)) = self.right.tabs.drop_held(Instant::now()) {
+            self.update_panel(cx, |p| p.reorder(from, to));
         }
         cx.notify();
     }
