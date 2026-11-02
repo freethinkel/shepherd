@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod analytics;
+pub mod annotations;
 pub mod assets;
 pub mod backend;
 pub mod bindings;

@@ -318,7 +318,7 @@ impl Mux for Rex {
         Box::pin(async move {
             let core = self.connected().await?;
             if let Some(text) = text {
-                on_block(&core, &pane, "write", json!({"data": text})).await?;
+                on_block(&core, &pane, "write", json!({"data": crate::backend::typed(text)})).await?;
             }
             on_block(&core, &pane, "write", json!({"data": "\r"})).await.map(drop)
         })
@@ -660,7 +660,7 @@ mod tests {
 
     fn checkouts() -> Checkouts {
         let checkouts = Checkouts::default();
-        checkouts.set("session:3".into(), Worktree { repo_key: "/r/.git".into(), is_linked_worktree: false, checkout_path: "/r".into() });
+        checkouts.set("session:3".into(), Worktree { repo_key: "/r/.git".into(), is_linked_worktree: false, checkout_path: "/r".into(), repo_root: "/r".into() });
         checkouts
     }
 
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn only_a_linked_worktree_carries_the_mark() {
-        let tree = |linked| Worktree { repo_key: "/r/.git".into(), is_linked_worktree: linked, checkout_path: "/r".into() };
+        let tree = |linked| Worktree { repo_key: "/r/.git".into(), is_linked_worktree: linked, checkout_path: "/r".into(), repo_root: "/r".into() };
         assert_eq!(kept_label("fix".into(), Some(&tree(true))), "\u{f126} r/fix");
         assert_eq!(shown_label("\u{f126} r/fix/two"), "fix/two", "a name may hold a slash");
         assert_eq!(shown_label("a/b"), "a/b", "only a worktree's is taken off");

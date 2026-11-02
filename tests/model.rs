@@ -1,5 +1,5 @@
 use shepherd::backend::Change;
-use shepherd::model::{AgentSort, AgentStatus, Frac, Since, Snapshot, ago, attachable, split_path};
+use shepherd::model::{AgentScope, AgentSort, AgentStatus, Frac, Since, Snapshot, ago, attachable, split_path};
 
 fn fixture() -> Snapshot {
     let value: serde_json::Value = serde_json::from_str(include_str!("fixtures/snapshot.json")).unwrap();
@@ -41,6 +41,22 @@ fn pane_frames_are_fractions_of_the_tab_area() {
     assert_eq!(frames[0].frame, Frac { x: 0.0, y: 0.0, w: 0.5, h: 1.0 });
     assert_eq!(frames[1].frame, Frac { x: 0.5, y: 0.0, w: 0.5, h: 1.0 });
     assert!(frames[1].focused);
+}
+
+#[test]
+fn a_pane_has_neighbors_only_away_from_the_tab_edge() {
+    use shepherd::commands::Direction::*;
+    let mut s = fixture();
+    let (left, right) = (s.layouts[0].clone(), "w1:p2");
+    assert!(left.has_neighbor("w1:p1", Right));
+    assert!(left.has_neighbor(right, Left));
+    for side in [Left, Up, Down] {
+        assert!(!left.has_neighbor("w1:p1", side));
+    }
+    assert!(!left.has_neighbor(right, Right));
+    assert!(!left.has_neighbor("w7:p7", Right), "unknown pane");
+    s.layouts[0].zoomed = true;
+    assert!(!s.layouts[0].has_neighbor("w1:p1", Right), "a zoomed pane hides the others");
 }
 
 #[test]
@@ -298,6 +314,27 @@ fn grouped_agents_keep_a_repos_worktrees_together_and_idle_ones_show_a_time() {
 }
 
 #[test]
+fn a_scope_takes_in_the_workspaces_agents_its_projects_or_all() {
+    let mut s = fixture();
+    for p in &mut s.panes {
+        p.agent = Some("claude".into());
+    }
+    s.workspaces = vec![ws("mochi", 1, Some(("m", false))), ws("plain", 2, None), ws("mochi-a", 3, Some(("m", true)))];
+    for (p, (ws, status)) in s.panes.iter_mut().zip([("mochi-a", AgentStatus::Blocked), ("plain", AgentStatus::Working), ("mochi", AgentStatus::Idle)]) {
+        (p.workspace_id, p.agent_status) = (ws.into(), status);
+    }
+    let ids = |workspace: &str, scope| s.agents_in(workspace, scope).iter().map(|p| p.pane_id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids("mochi", AgentScope::Worktree), ["w1:p3"], "the workspace alone");
+    assert_eq!(ids("mochi-a", AgentScope::Worktree), ["w1:p1"]);
+    assert_eq!(ids("mochi", AgentScope::Project), ["w1:p1", "w1:p3"], "the checkout's project, in agents' order");
+    assert_eq!(ids("mochi-a", AgentScope::Project), ids("mochi", AgentScope::Project), "a worktree's is the same project");
+    assert_eq!(ids("plain", AgentScope::Project), ["w1:p2"]);
+    assert_eq!(ids("plain", AgentScope::All), ["w1:p1", "w1:p2", "w1:p3"]);
+    assert!(ids("gone", AgentScope::Worktree).is_empty());
+    assert!(ids("gone", AgentScope::Project).is_empty());
+}
+
+#[test]
 fn waiting_agents_count_from_their_status_change_longest_first() {
     use std::time::{Duration, Instant};
     let mut s = fixture();
@@ -321,6 +358,39 @@ fn waiting_agents_count_from_their_status_change_longest_first() {
     assert!(!since.contains_key("w1:p3"), "a gone pane leaves");
     let labels: Vec<_> = [0, 59, 60, 3599, 3600, 86_399, 86_400].map(|secs| ago(Duration::from_secs(secs))).into();
     assert_eq!(labels, ["now", "now", "1m", "59m", "1h", "23h", "1d"]);
+}
+
+#[test]
+fn the_next_waiting_agent_goes_round_and_saved_times_survive_a_restart() {
+    use std::time::{Duration, Instant, SystemTime};
+    let mut s = fixture();
+    for p in &mut s.panes {
+        p.agent = Some("claude".into());
+    }
+    let (t0, mut since) = (Instant::now(), Since::new());
+    s.panes[1].agent_status = AgentStatus::Blocked;
+    s.track(&mut since, t0);
+    s.panes[0].agent_status = AgentStatus::Done;
+    s.track(&mut since, t0 + Duration::from_secs(5));
+    let next = |shown| s.next_waiting(&since, shown).map(|p| p.pane_id.clone());
+    assert_eq!(next(None).as_deref(), Some("w1:p2"), "the longest wait first");
+    assert_eq!(next(Some("w1:p2")).as_deref(), Some("w1:p1"));
+    assert_eq!(next(Some("w1:p1")).as_deref(), Some("w1:p2"), "round again");
+    assert_eq!(next(Some("w1:p3")).as_deref(), Some("w1:p2"), "from an agent not waiting, the first");
+
+    // Shepherd restarts: herdr's panes are the same, ten minutes on
+    let (wall, now) = (SystemTime::now(), t0 + Duration::from_secs(5));
+    let saved = s.remember(&mut since, &Default::default(), now, wall);
+    s.panes[2].state_change_seq = 7; // p3's id came back for another agent
+    let mut saved_p3 = saved.clone();
+    saved_p3.get_mut("w1:p3").unwrap().1 = 6;
+    let later = now + Duration::from_secs(3600);
+    let mut fresh = Since::new();
+    s.track(&mut fresh, later);
+    let again = s.remember(&mut fresh, &saved_p3, later, wall + Duration::from_secs(600));
+    assert_eq!(later.duration_since(fresh["w1:p2"].1), Duration::from_secs(605), "blocked since before the restart");
+    assert_eq!(fresh["w1:p3"].1, later, "another state change starts afresh");
+    assert_eq!(again["w1:p2"], saved["w1:p2"], "the saved time stays as it was");
 }
 
 fn ws(id: &str, number: u32, repo: Option<(&str, bool)>) -> shepherd::model::Workspace {

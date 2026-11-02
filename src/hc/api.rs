@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn a_worktree_sits_under_its_repos_checkout() {
         let mut doc = Doc::default();
-        let tree = |checkout: &str, linked| Some(Worktree { repo_key: "/r/app/.git".into(), is_linked_worktree: linked, checkout_path: checkout.into() });
+        let tree = |checkout: &str, linked| Some(Worktree { repo_key: "/r/app/.git".into(), is_linked_worktree: linked, checkout_path: checkout.into(), repo_root: "/r/app".into() });
         let (linked, _) = doc.add_workspace("t1".into());
         doc.add_workspace("t2".into());
         let (main, _) = doc.add_workspace("t3".into());

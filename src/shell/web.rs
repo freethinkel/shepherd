@@ -27,12 +27,14 @@ pub(super) enum PageEvent {
     /// A click in the page, which takes the keyboard from Shepherd's fields without GPUI knowing.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Clicked,
+    /// What a poll of the annotation picker returned.
+    Picked(String),
 }
 
 pub(super) struct Page {
     pub(super) view: Rc<wry::WebView>,
     /// Told apart from an earlier page under its key, whose events may still be on their way.
-    serial: u64,
+    pub(super) serial: u64,
     /// The normalized URL of the entry it was made for, so an edited URL makes a new page.
     entry_url: String,
     pub(super) title: Option<String>,
@@ -51,6 +53,8 @@ pub(super) struct Page {
     host: Option<Rc<host::Host>>,
     /// The SSH forward a page opened on a machine loads through; it closes with the page.
     tunnel: Option<crate::herdr::Tunnel>,
+    /// A browser tab's annotations.
+    pub(super) annotations: annotations::Draft,
 }
 
 /// A machine's page whose forward isn't up: being made, or why it couldn't be; with the entry's URL it is for.
@@ -81,7 +85,9 @@ pub(super) struct Pages {
     /// Where pages keep their cookies and storage between launches; macOS keeps WKWebView's default store.
     #[cfg(not(target_os = "macos"))]
     context: Option<wry::WebContext>,
-    events: Option<UnboundedSender<(PageKey, u64, PageEvent)>>,
+    pub(super) events: Option<UnboundedSender<(PageKey, u64, PageEvent)>>,
+    /// The agent last picked for each page's annotations, until Shepherd quits.
+    pub(super) recipients: HashMap<PageKey, String>,
     /// The last page's serial.
     made: u64,
     /// The setting that sends links to other sites to the browser, as the pages' handlers read it.
@@ -183,6 +189,7 @@ impl Shell {
         let popups = [
             self.view_menu.is_some(),
             self.agents_menu.is_some(),
+            self.annotation_agents_menu.is_some(),
             self.ws_menu.is_some(),
             self.web_menu.is_some(),
             self.new_tab_menu.is_some(),
@@ -194,6 +201,8 @@ impl Shell {
             self.tab_menu.is_some(),
             self.worktree_dialog.is_some(),
             self.remove_confirm.is_some(),
+            self.merge_delete.is_some(),
+            self.merge_failure.is_some(),
             self.merge_confirm.is_some(),
             self.session_dialog.is_some(),
             self.place_menu.is_some(),
@@ -392,6 +401,7 @@ impl Shell {
             #[cfg(target_os = "macos")]
             host,
             tunnel: None,
+            annotations: Default::default(),
         })
     }
 
@@ -468,7 +478,7 @@ impl Shell {
             }
             // the address field let go, as a click elsewhere in Shepherd would
             PageEvent::Clicked => {
-                if self.browser.editing() {
+                if self.browser.editing() || self.note_focused(window, cx) {
                     window.focus(&self.focus, cx);
                 }
             }
@@ -477,6 +487,8 @@ impl Shell {
                     crate::ui::toast::error(cx, format!("{url}: {e}"));
                 }
             }
+            // every 100 ms while picking: nothing below is for it
+            PageEvent::Picked(result) => return self.annotation_polled(&key, &result, window, cx),
         }
         if browser::is_tab(&key.0) {
             self.browser_loaded(&key, window, cx);
@@ -541,8 +553,8 @@ impl Shell {
         {
             self.show_web(key.0.clone(), window, cx);
         }
-        // the address field being typed in keeps the keyboard too
-        let popup = self.popup_open() || self.browser.editing();
+        // the address field or a note being typed in keeps the keyboard too
+        let popup = self.popup_open() || self.browser.editing() || self.note_focused(window, cx);
         // the page that takes the keyboard takes it after the others let go: `focus_parent` would take it back
         let mut takes = None;
         for (key, page) in &mut self.pages.live {
@@ -636,6 +648,7 @@ impl Shell {
         };
         div()
             .flex_1()
+            .min_w_0()
             .min_h_0()
             .relative()
             .bg(theme.terminal.background)

@@ -157,14 +157,39 @@ impl Shell {
             .with_priority(1)
         }))
         .children(self.agent_menu.as_ref().map(|menu| {
-            let (pane_id, at) = menu.value.clone();
-            // the row's own title on top, so the menu says which agent it closes
-            let title = snapshot
-                .as_ref()
-                .and_then(|s| s.panes.iter().find(|p| p.pane_id == pane_id))
-                .and_then(|p| p.terminal_title_stripped.clone())
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| "Agent".to_string());
+            use super::sidebar::AgentMenu;
+            let (of, at) = menu.value.clone();
+            let agents = self.shown_agents(cx);
+            let (title, panes, project) = match &of {
+                AgentMenu::Agent(pane_id) => {
+                    let title = agents.iter().find(|e| &e.pane.pane_id == pane_id).and_then(|e| e.pane.terminal_title_stripped.clone());
+                    (title.filter(|t| !t.is_empty()).unwrap_or_else(|| "Agent".into()), vec![pane_id.clone()], None)
+                }
+                AgentMenu::Project(id) => {
+                    let group: Vec<_> = agents.iter().filter(|e| &e.project.0 == id).collect();
+                    let title = group.first().map(|e| e.project.1.clone()).unwrap_or_default();
+                    (title, group.iter().map(|e| e.pane.pane_id.clone()).collect::<Vec<_>>(), Some(id.clone()))
+                }
+            };
+            let idle: Vec<String> = agents
+                .iter()
+                .filter(|e| panes.contains(&e.pane.pane_id) && e.pane.agent_status == crate::model::AgentStatus::Idle)
+                .map(|e| e.pane.pane_id.clone())
+                .collect();
+            let merged = project.as_ref().map(|id| self.merged_worktrees(id, cx)).unwrap_or_default();
+            // a project's menu folds or opens them all
+            let (any_open, any_folded) = match project {
+                Some(_) => agents.iter().fold((false, false), |(open, folded), e| {
+                    let f = self.agents_folded.contains(&e.project.0);
+                    (open || !f, folded || f)
+                }),
+                None => (false, false),
+            };
+            let item = |id: &'static str, label: String| row(theme, false, id).h(px(28.)).rounded(px(6.)).child(label);
+            let close = match panes.len() {
+                1 => "Close agent".to_string(),
+                n => format!("Close {n} agents"),
+            };
             gpui::deferred(
                 gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
                     "agent-menu-in",
@@ -174,18 +199,50 @@ impl Shell {
                             if let Some(m) = this.agent_menu.as_mut() { m.close() }
                             cx.notify();
                         }))
+                        // the row's or the project's own title on top, so the menu says what it closes
                         .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).max_w(px(240.)).truncate().text_size(px(11.)).text_color(theme.text_faint).child(title))
-                        .child(
-                            row(theme, false, "agent-menu-close")
-                                .h(px(28.))
-                                .rounded(px(6.))
-                                .text_color(theme.danger)
-                                .child("Close agent")
-                                .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    if let Some(m) = this.agent_menu.as_mut() { m.close() }
+                        .when(any_open, |el| {
+                            el.child(item("agent-menu-fold-all", "Fold all".into()).on_pick(at, cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if let Some(m) = this.agent_menu.as_mut() { m.close() }
+                                this.fold_all_agents(true, cx);
+                            })))
+                        })
+                        .when(any_folded, |el| {
+                            el.child(item("agent-menu-unfold-all", "Unfold all".into()).on_pick(at, cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if let Some(m) = this.agent_menu.as_mut() { m.close() }
+                                this.fold_all_agents(false, cx);
+                            })))
+                        })
+                        .when(any_open || any_folded, |el| el.child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border)))
+                        // all of them idle is what the next item closes
+                        .when(project.is_some() && !idle.is_empty() && idle.len() < panes.len(), |el| {
+                            let label = format!("Close {} idle agent{}", idle.len(), if idle.len() == 1 { "" } else { "s" });
+                            el.child(item("agent-menu-close-idle", label).on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if let Some(m) = this.agent_menu.as_mut() { m.close() }
+                                for pane_id in &idle {
                                     this.send(Command::ClosePane { pane_id: pane_id.clone() }, cx, |_, _, _| {});
-                                })),
-                        ),
+                                }
+                            })))
+                        })
+                        .child(item("agent-menu-close", close).text_color(theme.danger).on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if let Some(m) = this.agent_menu.as_mut() { m.close() }
+                            for pane_id in &panes {
+                                this.send(Command::ClosePane { pane_id: pane_id.clone() }, cx, |_, _, _| {});
+                            }
+                        })))
+                        // herdr keeps a worktree with changes, and Shepherd asks before forcing it; the branch stays
+                        .when(!merged.is_empty(), |el| {
+                            let label = match merged.len() {
+                                1 => "Remove merged worktree".to_string(),
+                                n => format!("Remove {n} merged worktrees"),
+                            };
+                            el.child(item("agent-menu-remove-merged", label).text_color(theme.danger).on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if let Some(m) = this.agent_menu.as_mut() { m.close() }
+                                for id in &merged {
+                                    this.remove_worktree(id.clone(), false, cx);
+                                }
+                            })))
+                        }),
                 )),
             )
             .with_priority(1)
@@ -202,7 +259,7 @@ impl Shell {
                             if let Some(m) = this.place_menu.as_mut() { m.close() }
                             cx.notify();
                         }))
-                        .child(row(theme, false, "place-menu-edit").h(px(28.)).rounded(px(6.)).child("Edit…").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        .child(row(theme, false, "place-menu-edit").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/solar/pen.svg", theme.text_muted)).child("Edit…").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.open_place_edit(edit.clone(), window, cx)
                         })))
                         .when(place.deletable(), |el| {
@@ -212,6 +269,7 @@ impl Shell {
                                     .h(px(28.))
                                     .rounded(px(6.))
                                     .text_color(theme.danger)
+                                    .child(menu_mark("icons/trash.svg", theme.danger))
                                     .child(label)
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         if let Some(m) = this.place_menu.as_mut() { m.close() }
@@ -421,6 +479,7 @@ impl Shell {
         }))
         .children(self.web_menu(theme, cx))
         .children(self.new_tab_menu(theme, cx))
+        .children(self.annotation_agents_menu(theme, cx))
         .children(self.ws_menu.as_ref().map(|menu| {
             let (id, at) = menu.value.clone();
             let worktree = snapshot
@@ -443,7 +502,7 @@ impl Shell {
                             cx.notify();
                         }))
                         .when(has_repo, |el| {
-                            el.child(row(theme, false, "ws-menu-worktree").h(px(28.)).rounded(px(6.)).child("New worktree").on_pick(at, 
+                            el.child(row(theme, false, "ws-menu-worktree").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/git-branch.svg", theme.text_muted)).child("New worktree").on_pick(at, 
                                 cx.listener({
                                     let id = id.clone();
                                     move |this, _: &ClickEvent, window, cx| {
@@ -452,7 +511,7 @@ impl Shell {
                                     }
                                 }),
                             ))
-                            .child(row(theme, false, "ws-menu-open-worktree").h(px(28.)).rounded(px(6.)).child("Open worktree").on_pick(at,
+                            .child(row(theme, false, "ws-menu-open-worktree").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/solar/folder-git.svg", theme.text_muted)).child("Open worktree").on_pick(at,
                                 cx.listener({
                                     let id = id.clone();
                                     move |this, _: &ClickEvent, window, cx| {
@@ -462,7 +521,7 @@ impl Shell {
                                 }),
                             ))
                         })
-                        .child(row(theme, false, "ws-menu-new-tab").h(px(28.)).rounded(px(6.)).child("New tab").on_pick(at, 
+                        .child(row(theme, false, "ws-menu-new-tab").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/plus.svg", theme.text_muted)).child("New tab").on_pick(at, 
                             cx.listener({
                                 let id = id.clone();
                                 move |this, _: &ClickEvent, _, cx| {
@@ -471,7 +530,7 @@ impl Shell {
                                 }
                             }),
                         ))
-                        .child(row(theme, false, "ws-menu-rename").h(px(28.)).rounded(px(6.)).child("Rename").on_pick(at, 
+                        .child(row(theme, false, "ws-menu-rename").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/solar/pen.svg", theme.text_muted)).child("Rename").on_pick(at, 
                             cx.listener({
                                 let id = id.clone();
                                 move |this, _: &ClickEvent, window, cx| {
@@ -487,7 +546,7 @@ impl Shell {
                             }),
                         ))
                         .when_some(checkout, |el, path| {
-                            el.child(row(theme, false, "ws-menu-reveal").h(px(28.)).rounded(px(6.)).child(if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Show in file manager" }).on_pick(at, 
+                            el.child(row(theme, false, "ws-menu-reveal").h(px(28.)).rounded(px(6.)).child(menu_mark("icons/solar/folder-open.svg", theme.text_muted)).child(if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Show in file manager" }).on_pick(at, 
                                 cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     if let Some(m) = this.ws_menu.as_mut() { m.close() }
                                     cx.reveal_path(std::path::Path::new(&path));
@@ -496,11 +555,29 @@ impl Shell {
                             ))
                         })
                         .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
+                        .when(linked, |el| {
+                            el.child(
+                                row(theme, false, "ws-menu-merge")
+                                    .h(px(28.))
+                                    .rounded(px(6.))
+                                    .text_color(theme.danger)
+                                    .child(menu_mark("icons/git-pull-request.svg", theme.danger))
+                                    .child("Merge and delete")
+                                    .on_pick(at, cx.listener({
+                                        let id = id.clone();
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            if let Some(m) = this.ws_menu.as_mut() { m.close() }
+                                            this.ask_merge_delete(id.clone(), window, cx);
+                                        }
+                                    })),
+                            )
+                        })
                         .child(
                             row(theme, false, "ws-menu-close")
                                 .h(px(28.))
                                 .rounded(px(6.))
                                 .text_color(theme.danger)
+                                .child(menu_mark("icons/close-circle.svg", theme.danger))
                                 .child(if linked { "Close worktree" } else { "Close workspace" }) // the checkout stays
                                 .on_pick(at, cx.listener({
                                     let id = id.clone();
@@ -516,6 +593,7 @@ impl Shell {
                                     .h(px(28.))
                                     .rounded(px(6.))
                                     .text_color(theme.danger)
+                                    .child(menu_mark("icons/trash.svg", theme.danger))
                                     .child("Remove worktree")
                                     .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         if let Some(m) = this.ws_menu.as_mut() { m.close() }
@@ -724,6 +802,8 @@ impl Shell {
                 );
             modal("remove-dialog", confirm, window, card)
         }))
+        .children(self.merge_delete_dialog(theme, window, cx))
+        .children(self.merge_failure_popover(theme, cx))
         .children(self.merge_confirm.as_ref().map(|confirm| {
             let ask = &confirm.value;
             let into = if ask.base.is_empty() { "its base branch".to_string() } else { ask.base.clone() };
@@ -933,6 +1013,7 @@ impl Shell {
                                 .h(px(28.))
                                 .rounded(px(6.))
                                 .when(close, |el| el.text_color(theme.danger))
+                                .child(menu_mark(crate::ui::command_panel::action_icon(action), if close { theme.danger } else { theme.text_muted }))
                                 .child(div().flex_1().child(label))
                                 .when_some(chord, |el, chord| el.child(div().text_size(px(11.)).text_color(theme.text_faint).child(chord)))
                                 .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {

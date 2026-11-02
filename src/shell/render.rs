@@ -13,6 +13,7 @@ impl Render for Shell {
         secure_input(SettingsGlobal::of(cx).settings.secure_input && cx.active_window().is_some());
         crate::ui::reap_popup(&mut self.view_menu, window);
         crate::ui::reap_popup(&mut self.agents_menu, window);
+        crate::ui::reap_popup(&mut self.annotation_agents_menu, window);
         crate::ui::reap_popup(&mut self.ws_menu, window);
         crate::ui::reap_popup(&mut self.web_menu, window);
         crate::ui::reap_popup(&mut self.new_tab_menu, window);
@@ -24,6 +25,8 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.tab_menu, window);
         crate::ui::reap_popup(&mut self.worktree_dialog, window);
         crate::ui::reap_popup(&mut self.remove_confirm, window);
+        crate::ui::reap_popup(&mut self.merge_delete, window);
+        crate::ui::reap_popup(&mut self.merge_failure, window);
         crate::ui::reap_popup(&mut self.merge_confirm, window);
         crate::ui::reap_popup(&mut self.session_dialog, window);
         crate::ui::reap_popup(&mut self.place_menu, window);
@@ -32,6 +35,7 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.command_panel, window);
         if let Some(s) = &self.snapshot {
             self.removing.retain(|id| s.workspaces.iter().any(|w| &w.workspace_id == id));
+            self.merging.retain(|id, _| s.workspaces.iter().any(|w| &w.workspace_id == id));
         }
         reapply_traffic_lights(window);
         let theme = Theme::of(cx).clone();
@@ -122,7 +126,8 @@ impl Render for Shell {
         let (tabbar, web_area) = match &web {
             Some((key, _)) if browsing => {
                 let bar = self.render_browser_bar(key, &theme, window, cx);
-                (tabbar, Some(div().flex_1().min_h_0().flex().flex_col().child(bar).child(self.render_web_area(key, &theme, window, cx))))
+                let page = div().flex_1().min_h_0().flex().child(self.render_web_area(key, &theme, window, cx)).children(self.render_annotations(key, &theme, cx));
+                (tabbar, Some(div().flex_1().min_h_0().flex().flex_col().child(bar).child(page)))
             }
             Some((key, entry)) => (self.render_web_bar(key, entry, &theme, sidebar_w, cx), Some(self.render_web_area(key, &theme, window, cx))),
             None => (tabbar, None),
@@ -346,6 +351,10 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &FocusRight, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Right })))
             .on_action(cx.listener(|this, _: &FocusUp, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Up })))
             .on_action(cx.listener(|this, _: &FocusDown, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Down })))
+            .on_action(cx.listener(|this, _: &NavigateLeft, w, cx| this.navigate(Direction::Left, w, cx)))
+            .on_action(cx.listener(|this, _: &NavigateRight, w, cx| this.navigate(Direction::Right, w, cx)))
+            .on_action(cx.listener(|this, _: &NavigateUp, w, cx| this.navigate(Direction::Up, w, cx)))
+            .on_action(cx.listener(|this, _: &NavigateDown, w, cx| this.navigate(Direction::Down, w, cx)))
             .on_action(cx.listener(|this, _: &Tab1, _, cx| this.go_to_tab(0, cx)))
             .on_action(cx.listener(|this, _: &Tab2, _, cx| this.go_to_tab(1, cx)))
             .on_action(cx.listener(|this, _: &Tab3, _, cx| this.go_to_tab(2, cx)))
@@ -368,6 +377,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
             .on_action(cx.listener(|this, _: &ChangeTheme, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Themes, w, cx)))
             .on_action(cx.listener(|this, _: &AgentsPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Agents, w, cx)))
+            .on_action(cx.listener(|this, _: &NextWaitingAgent, _, cx| this.next_waiting_agent(cx)))
             .on_action(cx.listener(|this, _: &WorkspacesPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Workspaces, w, cx)))
             .on_action(cx.listener(|this, c: &crate::herdr::keys::HerdrCommand, w, cx| this.run_herdr_command(c, w, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
@@ -487,7 +497,7 @@ impl Render for Shell {
             })
             .when(!on_page, |el| {
                 el.child(
-                    titlebar_button(&theme, "toggle-sidebar", "icons/sidebar-minimalistic-left.svg")
+                    titlebar_button_with(&theme, "toggle-sidebar", crate::ui::sidebar_glyph(sidebar_w / self.sidebar_width, 16., theme.text_muted))
                         .tooltip(tip("Toggle sidebar", Some("ToggleSidebar")))
                         .absolute()
                         .top(px(TRAFFIC_LIGHTS_CENTER - 12.))

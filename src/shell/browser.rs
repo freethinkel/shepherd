@@ -285,6 +285,17 @@ impl Shell {
             .bg(theme.surface)
             .border_b_1()
             .border_color(theme.border)
+            // the address field's Esc ends a pick too
+            .capture_key_down(cx.listener({
+                let key = key.clone();
+                move |this, e: &gpui::KeyDownEvent, _, cx| {
+                    if e.keystroke.key == "escape" && this.annotating(&key) {
+                        cx.stop_propagation();
+                        this.stop_annotation(&key);
+                        cx.notify();
+                    }
+                }
+            }))
             .child(nav_button(theme, view.clone(), "browser-back", "icons/solar/alt-arrow-left.svg", can(wry::WebView::can_go_back), wry::WebView::go_back))
             .child(nav_button(theme, view.clone(), "browser-forward", "icons/solar/alt-arrow-right.svg", can(wry::WebView::can_go_forward), wry::WebView::go_forward))
             .child(self.reload_button(key, "browser-reload", theme, cx))
@@ -302,6 +313,7 @@ impl Shell {
                     .text_size(px(12.5))
                     .child(Input::new(&input)),
             )
+            .child(self.annotate_button(key, theme, cx))
             .child(
                 div()
                     .id("browser-outside")
@@ -328,18 +340,24 @@ impl Shell {
         let menu = self.new_tab_menu.as_ref()?;
         let (ws, at) = menu.value.clone();
         type Pick = Box<dyn Fn(&mut Shell, String, &mut Window, &mut Context<Shell>)>;
-        let item = |key: &'static str, label: &'static str, pick: Pick| {
+        // each with the mark its tab gets: the command panel's terminal, a browser tab's globe
+        let item = |key: &'static str, icon: &'static str, label: &'static str, pick: Pick| {
             let ws = ws.clone();
-            row(theme, false, key).h(px(28.)).rounded(px(6.)).child(label).on_pick(
-                at,
-                cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    if let Some(m) = this.new_tab_menu.as_mut() {
-                        m.close()
-                    }
-                    pick(this, ws.clone(), window, cx);
-                    cx.notify();
-                }),
-            )
+            row(theme, false, key)
+                .h(px(28.))
+                .rounded(px(6.))
+                .child(menu_mark(icon, theme.text_muted))
+                .child(label)
+                .on_pick(
+                    at,
+                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        if let Some(m) = this.new_tab_menu.as_mut() {
+                            m.close()
+                        }
+                        pick(this, ws.clone(), window, cx);
+                        cx.notify();
+                    }),
+                )
         };
         let card = menu_card(theme, "new-tab-menu", 160.)
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -348,8 +366,8 @@ impl Shell {
                 }
                 cx.notify();
             }))
-            .child(item("new-tab-terminal", "Terminal", Box::new(|this, ws, _, cx| this.new_tab(ws, cx))))
-            .child(item("new-tab-browser", "Browser", Box::new(|this, ws, window, cx| {
+            .child(item("new-tab-terminal", "icons/terminal.svg", "Terminal", Box::new(|this, ws, _, cx| this.new_tab(ws, cx))))
+            .child(item("new-tab-browser", "icons/solar/global.svg", "Browser", Box::new(|this, ws, window, cx| {
                 // at the end of the bar
                 let last = this.snapshot.as_ref().and_then(|s| s.tabs_of(&ws).last().map(|t| t.tab_id.clone()));
                 this.new_browser_tab(ws, last, None, window, cx)

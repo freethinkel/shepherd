@@ -105,6 +105,7 @@ impl gpui::AssetSource for Assets {
             "tuning",
             "widget",
             "window-maximize",
+            "window-minimize",
             "window-restore",
             "neovim-mark",
             "vim-mark",

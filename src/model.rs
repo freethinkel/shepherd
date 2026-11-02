@@ -2,7 +2,20 @@
 //! (herdr's docs: events have no shared sequence with snapshots, so never replay them onto one).
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Which agents a browser tab's annotations can go to (their panel's `…` menu); saved in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentScope {
+    /// Those of the tab's project: the repo's checkout and worktrees (see [`Snapshot::project_of`]).
+    Project,
+    All,
+    /// Those of its workspace. Also what an unknown (old or future) value reads as.
+    #[default]
+    #[serde(other)]
+    Worktree,
+}
 
 /// How the sidebar orders its agents (its `…` menu); saved in the settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -20,6 +33,10 @@ pub enum AgentSort {
 
 /// Since when each agent pane has had its status, as Shepherd saw it change: herdr's snapshot carries no time.
 pub type Since = HashMap<String, (AgentStatus, Instant)>;
+
+/// Agent times as saved, so a restart keeps them: by pane id, the status, herdr's `state_change_seq` then, and since
+/// when (unix ms).
+pub type SavedTimes = HashMap<String, (AgentStatus, u64, u64)>;
 
 /// When the pane's agent started waiting or finished, while it still is.
 pub fn waiting_since(since: &Since, pane: &Pane) -> Option<Instant> {
@@ -48,7 +65,7 @@ pub fn ago(wait: Duration) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentStatus {
     Idle,
@@ -88,6 +105,9 @@ pub struct Worktree {
     pub is_linked_worktree: bool,
     #[serde(default)]
     pub checkout_path: String,
+    /// The repo's main checkout.
+    #[serde(default)]
+    pub repo_root: String,
 }
 
 /// A worktree of a repo, as `git worktree list` says it.
@@ -157,6 +177,21 @@ pub struct Layout {
     pub panes: Vec<LayoutPane>,
     #[serde(default)]
     pub splits: Vec<LayoutSplit>,
+}
+
+impl Layout {
+    /// Whether a pane lies on that side of `pane_id`: panes tile the area, so everywhere but at its edge.
+    pub fn has_neighbor(&self, pane_id: &str, direction: crate::commands::Direction) -> bool {
+        use crate::commands::Direction::*;
+        let Some(pane) = self.panes.iter().find(|p| p.pane_id == pane_id).filter(|_| !self.zoomed) else { return false };
+        let (r, a) = (&pane.rect, &self.area);
+        match direction {
+            Left => r.x > a.x,
+            Right => r.x + r.width < a.x + a.width,
+            Up => r.y > a.y,
+            Down => r.y + r.height < a.y + a.height,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -305,6 +340,38 @@ impl Snapshot {
         }
     }
 
+    /// `since` across restarts: an agent just tracked (at `now`) that `saved` has at the same state change (status and
+    /// `state_change_seq`; a pane id herdr gives out again comes with another) takes its saved time back. Returns what
+    /// to save now; `wall` is `now` on the clock.
+    pub fn remember(&self, since: &mut Since, saved: &SavedTimes, now: Instant, wall: SystemTime) -> SavedTimes {
+        let wall_ms = wall.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        self.agents()
+            .into_iter()
+            .filter_map(|p| {
+                let (status, at) = since.get_mut(&p.pane_id)?;
+                let kept = saved.get(&p.pane_id).filter(|(s, seq, _)| s == status && *seq == p.state_change_seq);
+                let ms = match kept {
+                    Some(&(_, _, ms)) => {
+                        if *at == now {
+                            *at = now.checked_sub(Duration::from_millis(wall_ms.saturating_sub(ms))).unwrap_or(now);
+                        }
+                        ms
+                    }
+                    None => wall_ms.saturating_sub(now.duration_since(*at).as_millis() as u64),
+                };
+                Some((p.pane_id.clone(), (*status, p.state_change_seq, ms)))
+            })
+            .collect()
+    }
+
+    /// The agent "next waiting agent" shows: the one waiting longest, or when `shown` waits too, the one after it,
+    /// round again after the last.
+    pub fn next_waiting(&self, since: &Since, shown: Option<&str>) -> Option<&Pane> {
+        let waiting: Vec<_> = self.agents_by(AgentSort::Waiting, since).into_iter().filter(|p| crate::notify::wants_attention(p.agent_status)).collect();
+        let next = waiting.iter().position(|p| Some(p.pane_id.as_str()) == shown).map_or(0, |i| (i + 1) % waiting.len());
+        waiting.get(next).copied()
+    }
+
     /// The agents in `sort` order, ties in status order: [`AgentSort::Grouped`] by project, as the sidebar groups
     /// workspaces. `since` orders [`AgentSort::Waiting`].
     pub fn agents_by(&self, sort: AgentSort, since: &Since) -> Vec<&Pane> {
@@ -331,6 +398,17 @@ impl Snapshot {
             .into_iter()
             .find(|(w, kids)| std::iter::once(w).chain(kids).any(|w| w.workspace_id == workspace_id))
             .map(|(w, _)| w)
+    }
+
+    /// The agents `scope` takes in from `workspace_id`, in [`Self::agents`]'s order.
+    pub fn agents_in(&self, workspace_id: &str, scope: AgentScope) -> Vec<&Pane> {
+        let project = |id: &str| self.project_of(id).map(|w| w.workspace_id.as_str());
+        let agents = self.agents().into_iter();
+        match scope {
+            AgentScope::Worktree => agents.filter(|p| p.workspace_id == workspace_id).collect(),
+            AgentScope::Project => agents.filter(|p| project(workspace_id).is_some() && project(&p.workspace_id) == project(workspace_id)).collect(),
+            AgentScope::All => agents.collect(),
+        }
     }
 
     /// Like `pick_tab`, but a gone choice falls back within `workspace` (its active tab, then its first) before

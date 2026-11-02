@@ -133,12 +133,13 @@ fn git(dir: &str, args: &[&str]) -> anyhow::Result<String> {
 pub fn of(dir: &str) -> Option<Worktree> {
     let out = git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir", "--show-toplevel"]).ok()?;
     let [common, own, top] = out.lines().collect::<Vec<_>>()[..] else { return None };
-    Some(Worktree { repo_key: common.into(), is_linked_worktree: common != own, checkout_path: top.into() })
+    let repo_root = common.strip_suffix("/.git").unwrap_or(common).into();
+    Some(Worktree { repo_key: common.into(), is_linked_worktree: common != own, checkout_path: top.into(), repo_root })
 }
 
-/// The main checkout of `tree`'s repo.
-fn root(tree: &Worktree) -> &str {
-    tree.repo_key.strip_suffix("/.git").unwrap_or(&tree.repo_key)
+/// The main checkout of `tree`'s repo. A layout saved before `repo_root` was has only the key to go by.
+pub fn root(tree: &Worktree) -> &str {
+    if tree.repo_root.is_empty() { tree.repo_key.strip_suffix("/.git").unwrap_or(&tree.repo_key) } else { &tree.repo_root }
 }
 
 /// The name of `tree`'s repo: its main checkout's folder.
@@ -377,7 +378,7 @@ mod tests {
 
     #[test]
     fn repos_are_listed_once_by_their_main_checkout() {
-        let tree = |repo_key: &str, path: &str| Worktree { repo_key: repo_key.into(), is_linked_worktree: false, checkout_path: path.into() };
+        let tree = |repo_key: &str, path: &str| Worktree { repo_key: repo_key.into(), is_linked_worktree: false, checkout_path: path.into(), repo_root: String::new() };
         let on = |worktree| crate::model::Workspace { workspace_id: String::new(), label: String::new(), number: 0, active_tab_id: None, agent_status: Default::default(), worktree };
         let snapshot = Snapshot {
             workspaces: vec![on(Some(tree("/r/app/.git", "/r/app"))), on(Some(tree("/r/app/.git", "/w/app/fix"))), on(None), on(Some(tree("/r/web/.git", "/r/web")))],

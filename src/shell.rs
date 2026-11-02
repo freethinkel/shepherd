@@ -21,9 +21,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+mod annotations;
 mod browser;
 mod divider;
 mod floating;
+mod merge;
 mod motion;
 mod pane_drag;
 mod popups;
@@ -174,10 +176,18 @@ pub struct Shell {
     show_submenu_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The Agents section's `…` menu, open under its button.
     agents_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
+    /// The annotations panel's `…` menu, open under its button.
+    annotation_agents_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// Worktrees herdr is removing: their rows show a spinner until they leave the snapshot.
     removing: std::collections::HashSet<String>,
     /// Remove a worktree? The workspace, its label, and whether herdr found changes (then removal is forced).
     remove_confirm: Option<crate::ui::Popup<(String, String, bool)>>,
+    /// Merge and delete?, asked over the window.
+    merge_delete: Option<crate::ui::Popup<merge::MergeDelete>>,
+    /// Worktrees being merged and deleted, or whose merge failed, by workspace: their rows show the step or a `!`.
+    merging: HashMap<String, merge::Merging>,
+    /// A failed merge's popover, opened from its row's `!` at this point.
+    merge_failure: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// The New worktree dialog, open over the window.
     worktree_dialog: Option<crate::ui::Popup<WorktreeDialog>>,
     /// Worktrees herdr is still creating, as (workspace the dialog was opened on, branch): herdr answers
@@ -187,8 +197,8 @@ pub struct Shell {
     tab_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// A pane's right-click menu: the pane and where it was clicked.
     pane_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
-    /// An agent row's right-click menu: the agent's pane and where it was clicked.
-    agent_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
+    /// The agents list's right-click menu, for a row or a project's heading, and where it was clicked.
+    agent_menu: Option<crate::ui::Popup<(sidebar::AgentMenu, gpui::Point<Pixels>)>>,
     /// The status bar's spend popup, opened at this point (its bottom-left).
     spent_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// The spend popup lists the most tokens first.
@@ -222,6 +232,8 @@ pub struct Shell {
     resize_hold: gpui::Task<()>,
     /// Since when each agent has had its status: how long the waiting ones have waited.
     since: crate::model::Since,
+    /// `since` as saved for each place, so a restart keeps it.
+    agent_times: HashMap<String, crate::model::SavedTimes>,
     /// The loop that keeps the window in step with herdr; replacing it (a switch of session) stops the last one.
     sync: gpui::Task<()>,
     /// Wakes the sync loop for a fresh snapshot without an event: a command named a tab or pane herdr no longer has.
@@ -504,6 +516,7 @@ impl Shell {
                     show_submenu: false,
                     show_submenu_bounds: Default::default(),
                     agents_menu: None,
+                    annotation_agents_menu: None,
                     pane_menu: None,
                     agent_menu: None,
                     spent_menu: None,
@@ -514,6 +527,9 @@ impl Shell {
                     worktree_dialog: None,
                     removing: Default::default(),
                     remove_confirm: None,
+                    merge_delete: None,
+                    merging: HashMap::new(),
+                    merge_failure: None,
                     pending_worktrees: Vec::new(),
                     agents_scroll: gpui::ScrollHandle::new(),
                     tab_bar: Default::default(),
@@ -529,6 +545,7 @@ impl Shell {
                     frame_save: gpui::Task::ready(()),
                     resize_hold: gpui::Task::ready(()),
                     since: Default::default(),
+                    agent_times: sync::load_agent_times(),
                     sync: gpui::Task::ready(()),
                     resync: Default::default(),
                     floating: None,
@@ -941,6 +958,18 @@ impl Shell {
         }
         if let Some(pane_id) = self.active_pane(window, cx) {
             self.send(make(pane_id), cx, |_, _, _| {});
+        }
+    }
+
+    /// Ghostty's `performable:goto_split`: focus the pane on that side of the terminal you are in; with none there,
+    /// the key goes on to whatever has focus, so Ctrl+L still clears a shell and Ctrl+H still deletes in a field.
+    fn navigate(&mut self, direction: Direction, window: &Window, cx: &mut Context<Self>) {
+        let focused = self.panes.iter().find(|(_, pane)| pane.read(cx).focus_handle(cx).is_focused(window)).map(|(id, _)| id.clone());
+        let tab = self.shown_tab().map(|t| t.tab_id);
+        let layout = self.snapshot.as_ref().and_then(|s| s.layouts.iter().find(|l| Some(&l.tab_id) == tab.as_ref()));
+        match focused.filter(|id| self.pages.shown.is_none() && layout.is_some_and(|l| l.has_neighbor(id, direction))) {
+            Some(pane_id) => self.send(Command::FocusPane { pane_id, direction }, cx, |_, _, _| {}),
+            None => cx.propagate(),
         }
     }
 

@@ -237,6 +237,12 @@ pub trait Agents: Send + Sync {
     fn seen(&self, pane: String) -> Reply<'_, ()>;
 }
 
+/// `text` to type into a program: lines go as one paste, since each would submit on its own.
+// ponytail: wrapped whether or not the program asked for it, which every agent does; only agents get text of several lines
+pub fn typed(text: String) -> String {
+    if text.contains('\n') { format!("\x1b[200~{text}\x1b[201~") } else { text }
+}
+
 /// One backend, with its worktrees and agents.
 #[derive(Clone)]
 pub struct Backend {
@@ -324,6 +330,38 @@ mod tests {
     #[test]
     fn a_split_names_its_pane() {
         assert_eq!(Made::of(&json!({"pane": {"pane_id": "w1:p2"}})).pane_id.as_deref(), Some("w1:p2"));
+    }
+
+    /// Live, on a server of its own: `SHEPHERD_TMUX_SOCKET=shepherd-paste cargo test --lib backend::tests::live_paste -- --ignored`,
+    /// or `REX_SERVER`. herdr and herdr-core paste by themselves.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn live_paste() {
+        let kind = [("REX_SERVER", Kind::Rex), ("SHEPHERD_TMUX_SOCKET", Kind::Tmux)].into_iter().find(|(name, _)| std::env::var(name).is_ok());
+        let backend = Backend::of(kind.expect("a server of its own: it closes what it opens").1, None);
+        let made = backend.mux.run(Command::NewWorkspace { cwd: None }).await.unwrap();
+        let (workspace, pane) = (made.workspace_id.unwrap(), made.pane_id.unwrap());
+        backend.mux.prompt(pane.clone()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        backend.mux.send(pane.clone(), Some("/bin/cat -v".into())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        backend.mux.send(pane.clone(), Some("first\nsecond".into())).await.unwrap();
+        let mut seen = String::new();
+        for _ in 0..50 {
+            seen = backend.mux.read(pane.clone(), 20, false).await.unwrap();
+            if seen.contains("^[[200~first") && seen.contains("second^[[201~") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(seen.contains("^[[200~first") && seen.contains("second^[[201~"), "{seen}");
+        backend.mux.run(Command::CloseWorkspace { workspace_id: workspace }).await.unwrap();
+    }
+
+    #[test]
+    fn lines_go_as_one_paste() {
+        assert_eq!(typed("one".into()), "one");
+        assert_eq!(typed("a\nb".into()), "\x1b[200~a\nb\x1b[201~");
     }
 
     #[test]

@@ -377,7 +377,7 @@ impl Mux for Tmux {
     fn send(&self, pane: String, text: Option<String>) -> Reply<'_, ()> {
         Box::pin(async move {
             if let Some(text) = text {
-                tmux(&["send-keys", "-l", "-t", &pane, "--", &text]).await?;
+                tmux(&["send-keys", "-l", "-t", &pane, "--", &crate::backend::typed(text)]).await?;
             }
             tmux(&["send-keys", "-t", &pane, "Enter"]).await.map(drop)
         })

@@ -180,17 +180,44 @@ impl Shell {
 
     /// Folds or unfolds a project in the agents list, tweening like a worktree group.
     pub(super) fn toggle_agents_fold(&mut self, id: &str, full: f32, cx: &mut Context<Self>) {
-        let folding = !self.agents_folded.contains(id);
-        self.start_fold_motion(&format!("agents-{id}"), folding, full);
-        if folding {
+        self.fold_agents(id, !self.agents_folded.contains(id), full);
+        self.save_agents_folded(cx);
+    }
+
+    /// Folds every project in the agents list, or opens them all.
+    pub(super) fn fold_all_agents(&mut self, fold: bool, cx: &mut Context<Self>) {
+        let row_h = agent_row_h(SettingsGlobal::of(cx).settings.compact_agents);
+        let agents = self.shown_agents(cx);
+        for group in agents.chunk_by(|a, b| a.project.0 == b.project.0) {
+            if self.agents_folded.contains(&group[0].project.0) != fold {
+                self.fold_agents(&group[0].project.0, fold, group.len() as f32 * (row_h + 2.));
+            }
+        }
+        self.save_agents_folded(cx);
+    }
+
+    fn fold_agents(&mut self, id: &str, fold: bool, full: f32) {
+        self.start_fold_motion(&format!("agents-{id}"), fold, full);
+        if fold {
             self.agents_folded.insert(id.to_string());
         } else {
             self.agents_folded.remove(id);
         }
+    }
+
+    fn save_agents_folded(&mut self, cx: &mut Context<Self>) {
         let mut folded: Vec<String> = self.agents_folded.iter().cloned().collect();
         folded.sort();
         save_from_sidebar(cx, |s| s.agents_folded = folded);
         cx.notify();
+    }
+
+    /// Shows the agent waiting longest, or the next one after the agent shown: one key goes round them all.
+    pub(super) fn next_waiting_agent(&mut self, cx: &mut Context<Self>) {
+        let next = self.snapshot.as_ref().and_then(|s| s.next_waiting(&self.since, self.focused.as_deref()));
+        if let Some((tab_id, pane_id)) = next.map(|p| (p.tab_id.clone(), p.pane_id.clone())) {
+            self.show_agent(tab_id, pane_id, cx);
+        }
     }
 
     pub(super) fn set_agent_sort(&mut self, sort: AgentSort, cx: &mut Context<Self>) {
@@ -269,6 +296,8 @@ impl Shell {
             // Zeron's card: the name, and under it the branch with what it changed; one line when compact
             // a worktree always has its branch line, so a folding group knows its height
             let two = !compact && (nested || branch.is_some() || extras.is_some());
+            // a worktree being merged and deleted shows its step in place of its branch, or what failed
+            let merging = self.merging.get(&w.workspace_id).filter(|_| live);
             let (inline, below) = if two { (None, extras) } else { (extras, None) };
             // a repo's own artwork or its monogram; its worktrees, indented under its name, go without
             // compact, a worktree has no branch line: a branch mark in front of its name tells it apart
@@ -293,8 +322,11 @@ impl Shell {
                 Some(field) => field.into_any_element(),
                 None => div().min_w_0().truncate().child(w.label.clone()).into_any_element(),
             };
+            // its right-click menu open: lit until it closes
+            let menu_on = live && self.ws_menu.as_ref().is_some_and(|m| m.is_open() && m.value.0 == w.workspace_id);
             row(theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
                 .h(px(if two { WS_TWO_LINES } else { ws_h }))
+                .when(menu_on && !selected, |el| el.bg(theme.hover))
                 .when(live, |el| pane_drag::accept_pane_in_workspace(el, &w.workspace_id, theme.accent.opacity(0.15), cx))
                 .when(nested, |el| el.pl(px(if show.icon { 30. } else { 20. })))
                 .child(
@@ -327,23 +359,57 @@ impl Shell {
                                     .text_size(px(11.))
                                     .text_color(theme.text_muted)
                                     .when(show.icon && !nested, |el| el.pl(px(22.)))
-                                    .children(branch.map(|b| {
-                                        div()
-                                            .min_w_0()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(4.))
-                                            .child(gpui::svg().path("icons/git-branch.svg").size(px(11.)).flex_none().text_color(theme.text_muted))
-                                            .child(div().min_w_0().truncate().child(b))
-                                    }))
-                                    .children(sync)
-                                    .child(div().flex_1())
-                                    .children(below),
+                                    .map(|el| match merging {
+                                        Some(m) => el.child(
+                                            div().min_w_0().truncate().when(m.failed.is_some(), |el| el.text_color(theme.danger)).child(m.step().to_string()),
+                                        ),
+                                        None => el
+                                            .children(branch.map(|b| {
+                                                div()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.))
+                                                    .child(gpui::svg().path("icons/git-branch.svg").size(px(11.)).flex_none().text_color(theme.text_muted))
+                                                    .child(div().min_w_0().truncate().child(b))
+                                            }))
+                                            .children(sync)
+                                            .child(div().flex_1())
+                                            .children(below),
+                                    }),
                             )
                         }),
                 )
                 .map(|el| {
-                    if live && self.removing.contains(&w.workspace_id) {
+                    if let Some(m) = merging {
+                        match m.failed {
+                            None => el.child(spinner(theme, format!("ws-merging-{}", w.workspace_id))),
+                            // the `!` opens what failed, with Force delete
+                            Some(_) => el.child(
+                                div()
+                                    .id(SharedString::from(format!("ws-merge-failed-{}", w.workspace_id)))
+                                    .size(px(16.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(theme.danger.opacity(0.18))
+                                    .text_color(theme.danger)
+                                    .text_size(px(11.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .cursor_pointer()
+                                    .child("!")
+                                    .on_click(cx.listener({
+                                        let id = w.workspace_id.clone();
+                                        move |this, e: &ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.open_merge_failure(id.clone(), e.position(), cx);
+                                        }
+                                    })),
+                            ),
+                        }
+                    } else if live && self.removing.contains(&w.workspace_id) {
                         el.text_color(theme.text_faint).child(spinner(theme, format!("ws-removing-{}", w.workspace_id)))
                     } else {
                         el.when(show.status, |el| el.child(status_dot(w.agent_status, theme)))
@@ -645,18 +711,14 @@ impl Shell {
                             })
                             .children(self.agent_rows(agents, SettingsGlobal::of(cx).settings.compact_agents, shown_tab.as_deref(), true, theme, |row, pane| {
                                 let (tab_id, pane_id) = (pane.tab_id.clone(), pane.pane_id.clone());
-                                let menu = pane_id.clone();
+                                let menu = AgentMenu::Agent(pane_id.clone());
                                 row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.show_agent(tab_id.clone(), pane_id.clone(), cx)))
-                                    .on_mouse_down(
-                                        MouseButton::Right,
-                                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                                            this.agent_menu = Some(crate::ui::Popup::new((menu.clone(), e.position)));
-                                            cx.notify();
-                                        }),
-                                    )
+                                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _, cx| this.open_agent_menu(menu.clone(), e.position, cx)))
                             }, |heading, id, full| {
-                                let id = id.to_string();
-                                heading.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_agents_fold(&id, full, cx)))
+                                let (id, menu) = (id.to_string(), AgentMenu::Project(id.to_string()));
+                                heading
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_agents_fold(&id, full, cx)))
+                                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _, cx| this.open_agent_menu(menu.clone(), e.position, cx)))
                             }))
                             // the last row scrolls clear of the list's faded edge
                             .child(div().flex_none().h(px(4.)))),
@@ -891,9 +953,51 @@ pub(super) fn agent_entries(s: &Snapshot, sort: AgentSort, since: &crate::model:
         .collect()
 }
 
+/// What the agents list's right-click menu is for: an agent by its pane, or a project by its top-level workspace.
+#[derive(Clone, PartialEq)]
+pub(super) enum AgentMenu {
+    Agent(String),
+    Project(String),
+}
+
+/// An agent row's height in the list.
+fn agent_row_h(compact: bool) -> f32 {
+    if compact { 30. } else { 44. }
+}
+
 impl Shell {
-    /// The agents list's rows, `act` making each one do something and `fold` each project heading (given its body's
-    /// full height); `live` false is the swipe's preview of another place, inert and without tweens.
+    fn open_agent_menu(&mut self, menu: AgentMenu, at: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        self.agent_menu = Some(crate::ui::Popup::new((menu, at)));
+        cx.notify();
+    }
+
+    /// The agents list as the sidebar shows it: only those waiting on you while that filter is on.
+    pub(super) fn shown_agents(&self, cx: &App) -> Vec<AgentEntry> {
+        let Some(s) = self.snapshot.as_ref() else { return Vec::new() };
+        let mut agents = agent_entries(s, self.agent_sort, &self.since);
+        if SettingsGlobal::of(cx).settings.attention_agents {
+            agents.retain(|e| crate::notify::wants_attention(e.pane.agent_status));
+        }
+        agents
+    }
+
+    /// Project `id`'s linked worktrees whose branch's PR or MR is merged, as far as gh or glab has said yet.
+    pub(super) fn merged_worktrees(&self, id: &str, cx: &mut App) -> Vec<String> {
+        let Some(s) = self.snapshot.as_ref() else { return Vec::new() };
+        let Some((w, kids)) = crate::model::groups(s.workspace_tree()).into_iter().find(|(w, _)| w.workspace_id == id) else { return Vec::new() };
+        let linked: Vec<(String, String)> = std::iter::once(w)
+            .chain(kids)
+            .filter(|w| !self.removing.contains(&w.workspace_id))
+            .filter_map(|w| {
+                let t = w.worktree.as_ref().filter(|t| t.is_linked_worktree && !t.checkout_path.is_empty())?;
+                Some((w.workspace_id.clone(), crate::herdr::locate(&t.checkout_path)))
+            })
+            .collect();
+        linked.into_iter().filter(|(_, dir)| crate::ui::statusbar::pr_of(dir, true, cx).is_some_and(|pr| pr.state == "merged")).map(|(id, _)| id).collect()
+    }
+
+    /// The agents list's rows, `act` making each one do something and `fold` each project heading (given its id and
+    /// its body's full height); `live` false is the swipe's preview of another place, inert and without tweens.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn agent_rows(
         &self,
@@ -906,7 +1010,9 @@ impl Shell {
         fold: impl Fn(Stateful<Div>, &str, f32) -> Stateful<Div>,
     ) -> Vec<gpui::AnyElement> {
         let grouped = self.agent_sort == AgentSort::Grouped;
-        let row_h = if compact { 30. } else { 44. };
+        let row_h = agent_row_h(compact);
+        // the row or heading whose menu is open stays lit
+        let menu_for = self.agent_menu.as_ref().filter(|m| live && m.is_open()).map(|m| &m.value.0);
         let mut out = Vec::new();
         // Grouped: a heading per project, which folds its rows away like a worktree group; otherwise one run of rows.
         for (i, group) in agents.chunk_by(|a, b| !grouped || a.project.0 == b.project.0).enumerate() {
@@ -924,6 +1030,7 @@ impl Shell {
                 let place = (!grouped || workspace != &project.1).then(|| workspace.clone());
                 let agent = row(theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
                     .h(px(row_h))
+                    .when(!selected && matches!(menu_for, Some(AgentMenu::Agent(p)) if *p == pane.pane_id), |el| el.bg(theme.hover))
                     .child(status_dot(pane.agent_status, theme))
                     .when(compact, |el| {
                         el.child(mark())
@@ -962,11 +1069,13 @@ impl Shell {
                 .items_center()
                 .gap(px(6.))
                 .px(px(8.))
-                .pt(px(if i == 0 { 2. } else { 8. }))
-                .pb(px(2.))
+                .mt(px(if i == 0 { 0. } else { 6. }))
+                .py(px(2.))
+                .rounded(px(6.))
                 .cursor_pointer()
                 .text_size(px(11.))
                 .text_color(theme.text_faint)
+                .when(matches!(menu_for, Some(AgentMenu::Project(p)) if p == id), |el| el.bg(theme.hover).text_color(theme.text_muted))
                 .child(div().flex_1().min_w_0().truncate().child(project.clone()))
                 // folded: how many, and the most urgent status (the group's first)
                 .when(!open, |el| el.child(status_dot(group[0].pane.agent_status, theme)).child(group.len().to_string()))
