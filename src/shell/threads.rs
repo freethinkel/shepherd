@@ -239,6 +239,17 @@ impl Shell {
         })
     }
 
+    /// Goes to a card: its agent, or without one its workspace's `tab`.
+    fn show_thread(&mut self, tab: Option<String>, agent: Option<(String, String)>, cx: &mut Context<Self>) {
+        match agent {
+            Some((tab, pane)) => self.show_agent(tab, pane, cx),
+            None => {
+                self.select_tab(tab);
+                cx.notify();
+            }
+        }
+    }
+
     /// Card `i` of the list and its height: Zeron's `render_chat_row` on an agent or a workspace. Its right-click menu
     /// is its workspace's, which is where a worktree is merged or removed.
     #[allow(clippy::too_many_arguments)]
@@ -250,7 +261,7 @@ impl Shell {
             (settings.workspace_show, settings.compact_workspaces)
         };
         let project = snapshot.project_of(&id).unwrap_or(w);
-        let linked = w.worktree.as_ref().is_some_and(|t| t.is_linked_worktree);
+        let worktree = w.worktree.as_ref().filter(|t| t.is_linked_worktree);
         let dir = super::sidebar::workspace_dir(w, Some(snapshot));
         let branch = dir.as_deref().and_then(|d| crate::ui::statusbar::git_of(d, cx)).map(|g| g.branch);
         // a project's own checkout is named by the line above: its branch says more
@@ -304,8 +315,8 @@ impl Shell {
         };
 
         // the last line: the branch with what it changed, and the agent at the end; without one, T3 Code's `titleLineIcons`
-        let (changes, pr) = match dir.as_deref().filter(|_| linked && !compact) {
-            Some(d) => crate::ui::statusbar::changes_of(d, active, cx),
+        let (changes, pr) = match dir.as_deref().filter(|_| worktree.is_some() && !compact) {
+            Some(d) => (crate::ui::statusbar::changes_of(d, active, cx).0, crate::ui::statusbar::pr_of(d, active, cx)),
             None => (None, None),
         };
         let changes = changes.filter(|c| show.changes && *c != (0, 0)).map(|(added, removed)| {
@@ -316,13 +327,54 @@ impl Shell {
                 .when(added > 0, |el| el.child(div().text_color(theme.success.opacity(0.7)).child(format!("+{added}"))))
                 .when(removed > 0, |el| el.child(div().text_color(theme.danger.opacity(0.7)).child(format!("−{removed}"))))
         });
-        let pr = pr.filter(|_| show.pull_request).map(|state| div().flex_none().child(state));
+        let tab = w.active_tab_id.clone().or_else(|| snapshot.tabs_of(&id).first().map(|t| t.tab_id.clone()));
+        let agent = pane.map(|p| (p.tab_id.clone(), p.pane_id.clone()));
+        // Zeron's `pull_request_badge`: a click goes to the card and opens its PR in the panel
+        let pr = pr.filter(|_| show.pull_request).map(|pr| {
+            let (_, color) = super::review::pr_tone(pr.state, theme);
+            div()
+                .id("thread-pr")
+                .h(px(LINE_H))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(3.))
+                .px(px(4.))
+                .rounded(px(4.))
+                .bg(color.opacity(0.08))
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(color.opacity(0.85))
+                .child(gpui::svg().path("icons/git-pull-request.svg").size(px(10.)).flex_none().text_color(color.opacity(0.85)))
+                .child(pr.number.to_string())
+                .when(live, |el| {
+                    let (id, tab, agent) = (id.clone(), tab.clone(), agent.clone());
+                    el.cursor_pointer().hover(move |s| s.bg(color.opacity(0.16)).text_color(color)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.show_thread(tab.clone(), agent.clone(), cx);
+                        this.right.panels.entry(id.clone()).or_default().add(crate::right_panel::Surface::PullRequest);
+                    }))
+                })
+        });
         let mark = pane.map(|p| {
             let icon = crate::ui::command_panel::agent_icon(p.agent.as_deref().unwrap_or_default());
             gpui::svg().path(icon).size(px(14.)).flex_none().text_color(crate::ui::command_panel::icon_ink(icon, theme.text_muted))
         });
         let has_last = !compact && (branch.is_some() || changes.is_some() || pr.is_some());
         let (last_mark, title_mark) = if has_last { (mark, None) } else { (None, mark) };
+        // T3 Code's `ThreadWorktreeIndicator`, in place of the branch mark
+        let branch_mark = branch.as_ref().map(|b| match worktree {
+            Some(t) => {
+                let text = format!("Worktree: {} ({b})", crate::ui::statusbar::short_path(&t.checkout_path, std::env::home_dir().as_deref()));
+                div()
+                    .id("thread-worktree")
+                    .flex_none()
+                    .child(gpui::svg().path("icons/lucide-folder-git-2.svg").size(px(12.)).text_color(theme.text_faint))
+                    .when(live, |el| el.tooltip(tip(text, None)))
+                    .into_any_element()
+            }
+            None => gpui::svg().path("icons/git-branch.svg").size(px(11.)).flex_none().text_color(theme.text_faint).into_any_element(),
+        });
         let last = has_last.then(|| {
             div()
                 .w_full()
@@ -332,7 +384,7 @@ impl Shell {
                 .gap(px(6.))
                 .text_size(px(11.))
                 .text_color(theme.text_faint)
-                .children(branch.as_ref().map(|_| gpui::svg().path("icons/git-branch.svg").size(px(11.)).flex_none().text_color(theme.text_faint)))
+                .children(branch_mark)
                 .child(div().flex_1().min_w_0().truncate().children(branch))
                 .children(changes)
                 .children(pr)
@@ -342,7 +394,6 @@ impl Shell {
 
         let height = if last.is_some() { CARD_H } else { CARD_TWO_LINES_H };
         let menu_on = live && self.ws_menu.as_ref().is_some_and(|m| m.is_open() && m.value.0 == id);
-        let tab = w.active_tab_id.clone().or_else(|| snapshot.tabs_of(&id).first().map(|t| t.tab_id.clone()));
         let label = w.label.clone();
         let card = row(theme, selected, SharedString::from(format!("thread-{}", pane.map_or(id.as_str(), |p| p.pane_id.as_str()))))
             .h(px(height))
@@ -358,14 +409,10 @@ impl Shell {
             .children(last)
             .when(live, |el| {
                 el.on_click(cx.listener({
-                    let (id, agent) = (id.clone(), pane.map(|p| (p.tab_id.clone(), p.pane_id.clone())));
-                    move |this, e: &ClickEvent, window, cx| match &agent {
-                        Some((tab, pane)) => this.show_agent(tab.clone(), pane.clone(), cx),
-                        None if e.click_count() == 2 => this.start_rename(RenameTarget::Workspace(id.clone()), label.clone(), window, cx),
-                        None => {
-                            this.select_tab(tab.clone());
-                            cx.notify();
-                        }
+                    let id = id.clone();
+                    move |this, e: &ClickEvent, window, cx| match agent.is_none() && e.click_count() == 2 {
+                        true => this.start_rename(RenameTarget::Workspace(id.clone()), label.clone(), window, cx),
+                        false => this.show_thread(tab.clone(), agent.clone(), cx),
                     }
                 }))
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &MouseDownEvent, _, cx| {

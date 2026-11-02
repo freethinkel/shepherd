@@ -140,6 +140,7 @@ impl gpui::AssetSource for Assets {
             "lua-mark",
             "lucide-circle-check",
             "lucide-circle-dashed",
+            "lucide-folder-git-2",
             "lucide-folder-plus",
             "lucide-list-filter",
             "lucide-message-circle-question",
