@@ -60,6 +60,32 @@ fn a_pane_has_neighbors_only_away_from_the_tab_edge() {
 }
 
 #[test]
+fn the_neighbor_is_the_pane_sharing_most_of_that_side() {
+    use shepherd::commands::Direction::*;
+    let mut s = fixture();
+    let layout = &mut s.layouts[0];
+    let mut bottom = layout.panes[1].clone();
+    bottom.pane_id = "w1:p3".into();
+    (bottom.rect.y, bottom.rect.height, layout.panes[1].rect.height) = (10, 30, 10);
+    layout.panes.push(bottom);
+    assert_eq!(layout.neighbor("w1:p1", Right), Some("w1:p3"));
+    assert_eq!(layout.neighbor("w1:p2", Left), Some("w1:p1"));
+    assert_eq!(layout.neighbor("w1:p2", Down), Some("w1:p3"));
+    assert_eq!(layout.neighbor("w1:p3", Up), Some("w1:p2"));
+    assert_eq!(layout.neighbor("w1:p3", Right), None);
+    assert_eq!(s.layouts[1].neighbor("w1:p3", Right), None, "a zero-size pane is not shown");
+}
+
+#[test]
+fn focus_moved_here_shows_before_herdrs_next_snapshot() {
+    let mut s = fixture();
+    s.focus_pane("w1:t1", "w1:p1");
+    let frames = s.pane_frames("w1:t1");
+    assert!(frames[0].focused && !frames[1].focused);
+    assert_eq!(s.focused_pane_id.as_deref(), Some("w1:p1"));
+}
+
+#[test]
 fn zoomed_tab_shows_only_the_focused_pane_full_size() {
     let mut s = fixture();
     s.layouts[0].zoomed = true;

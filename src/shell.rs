@@ -959,10 +959,13 @@ impl Shell {
         let focused = self.panes.iter().find(|(_, pane)| pane.read(cx).focus_handle(cx).is_focused(window)).map(|(id, _)| id.clone());
         let tab = self.shown_tab().map(|t| t.tab_id);
         let layout = self.snapshot.as_ref().and_then(|s| s.layouts.iter().find(|l| Some(&l.tab_id) == tab.as_ref()));
-        match focused.filter(|id| self.pages.shown.is_none() && layout.is_some_and(|l| l.has_neighbor(id, direction))) {
-            Some(pane_id) => self.send(Command::FocusPane { pane_id, direction }, cx, |_, _, _| {}),
-            None => cx.propagate(),
-        }
+        let next = focused.filter(|_| self.pages.shown.is_none()).zip(layout).and_then(|(id, l)| l.neighbor(&id, direction).map(str::to_string));
+        let (Some(next), Some(tab), Some(snapshot)) = (next, tab, self.snapshot.as_mut()) else { return cx.propagate() };
+        // herdr's word comes back over an event, its coalescing and a whole snapshot: the window moves now, and herdr
+        // is told the pane rather than the side, so the two agree. ponytail: a snapshot already on its way undoes this until the next one.
+        snapshot.focus_pane(&tab, &next);
+        self.send(Command::Focus { pane_id: next }, cx, |_, _, _| {});
+        cx.notify();
     }
 
     /// herdr paints the terminals' default colors itself: it is told the theme's over the popup watch, which then

@@ -180,17 +180,31 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Whether a pane lies on that side of `pane_id`: panes tile the area, so everywhere but at its edge.
+    /// Whether a pane lies on that side of `pane_id`.
     pub fn has_neighbor(&self, pane_id: &str, direction: crate::commands::Direction) -> bool {
+        self.neighbor(pane_id, direction).is_some()
+    }
+
+    /// The pane on that side of `pane_id`: the nearest, then the one sharing most of that side.
+    pub fn neighbor(&self, pane_id: &str, direction: crate::commands::Direction) -> Option<&str> {
         use crate::commands::Direction::*;
-        let Some(pane) = self.panes.iter().find(|p| p.pane_id == pane_id).filter(|_| !self.zoomed) else { return false };
-        let (r, a) = (&pane.rect, &self.area);
-        match direction {
-            Left => r.x > a.x,
-            Right => r.x + r.width < a.x + a.width,
-            Up => r.y > a.y,
-            Down => r.y + r.height < a.y + a.height,
-        }
+        let r = &self.panes.iter().find(|p| p.pane_id == pane_id).filter(|_| !self.zoomed)?.rect;
+        let shared = |a: u16, a_len: u16, b: u16, b_len: u16| i32::from((a + a_len).min(b + b_len)) - i32::from(a.max(b));
+        let beside = |q: &Rect| match direction {
+            Left => (i32::from(r.x) - i32::from(q.x + q.width), shared(r.y, r.height, q.y, q.height)),
+            Right => (i32::from(q.x) - i32::from(r.x + r.width), shared(r.y, r.height, q.y, q.height)),
+            Up => (i32::from(r.y) - i32::from(q.y + q.height), shared(r.x, r.width, q.x, q.width)),
+            Down => (i32::from(q.y) - i32::from(r.y + r.height), shared(r.x, r.width, q.x, q.width)),
+        };
+        self.panes
+            .iter()
+            .filter(|p| p.pane_id != pane_id && p.rect.width > 0 && p.rect.height > 0)
+            .filter_map(|p| {
+                let (gap, side) = beside(&p.rect);
+                (gap >= 0 && side > 0).then_some((gap, -side, p.pane_id.as_str()))
+            })
+            .min()
+            .map(|(.., id)| id)
     }
 }
 
@@ -447,6 +461,17 @@ impl Snapshot {
                 })
             })
             .collect()
+    }
+
+    /// Shows `pane_id` as its tab's focused pane now, ahead of the snapshot that will say so.
+    pub fn focus_pane(&mut self, tab_id: &str, pane_id: &str) {
+        self.focused_pane_id = Some(pane_id.into());
+        if let Some(layout) = self.layouts.iter_mut().find(|l| l.tab_id == tab_id) {
+            layout.focused_pane_id = pane_id.into();
+            for pane in &mut layout.panes {
+                pane.focused = pane.pane_id == pane_id;
+            }
+        }
     }
 
     // ponytail: fractions of herdr's cell rects; plan 2 builds a real split tree (dividers, set_split_ratio paths).
