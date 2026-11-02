@@ -65,18 +65,19 @@ pub fn ago(wait: Duration) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentStatus {
     Idle,
     Working,
     Blocked,
     Done,
+    #[default]
     #[serde(other)]
     Unknown,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Snapshot {
     pub focused_workspace_id: Option<String>,
     pub focused_tab_id: Option<String>,
@@ -98,7 +99,7 @@ pub struct Workspace {
     pub worktree: Option<Worktree>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Worktree {
     pub repo_key: String,
     pub is_linked_worktree: bool,
@@ -107,6 +108,23 @@ pub struct Worktree {
     /// The repo's main checkout.
     #[serde(default)]
     pub repo_root: String,
+}
+
+/// A worktree of a repo, as `git worktree list` says it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct WorktreeEntry {
+    pub path: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// The workspace that has it open.
+    #[serde(default)]
+    pub open_workspace_id: Option<String>,
+    #[serde(default)]
+    pub is_linked_worktree: bool,
+    #[serde(default)]
+    pub is_bare: bool,
+    #[serde(default)]
+    pub is_prunable: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,7 +136,7 @@ pub struct Tab {
     pub agent_status: AgentStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Pane {
     pub pane_id: String,
     pub tab_id: String,
@@ -140,6 +158,9 @@ pub struct Pane {
     /// herdr's counter of agent status changes, higher is more recent; read from the snapshot's `agents`.
     #[serde(default)]
     pub state_change_seq: u64,
+    /// What its program says of itself, on a backend that leaves agents to Shepherd.
+    #[serde(skip)]
+    pub report: Option<crate::agents::Report>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -217,8 +238,11 @@ pub struct LayoutPane {
     pub rect: Rect,
 }
 
+/// The grid of a backend that lays panes out in fractions, as herdr's cells: fine enough for a pane's edge.
+pub const AREA: u16 = 10_000;
+
 /// Terminal cells, in herdr's own client geometry.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 pub struct Rect {
     pub x: u16,
     pub y: u16,
@@ -254,14 +278,12 @@ impl Snapshot {
         Ok(snapshot)
     }
 
-    /// Whether herdr's `event` leaves this snapshot as it is: a `pane_updated` whose pane reads here as it does in
-    /// the event. Claude Code's title spinner sends one a few times a second, with only the unstripped title changed.
-    pub fn holds(&self, event: &serde_json::Value) -> bool {
-        event["event"] == "pane_updated"
-            && Pane::deserialize(&event["data"]["pane"]).is_ok_and(|new| {
-                // herdr puts the seq on the snapshot's `agents` only
-                self.panes.iter().any(|old| *old == Pane { state_change_seq: old.state_change_seq, ..new.clone() })
-            })
+    /// Whether `change` leaves this snapshot as it is: a pane that reads here as it does in the change. Claude Code's
+    /// title spinner sends one a few times a second, with only the unstripped title changed.
+    pub fn holds(&self, change: &crate::backend::Change) -> bool {
+        // herdr puts the seq on the snapshot's `agents` only
+        let same = |new: &Pane| self.panes.iter().any(|old| *old == Pane { state_change_seq: old.state_change_seq, ..new.clone() });
+        matches!(change, crate::backend::Change::Pane(new) if same(new))
     }
 
     pub fn tabs_of(&self, workspace_id: &str) -> Vec<&Tab> {

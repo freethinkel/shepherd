@@ -42,10 +42,10 @@ impl Shell {
             return;
         }
         let worktree = self.snapshot.as_ref().and_then(|s| s.workspaces.iter().find(|w| w.workspace_id == workspace_id)).and_then(|w| w.worktree.clone());
-        let Some(t) = worktree.filter(|t| t.is_linked_worktree && !t.checkout_path.is_empty() && !t.repo_root.is_empty()) else {
-            return crate::ui::toast::error(cx, "herdr didn't say where this worktree's main checkout is");
+        let Some(t) = worktree.filter(|t| t.is_linked_worktree && !t.checkout_path.is_empty()) else {
+            return crate::ui::toast::error(cx, "This isn't a worktree of a repo");
         };
-        let (dir, root) = (crate::herdr::locate(&t.checkout_path), crate::herdr::locate(&t.repo_root));
+        let (dir, root) = (crate::herdr::locate(&t.checkout_path), crate::herdr::locate(crate::worktree::root(&t)));
         cx.spawn_in(window, async move |this, cx| {
             let read = { let dir = dir.clone(); cx.background_spawn(async move { read(&dir) }).await };
             let _ = this.update_in(cx, |shell, window, cx| match read {
@@ -120,7 +120,7 @@ impl Shell {
     fn run_merge_delete(&mut self, id: String, dir: String, message: Option<String>, force: bool, cx: &mut Context<Self>) {
         let Some(m) = self.merging.get(&id) else { return };
         let (root, branch, base) = (m.root.clone(), m.branch.clone(), m.base.clone());
-        let (client, rt) = (self.client.clone(), self.rt.clone());
+        let (backend, rt) = (self.backend.clone(), self.rt.clone());
         cx.spawn(async move |this, cx| {
             let step = |cx: &mut gpui::AsyncApp, text: String| {
                 let id = id.clone();
@@ -140,8 +140,8 @@ impl Shell {
                 let (r, b, into) = (root.clone(), branch.clone(), base.clone());
                 cx.background_spawn(async move { merge(&r, &b, &into) }).await.map_err(|e| ("Merge failed", e))?;
                 step(cx, "Removing…".into());
-                let (method, params) = Command::RemoveWorktree { workspace_id: id.clone(), force }.request();
-                let removed = rt.spawn(async move { client.call(method, params).await }).await;
+                let workspace = id.clone();
+                let removed = rt.spawn(async move { backend.worktrees.remove(workspace, force).await }).await;
                 removed.map_err(anyhow::Error::from).and_then(|r| r).map_err(|e| ("Remove failed", format!("Merged into {base}, but the worktree stays:\n{e:#}")))?;
                 Ok(())
             }
@@ -172,7 +172,8 @@ impl Shell {
         m.step = "Removing…".into();
         let (root, branch) = (m.root.clone(), m.branch.clone());
         cx.notify();
-        self.send_then(Command::RemoveWorktree { workspace_id: id.clone(), force: true }, cx, move |shell, result, cx| {
+        let (backend, workspace) = (self.backend.clone(), id.clone());
+        self.ask(async move { backend.worktrees.remove(workspace, true).await }, cx, move |shell, result, cx| {
             match result {
                 Ok(_) => {
                     cx.spawn(async move |_, cx| {

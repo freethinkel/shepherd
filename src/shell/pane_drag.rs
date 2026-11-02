@@ -1,6 +1,7 @@
 //! Dragging a pane by its grip: onto another pane's edge to split it there, onto its middle to swap the two,
 //! or onto a tab to move it into that tab. herdr moves the pane's process along (`pane.move`, `pane.swap`).
 use super::Shell;
+use crate::backend::Made;
 use crate::commands::Command;
 use crate::model::{Frac, PaneFrame};
 use crate::theme::Theme;
@@ -292,8 +293,8 @@ impl Shell {
     }
 
     /// Shows the tab a moved pane landed in.
-    fn follow_moved_pane(&mut self, result: &serde_json::Value, cx: &mut Context<Self>) {
-        if let Some(tab) = crate::commands::moved_tab_id(result) {
+    fn follow_moved_pane(&mut self, result: &Made, cx: &mut Context<Self>) {
+        if let Some(tab) = result.tab_id.clone() {
             self.select_tab(Some(tab));
             cx.notify();
         }

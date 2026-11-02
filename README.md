@@ -11,7 +11,7 @@ https://github.com/user-attachments/assets/9b3f5fae-8eee-4697-89b4-37d232250117
 ## What it does
 
 - The sidebar lists workspaces. A repo's worktrees fold under it with their branch, changes against main and PR state. Right-click creates, opens or removes a worktree.
-- Under the sidebar, herdr sessions and saved SSH machines sit in a bar, like Arc's spaces. A two-finger swipe goes to the next one.
+- Under the sidebar, herdr sessions and saved SSH machines sit in a bar, like Arc's spaces. A two-finger swipe goes to the next one. The bar is herdr's: Shepherd shows one backend at a time, and another backend's sessions are its workspaces.
 - The agents list at the bottom shows every agent herdr detects in any workspace, with its status (working, blocked, done, idle), the task in its title and how long it has waited. Click one to jump to its pane.
 - When an agent you can't see starts waiting or finishes, macOS shows a notification and the Dock icon counts it until you look at that tab. Approve on the notification answers the agent without opening Shepherd.
 - Tabs show what runs in their panes: an agent, or a program such as Neovim, `cargo` or `btop`, each with its logo. Drag tabs to reorder them. Drag a pane by its grip onto another pane to split or swap, or onto a tab to move it there.
@@ -44,6 +44,24 @@ Settings → Appearance can make the window translucent (your compositor decides
 ### Requirements
 
 Shepherd needs macOS 14 or later, or Linux. It talks to the herdr server over `~/.config/herdr/herdr.sock` and starts the server if nothing answers there. If herdr isn't installed, Shepherd downloads the build for your system from herdr.dev, checks its SHA-256 and puts it in `~/.local/bin`, as herdr's `install.sh` does. You can point it at another binary or socket in Settings.
+
+### herdr-core
+
+Shepherd can also run on [herdr-core](https://herdr.dev/core) (`hc`), the terminal runtime under the Herdr app, as an experiment. Switch from herdr to it and back in Settings → Backend, or with Switch backend in the command panel. Your herdr sessions keep running either way. That page also shows the core's version and templates, restarts or updates it, and edits its shell, history, wait and notes.
+
+herdr-core has terminals, not workspaces, so the Herdr app keeps its spaces, tabs and splits in a document in the core, and Shepherd shares that document: what you open, move or close in one shows in the other. Focus and zoom stay each one's own, a tab holding a mod or a stack can only be rearranged in the app, and Shepherd keeps a copy of the app's document from before its first write, as `shepherd-herdr-app-backup`. Terminals no space holds show under Other terminals. Off (Settings → Backend → Sync with the Herdr app), Shepherd keeps its own layout, and shows the app's terminals grouped by their labels. Plugins, popups, Kitty images and resuming agents after a reboot are herdr's and don't work there. Worktrees do: Shepherd makes them with git in `~/.herdr/worktrees` and runs a project's commands from Settings → Worktrees itself, so there they run only while Shepherd is open. An agent shows its status only if it reports it (Claude Code and pi do).
+
+### Rex
+
+Shepherd can also run on [Rex](https://www.superlogical.com/rex/docs), as an experiment, on a Mac with Rex installed. Switch to it in Settings → Backend, or with Switch backend in the command panel. Shepherd starts Rex's server if nothing answers. That page also shows the server, `init.lua`, the agent skill, terminfo and hosts, reloads the config and sets up what is missing.
+
+Shepherd shows the same sessions as Rex.app: a session is a workspace, a window a tab, a block a pane. A pane in Shepherd's front window sets its terminal's size, and Rex.app follows it until Shepherd goes to the background. Rex's floating layers don't show, a pane moves only within its session, and plugins, popups and Kitty images are herdr's. Worktrees work as on herdr-core, named with a Nerd Font branch icon and their repo in Rex's own list of sessions (` mono/fix-tabs`), and an agent shows its status only if it reports it.
+
+### tmux
+
+Shepherd can also run on tmux 3.2 or newer, as an experiment. Switch to it in Settings → Backend, or with Switch backend in the command panel.
+
+Shepherd shows the same sessions as `tmux attach`: a session is a workspace, a window a tab, a pane a pane. tmux sizes a session's windows, so they take the room of the tab shown, a pane can be a cell wider than its place, and a terminal attached to the same session at another size makes the two take turns. A session stays where its name sorts it, a window linked into two sessions shows in the first, and plugins, popups and Kitty images are herdr's. Worktrees work as on herdr-core, and an agent shows its status once it reports it while Shepherd is open.
 
 ## Keys
 

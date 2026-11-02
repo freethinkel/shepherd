@@ -235,7 +235,8 @@ impl Shell {
         draft.sending = true;
         let picks: Vec<_> = draft.items.iter().map(|item| (item.annotation.clone(), item.note.read(cx).value().to_string())).collect();
         let (key, name, workspace) = (key.clone(), agent.agent.clone().unwrap_or_default(), self.workspace_label(&agent.workspace_id));
-        self.send_then(Command::Reply { pane_id: agent.pane_id, text: annotation_prompt(&picks) }, cx, move |shell, result, cx| {
+        let (backend, pane, prompt) = (self.backend.clone(), agent.pane_id, annotation_prompt(&picks));
+        self.ask(async move { backend.mux.send(pane, Some(prompt)).await }, cx, move |shell, result, cx| {
             match result {
                 Ok(_) => {
                     shell.stop_annotation(&key);

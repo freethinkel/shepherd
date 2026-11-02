@@ -20,6 +20,10 @@ pub struct Settings {
     #[serde(skip_serializing)]
     pub theme_family: Option<String>,
     pub appearance: AppearanceMode,
+    /// What runs the terminals.
+    pub backend: crate::backend::Kind,
+    /// On herdr-core, share workspaces, tabs and splits with the Herdr app.
+    pub hc_sync: bool,
     /// The herdr binary; `None` is `herdr` on PATH.
     pub herdr_bin: Option<String>,
     /// herdr's API socket; `None` is herdr's own default.
@@ -271,6 +275,8 @@ impl Default for Settings {
             theme_family: None,
             appearance: AppearanceMode::System,
             herdr_bin: None,
+            backend: crate::backend::Kind::Herdr,
+            hc_sync: true,
             herdr_socket: None,
             herdr_machine: None,
             place_looks: BTreeMap::new(),

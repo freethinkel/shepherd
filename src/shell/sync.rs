@@ -1,8 +1,8 @@
-//! Keeping the window in step with herdr: subscribe, snapshot, and start herdr's server when nothing answers.
+//! Keeping the window in step with the backend: subscribe, snapshot, and start herdr's server when nothing answers.
 use super::*;
 
 /// Subscribe, then snapshot; every event (coalesced) triggers another snapshot. Reconnects forever.
-pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, client: Client, resync: std::sync::Arc<tokio::sync::Notify>, cx: &mut gpui::AsyncApp) {
+pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, backend: Backend, resync: std::sync::Arc<tokio::sync::Notify>, cx: &mut gpui::AsyncApp) {
     // When nothing listens on the socket, Shepherd starts herdr's server itself: again after 10 s if it never came
     // up, after a minute if it could not be run at all.
     let (mut next_start, mut spawned, mut start_error, mut downloaded) = (Instant::now(), None::<Instant>, None::<String>, false);
@@ -24,25 +24,26 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
     }
     // dropped with this loop, so a switch of session stops it too
     let _programs = cx.spawn({
-        let (this, rt, client) = (this.clone(), rt.clone(), client.clone());
-        async move |cx| super::tab_bar::watch_programs(this, rt, client, cx).await
+        let (this, rt, backend) = (this.clone(), rt.clone(), backend.clone());
+        async move |cx| super::tab_bar::watch_programs(this, rt, backend, cx).await
     });
     // the agents' panes, whose status the subscription follows: herdr only sends that per pane
     let mut watched: Vec<String> = Vec::new();
     loop {
         let sub = {
-            let (c, panes) = (client.clone(), watched.clone());
-            rt.spawn(async move { c.subscribe(EVENT_TYPES, &panes).await })
+            let (b, panes) = (backend.clone(), watched.clone());
+            rt.spawn(async move { b.mux.changes(panes).await })
         };
         let mut rx = match sub.await.expect("tokio") {
             Ok(rx) => {
-                check_protocol(&this, &rt, &client, cx).await;
+                check_protocol(&this, &rt, &backend, cx).await;
                 rx
             }
             Err(err) => {
-                let no_server = crate::herdr::no_server(&err);
+                // the other backends start their own server
+                let no_server = backend.herdr().is_some() && crate::herdr::no_server(&err);
                 // a server that answers but won't subscribe may speak another protocol: its ping says which
-                let outdated = if no_server { None } else { check_protocol(&this, &rt, &client, cx).await };
+                let outdated = if no_server { None } else { check_protocol(&this, &rt, &backend, cx).await };
                 if no_server && Instant::now() >= next_start {
                     // no herdr anywhere: Shepherd downloads it, once a launch, then starts it
                     let fetched = if crate::herdr::missing() && !std::mem::replace(&mut downloaded, true) {
@@ -80,9 +81,8 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
             }
         };
         'snapshots: loop {
-            let c = client.clone();
-            let result = rt.spawn(async move { c.call("session.snapshot", json!({})).await }).await.expect("tokio");
-            let update = result.and_then(|r| Snapshot::from_result(&r));
+            let b = backend.clone();
+            let update = rt.spawn(async move { b.snapshot().await }).await.expect("tokio");
             let alive = this.update(cx, |s, cx| {
                 let mut panes = None;
                 match update {
@@ -112,6 +112,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                         snapshot.track(&mut s.since, now);
                         s.keep_agent_times(&snapshot, now, cx);
                         s.snapshot = Some(snapshot);
+                        s.tell_settings_repos(cx);
                         s.error = None;
                         s.connecting = None;
                     }
@@ -132,7 +133,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
             loop {
                 let event = tokio::select! {
                     event = rx.recv() => event,
-                    _ = resync.notified() => Some(serde_json::Value::Null),
+                    _ = resync.notified() => Some(Change::Any),
                 };
                 let Some(event) = event else {
                     break 'snapshots; // server gone or events_lost: resubscribe
@@ -144,7 +145,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                 }
                 // ponytail: herdr's events do not name the client; a focus change Shepherd did not just cause is
                 // another client's (its TUI in a terminal, over ssh), and the client used last sizes the panes
-                let focused = burst.iter().any(|e| e["event"] == "pane_focused");
+                let focused = burst.contains(&Change::Focused);
                 let held = this.update(cx, |s, cx| {
                     if focused && s.touched.elapsed() > Duration::from_secs(2) {
                         cx.set_global(crate::terminal::pane::Yielded(true));
@@ -162,8 +163,8 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
 /// Asks the server which protocol it speaks, and returns the complaint when it is not Shepherd's. A change of
 /// verdict is told once, as a toast; the verdict stays in [`crate::herdr::OutdatedServer`] for the panes whose
 /// connection it breaks. No answer to the ping changes nothing.
-async fn check_protocol(this: &gpui::WeakEntity<Shell>, rt: &tokio::runtime::Handle, client: &Client, cx: &mut gpui::AsyncApp) -> Option<String> {
-    let c = client.clone();
+async fn check_protocol(this: &gpui::WeakEntity<Shell>, rt: &tokio::runtime::Handle, backend: &Backend, cx: &mut gpui::AsyncApp) -> Option<String> {
+    let c = backend.herdr()?;
     let Ok(Ok(pong)) = rt.spawn(async move { c.call("ping", json!({})).await }).await else { return None };
     let mismatch = crate::herdr::protocol_mismatch(&pong);
     let told = mismatch.clone();
@@ -190,8 +191,8 @@ impl Shell {
             return;
         }
         if self.snapshot.as_ref().and_then(|s| s.focused_tab_id.as_ref()) != Some(&tab) {
-            let (client, id) = (self.client.clone(), tab.clone());
-            self.rt.spawn(async move { client.call("tab.focus", json!({"tab_id": id})).await });
+            let (backend, id) = (self.backend.clone(), tab.clone());
+            self.rt.spawn(async move { backend.mux.run(Command::FocusTab { tab_id: id }).await });
         }
         self.focused_tab = Some(tab);
     }

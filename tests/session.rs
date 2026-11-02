@@ -1,6 +1,7 @@
 // ponytail: the fake herdr is a shell script; Windows runs the unit tests only, a .cmd fake if it ever needs these
 #![cfg(unix)]
 use serde_json::{Value, json};
+use shepherd::backend::Terminal;
 use shepherd::herdr::{Mode, Session, SessionEvent};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -199,7 +200,7 @@ fn live_echo() {
         match recv(&mut rx, Duration::from_millis(200)) {
             Some(SessionEvent::Frame(b)) => seen.extend(b),
             Some(SessionEvent::Ended(why)) => panic!("ended: {why}"),
-            Some(SessionEvent::MouseCapture(_) | SessionEvent::KeyboardFlags(_) | SessionEvent::Size(..)) | None => {}
+            Some(SessionEvent::Restart | SessionEvent::Snapshot(_) | SessionEvent::MouseCapture(_) | SessionEvent::KeyboardFlags(_) | SessionEvent::Size(..)) | None => {}
         }
         if String::from_utf8_lossy(&seen).contains("shepherd-42") {
             return;

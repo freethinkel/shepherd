@@ -8,6 +8,7 @@ impl Render for Shell {
         }
         self.sync_badge(window, cx);
         self.mark_seen(window, cx);
+        self.fit_shown_tab(cx);
         // any Shepherd window in front, not this one: a window in the back renders too
         secure_input(SettingsGlobal::of(cx).settings.secure_input && cx.active_window().is_some());
         crate::ui::reap_popup(&mut self.view_menu, window);
@@ -335,8 +336,8 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
-            .on_action(cx.listener(|this, _: &SplitRight, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: false })))
-            .on_action(cx.listener(|this, _: &SplitDown, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: true })))
+            .on_action(cx.listener(|this, _: &SplitRight, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: false, cwd: None })))
+            .on_action(cx.listener(|this, _: &SplitDown, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: true, cwd: None })))
             .on_action(cx.listener(|this, _: &ClosePane, w, cx| {
                 // a browser tab is its own one pane, as in Safari
                 if let Some(id) = this.shown_browser_tab().map(|t| t.id.clone()) {
@@ -345,6 +346,7 @@ impl Render for Shell {
                 this.pane_command(w, cx, |pane_id| Command::ClosePane { pane_id })
             }))
             .on_action(cx.listener(|this, _: &ToggleZoom, w, cx| this.pane_command(w, cx, |pane_id| Command::Zoom { pane_id })))
+            .on_action(cx.listener(|this, _: &crate::bindings::SwitchBackend, _, cx| this.next_backend(cx)))
             .on_action(cx.listener(|this, _: &FocusLeft, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Left })))
             .on_action(cx.listener(|this, _: &FocusRight, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Right })))
             .on_action(cx.listener(|this, _: &FocusUp, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Up })))

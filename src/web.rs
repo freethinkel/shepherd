@@ -1,5 +1,6 @@
 //! Web integrations: local tools' pages listed in the sidebar and shown in place of the tabs and panes. What here is
 //! plain logic; the pages themselves are the Shell's (`shell/web.rs`).
+use crate::backend::Kind;
 use crate::settings::WebEntry;
 use gpui::{Bounds, ImageFormat, Pixels, point, px, size};
 
@@ -23,9 +24,10 @@ pub fn label(entry: &WebEntry, title: Option<&str>) -> String {
     url.parse::<http::Uri>().ok().and_then(|u| u.authority().map(|a| a.to_string())).unwrap_or_else(|| entry.url.trim().to_string())
 }
 
-/// The entries listed while the place with `place` key is shown, in the settings' order.
-pub fn listed<'a>(entries: &'a [WebEntry], place: Option<&str>) -> Vec<&'a WebEntry> {
-    entries.iter().filter(|e| e.show_in.is_none() || e.show_in.as_deref() == place).collect()
+/// The entries listed while the place with `place` key is shown, in the settings' order. Only herdr has places to keep
+/// a page to: on another backend every page is there.
+pub fn listed<'a>(entries: &'a [WebEntry], kind: Kind, place: Option<&str>) -> Vec<&'a WebEntry> {
+    entries.iter().filter(|e| kind != Kind::Herdr || e.show_in.is_none() || e.show_in.as_deref() == place).collect()
 }
 
 /// Moves entry `id` to where entry `to` is: a row dropped on another takes its place, so it lands after it when
@@ -257,10 +259,11 @@ mod tests {
     fn an_entry_tied_to_a_place_lists_only_there() {
         let e = |id: &str, show_in: Option<&str>| WebEntry { id: id.into(), show_in: show_in.map(Into::into), ..Default::default() };
         let entries = [e("a", None), e("b", Some("machine:m1")), e("c", Some("/tmp/s.sock"))];
-        let ids = |p| listed(&entries, p).iter().map(|e| e.id.as_str()).collect::<Vec<_>>();
+        let ids = |p| listed(&entries, Kind::Herdr, p).iter().map(|e| e.id.as_str()).collect::<Vec<_>>();
         assert_eq!(ids(Some("machine:m1")), ["a", "b"]);
         assert_eq!(ids(Some("/tmp/s.sock")), ["a", "c"]);
         assert_eq!(ids(None), ["a"]);
+        assert_eq!(listed(&entries, Kind::Rex, Some("rex")).len(), 3, "another backend has them all");
     }
 
     #[test]

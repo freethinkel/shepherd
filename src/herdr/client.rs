@@ -28,7 +28,7 @@ impl Client {
     /// Same resolution as herdr for the default session: `HERDR_SOCKET_PATH`, else `herdr.sock` in herdr's folder.
     pub fn local() -> Self {
         let path = std::env::var_os("HERDR_SOCKET_PATH").map(PathBuf::from).unwrap_or_else(|| super::config::dir().join("herdr.sock"));
-        Self { path }
+        Self::at(path)
     }
 
     pub fn at(path: PathBuf) -> Self {

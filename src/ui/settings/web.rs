@@ -1,5 +1,6 @@
 //! Settings → Web pages: an editable row per page, saved on Enter or when a field is left.
 use super::*;
+use crate::backend::Kind;
 
 /// One web page's fields, saved on Enter or when left.
 pub(super) struct WebFields {
@@ -122,7 +123,7 @@ impl SettingsView {
                             .flex_col()
                             .gap(px(12.))
                             .child(pair(labelled("Name", field(theme, &fields.name).w_full()), labelled("URL", field(theme, &fields.url).w_full())))
-                            .child(pair(labelled("Show in", show_in.w_full()), labelled("Open from", open_from.w_full()))),
+                            .when(self.backend == Kind::Herdr, |el| el.child(pair(labelled("Show in", show_in.w_full()), labelled("Open from", open_from.w_full())))),
                     )
                     .child(remove)
             })

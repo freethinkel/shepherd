@@ -105,7 +105,12 @@ fn save_in(herdr_dir: &Path, herdr: &str, projects: &[Project], stale: &dyn Fn()
     if stale() {
         return Ok(());
     }
-    let conf = conf_in(herdr_dir);
+    write_conf(&conf_in(herdr_dir), projects).context("Not saved")?;
+    // after the file, so what was typed is kept when herdr cannot be run; the next save installs again
+    install(herdr_dir, herdr).context("Saved, but herdr's plugin is not set up")
+}
+
+fn write_conf(conf: &Path, projects: &[Project]) -> anyhow::Result<()> {
     let dir = conf.parent().expect("hooks.conf is in a folder");
     std::fs::create_dir_all(dir)?;
     // event.sh leaves worktrees older than this alone: they were there before the hooks
@@ -116,9 +121,7 @@ fn save_in(herdr_dir: &Path, herdr: &str, projects: &[Project], stale: &dyn Fn()
     // written whole and renamed into place, so event.sh never reads half of one
     let tmp = dir.join(".hooks.conf.tmp");
     std::fs::write(&tmp, render(&unique(projects)))?;
-    std::fs::rename(&tmp, &conf).with_context(|| format!("cannot write {}", conf.display()))?;
-    // after the file, so what was typed is kept when herdr cannot be run; the next save installs again
-    install(herdr_dir, herdr)
+    std::fs::rename(&tmp, conf).with_context(|| format!("cannot write {}", conf.display()))
 }
 
 /// Projects of one name in one session would be one to event.sh: the later ones get `-2`, `-3`.
@@ -147,7 +150,12 @@ fn install(herdr_dir: &Path, herdr: &str) -> anyhow::Result<()> {
     let manifest_changed = write_changed(&root.join("herdr-plugin.toml"), MANIFEST)?;
     write_changed(&root.join("event.sh"), EVENT_SH)?;
     let root = root.to_string_lossy();
-    if !run(herdr, &["plugin", "list"])?.contains(&format!("- {PLUGIN_ID} ")) {
+    let listed = match run(herdr, &["plugin", "list"]) {
+        // no herdr on this computer: `hooks.conf` is all the other backends read
+        Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => return Ok(()),
+        listed => listed?,
+    };
+    if !listed.contains(&format!("- {PLUGIN_ID} ")) {
         run(herdr, &["plugin", "link", &root])?;
     } else if manifest_changed {
         run(herdr, &["plugin", "unlink", PLUGIN_ID])?;
@@ -605,7 +613,17 @@ removed = docker compose -p "$(basename "$WORKTREE_PATH")" down -v
     fn hooks_are_kept_when_herdr_fails() {
         let dir = tempfile::tempdir().unwrap();
         let projects = vec![project("a", "/a", &["make"], &[])];
-        assert!(save_in(dir.path(), "/nonexistent/herdr", &projects, &|| false).is_err());
+        // a folder cannot be run, and it is there: herdr failing, not missing
+        let error = format!("{:#}", save_in(dir.path(), &dir.path().to_string_lossy(), &projects, &|| false).unwrap_err());
+        assert!(error.starts_with("Saved, but"), "{error}");
+        assert_eq!(parse(&std::fs::read_to_string(conf_in(dir.path())).unwrap()), projects);
+    }
+
+    #[test]
+    fn hooks_need_no_herdr() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = vec![project("a", "/a", &["make"], &[])];
+        save_in(dir.path(), "/nonexistent/herdr", &projects, &|| false).unwrap();
         assert_eq!(parse(&std::fs::read_to_string(conf_in(dir.path())).unwrap()), projects);
     }
 

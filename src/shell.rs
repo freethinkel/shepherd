@@ -2,7 +2,7 @@
 //! every herdr event. Look and titlebar handling follow Collie (Zeron style).
 use crate::bindings::*;
 use crate::commands::{Command, Direction};
-use crate::herdr::{Client, EVENT_TYPES};
+use crate::backend::{Backend, Change, Made};
 use crate::terminal::pane::{GridHold, PaneQueries};
 use crate::ui::divider::{Throttle, drag_ratio};
 use gpui_base::input::{Input, InputEvent, InputState};
@@ -90,7 +90,9 @@ pub struct Shell {
     selected_tab: Option<String>,
     /// Titlebar drag: armed by a press in the strip, consumed by the first move (Collie's `drag_strip`).
     should_move: Rc<Cell<bool>>,
-    client: Client,
+    backend: Backend,
+    /// The tab last told its room, in cells: see [`Self::fit_shown_tab`].
+    fitted: Option<(String, u16, u16)>,
     rt: tokio::runtime::Handle,
     /// herdr's plugin actions as (id, title), for the command panel; read again whenever it opens.
     plugin_actions: Vec<(String, String)>,
@@ -394,11 +396,11 @@ impl Shell {
                         let pane = s.snapshot.as_ref().and_then(|snap| snap.panes.iter().find(|p| p.pane_id == crate::notify::tag_pane(&response.tag)));
                         match (pane.map(|p| (p.tab_id.clone(), p.pane_id.clone(), p.agent_status)), reply) {
                             // only while it still waits: a late press must not type Enter into an agent at work
-                            (Some((_, pane_id, AgentStatus::Blocked)), _) if approve => s.send(Command::Approve { pane_id }, cx, |_, _, _| {}),
+                            (Some((_, pane_id, AgentStatus::Blocked)), _) if approve => s.answer(pane_id, None, cx),
                             // only at its prompt (herdr makes a seen `done` `idle`): typed into an agent at work or
                             // into its question, the text would land in the wrong place
                             (Some((_, pane_id, AgentStatus::Done | AgentStatus::Idle)), Some(text)) => {
-                                s.send(Command::Reply { pane_id, text: text.to_string() }, cx, |_, _, _| {});
+                                s.answer(pane_id, Some(text.to_string()), cx);
                                 return true;
                             }
                             // the agent moved on while you typed: its tab comes up, and your words wait on the clipboard
@@ -466,12 +468,11 @@ impl Shell {
                     touched: Instant::now(),
                     selected_tab: std::env::var("SHEPHERD_TAB").ok(),
                     should_move: Rc::new(Cell::new(false)),
-                    client: SettingsGlobal::of(cx)
-                        .settings
-                        .herdr_socket
-                        .clone()
-                        .filter(|p| !p.trim().is_empty())
-                        .map_or_else(Client::local, |p| Client::at(p.into())),
+                    fitted: None,
+                    backend: {
+                        let settings = &SettingsGlobal::of(cx).settings;
+                        Backend::of(settings.backend, settings.herdr_socket.clone())
+                    },
                     rt: rt.clone(),
                     plugin_actions: Vec::new(),
                     grid_bounds: Rc::new(Cell::new(None)),
@@ -616,20 +617,25 @@ impl Shell {
         });
     }
 
-    /// Follows herdr over `self.client` from scratch: its snapshot and the subscription that refreshes it.
+    /// Follows the backend from scratch: its snapshot and the subscription that refreshes it.
     fn connect(&mut self, cx: &mut Context<Self>) {
-        let (client, rt, resync) = (self.client.clone(), self.rt.clone(), self.resync.clone());
+        let (backend, rt, resync) = (self.backend.clone(), self.rt.clone(), self.resync.clone());
         if crate::mock::dir().is_some() {
             // the fixture: its one snapshot (sync_loop), no popups, no pane queries
-            self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, resync, cx).await);
+            self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, backend, resync, cx).await);
             self.floating = None;
             self.popup_watch = gpui::Task::ready(());
             return;
         }
-        cx.set_global(PaneQueries(client.clone(), rt.clone()));
-        self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, client, resync, cx).await);
+        cx.set_global(PaneQueries(backend.clone(), rt.clone()));
+        let herdr = backend.herdr().is_some();
+        self.sync = cx.spawn(async move |this, cx| sync_loop(this, rt, backend, resync, cx).await);
         self.floating = None;
-        self.popup_watch = cx.spawn(async move |this, cx| floating::popup_loop(this, cx).await);
+        // only herdr has a client shell: elsewhere no popups, `keys.command`s or images over it
+        self.popup_watch = if herdr { cx.spawn(async move |this, cx| floating::popup_loop(this, cx).await) } else { gpui::Task::ready(()) };
+        if !herdr {
+            self.forget_popups(cx);
+        }
     }
 
     fn toggle_settings_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -640,7 +646,16 @@ impl Shell {
         let close = cx.subscribe(&view, |this, _, _: &crate::ui::settings::Close, cx| this.close_settings(cx));
         window.focus(&view.focus_handle(cx), cx);
         self.settings = Some((view, close));
+        self.tell_settings_repos(cx);
         cx.notify();
+    }
+
+    /// Settings lists the repos open on the backend, which only the window knows, for their worktree hooks.
+    fn tell_settings_repos(&self, cx: &mut Context<Self>) {
+        if let (Some((view, _)), Some(snapshot)) = (&self.settings, &self.snapshot) {
+            let repos = crate::worktree::repos(snapshot);
+            view.update(cx, |v, cx| v.set_repos(repos, cx));
+        }
     }
 
     /// Settings on its Usage page, opened if it is not up: the limits popup's way there.
@@ -738,10 +753,10 @@ impl Shell {
                     match open_tab {
                         Some(tab) => this.select_tab(Some(tab)),
                         None => {
-                            let command = Command::OpenWorktree { workspace_id: repo.clone(), path: path.clone() };
-                            this.send_then(command, cx, |shell, result, cx| {
+                            let (backend, repo, path) = (this.backend.clone(), repo.clone(), path.clone());
+                            this.ask(async move { backend.worktrees.open(repo, path).await }, cx, |shell, result, cx| {
                                 match result {
-                                    Ok(value) => shell.select_tab(crate::commands::created_tab_id(&value)),
+                                    Ok(made) => shell.select_tab(made.tab_id),
                                     Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),
                                 }
                                 cx.notify();
@@ -779,34 +794,56 @@ impl Shell {
         cx.notify();
     }
 
-    /// Send a command to herdr; `then` gets the result. Errors show over the grid for 4 s.
+    /// Send a command to the backend; `then` gets what it made. Errors show over the grid for 4 s.
     fn send(
         &mut self,
         command: Command,
         cx: &mut Context<Self>,
-        then: impl FnOnce(&mut Shell, &serde_json::Value, &mut Context<Shell>) + 'static,
+        then: impl FnOnce(&mut Shell, &Made, &mut Context<Shell>) + 'static,
     ) {
         if crate::mock::dir().is_some() {
             return; // a fixture takes no commands
         }
         self.send_then(command, cx, |shell, result, cx| match result {
-            Ok(value) => then(shell, &value, cx),
-            // the window was behind herdr (a tab closed elsewhere, a double click): catch up instead of complaining
-            Err(err) if stale(&err) => shell.resync.notify_one(),
-            Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),
+            Ok(made) => then(shell, &made, cx),
+            Err(err) => shell.complain(err, cx),
+        });
+    }
+
+    fn complain(&mut self, err: anyhow::Error, cx: &mut Context<Self>) {
+        // the window was behind the backend (a tab closed elsewhere, a double click): catch up instead of complaining
+        if stale(&err) {
+            self.resync.notify_one();
+        } else {
+            crate::ui::toast::error(cx, format!("{err:#}"));
+        }
+    }
+
+    /// Types `text` if any, then Enter, in the pane, without attaching to it: a waiting agent takes its highlighted
+    /// choice (Claude's and Codex's is "Yes"), and one at its prompt your next message.
+    fn answer(&mut self, pane_id: String, text: Option<String>, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        self.ask(async move { backend.mux.send(pane_id, text).await }, cx, |shell, result, cx| {
+            if let Err(err) = result {
+                shell.complain(err, cx);
+            }
         });
     }
 
     /// [`Self::send`] that sees failures too.
-    fn send_then(
+    fn send_then(&mut self, command: Command, cx: &mut Context<Self>, then: impl FnOnce(&mut Shell, anyhow::Result<Made>, &mut Context<Shell>) + 'static) {
+        let backend = self.backend.clone();
+        self.ask(async move { backend.mux.run(command).await }, cx, then);
+    }
+
+    /// Runs `call` off the main thread; `then` gets its result.
+    fn ask<T: Send + 'static>(
         &mut self,
-        command: Command,
+        call: impl std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
         cx: &mut Context<Self>,
-        then: impl FnOnce(&mut Shell, anyhow::Result<serde_json::Value>, &mut Context<Shell>) + 'static,
+        then: impl FnOnce(&mut Shell, anyhow::Result<T>, &mut Context<Shell>) + 'static,
     ) {
-        let (method, params) = command.request();
-        let client = self.client.clone();
-        let call = self.rt.spawn(async move { client.call(method, params).await });
+        let call = self.rt.spawn(call);
         cx.spawn(async move |this, cx| {
             let result = call.await.map_err(anyhow::Error::from).and_then(|r| r);
             let _ = this.update(cx, |shell, cx| then(shell, result, cx));
@@ -819,6 +856,20 @@ impl Shell {
     fn shown_geometry(&self, cx: &App) -> Option<crate::terminal::pane::GridGeometry> {
         let (snapshot, tab) = (self.snapshot.as_ref()?, self.shown_tab()?);
         snapshot.panes.iter().filter(|p| p.tab_id == tab.tab_id).find_map(|p| self.panes.get(&p.pane_id)?.read(cx).geometry())
+    }
+
+    /// Tells a backend that sizes tabs, not panes, the room the shown one has, once it settles.
+    fn fit_shown_tab(&mut self, cx: &App) {
+        if cx.try_global::<GridHold>().is_some_and(|hold| hold.0) {
+            return;
+        }
+        let (Some(bounds), Some(geometry), Some(tab)) = (self.grid_bounds.get(), self.shown_geometry(cx), self.shown_tab()) else { return };
+        let room = |size: Pixels, cell: f32| ((f32::from(size) - 2. * crate::terminal::element::TERM_PADDING) / cell).floor().max(1.) as u16;
+        let fit = (tab.tab_id, room(bounds.size.width, geometry.cell_w), room(bounds.size.height, geometry.line_h));
+        if self.fitted.as_ref() != Some(&fit) {
+            self.backend.mux.fit(&fit.0, fit.1, fit.2);
+            self.fitted = Some(fit);
+        }
     }
 
     fn shown_tab(&self) -> Option<crate::model::Tab> {
@@ -886,7 +937,8 @@ impl Shell {
         }
         self.marked_seen = done.clone();
         if let Some(pane_id) = done {
-            self.send_then(Command::MarkSeen { pane_id }, cx, |_, _, _| {});
+            let backend = self.backend.clone();
+            self.rt.spawn(async move { backend.agents.seen(pane_id).await });
         }
     }
 
@@ -927,10 +979,17 @@ impl Shell {
         if let Some((surface, _)) = &self.popup_surface {
             surface.theme(floating::host_theme(Theme::of(cx)));
         }
+        let hex = |c: Hsla| {
+            let c = gpui::Rgba::from(c);
+            let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            format!("#{:02x}{:02x}{:02x}", b(c.r), b(c.g), b(c.b))
+        };
+        let terminal = &Theme::of(cx).terminal;
+        crate::backend::set_colors(hex(terminal.foreground), hex(terminal.background));
     }
 
     fn refresh_plugin_actions(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
+        let Some(client) = self.backend.herdr() else { return self.plugin_actions.clear() };
         let call = self.rt.spawn(async move { client.call("plugin.action.list", json!({})).await });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(result)) = call.await else { return };
@@ -949,7 +1008,8 @@ impl Shell {
         // herdr gives a popup to the tab in its focus as the popup opens, and only a client shell on that tab gets it:
         // herdr's focus moves to the tab shown first, so a popup the command opens comes to this window
         let Some(tab) = self.shown_tab() else { return self.run_herdr_command_in(command, pane_id, cx) };
-        let (client, command) = (self.client.clone(), command.clone());
+        let Some(client) = self.backend.herdr() else { return self.run_herdr_command_in(command, pane_id, cx) };
+        let command = command.clone();
         let focused = self.rt.spawn(async move { client.call("tab.focus", json!({"tab_id": tab.tab_id})).await });
         cx.spawn(async move |this, cx| {
             let _ = focused.await;
@@ -960,16 +1020,25 @@ impl Shell {
 
     fn run_herdr_command_in(&mut self, command: &crate::herdr::keys::HerdrCommand, pane_id: Option<String>, cx: &mut Context<Self>) {
         use crate::herdr::keys::CommandKind;
+        let client = self.backend.herdr();
         let pane = self.snapshot.as_ref().and_then(|s| s.panes.iter().find(|p| Some(&p.pane_id) == pane_id.as_ref())).cloned();
         match command.kind {
             CommandKind::PluginAction => {
-                self.send(Command::InvokePluginAction { action_id: command.command.clone(), pane }, cx, |_, _, _| {})
+                let Some(client) = client else { return };
+                let params = crate::commands::plugin_action(&command.command, pane.as_ref());
+                self.ask(async move { client.call("plugin.action.invoke", params).await }, cx, |shell, result, cx| {
+                    if let Err(err) = result {
+                        shell.complain(err, cx);
+                    }
+                });
             }
             // herdr's `shell`: detached, in the pane's directory, with herdr's socket for the `herdr` CLI
             CommandKind::Shell => {
                 let mut sh = crate::process::shell(&command.command);
-                sh.env("HERDR_SOCKET_PATH", self.client.path())
-                    .stdin(std::process::Stdio::null())
+                if let Some(client) = &client {
+                    sh.env("HERDR_SOCKET_PATH", client.path());
+                }
+                sh.stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());
                 if let Some(p) = &pane {
@@ -998,9 +1067,11 @@ impl Shell {
                     *keys == command.keys && pane.as_ref().is_some_and(|shown| panes.iter().any(|p| &p.pane_id == id && p.tab_id == shown.tab_id))
                 });
                 let open = open.map(|(_, id)| id.clone());
+                let Some(client) = client else {
+                    return crate::ui::toast::error(cx, format!("{}: only herdr runs this", command.command));
+                };
                 if let Some(id) = open.filter(|_| command.kind == CommandKind::Pane) {
                     self.focus_next = Some(id.clone());
-                    let client = self.client.clone();
                     self.rt.spawn(async move { client.call("pane.focus", json!({"pane_id": id})).await });
                     cx.notify();
                     return;
@@ -1015,7 +1086,7 @@ impl Shell {
                     params["tab_id"] = json!(p.tab_id);
                     params["pane_id"] = json!(p.pane_id);
                 }
-                let (client, label, keys) = (self.client.clone(), command.command.clone(), command.keys.clone());
+                let (label, keys) = (command.command.clone(), command.keys.clone());
                 let before: Vec<String> = self.snapshot.iter().flat_map(|s| s.panes.iter().map(|p| p.pane_id.clone())).collect();
                 let tab = pane.as_ref().map(|p| p.tab_id.clone());
                 // herdr opens the pane before it answers: the one in the tab that was not there is it
@@ -1063,7 +1134,7 @@ impl Shell {
 
     fn new_tab(&mut self, workspace_id: String, cx: &mut Context<Self>) {
         self.send(Command::NewTab { workspace_id }, cx, |shell, result, cx| {
-            shell.select_tab(crate::commands::created_tab_id(result));
+            shell.select_tab(result.tab_id.clone());
             cx.notify();
         });
     }
@@ -1149,6 +1220,24 @@ fn remember_shown(recent: &mut Vec<String>, shown: &[PaneFrame], live: impl Fn(&
 
 /// Saves a choice made in the sidebar, or where the window was moved. A settings file that failed to load is the user's to fix: the sidebar must
 /// not overwrite it with defaults.
+/// Settings' Backend: the windows move to it. Deferred: the click that picked it is inside an update of one of them.
+pub fn set_backend(backend: crate::backend::Kind, cx: &mut App) {
+    cx.defer(move |cx| {
+        for window in cx.windows().into_iter().filter_map(|w| w.downcast::<Shell>()) {
+            let _ = window.update(cx, |shell, _, cx| shell.set_backend(backend, cx));
+        }
+    });
+}
+
+/// Every window connects again: the backend's server has restarted.
+pub fn reconnect(cx: &mut App) {
+    cx.defer(move |cx| {
+        for window in cx.windows().into_iter().filter_map(|w| w.downcast::<Shell>()) {
+            let _ = window.update(cx, |shell, _, cx| shell.reconnect(cx));
+        }
+    });
+}
+
 fn save_from_sidebar(cx: &mut App, change: impl FnOnce(&mut crate::settings::Settings)) {
     if SettingsGlobal::of(cx).error.is_none() {
         crate::ui::settings::update(cx, change);

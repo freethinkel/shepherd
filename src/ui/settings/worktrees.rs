@@ -1,7 +1,9 @@
-//! Settings → Worktrees: the worktree hooks (`hooks.conf`) of one herdr session at a time, here or on a saved herdr
-//! machine (over SSH): every repo open in it (the sidebar's) with its commands, saved when a field is left. herdr runs
-//! the commands, so they keep working without Shepherd.
+//! Settings → Worktrees: where worktrees go, and the worktree hooks (`hooks.conf`). On another backend: every project
+//! of the file and each repo open on it, since Shepherd finds a hook by its repo alone. On herdr: one session at a time,
+//! here or on a saved herdr machine (over SSH): every repo open in it (the sidebar's) with its commands, and herdr runs
+//! them, so they keep working without Shepherd. Saved when a field is left.
 use super::*;
+use crate::backend::Kind;
 use crate::herdr::hooks::{self, Project, tilde};
 use gpui::{HighlightStyle, Hsla};
 use gpui_base::input::{Editor, EditorState, FoldRange, HighlightStyleResolver, InputEdit, InputHighlighter, Rope};
@@ -98,6 +100,12 @@ fn code_field(theme: &Theme, input: &Entity<EditorState>, cx: &App) -> Div {
 }
 
 const ABOUT: &str = "Commands herdr runs in a new worktree and after one is removed, per session. They run in herdr, so they keep working with Shepherd closed or deleted, from any client.";
+const ABOUT_OTHERS: &str = "Commands Shepherd runs in a worktree it makes and after it removes one, per repo. They run while Shepherd is open; one that fails shows as an error.";
+
+/// `dir`s of `hooks.conf` as one path, either way it is written.
+fn same_project(a: &str, b: &str) -> bool {
+    tilde(a) == tilde(b)
+}
 
 /// One command a line: blank lines and the spaces around each command dropped.
 fn commands(text: &str) -> Vec<String> {
@@ -132,9 +140,21 @@ impl SettingsView {
         for (machine, p) in std::mem::take(&mut self.worktree_adds) {
             self.add_project(machine, &p, window, cx);
         }
-        if self.worktrees.is_some() {
-            return;
+        if self.worktrees.is_none() {
+            self.load_hooks(window, cx);
         }
+        if self.backend != Kind::Herdr {
+            for (name, root) in self.open_repos.clone() {
+                let known = matches!(&self.worktrees, Some(Ok(fields)) if fields.iter().any(|f| same_dir(&f.dir, &root)));
+                if !known {
+                    let session = Some("default".to_string()); // the one a project without a session is taken for
+                    self.add_project(None, &Project { session, name, dir: tilde(&root), ..Project::default() }, window, cx);
+                }
+            }
+        }
+    }
+
+    fn load_hooks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match hooks::load() {
             Ok(projects) => {
                 self.worktrees = Some(Ok(Vec::new()));
@@ -144,6 +164,9 @@ impl SettingsView {
             }
             // not saved over: what could not be read stays as it is
             Err(e) => self.worktrees = Some(Err(format!("{e:#}"))),
+        }
+        if self.backend != Kind::Herdr {
+            return;
         }
         let rt = cx.global::<Tokio>().0.clone();
         let list = rt.spawn(async move {
@@ -260,14 +283,14 @@ impl SettingsView {
         let stale = move || saves.load(std::sync::atomic::Ordering::SeqCst) != this_save;
         let saving = cx.background_spawn(async move {
             match &machine {
-                Some(target) => hooks::save_remote(target, &projects, stale),
+                Some(target) => hooks::save_remote(target, &projects, stale).map_err(|e| e.context("Not saved")),
                 None => hooks::save(&projects, stale),
             }
         });
         cx.spawn(async move |this, cx| {
             let result = saving.await;
             let _ = this.update(cx, |v, cx| {
-                v.worktree_note = result.err().map(|e| format!("Not saved: {e:#}"));
+                v.worktree_note = result.err().map(|e| format!("{e:#}"));
                 cx.notify();
             });
         })
@@ -278,6 +301,9 @@ impl SettingsView {
     /// saved machine's; at first the one Shepherd is on), then that session's repos and projects, each its name and path, folded to its count of
     /// commands or open on its two command fields; a project of a repo no longer open in the session has a red bin.
     pub(super) fn worktrees_page(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let kind = self.backend;
+        let herdr = kind == Kind::Herdr;
+        let about = if herdr { ABOUT } else { ABOUT_OTHERS };
         let body = match &self.worktrees {
             None => div(),
             Some(Err(e)) => note(theme, e.clone()),
@@ -289,7 +315,11 @@ impl SettingsView {
                     .flatten()
                     .map(|s| SessionRepos { machine: s.machine.clone(), name: s.name.clone(), label: s.label.clone(), running: s.running, repos: s.repos.clone(), error: s.error.clone() })
                     .collect();
-                let of = |g: &SessionRepos, f: &ProjectFields| f.machine == g.machine && f.session == g.name;
+                // another backend has no sessions: one group of everything
+                if !herdr {
+                    groups = vec![SessionRepos { machine: None, name: String::new(), label: kind.name().into(), running: true, repos: self.open_repos.clone(), error: None }];
+                }
+                let of = |g: &SessionRepos, f: &ProjectFields| f.machine == g.machine && (!herdr || f.session == g.name);
                 for f in fields {
                     if !groups.iter().any(|g| of(g, f)) {
                         let label = match &f.machine {
@@ -330,7 +360,7 @@ impl SettingsView {
                     self.select(theme, "worktree-session", labels, Some(at), "Session".into(), |_| None, pick, cx).w(px(220.))
                 };
                 let Some(group) = groups.into_iter().nth(at) else {
-                    return div().child(page_header(theme, "Worktrees", ABOUT)).child(note(theme, "No herdr session answered yet."));
+                    return div().child(page_header(theme, "Worktrees", about)).child(self.worktrees_folder(theme)).child(note(theme, "No herdr session answered yet."));
                 };
                 let rows: Vec<Div> = fields
                     .iter()
@@ -365,7 +395,14 @@ impl SettingsView {
                             cx.notify();
                         });
                         let chevron = if open { "icons/alt-arrow-down.svg" } else { "icons/alt-arrow-right.svg" };
-                        let path = if gone { format!("{} · not open in this session", f.dir) } else { f.dir.clone() };
+                        // Shepherd takes the first project of a repo, whichever session it is in
+                        let first = fields[..i].iter().find(|o| !herdr && same_project(&o.dir, &f.dir));
+                        let path = match first {
+                            Some(first) => format!("{} · not run on {}: session {}'s commands are", f.dir, kind.name(), first.session),
+                            None if gone && herdr => format!("{} · not open in this session", f.dir),
+                            None if gone => format!("{} · not open on {}", f.dir, kind.name()),
+                            None => f.dir.clone(),
+                        };
                         let head = div()
                             .id(("worktree-project", i))
                             .flex_1()
@@ -394,30 +431,41 @@ impl SettingsView {
                     .collect();
                 let empty = rows.is_empty().then(|| match &group.error {
                     Some(e) => card_row(theme, true).child(row_text(theme, "Cannot reach the machine", e.clone())),
-                    None => card_row(theme, true).child(row_text(theme, "No repos", "No workspace open in this session is a git repo: open one in herdr and it shows here.")),
+                    None if herdr => card_row(theme, true).child(row_text(theme, "No repos", "No workspace open in this session is a git repo: open one in herdr and it shows here.")),
+                    None => card_row(theme, true).child(row_text(theme, "No repos", format!("No workspace open on {} is a git repo: open one and it shows here.", kind.name()))),
                 });
                 div()
-                    .child(div().mt(px(24.)).mb(px(8.)).child(picker))
-                    .child(card(theme).mt(px(0.)).children(rows).children(empty))
+                    .when(herdr, |el| el.child(div().mt(px(24.)).mb(px(8.)).child(picker)))
+                    .child(card(theme).when(herdr, |el| el.mt(px(0.))).children(rows).children(empty))
                     .child(note(theme, "One command a line, run in order; the first that fails stops the rest. $ROOT_PATH is the main checkout, $WORKTREE_PATH the worktree, $PROJECT the project's name."))
                     // what to give an agent asked to set them up
                     .children(std::env::current_exe().ok().map(|exe| note(theme, format!("An agent can set them up too: \"{}\" hooks --help", exe.display()))))
             }
         };
         div()
-            .child(page_header(
-                theme,
-                "Worktrees",
-                ABOUT,
-            ))
+            .child(page_header(theme, "Worktrees", about))
+            .child(self.worktrees_folder(theme))
             .child(body)
             .children(self.worktree_note.clone().map(|text| note(theme, text)))
+            .children(self.herdr_note.clone().map(|text| note(theme, text)))
+    }
+
+    /// herdr's setting, which Shepherd follows on the other backends. Its field is the last of `HERDR_FIELDS`.
+    fn worktrees_folder(&self, theme: &Theme) -> Div {
+        card(theme).children(self.herdr_fields.last().map(|input| card_row(theme, true).child(row_text(theme, "Worktrees folder", "Where new worktrees are checked out.")).child(field(theme, input))))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_is_one_path_however_it_is_written() {
+        let home = crate::settings::home().join("app").to_string_lossy().into_owned();
+        assert!(same_project("~/app", &home));
+        assert!(!same_project("~/app", "~/web"));
+    }
 
     #[test]
     fn lines_to_commands() {
