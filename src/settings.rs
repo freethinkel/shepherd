@@ -48,6 +48,8 @@ pub struct Settings {
     pub diff_split: bool,
     /// The diffs wrap long lines; else they scroll sideways.
     pub diff_wrap: bool,
+    /// Agents seen through to done, up to the count that asks for a GitHub star.
+    pub agents_done: u32,
     pub agent_sort: AgentSort,
     /// Which agents a browser tab's annotations can go to.
     pub annotation_agents: AgentScope,
@@ -305,6 +307,7 @@ impl Default for Settings {
             right_panel_width: RIGHT_PANEL_WIDTH,
             diff_split: false,
             diff_wrap: false,
+            agents_done: 0,
             agent_sort: AgentSort::default(),
             annotation_agents: AgentScope::default(),
             sidebar_style: SidebarStyle::default(),

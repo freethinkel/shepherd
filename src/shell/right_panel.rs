@@ -6,7 +6,7 @@ use crate::ui::review::Review;
 use crate::ui::statusbar::fetching;
 use super::tabs::{Leading, Tab, Tabs, new_tab_button, plain_tint, tab_element};
 use super::*;
-use crate::right_panel::{Offer, PanelState, Surface, clamp_width, fits, offered};
+use crate::right_panel::{Offer, PanelState, Surface, clamp_width, fits, offered, slides};
 use crate::settings::RIGHT_PANEL_WIDTH;
 use gpui::AnyElement;
 
@@ -21,10 +21,20 @@ pub(super) struct RightPanel {
     pub(super) width: f32,
     /// The panel's edge is being dragged.
     pub(super) drag: bool,
+    /// The dragged edge's spring at a limit.
+    pub(super) edge: EdgeSpring,
     /// The strip's `+` menu and where it opened.
     pub(super) plus: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// The workspace whose panel has the keyboard, not its panes.
     pub(super) focused: Option<String>,
+    /// Its slide while it shows or hides: 0 hidden, 1 shown.
+    pub(super) motion: Option<FoldMotion>,
+    /// Its growth while it expands or collapses: 0 beside the panes, 1 in their place.
+    pub(super) expand: Option<FoldMotion>,
+    /// The workspace shown and whether its panel was open at the last render.
+    seen: (Option<String>, bool),
+    /// The same for whether it was expanded.
+    seen_expanded: (Option<String>, bool),
     tabs: Tabs,
     /// What the picker and the `+` offered at the last render.
     offers: Vec<Offer>,
@@ -48,8 +58,13 @@ impl RightPanel {
             panels: HashMap::new(),
             width,
             drag: false,
+            edge: None,
             plus: None,
             focused: None,
+            motion: None,
+            expand: None,
+            seen: (None, false),
+            seen_expanded: (None, false),
             tabs: Tabs::default(),
             offers: Vec::new(),
             diffs: HashMap::new(),
@@ -60,6 +75,23 @@ impl RightPanel {
             turns: HashMap::new(),
         }
     }
+}
+
+/// A 0-to-1 tween's value this frame, or where `on` rests. A tween heading elsewhere was another workspace's, left
+/// behind by a switch.
+fn tweened(motion: Option<FoldMotion>, on: bool) -> f32 {
+    match motion.filter(|m| m.animating() && (m.to > 0.) == on) {
+        Some(m) => m.current(),
+        None if on => 1.,
+        None => 0.,
+    }
+}
+
+/// A 0-to-1 tween toward `on`, from wherever `motion` has got to.
+fn retween(motion: Option<FoldMotion>, on: bool) -> FoldMotion {
+    let to = if on { 1. } else { 0. };
+    let from = motion.filter(|m| m.animating()).map_or(1. - to, FoldMotion::current);
+    FoldMotion { epoch: 0, from, to, started: Instant::now() }
 }
 
 /// The pull request tab's title: the request's own once known.
@@ -93,10 +125,78 @@ impl Shell {
         }
     }
 
-    /// Whether the panel is on screen: open, Settings and a sidebar page not in its place, and room for it.
+    /// Whether the window can show a panel: Settings and a sidebar page not in its place, and room for it.
+    fn right_panel_fits(&self, window: &Window) -> bool {
+        self.settings.is_none() && self.pages.shown.is_none() && fits(f32::from(window.viewport_size().width), self.sidebar_now())
+    }
+
+    fn right_panel_open(&self) -> bool {
+        self.panel().is_some_and(|p| p.open)
+    }
+
+    /// Whether the panel is on screen and staying. One sliding out is not: it's only drawn, see `right_panel_now`.
     pub(super) fn right_panel_shown(&self, window: &Window) -> bool {
-        let room = fits(f32::from(window.viewport_size().width), self.sidebar_now());
-        self.settings.is_none() && self.pages.shown.is_none() && room && self.panel().is_some_and(|p| p.open)
+        self.right_panel_fits(window) && self.right_panel_open()
+    }
+
+    fn right_panel_expanded(&self) -> bool {
+        self.panel().is_some_and(|p| p.expanded)
+    }
+
+    /// Whether it has left its place beside the panes, on its way or all the way.
+    pub(super) fn right_panel_grown(&self) -> bool {
+        tweened(self.right.expand, self.right_panel_expanded()) > 0.
+    }
+
+    /// The panel's slide this frame: 0 hidden, 1 shown.
+    pub(super) fn right_panel_slide(&self, window: &Window) -> f32 {
+        if self.right_panel_fits(window) { tweened(self.right.motion, self.right_panel_open()) } else { 0. }
+    }
+
+    /// The room the panes give up for the panel this frame.
+    pub(super) fn right_panel_now(&self, window: &Window) -> f32 {
+        self.right_panel_width(window) * self.right_panel_slide(window)
+    }
+
+    /// The panel's own width: beside the panes, or grown in their place to the sidebar.
+    pub(super) fn right_panel_drawn(&self, window: &Window) -> f32 {
+        let beside = self.right_panel_width(window);
+        let full = f32::from(window.viewport_size().width) - self.sidebar_now();
+        beside + (full - beside) * tweened(self.right.expand, self.right_panel_expanded())
+    }
+
+    /// Once per render, so every way of opening and closing it slides: holds the panes' grids until it lands, as the
+    /// sidebar does.
+    pub(super) fn follow_right_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ws = self.shown_tab().map(|t| t.workspace_id);
+        let now = (ws.clone(), self.right_panel_open());
+        let expanded = (ws.clone(), self.right_panel_expanded());
+        let was = std::mem::replace(&mut self.right.seen, now.clone());
+        let was_expanded = std::mem::replace(&mut self.right.seen_expanded, expanded.clone());
+        let fit = self.right_panel_fits(window);
+        if fit && slides(&was_expanded, &expanded) {
+            self.right.expand = Some(retween(self.right.expand, expanded.1));
+        }
+        // the panes are clipped away: what's typed must not reach them unseen
+        if expanded.1 && self.right_panel_shown(window) && self.right.focused != ws {
+            self.focus_panel(true, window, cx);
+        }
+        if !fit || !slides(&was, &now) {
+            return;
+        }
+        let motion = retween(self.right.motion, now.1);
+        self.right.motion = Some(motion);
+        cx.set_global(GridHold(true));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FOLD_DURATION + Duration::from_millis(120)).await;
+            let _ = this.update(cx, |shell, cx| {
+                if shell.right.motion.is_some_and(|m| m.started == motion.started) {
+                    shell.right.motion = None;
+                    shell.release_grids(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Whether the panel shows the pull request.
@@ -104,9 +204,9 @@ impl Shell {
         self.right_panel_shown(window) && self.panel().is_some_and(|p| p.active == Some(Surface::PullRequest))
     }
 
-    /// The width the panel is drawn at.
+    /// The width the panel is drawn at, its edge's spring included.
     pub(super) fn right_panel_width(&self, window: &Window) -> f32 {
-        clamp_width(self.right.width, f32::from(window.viewport_size().width), self.sidebar_now())
+        clamp_width(self.right.width, f32::from(window.viewport_size().width), self.sidebar_now()) + spring_offset(self.right.edge).unwrap_or(0.)
     }
 
     pub(super) fn panel_focused(&self) -> bool {
@@ -153,17 +253,29 @@ impl Shell {
         }
     }
 
-    // ponytail: opens at once, unlike the sidebar: nobody has watched a native page follow a slide; a `FoldMotion` on
-    // the width if the jump bothers
     pub(super) fn toggle_right_panel(&mut self, window: &Window, cx: &mut Context<Self>) {
         let seen = self.right_panel_shown(window);
         self.update_panel(cx, |p| p.toggle_seen(seen));
     }
 
+    /// Zeron's takeover, from the strip's button: the panel takes the panes' room, which clip and keep their grids, or
+    /// goes back beside them with the keyboard back there too.
+    fn toggle_right_panel_expand(&mut self, window: &Window, cx: &mut Context<Self>) {
+        // a closing panel's strip is still drawn
+        if self.right_panel_shown(window) {
+            self.release_panel();
+            self.update_panel(cx, |p| p.expanded = !p.expanded);
+        }
+    }
+
     pub(super) fn drag_right_panel(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
         if self.right.drag {
             let window_w = f32::from(window.viewport_size().width);
-            self.right.width = clamp_width(window_w - f32::from(x), window_w, self.sidebar_now());
+            let sidebar = self.sidebar_now();
+            let limit = |width| clamp_width(width, window_w, sidebar);
+            let wanted = window_w - f32::from(x);
+            spring_at_limit(&mut self.right.edge, wanted, limit(0.), limit(f32::INFINITY));
+            self.right.width = limit(wanted);
             cx.notify();
         }
     }
@@ -224,7 +336,8 @@ impl Shell {
     /// The panel and its resize edge.
     pub(super) fn render_right_panel(&mut self, theme: &Theme, shown: &ShownReview, has_remote: bool, window: &mut Window, cx: &mut Context<Self>) -> [AnyElement; 2] {
         self.right.offers = offered(has_remote, shown.key.is_some(), super::web::embeds_pages(window));
-        let width = self.right_panel_width(window);
+        let width = self.right_panel_drawn(window);
+        let now = width * self.right_panel_slide(window);
         let strip = self.render_right_strip(theme, shown, window, cx);
         let body = match self.panel().and_then(|p| p.active.clone()) {
             Some(Surface::PullRequest) => self.render_review(theme, shown, window, cx),
@@ -248,13 +361,18 @@ impl Shell {
             Some(Surface::Diff(_)) | None => self.render_surface_picker(theme, cx).into_any_element(),
         };
         let panel = div().id("right-panel").w(px(width)).h_full().flex_none().flex().flex_col().overflow_hidden().bg(theme.wash(0.05)).border_l_1().border_color(theme.border).child(strip).child(body);
+        // the sidebar's slide, mirrored but for the content, which rides the edge: a native page can't be clipped by
+        // GPUI, only by the window
+        let panel = div().w(px(now)).h_full().flex_none().overflow_hidden().child(panel);
+        let grown = self.right_panel_grown();
         let edge = div()
             .id("right-panel-resize")
             .on_hover(cx.listener(|this, on: &bool, _, cx| this.hover_seam("right-panel-resize", *on, cx)))
             .absolute()
             .top(px(TITLEBAR_HEIGHT))
             .bottom_0()
-            .right(px(width - 3.))
+            .right(px(now - 3.))
+            .when(grown, |el| el.invisible())
             .w(px(6.))
             .cursor_col_resize()
             // the panel's 1 px border sits at x = 3 of the strip
@@ -278,7 +396,7 @@ impl Shell {
         [panel.into_any_element(), edge.into_any_element()]
     }
 
-    /// The titlebar band over the panel: its tabs and the `+`, as t3code's `RightPanelTabs`, and the ✕.
+    /// The titlebar band over the panel: its tabs and the `+`, as t3code's `RightPanelTabs`, and the toggle.
     fn render_right_strip(&mut self, theme: &Theme, shown: &ShownReview, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let mut tabs = self.surface_tabs(shown, theme, window, cx);
         let empty = tabs.is_empty();
@@ -291,7 +409,7 @@ impl Shell {
         let mut items = Vec::new();
         for p in &placed {
             if p.tab.id == NEW {
-                let close = |this: &mut Shell, cx: &mut Context<Shell>| this.update_panel(cx, |p| p.open = false);
+                let close = |this: &mut Shell, cx: &mut Context<Shell>| this.update_panel(cx, PanelState::shut);
                 items.push(tab_element(p, theme, None, None, close, window, cx).into_any_element());
                 continue;
             }
@@ -317,12 +435,16 @@ impl Shell {
         }
         let row = self.tabs_row(&self.right.tabs, "right-surface-strip", theme, items, Shell::surface_dropped, cx);
         let plus_open = self.right.plus.as_ref().is_some_and(|m| m.is_open());
+        let expanded = self.right_panel_expanded();
+        let slide = self.right_panel_slide(window);
+        let left = f32::from(window.viewport_size().width) - self.right_panel_drawn(window) * slide;
         div()
             .h(px(TITLEBAR_HEIGHT))
             .flex_none()
             // opaque, as the tab bar's, for the edge fades
             .bg(theme.surface)
-            .pl(px(8.))
+            // grown to the window's edge with the sidebar closed, it clears the traffic lights and the sidebar toggle
+            .pl(px((TITLEBAR_CLUSTER - left).max(8.)))
             .pr(px(8. + window_controls_w(cx)))
             .flex()
             .items_center()
@@ -343,8 +465,13 @@ impl Shell {
                 )
             })
             .child(
-                titlebar_button(theme, "right-panel-close", "icons/close.svg")
-                    .tooltip(tip("Close", Some("ToggleRightPanel")))
+                titlebar_button(theme, "right-panel-expand", if expanded { "icons/collapse-arrows.svg" } else { "icons/expand-arrows.svg" })
+                    .tooltip(tip(if expanded { "Collapse panel" } else { "Expand panel" }, None))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_right_panel_expand(window, cx))),
+            )
+            .child(
+                titlebar_button_with(theme, "right-panel-toggle-open", crate::ui::sidebar_glyph(slide, true, 16., theme.text_muted))
+                    .tooltip(tip("Toggle right panel", Some("ToggleRightPanel")))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_right_panel(window, cx))),
             )
     }

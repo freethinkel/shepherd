@@ -356,10 +356,10 @@ impl Shell {
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.new_tab(ws.clone(), cx))),
                 )
             })
-            // the toggle, where the panel's ✕ sits while it's open
+            // the toggle, the panel's own while it's open
             .when(toggle, |el| {
                 el.child(
-                    titlebar_button(theme, "right-panel-toggle", "icons/sidebar-minimalistic-right.svg")
+                    titlebar_button_with(theme, "right-panel-toggle", crate::ui::sidebar_glyph(self.right_panel_slide(window), true, 16., theme.text_muted))
                         .ml_auto()
                         .flex_none()
                         .tooltip(tip("Toggle right panel", Some("ToggleRightPanel")))

@@ -47,6 +47,7 @@ impl Render for Shell {
         let tab = self.shown_tab();
         self.shown_workspace = tab.as_ref().map(|t| t.workspace_id.clone());
         self.follow_shown_tab();
+        self.follow_right_panel(window, cx);
         let (mut frames, mut splits) = match (&snapshot, &tab) {
             (Some(s), Some(t)) => (s.pane_frames(&t.tab_id), s.split_frames(&t.tab_id)),
             _ => (Vec::new(), Vec::new()),
@@ -112,7 +113,8 @@ impl Render for Shell {
         let sidebar_w = self.sidebar_now();
         let sliding = self.sidebar_motion.is_some_and(|m| m.animating());
         let peek = self.peek_now();
-        if sliding || self.sidebar_nudge().is_some() || self.sidebar_peek.is_some_and(|m| m.animating()) {
+        let right_moving = self.right.motion.is_some_and(|m| m.animating()) || self.right.expand.is_some_and(|m| m.animating()) || spring_offset(self.right.edge).is_some();
+        if sliding || self.sidebar_nudge().is_some() || self.sidebar_peek.is_some_and(|m| m.animating()) || right_moving {
             window.request_animation_frame();
         }
 
@@ -256,7 +258,8 @@ impl Render for Shell {
         let show_bar = SettingsGlobal::of(cx).settings.show_status_bar;
         let pull_request_shown = self.pull_request_shown(window);
         // the picker offers the pull request by what this says, so an open panel needs it too
-        let shown = if show_bar || self.right_panel_shown(window) { self.shown_review(snapshot.as_ref(), window, cx) } else { Default::default() };
+        let panel_drawn = self.right_panel_now(window) > 0.;
+        let shown = if show_bar || panel_drawn { self.shown_review(snapshot.as_ref(), window, cx) } else { Default::default() };
         let statusbar = show_bar.then(|| {
             let pane = self.active_pane(window, cx);
             let on_branch = cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -299,7 +302,8 @@ impl Render for Shell {
         // nothing to show outside a repo with a remote, and no PR label to close it from: it waits for one
         let has_remote = shown.key.is_some() && !matches!(shown.review, Some(crate::ui::review::Review::NoRemote));
         self.sync_diffs(&shown, window, cx);
-        let right_panel = self.right_panel_shown(window).then(|| self.render_right_panel(&theme, &shown, has_remote, window, cx));
+        let kept_width = self.right_panel_grown().then(|| f32::from(window.viewport_size().width) - sidebar_w - self.right_panel_now(window));
+        let right_panel = panel_drawn.then(|| self.render_right_panel(&theme, &shown, has_remote, window, cx));
         if !pull_request_shown {
             // a hidden panel's selection is not Cmd+C's to copy
             crate::ui::markdown::forget("review-");
@@ -431,10 +435,17 @@ impl Render for Shell {
             })
             .map(|el| match settings_page {
                 Some(page) => el.child(page),
-                None => el.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).map(|el| match web_area {
-                    Some(area) => el.child(area),
-                    None => el.child(grid),
-                }).children(statusbar)),
+                None => {
+                    let column = div().flex_1().min_w_0().h_full().flex().flex_col().child(tabbar).map(|el| match web_area {
+                        Some(area) => el.child(area),
+                        None => el.child(grid),
+                    }).children(statusbar);
+                    match kept_width {
+                        // clipped, not squeezed: the panes keep their grids, and the panel lies on the window's glass
+                        Some(width) => el.child(div().flex_1().min_w_0().h_full().overflow_hidden().child(column.w(px(width)))),
+                        None => el.child(column),
+                    }
+                }
             })
             .children(right_panel.into_iter().flatten())
             // The sidebar closed: the window's left edge brings it out floating over the panes, as Arc's does.
@@ -513,7 +524,7 @@ impl Render for Shell {
             })
             .when(!on_page, |el| {
                 el.child(
-                    titlebar_button_with(&theme, "toggle-sidebar", crate::ui::sidebar_glyph(sidebar_w / self.sidebar_width, 16., theme.text_muted))
+                    titlebar_button_with(&theme, "toggle-sidebar", crate::ui::sidebar_glyph(sidebar_w / self.sidebar_width, false, 16., theme.text_muted))
                         .tooltip(tip("Toggle sidebar", Some("ToggleSidebar")))
                         .absolute()
                         .top(px(TRAFFIC_LIGHTS_CENTER - 12.))
@@ -542,7 +553,7 @@ impl Render for Shell {
                                 Some(menu) if menu.is_open() => menu.close(),
                                 _ => {
                                     this.view_menu = Some(crate::ui::Popup::new(()));
-                                    this.show_submenu = false;
+                                    this.view_submenu = None;
                                 }
                             }
                             cx.notify();

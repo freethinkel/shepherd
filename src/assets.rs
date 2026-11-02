@@ -58,6 +58,7 @@ impl gpui::AssetSource for Assets {
             "claude-mark",
             "close",
             "close-circle",
+            "collapse-arrows",
             "copilot-mark",
             "clock-circle",
             "cursor-mark",
