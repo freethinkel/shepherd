@@ -3,6 +3,9 @@ use crate::theme::Theme;
 use gpui::{Div, div, prelude::*, px};
 
 pub const HEADER_HEIGHT: f32 = 38.;
+pub const CONTROL_SIZE: f32 = 24.;
+pub const CONTROL_RADIUS: f32 = 6.;
+pub const ICON_SIZE: f32 = 14.;
 pub const CONTROL_GAP: f32 = 4.;
 pub const EDGE_INSET: f32 = 8.;
 

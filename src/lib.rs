@@ -7,6 +7,7 @@ pub mod annotations;
 pub mod assets;
 pub mod backend;
 pub mod bindings;
+pub mod changes;
 pub mod commands;
 pub mod hc;
 pub mod herdr;

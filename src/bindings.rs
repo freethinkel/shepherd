@@ -308,15 +308,23 @@ impl gpui::Global for HerdrBindings {}
 /// second key would get in the way of typing elsewhere.
 const TERMINAL: &str = "Terminal";
 
+/// Shepherd's keys that mean something only on a page: in a pane, where herdr's chords live, they give way to herdr's.
+const PAGE_ACTIONS: [&str; 3] = ["ReloadPage", "FocusAddress", "CopyPageUrl"];
+
+/// Whether herdr gets `chord` in the panes: not when `shepherd` uses it for anything but a page.
+fn herdr_keeps(chord: &str, shepherd: &[(String, String)]) -> bool {
+    !shepherd.iter().any(|(action, k)| k == chord && !PAGE_ACTIONS.contains(&action.as_str()))
+}
+
 /// Binds herdr's keymap from its config.toml (`[keys]`, `[[keys.command]]`) in the panes, under Shepherd's
-/// own: a chord `shepherd` uses stays Shepherd's.
+/// own: a chord `shepherd` uses stays Shepherd's, a page's key aside.
 fn rebind_herdr(cx: &mut App, shepherd: &[(String, String)]) {
     use crate::herdr::keys::Bind;
     // ponytail: read on rebind (start, Settings), not watched; a config.toml edit takes a restart
     let config = crate::herdr::HerdrConfig::load(&crate::herdr::config_path()).unwrap_or_default();
     let next: Vec<_> = crate::herdr::keys::bindings(&config)
         .into_iter()
-        .filter(|(_, chord)| !shepherd.iter().any(|(_, k)| k == chord))
+        .filter(|(_, chord)| herdr_keeps(chord, shepherd))
         .collect();
     let previous = cx.try_global::<HerdrBindings>().map(|b| b.0.clone()).unwrap_or_default();
     let mut bindings: Vec<KeyBinding> = previous
@@ -361,6 +369,21 @@ mod tests {
         assert_eq!(chord(&eff, "SplitRight"), Some("ctrl-shift-o"));
         assert_eq!(chord(&eff, "NewTab"), Some("ctrl-shift-t"));
         assert_eq!(chord(&eff, "OpenSettings"), Some("ctrl-,"));
+    }
+
+    #[test]
+    fn a_page_key_is_herdrs_in_the_panes_and_shepherds_on_a_page() {
+        let shepherd = [("ReloadPage".to_string(), "cmd-r".to_string()), ("NewTab".to_string(), "cmd-t".to_string())];
+        assert!(herdr_keeps("cmd-r", &shepherd), "a [[keys.command]] on cmd+r was dropped for ReloadPage");
+        assert!(!herdr_keeps("cmd-t", &shepherd));
+        assert!(herdr_keeps("cmd-g", &shepherd));
+
+        // herdr's chords are bound in the panes' context, so there they win over the app-wide page key
+        let keymap = gpui::Keymap::new(vec![binding("ReloadPage", "cmd-r", None).unwrap(), binding("NewTab", "cmd-r", Some(TERMINAL)).unwrap()]);
+        let input = [gpui::Keystroke::parse("cmd-r").unwrap()];
+        let first = |stack: &[gpui::KeyContext]| keymap.bindings_for_input(&input, stack).0.first().map(|b| b.action().name().to_string()).unwrap();
+        assert!(first(&[gpui::KeyContext::parse(TERMINAL).unwrap()]).ends_with("NewTab"));
+        assert!(first(&[gpui::KeyContext::parse("Page").unwrap()]).ends_with("ReloadPage"));
     }
 
     #[test]

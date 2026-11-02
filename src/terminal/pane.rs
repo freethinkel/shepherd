@@ -25,7 +25,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 
 mod open;
 mod search;
-pub use open::is_nvim;
+pub use open::{edit_file, image_copy, is_image, is_nvim};
 use open::*;
 use search::*;
 

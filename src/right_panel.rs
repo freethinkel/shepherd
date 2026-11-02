@@ -7,17 +7,25 @@ use crate::settings::{RIGHT_PANEL_CENTER_MIN, RIGHT_PANEL_MIN};
 pub enum Surface {
     /// A browser tab, by its id.
     Browser(String),
+    /// A diff, by its id: each has its own scope, as Zeron's.
+    Diff(String),
     /// The shown pane's branch's pull request.
     PullRequest,
 }
 
 const PULL_REQUEST_KEY: &str = "pull-request";
+const DIFF_PREFIX: &str = "diff-";
 
 impl Surface {
+    /// Diff `n`.
+    pub fn diff(n: u64) -> Self {
+        Surface::Diff(format!("{DIFF_PREFIX}{n}"))
+    }
+
     /// What the strip knows the tab by.
     pub fn key(&self) -> &str {
         match self {
-            Surface::Browser(id) => id,
+            Surface::Browser(id) | Surface::Diff(id) => id,
             Surface::PullRequest => PULL_REQUEST_KEY,
         }
     }
@@ -25,6 +33,7 @@ impl Surface {
     pub fn of_key(key: &str) -> Self {
         match key {
             PULL_REQUEST_KEY => Surface::PullRequest,
+            id if id.starts_with(DIFF_PREFIX) => Surface::Diff(id.to_string()),
             id => Surface::Browser(id.to_string()),
         }
     }
@@ -121,14 +130,16 @@ pub fn page_takes_keyboard(sidebar_page: bool, focus_in_panel: bool, popup: bool
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Offer {
     Browser,
+    Diffs,
     PullRequest,
 }
 
-/// A page needs a window that can embed it; a pull request, a remote to ask.
-pub fn offered(has_remote: bool, embeds_pages: bool) -> Vec<Offer> {
+/// A page needs a window that can embed it; a diff, a repo; a pull request, a remote to ask.
+pub fn offered(has_remote: bool, in_repo: bool, embeds_pages: bool) -> Vec<Offer> {
     let browser = embeds_pages.then_some(Offer::Browser);
+    let diffs = in_repo.then_some(Offer::Diffs);
     let request = has_remote.then_some(Offer::PullRequest);
-    browser.into_iter().chain(request).collect()
+    browser.into_iter().chain(diffs).chain(request).collect()
 }
 
 /// Whether the panel's smallest width leaves the panes theirs, beside a left sidebar `sidebar` wide.

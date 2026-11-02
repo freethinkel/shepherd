@@ -44,6 +44,10 @@ pub struct Settings {
     pub sidebar_width: f32,
     /// The right panel's width, drawn narrower while the window has no room for it; dragging its edge sets it.
     pub right_panel_width: f32,
+    /// The diffs side by side; else one column.
+    pub diff_split: bool,
+    /// The diffs wrap long lines; else they scroll sideways.
+    pub diff_wrap: bool,
     pub agent_sort: AgentSort,
     /// Which agents a browser tab's annotations can go to.
     pub annotation_agents: AgentScope,
@@ -283,6 +287,8 @@ impl Default for Settings {
             keys: BTreeMap::new(),
             sidebar_width: SIDEBAR_WIDTH,
             right_panel_width: RIGHT_PANEL_WIDTH,
+            diff_split: false,
+            diff_wrap: false,
             agent_sort: AgentSort::default(),
             annotation_agents: AgentScope::default(),
             show_agents: true,

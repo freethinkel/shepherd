@@ -1,5 +1,6 @@
 //! The right panel, Zeron's: a column of tabs beside the panes, one set per workspace. The logic is
 //! `crate::right_panel`'s, the strip is `tabs`', the picker and the `+` menu are ported from Zeron's shell.
+use super::changes::Changes;
 use super::review::ShownReview;
 use crate::ui::review::Review;
 use crate::ui::statusbar::fetching;
@@ -11,6 +12,7 @@ use gpui::AnyElement;
 
 /// The tab an empty panel shows in its strip, whose `×` closes the panel.
 const NEW: &str = "right-surface-new";
+const DIFF_ICON: &str = "icons/solar/list.svg";
 
 pub(super) struct RightPanel {
     /// By workspace id.
@@ -26,11 +28,37 @@ pub(super) struct RightPanel {
     tabs: Tabs,
     /// What the picker and the `+` offered at the last render.
     offers: Vec<Offer>,
+    /// The diff tabs of all workspaces, by their tab's key.
+    pub(super) diffs: HashMap<String, Entity<Changes>>,
+    /// How many diff tabs were made: their ids.
+    pub(super) made_diffs: u64,
+    /// The discard asked about, of which directory, at which capture.
+    pub(super) discard: Option<crate::ui::Popup<super::changes::DiscardAsk>>,
+    /// A diff's agent menu: of which tab, and where it opened.
+    pub(super) agents: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
+    /// The agent picked for a diff tab, by its pane.
+    pub(super) diff_agents: HashMap<String, String>,
+    /// Each workspace's agents' turns, watched whether or not a diff is open: a turn can't be seen afterwards.
+    pub(super) turns: HashMap<String, super::changes::Turn>,
 }
 
 impl RightPanel {
     pub(super) fn new(width: f32) -> Self {
-        RightPanel { panels: HashMap::new(), width, drag: false, plus: None, focused: None, tabs: Tabs::default(), offers: Vec::new() }
+        RightPanel {
+            panels: HashMap::new(),
+            width,
+            drag: false,
+            plus: None,
+            focused: None,
+            tabs: Tabs::default(),
+            offers: Vec::new(),
+            diffs: HashMap::new(),
+            made_diffs: 0,
+            discard: None,
+            agents: None,
+            diff_agents: HashMap::new(),
+            turns: HashMap::new(),
+        }
     }
 }
 
@@ -46,6 +74,7 @@ fn pull_request_title(shown: &ShownReview) -> String {
 fn offer_row(offer: Offer) -> (&'static str, &'static str) {
     match offer {
         Offer::Browser => ("icons/solar/global.svg", "Browser"),
+        Offer::Diffs => (DIFF_ICON, "Diffs"),
         Offer::PullRequest => ("icons/git-pull-request.svg", "Pull request"),
     }
 }
@@ -152,6 +181,7 @@ impl Shell {
     fn pick_surface(&mut self, offer: Offer, window: &mut Window, cx: &mut Context<Self>) {
         match offer {
             Offer::PullRequest => self.update_panel(cx, |p| p.add(Surface::PullRequest)),
+            Offer::Diffs => self.add_diff_surface(window, cx),
             Offer::Browser => {
                 if let Some(tab) = self.shown_tab() {
                     self.new_browser_tab(tab.workspace_id, None, true, window, cx);
@@ -172,6 +202,7 @@ impl Shell {
                     (Some(image), false) => Leading::Image(image),
                     (None, false) => mark("icons/solar/global.svg"),
                 }),
+                Surface::Diff(id) => (self.right.diffs.get(id).map_or("Diff".to_string(), |c| c.read(cx).tab_title().to_string()), mark(DIFF_ICON)),
                 Surface::PullRequest => (pull_request_title(shown), if fetching_review { Leading::Spinner } else { mark("icons/git-pull-request.svg") }),
             };
             Tab::titled(s.key(), title, leading, theme, window)
@@ -182,17 +213,22 @@ impl Shell {
     pub(super) fn close_surface(&mut self, surface: &Surface, cx: &mut Context<Self>) {
         match surface {
             Surface::Browser(id) => self.close_browser_tab(id, cx),
+            Surface::Diff(id) => {
+                self.right.diffs.remove(id);
+                self.update_panel(cx, |p| p.close(surface));
+            }
             Surface::PullRequest => self.update_panel(cx, |p| p.close(surface)),
         }
     }
 
     /// The panel and its resize edge.
     pub(super) fn render_right_panel(&mut self, theme: &Theme, shown: &ShownReview, has_remote: bool, window: &mut Window, cx: &mut Context<Self>) -> [AnyElement; 2] {
-        self.right.offers = offered(has_remote, super::web::embeds_pages(window));
+        self.right.offers = offered(has_remote, shown.key.is_some(), super::web::embeds_pages(window));
         let width = self.right_panel_width(window);
         let strip = self.render_right_strip(theme, shown, window, cx);
         let body = match self.panel().and_then(|p| p.active.clone()) {
             Some(Surface::PullRequest) => self.render_review(theme, shown, window, cx),
+            Some(Surface::Diff(id)) if self.right.diffs.contains_key(&id) => self.render_diff(&id, theme, window, cx),
             Some(Surface::Browser(id)) => {
                 let key = (id, None);
                 let bar = self.render_browser_bar(&key, theme, window, cx);
@@ -209,7 +245,7 @@ impl Shell {
                     .child(page)
                     .into_any_element()
             }
-            None => self.render_surface_picker(theme, cx).into_any_element(),
+            Some(Surface::Diff(_)) | None => self.render_surface_picker(theme, cx).into_any_element(),
         };
         let panel = div().id("right-panel").w(px(width)).h_full().flex_none().flex().flex_col().overflow_hidden().bg(theme.wash(0.05)).border_l_1().border_color(theme.border).child(strip).child(body);
         let edge = div()

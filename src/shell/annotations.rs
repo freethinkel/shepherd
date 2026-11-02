@@ -19,7 +19,7 @@ const MAX_PICKS: usize = 24;
 const MAX_MISSES: u32 = 20;
 
 /// The `…` menu's choices of which agents the panel lists: the choice, its id, icon and label.
-const SCOPES: [(AgentScope, &str, &str, &str); 3] = [
+pub(super) const SCOPES: [(AgentScope, &str, &str, &str); 3] = [
     (AgentScope::Worktree, "annotation-agents-worktree", "icons/git-branch.svg", "This worktree"),
     (AgentScope::Project, "annotation-agents-project", "icons/folder.svg", "This project"),
     (AgentScope::All, "annotation-agents-all", "icons/bot.svg", "All agents"),
@@ -209,9 +209,19 @@ impl Shell {
     /// The agents page `key`'s tab can send to, as the panel's `…` menu chose, in `Snapshot::agents`'s order, each with
     /// its workspace's label.
     fn recipients(&self, key: &PageKey, cx: &App) -> Vec<(crate::model::Pane, String)> {
-        let (Some(snapshot), Some(tab)) = (&self.snapshot, self.browser.tabs.iter().find(|t| t.id == key.0)) else { return Vec::new() };
+        self.browser.tabs.iter().find(|t| t.id == key.0).map_or(Vec::new(), |tab| self.agents_of(&tab.workspace, cx))
+    }
+
+    /// The agents a prompt from `workspace` can go to, as the settings' choice of which, each with its workspace's label.
+    pub(super) fn agents_of(&self, workspace: &str, cx: &App) -> Vec<(crate::model::Pane, String)> {
+        let Some(snapshot) = &self.snapshot else { return Vec::new() };
         let scope = SettingsGlobal::of(cx).settings.annotation_agents;
-        snapshot.agents_in(&tab.workspace, scope).into_iter().map(|p| (p.clone(), self.workspace_label(&p.workspace_id))).collect()
+        let label = |p: &crate::model::Pane| {
+            let workspace = self.workspace_label(&p.workspace_id);
+            // the number first: a long workspace truncates, and the number tells two agents apart
+            snapshot.tab_position(p).map_or_else(|| workspace.clone(), |n| format!("tab {n} · {workspace}"))
+        };
+        snapshot.agents_in(workspace, scope).into_iter().map(|p| (p.clone(), label(p))).collect()
     }
 
     fn workspace_label(&self, id: &str) -> String {
@@ -286,20 +296,11 @@ impl Shell {
         let hint = draft.items.is_empty().then(|| div().p(px(8.)).text_color(theme.text_faint).child("Click an element or drag over an area."));
         let chosen = self.recipient(key, cx).map(|p| p.pane_id);
         let recipients = self.recipients(key, cx);
-        let (heading, empty) = match SettingsGlobal::of(cx).settings.annotation_agents {
-            AgentScope::Worktree => ("Agents in this worktree", "No agents in this worktree."),
-            AgentScope::Project => ("Agents in this project", "No agents in this project."),
-            AgentScope::All => ("All agents", "No agents running."),
-        };
+        let (heading, empty) = agents_words(SettingsGlobal::of(cx).settings.annotation_agents);
         let none = recipients.is_empty();
         let agents = recipients.into_iter().map(|(pane, workspace)| {
             let (id, picked, key) = (pane.pane_id.clone(), chosen.as_deref() == Some(pane.pane_id.as_str()), key.clone());
-            row(theme, picked, SharedString::from(format!("annotate-agent-{id}")))
-                .h(px(28.))
-                .child(status_dot(pane.agent_status, theme))
-                .child(div().flex_none().text_color(theme.text).child(pane.agent.clone().unwrap_or_default()))
-                .child(div().flex_1().min_w_0().truncate().text_color(theme.text_muted).child(workspace))
-                .child(div().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(status_word(pane.agent_status)))
+            agent_row(&pane, workspace, picked, theme)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.pages.recipients.insert(key.clone(), id.clone());
                     cx.notify();
@@ -455,6 +456,25 @@ impl Shell {
             .when(!item.annotation.text.is_empty(), |el| el.child(div().truncate().text_color(theme.text_muted).child(item.annotation.text.clone())))
             .child(div().px(px(8.)).py(px(5.)).rounded(px(6.)).border_1().border_color(theme.border).bg(theme.wash(0.04)).child(Textarea::new(&item.note)))
     }
+}
+
+/// The heading over a list of agents and what it says empty.
+pub(super) fn agents_words(scope: AgentScope) -> (&'static str, &'static str) {
+    match scope {
+        AgentScope::Worktree => ("Agents in this worktree", "No agents in this worktree."),
+        AgentScope::Project => ("Agents in this project", "No agents in this project."),
+        AgentScope::All => ("All agents", "No agents running."),
+    }
+}
+
+/// An agent to send to: its status, name, tab and workspace (`place`), and status in a word.
+pub(super) fn agent_row(pane: &crate::model::Pane, place: String, picked: bool, theme: &Theme) -> Stateful<Div> {
+    row(theme, picked, SharedString::from(format!("annotate-agent-{}", pane.pane_id)))
+        .h(px(28.))
+        .child(status_dot(pane.agent_status, theme))
+        .child(div().flex_none().text_color(theme.text).child(pane.agent.clone().unwrap_or_default()))
+        .child(div().flex_1().min_w_0().truncate().text_color(theme.text_muted).child(place))
+        .child(div().flex_none().text_size(px(11.)).text_color(theme.text_faint).child(status_word(pane.agent_status)))
 }
 
 /// The word for an agent's status beside its dot.

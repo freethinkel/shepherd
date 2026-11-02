@@ -199,6 +199,8 @@ impl Shell {
             self.ws_menu.is_some(),
             self.web_menu.is_some(),
             self.right.plus.is_some(),
+            self.right.discard.is_some(),
+            self.right.agents.is_some(),
             self.pane_menu.is_some(),
             self.agent_menu.is_some(),
             self.spent_menu.is_some(),
@@ -230,7 +232,7 @@ impl Shell {
     pub(super) fn panel_page(&self, window: &Window) -> Option<PageKey> {
         match self.panel()?.active.as_ref().filter(|_| self.right_panel_shown(window))? {
             crate::right_panel::Surface::Browser(id) => Some((id.clone(), None)),
-            crate::right_panel::Surface::PullRequest => None,
+            crate::right_panel::Surface::Diff(_) | crate::right_panel::Surface::PullRequest => None,
         }
     }
 

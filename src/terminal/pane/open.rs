@@ -159,6 +159,19 @@ pub(super) async fn edit(backend: &Backend, pane_id: &str, cwd: &str, editor: Op
     }
 }
 
+/// [`edit`] of a path known whole, not one read off a pane.
+pub async fn edit_file(backend: &Backend, pane_id: &str, cwd: &str, editor: Option<&str>, path: PathBuf, machine: Option<String>) {
+    edit(backend, pane_id, cwd, editor, &File { path, dir: false, machine }, None, None).await
+}
+
+/// `path` (a machine's, with one) as a file here for the image dialog. Always a copy: gpui keeps an image by its path,
+/// and a diff's file is one that changes.
+pub async fn image_copy(path: PathBuf, machine: Option<String>) -> Option<PathBuf> {
+    let file = File { path, dir: false, machine };
+    let name = file.path.file_name()?.to_string_lossy().into_owned();
+    cache_copy(&name, file.bytes().await?).await
+}
+
 pub(super) const MIN_ZOOM: f32 = 0.1;
 pub(super) const MAX_ZOOM: f32 = 20.;
 pub(super) const ZOOM_STEP: f32 = 1.25;
@@ -278,7 +291,7 @@ impl Preview {
 }
 
 /// Whether the viewer can show the file: the formats gpui decodes.
-pub(super) fn is_image(path: &Path) -> bool {
+pub fn is_image(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
     matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "svg" | "ico"))
 }
@@ -531,7 +544,7 @@ impl PaneTerminal {
         rt.spawn(async move { edit(&backend, &pane_id, &cwd, editor.as_deref(), &file, None, None).await });
     }
 
-    pub(super) fn show_preview(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub fn show_preview(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         // Only the header: the image itself loads as the dialog draws it.
         let size = image::image_dimensions(&path).ok();
         self.preview = Some(Popup::new(Preview { path, size, zoom: 1., pan: (0., 0.), drag: None, opened: std::time::Instant::now() }));

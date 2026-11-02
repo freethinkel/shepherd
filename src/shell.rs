@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 mod annotations;
 mod browser;
+mod changes;
 mod divider;
 mod floating;
 mod merge;

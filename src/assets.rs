@@ -31,6 +31,9 @@ macro_rules! icons {
 
 impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        if path.starts_with("file-icons/") {
+            return crate::ui::file_icons::load(path);
+        }
         let Some(name) = path.strip_prefix("icons/").and_then(|p| p.strip_suffix(".svg")) else { return Ok(None) };
         if let Some(icon) = name.strip_prefix("solar/") {
             return Ok(solar_icon(icon).map(|svg| Cow::Owned(svg.into_bytes())));
@@ -62,6 +65,7 @@ impl gpui::AssetSource for Assets {
             "factory-mark",
             "drag-handle",
             "expand-arrows",
+            "fold-vertical",
             "folder",
             "git-branch",
             "git-pull-request",
@@ -84,6 +88,7 @@ impl gpui::AssetSource for Assets {
             "qoder-mark",
             "qwen-mark",
             "plus",
+            "wrap-text",
             "prompt",
             "remote-server",
             "settings",

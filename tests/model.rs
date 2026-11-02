@@ -148,6 +148,16 @@ fn tabs_keep_herdrs_order_not_their_numbers() {
 }
 
 #[test]
+fn a_panes_tab_position_follows_the_order_not_the_number() {
+    let mut s = fixture();
+    let pane = s.panes.iter().find(|p| s.tabs_of("w1").first().is_some_and(|t| t.tab_id == p.tab_id)).unwrap().clone();
+    assert_eq!(s.tab_position(&pane), Some(1));
+    s.tabs.reverse();
+    assert_eq!(s.tab_position(&pane), Some(2));
+    assert_eq!(s.tab_position(&shepherd::model::Pane::default()), None);
+}
+
+#[test]
 fn pick_tab_keeps_a_live_choice() {
     assert_eq!(fixture().pick_tab(Some("w1:t2")).map(|t| t.tab_id.as_str()), Some("w1:t2"));
 }
