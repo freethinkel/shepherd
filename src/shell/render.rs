@@ -29,6 +29,8 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.merge_delete, window);
         crate::ui::reap_popup(&mut self.merge_failure, window);
         crate::ui::reap_popup(&mut self.merge_confirm, window);
+        crate::ui::reap_popup(&mut self.right.discard, window);
+        crate::ui::reap_popup(&mut self.right.agents, window);
         crate::ui::reap_popup(&mut self.session_dialog, window);
         crate::ui::reap_popup(&mut self.place_menu, window);
         crate::ui::reap_popup(&mut self.place_edit, window);
@@ -299,6 +301,7 @@ impl Render for Shell {
         let on_page = settings_page.is_some();
         // nothing to show outside a repo with a remote, and no PR label to close it from: it waits for one
         let has_remote = shown.key.is_some() && !matches!(shown.review, Some(crate::ui::review::Review::NoRemote));
+        self.sync_diffs(&shown, window, cx);
         let kept_width = self.right_panel_grown().then(|| f32::from(window.viewport_size().width) - sidebar_w - self.right_panel_now(window));
         let right_panel = panel_drawn.then(|| self.render_right_panel(&theme, &shown, has_remote, window, cx));
         if !pull_request_shown {

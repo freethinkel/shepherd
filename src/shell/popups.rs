@@ -528,6 +528,7 @@ impl Shell {
         }))
         .children(self.web_menu(theme, cx))
         .children(self.right_plus_menu(theme, cx))
+        .children(self.diff_agents_menu(theme, window, cx))
         .children(self.annotation_agents_menu(theme, cx))
         .children(self.project_menu(theme, snapshot.as_ref(), cx))
         .children(self.ws_menu.as_ref().map(|menu| {
@@ -853,6 +854,7 @@ impl Shell {
             modal("remove-dialog", confirm, window, card)
         }))
         .children(self.merge_delete_dialog(theme, window, cx))
+        .children(self.discard_dialog(theme, window, cx))
         .children(self.merge_failure_popover(theme, cx))
         .children(self.merge_confirm.as_ref().map(|confirm| {
             let ask = &confirm.value;

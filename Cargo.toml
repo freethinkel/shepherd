@@ -38,6 +38,8 @@ wry = { version = "0.57", features = ["devtools"] }
 toml_edit = "0.25"
 emojis = "0.9.0"
 unicode-width = "0.2"
+# the diffs' file icons (assets/file-icons), compiled in
+rust-embed = "=8.7.2"
 
 # The Dock, notifications' authorization, Secure Keyboard Entry and the trackpad's haptics.
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -29,6 +29,11 @@ Rex (assets/icons/<name>-mark.svg for: btop, d2, fx, gnu, kakoune, moon, pixi, p
   Logos of those open-source projects as drawn in the icon catalog of Rex Beta.app (Superlogical), read out as SVG,
   with their viewBoxes made square. They name the program running in a tab.
 
+herdr-reviewr
+  The last turn in src/changes.rs (a turn as a worktree's agents' rest-to-work edge, a snapshot on a copy of the index,
+  counted once a file really changes) follows src/turn.rs of https://github.com/persiyanov/herdr-reviewr, MIT License,
+  Copyright (c) 2026 Dmitry Persiyanov.
+
 Zeron
   The theme families (the zeron-theme crate), the theme tokens in src/theme.rs (via Collie) the terminal code
   in src/terminal/, the sidebar, settings and tab icons (agent marks) in assets/icons/, the sidebar glyph (src/ui/mod.rs), the settings page layout, the sidebar fold motion, the project icon (src/ui/project_icon.rs) the scroll-edge fade (src/ui/edge_fade.rs) the loaders (src/ui/loader.rs) the browser annotations (assets/annotate.js, src/annotations.rs, src/shell/annotations.rs) the right panel's tab strip, picker and surface chrome (src/ui/surface_chrome.rs, src/shell/right_panel.rs) and the markdown drawing and its text selection (src/ui/markdown.rs, over the
@@ -89,6 +94,14 @@ Ghostty
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
+
+Zeron's diffs
+  src/changes.rs, src/shell/changes.rs and src/ui/file_icons.rs port crates/ui/src/changes.rs, comments.rs, comment_ui.rs,
+  file_icons.rs and the capture of crates/engine/src/diff_sync.rs (MIT, as above).
+
+Symbols (assets/file-icons and assets/file-icons.json)
+  By Miguel Solorio, https://github.com/miguelsolorio/vscode-symbols at 296ef1b62287fb2315cb5651e552e09e8c8e1de8, MIT; the
+  license is in assets/file-icons/LICENSE.symbols.
 
 herdr
   src/herdr/wire.rs reproduces part of herdr's client socket protocol (src/protocol/wire.rs at v0.9.3,

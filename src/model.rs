@@ -305,6 +305,12 @@ impl Snapshot {
         self.tabs.iter().filter(|t| t.workspace_id == workspace_id).collect()
     }
 
+    /// The 1-based place of `pane`'s tab among its workspace's, the one a go-to-tab key counts: not [`Tab::number`], which
+    /// stays put when tabs are reordered.
+    pub fn tab_position(&self, pane: &Pane) -> Option<usize> {
+        self.tabs_of(&pane.workspace_id).iter().position(|t| t.tab_id == pane.tab_id).map(|i| i + 1)
+    }
+
     /// Workspaces in sidebar order: linked worktrees right under their repo's checkout workspace, with
     /// `Some(is_last_child)`; roots (and worktrees whose checkout has no workspace) get `None`.
     pub fn workspace_tree(&self) -> Vec<(&Workspace, Option<bool>)> {

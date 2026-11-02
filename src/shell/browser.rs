@@ -142,6 +142,10 @@ impl Shell {
             let live: Vec<&str> = self.browser.tabs.iter().filter(|t| t.workspace == *ws).map(|t| t.id.as_str()).collect();
             panel.retain_browsers(&live);
         }
+        let panels = &self.right.panels;
+        self.right.diffs.retain(|id, _| panels.values().any(|p| p.tabs.iter().any(|s| s.key() == id)));
+        let diffs = &self.right.diffs;
+        self.right.diff_agents.retain(|id, _| diffs.contains_key(id));
     }
 
     /// Tab `id`'s label: its page's title, else its site, else New Tab.
