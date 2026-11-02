@@ -288,6 +288,8 @@ mod tests {
         (dir, root)
     }
 
+    // ponytail: on Windows git writes `C:/…` and `canonicalize` `\\?\C:\…`; compare them canonicalized to run it there
+    #[cfg(unix)]
     #[test]
     fn a_worktree_is_made_listed_and_removed() {
         let (dir, root) = repo();
@@ -404,6 +406,8 @@ mod tests {
         assert!(!Path::new(&made).exists());
     }
 
+    // `sh` syntax: Windows runs hooks through `cmd.exe`
+    #[cfg(unix)]
     #[test]
     fn hooks_stop_at_the_first_failure_and_see_their_worktree() {
         let dir = tempfile::tempdir().unwrap();
