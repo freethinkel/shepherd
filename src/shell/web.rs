@@ -1,7 +1,7 @@
 //! Web integrations' pages: an entry clicked in the sidebar shows its page in the system web view (wry) in place of
 //! the tabs and panes. A page lives until Shepherd quits or its entry goes; hidden, it keeps its state.
 use super::*;
-use super::tab_bar::{TAB_H, TAB_TOP};
+use super::tabs::{TAB_H, TAB_TOP};
 use crate::settings::{OpenFrom, WebEntry};
 use crate::web::{forwarded, label, listed, normalize, off_site, page_bounds, page_is_current};
 use futures::StreamExt;
@@ -11,6 +11,12 @@ use wry::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 
 /// A page by its entry's id and, for one opened on a machine, that machine's SSH target.
 pub(super) type PageKey = (String, Option<String>);
+
+/// Whether a web view can sit in the window: not in a Wayland one.
+pub(super) fn embeds_pages(window: &Window) -> bool {
+    use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    !matches!(HasWindowHandle::window_handle(window).map(|h| h.as_raw()), Ok(RawWindowHandle::Wayland(_)))
+}
 
 /// What a web view reports, sent from its handlers (which run without a `cx`) to the Shell.
 pub(super) enum PageEvent {
@@ -165,7 +171,7 @@ impl Shell {
     /// The entry shown, with its page's key, while it is listed for the place shown.
     pub(super) fn shown_page(&self, cx: &App) -> Option<(PageKey, WebEntry)> {
         let id = self.pages.shown.as_ref()?;
-        let entry = self.listed_entries(cx).into_iter().chain(self.browser.entries()).find(|e| &e.id == id)?;
+        let entry = self.listed_entries(cx).into_iter().find(|e| &e.id == id)?;
         Some((self.page_key(&entry), entry))
     }
 
@@ -192,7 +198,7 @@ impl Shell {
             self.annotation_agents_menu.is_some(),
             self.ws_menu.is_some(),
             self.web_menu.is_some(),
-            self.new_tab_menu.is_some(),
+            self.right.plus.is_some(),
             self.pane_menu.is_some(),
             self.agent_menu.is_some(),
             self.spent_menu.is_some(),
@@ -215,26 +221,55 @@ impl Shell {
 
     /// Every user selection of a tab goes through here; it leaves the page for the tabs.
     pub(super) fn select_tab(&mut self, tab: Option<String>) {
+        self.release_panel();
         self.selected_tab = tab;
         self.pages.shown = None;
     }
 
-    /// The entry clicked in the sidebar: its page shown (made on first show); on Wayland, where a web view can't sit in
-    /// Shepherd's window, its URL in the browser.
+    /// The panel's active browser tab's page, while the panel shows.
+    pub(super) fn panel_page(&self, window: &Window) -> Option<PageKey> {
+        match self.panel()?.active.as_ref().filter(|_| self.right_panel_shown(window))? {
+            crate::right_panel::Surface::Browser(id) => Some((id.clone(), None)),
+            crate::right_panel::Surface::PullRequest => None,
+        }
+    }
+
+    /// The page on screen and its entry: a sidebar page's, else the panel's. Never both: a sidebar page hides the panel.
+    fn visible_entry(&self, window: &Window, cx: &App) -> Option<(PageKey, WebEntry)> {
+        self.shown_page(cx).or_else(|| {
+            let key = self.panel_page(window)?;
+            let entry = self.browser.entries().find(|e| e.id == key.0)?;
+            Some((key, entry))
+        })
+    }
+
+    pub(super) fn visible_page(&self, window: &Window, cx: &App) -> Option<PageKey> {
+        self.visible_entry(window, cx).map(|(key, _)| key)
+    }
+
+    /// The entry clicked in the sidebar: its page shown (made on first show).
     pub(super) fn show_web(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ensure_page(&id, window, cx) {
+            self.pages.shown = Some(id);
+            cx.notify();
+        }
+    }
+
+    /// Entry `id`'s page, made if it isn't yet; false when it can't be, a toast saying why, or on Wayland, where a web
+    /// view can't sit in Shepherd's window, with its URL in the browser.
+    pub(super) fn ensure_page(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let entries = SettingsGlobal::of(cx).settings.web_entries.iter().cloned().chain(self.browser.entries());
-        let Some(entry) = entries.into_iter().find(|e| e.id == id) else { return };
+        let Some(entry) = entries.into_iter().find(|e| e.id == id) else { return false };
         let url = normalize(&entry.url);
-        use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        if matches!(HasWindowHandle::window_handle(window).map(|h| h.as_raw()), Ok(RawWindowHandle::Wayland(_))) {
+        if !embeds_pages(window) {
             cx.open_url(&url);
-            return;
+            return false;
         }
         #[cfg(target_os = "linux")]
         if let Err(e) = self.gtk_ready(cx) {
             crate::ui::toast::error(cx, format!("Web pages need GTK ({e}): {url} opens in the browser"));
             cx.open_url(&url);
-            return;
+            return false;
         }
         let key = self.page_key(&entry);
         if let (None, Some(target)) = (self.pages.live.get(&key), key.1.clone()) {
@@ -251,12 +286,11 @@ impl Shell {
                     crate::ui::toast::error(cx, format!("{}: {e}", label(&entry, None)));
                     // the tabs again, or the next render would try once more, and again
                     self.pages.shown = None;
-                    return;
+                    return false;
                 }
             }
         }
-        self.pages.shown = Some(id);
-        cx.notify();
+        true
     }
 
     /// Forwards the entry's port from `target` (off the main thread), then makes its page on the forward; or keeps
@@ -478,6 +512,9 @@ impl Shell {
             }
             // the address field let go, as a click elsewhere in Shepherd would
             PageEvent::Clicked => {
+                if self.panel_page(window).as_ref() == Some(&key) {
+                    self.focus_panel(true, window, cx);
+                }
                 if self.browser.editing() || self.note_focused(window, cx) {
                     window.focus(&self.focus, cx);
                 }
@@ -541,17 +578,24 @@ impl Shell {
                 self.pages.forwards.insert(key, (page.entry_url, Forward::Failed(why)));
             }
         }
-        let shown = self.shown_page(cx).map(|(key, _)| key);
-        if shown.is_none() {
+        if self.shown_page(cx).is_none() {
             self.pages.shown = None;
         }
-        // the page shown has no web view and no forward under its key now (the machine shown changed under it): one is
-        // made, as a click makes it
+        // a panel gone from under the keyboard, or left for another workspace, gives it back
+        if self.right.focused.is_some() && (self.right.focused != self.shown_tab().map(|t| t.workspace_id) || !self.right_panel_shown(window)) {
+            self.release_panel();
+            cx.notify();
+        }
+        let shown = self.visible_page(window, cx);
+        // the page shown has no web view and no forward under its key now (the machine shown changed under it, its web
+        // view dropped): one is made, as a click makes it; a browser tab that can't have one closes
         if let Some(key) = &shown
             && !self.pages.live.contains_key(key)
             && !self.pages.forwards.contains_key(key)
+            && !self.ensure_page(&key.0, window, cx)
+            && browser::is_tab(&key.0)
         {
-            self.show_web(key.0.clone(), window, cx);
+            self.close_browser_tab(&key.0, cx);
         }
         // the address field or a note being typed in keeps the keyboard too
         let popup = self.popup_open() || self.browser.editing() || self.note_focused(window, cx);
@@ -573,7 +617,7 @@ impl Shell {
                 }
             }
             // the keyboard goes with the page, to a menu or dialog open over it, and back to Shepherd when it hides
-            let focused = visible && !popup;
+            let focused = visible && crate::right_panel::page_takes_keyboard(self.pages.shown.is_some(), self.right.focused.is_some(), popup);
             if page.focused != focused {
                 page.focused = focused;
                 match focused {
@@ -704,7 +748,7 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(2.))
-            .pr(px(TAB_TOP + if self.review_open { 0. } else { window_controls_w(cx) }))
+            .pr(px(TAB_TOP + window_controls_w(cx)))
             .pl(px((TITLEBAR_CLUSTER - sidebar_w).max(8.)))
             .child(nav_button(theme, view.clone(), "web-back", "icons/solar/alt-arrow-left.svg", can(wry::WebView::can_go_back), wry::WebView::go_back))
             .child(nav_button(theme, view.clone(), "web-forward", "icons/solar/alt-arrow-right.svg", can(wry::WebView::can_go_forward), wry::WebView::go_forward))
@@ -772,8 +816,8 @@ impl Shell {
     }
 
     /// The shown page reloaded (⌘R).
-    pub(super) fn reload_shown_page(&mut self, cx: &mut Context<Self>) {
-        if let Some((key, _)) = self.shown_page(cx) {
+    pub(super) fn reload_shown_page(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if let Some(key) = self.visible_page(window, cx) {
             self.reload_page(&key);
             cx.notify();
         }
@@ -791,8 +835,8 @@ impl Shell {
 
     /// The shown page's URL on the clipboard: where it is now, or the entry's for a page on a machine, whose own is
     /// its forward's.
-    pub(super) fn copy_page_url(&mut self, cx: &mut Context<Self>) {
-        let Some((key, entry)) = self.shown_page(cx) else { return };
+    pub(super) fn copy_page_url(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some((key, entry)) = self.visible_entry(window, cx) else { return };
         let now = self.pages.live.get(&key).filter(|_| key.1.is_none()).and_then(|p| p.view.url().ok());
         let url = now.unwrap_or_else(|| normalize(&entry.url));
         // an empty browser tab has nothing to copy

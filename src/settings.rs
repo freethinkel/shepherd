@@ -42,10 +42,8 @@ pub struct Settings {
     pub keys: BTreeMap<String, String>,
     /// The workspaces sidebar's width; dragging its edge sets it.
     pub sidebar_width: f32,
-    /// The review panel on the right: the shown branch's PR or MR and its checks.
-    pub review_open: bool,
-    /// Its width; dragging its edge sets it.
-    pub review_width: f32,
+    /// The right panel's width, drawn narrower while the window has no room for it; dragging its edge sets it.
+    pub right_panel_width: f32,
     pub agent_sort: AgentSort,
     /// Which agents a browser tab's annotations can go to.
     pub annotation_agents: AgentScope,
@@ -258,10 +256,10 @@ impl WindowFrame {
 pub const SIDEBAR_WIDTH: f32 = 256.0;
 pub const SIDEBAR_MIN: f32 = 224.0;
 pub const SIDEBAR_MAX: f32 = 400.0;
-/// The review panel: 340 px by default, its edge drags it between 280 and 640.
-pub const REVIEW_WIDTH: f32 = 340.0;
-pub const REVIEW_MIN: f32 = 280.0;
-pub const REVIEW_MAX: f32 = 640.0;
+/// Zeron's right pane: 520 px by default, 360 at the least, and it leaves the panes 300.
+pub const RIGHT_PANEL_WIDTH: f32 = 520.0;
+pub const RIGHT_PANEL_MIN: f32 = 360.0;
+pub const RIGHT_PANEL_CENTER_MIN: f32 = 300.0;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -284,8 +282,7 @@ impl Default for Settings {
             editor: None,
             keys: BTreeMap::new(),
             sidebar_width: SIDEBAR_WIDTH,
-            review_open: false,
-            review_width: REVIEW_WIDTH,
+            right_panel_width: RIGHT_PANEL_WIDTH,
             agent_sort: AgentSort::default(),
             annotation_agents: AgentScope::default(),
             show_agents: true,
@@ -378,7 +375,7 @@ impl Settings {
                 settings.font_size = settings.font_size.clamp(9.0, 32.0);
                 settings.line_height = step_line_height(settings.line_height, 0.0);
                 settings.sidebar_width = settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
-                settings.review_width = settings.review_width.clamp(REVIEW_MIN, REVIEW_MAX);
+                settings.right_panel_width = settings.right_panel_width.max(RIGHT_PANEL_MIN);
                 if let Some(family) = settings.theme_family.take() {
                     settings.adopt_family(&family);
                 }
@@ -635,8 +632,18 @@ mod tests {
         let (_d, path) = tmp();
         std::fs::write(&path, r#"{"sidebar_width": 10}"#).unwrap();
         assert_eq!(Settings::load(&path).0.sidebar_width, SIDEBAR_MIN);
-        std::fs::write(&path, r#"{"review_width": 9000}"#).unwrap();
-        assert_eq!(Settings::load(&path).0.review_width, REVIEW_MAX);
+        std::fs::write(&path, r#"{"right_panel_width": 10}"#).unwrap();
+        assert_eq!(Settings::load(&path).0.right_panel_width, RIGHT_PANEL_MIN);
+    }
+
+    #[test]
+    fn old_settings_with_the_review_panel_still_load() {
+        let (_d, path) = tmp();
+        std::fs::write(&path, r#"{"review_open": true, "review_width": 400, "sidebar_width": 300}"#).unwrap();
+        let (settings, error) = Settings::load(&path);
+        assert_eq!(error, None);
+        assert_eq!(settings.sidebar_width, 300.);
+        assert_eq!(settings.right_panel_width, RIGHT_PANEL_WIDTH);
     }
 
     #[test]

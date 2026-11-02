@@ -15,6 +15,7 @@ pub mod model;
 pub mod notify;
 pub mod process;
 pub mod rex;
+pub mod right_panel;
 pub mod settings;
 pub mod shell;
 pub mod terminal;

@@ -32,10 +32,12 @@ mod popups;
 mod render;
 mod reorder;
 mod review;
+mod right_panel;
 mod sessions;
 mod sidebar;
 mod sync;
 mod tab_bar;
+mod tabs;
 mod web;
 mod widgets;
 mod window;
@@ -110,8 +112,6 @@ pub struct Shell {
     ws_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// A web page's right-click menu in the sidebar: its entry's id, and where it was clicked.
     web_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
-    /// `+`'s menu (a terminal or a browser tab), for the workspace it was opened in.
-    new_tab_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// Groups mid fold or unfold, by workspace id.
     fold_motion: HashMap<String, FoldMotion>,
     /// Resize seams' hover: (hovered, flip count), keyed by the strip id.
@@ -131,12 +131,7 @@ pub struct Shell {
     sidebar_drag: bool,
     /// The drag hit a width limit (-1 min, +1 max) at this instant: the edge nudges past it and springs back.
     sidebar_edge: Option<(f32, Instant)>,
-    /// The review panel on the right shows; saved in the settings.
-    review_open: bool,
-    /// Saved in the settings when a drag ends.
-    review_width: f32,
-    /// The review panel's edge is being dragged.
-    review_drag: bool,
+    right: right_panel::RightPanel,
     /// The shown branch (its review's key), while its checks run: asked again every `REVIEW_POLL`.
     review_poll: Option<String>,
     /// The shown branch's key at the last render and whether its checks ran: when they stop, CI finished.
@@ -438,7 +433,7 @@ impl Shell {
                         cx.background_executor().timer(Duration::from_millis(120)).await;
                         let _ = this.update(cx, |s, cx| {
                             // a drag or the sidebar's fold owns the hold now
-                            if s.divider.is_none() && !s.sidebar_drag && !s.review_drag && s.sidebar_motion.is_none() {
+                            if s.divider.is_none() && !s.sidebar_drag && !s.right.drag && s.sidebar_motion.is_none() {
                                 cx.set_global(GridHold(false));
                                 cx.refresh_windows();
                             }
@@ -485,7 +480,6 @@ impl Shell {
                     seam_hover: Default::default(),
                     ws_menu: None,
                     web_menu: None,
-                    new_tab_menu: None,
                     shown_workspace: None,
                     sidebar_width: SettingsGlobal::of(cx).settings.sidebar_width,
                     sidebar_open: SettingsGlobal::of(cx).settings.sidebar_open,
@@ -494,9 +488,7 @@ impl Shell {
                     peek_hovered: false,
                     sidebar_drag: false,
                     sidebar_edge: None,
-                    review_open: SettingsGlobal::of(cx).settings.review_open,
-                    review_width: SettingsGlobal::of(cx).settings.review_width,
-                    review_drag: false,
+                    right: right_panel::RightPanel::new(SettingsGlobal::of(cx).settings.right_panel_width),
                     review_poll: None,
                     review_last: None,
                     review_acting: Default::default(),
@@ -952,8 +944,8 @@ impl Shell {
     }
 
     fn pane_command(&mut self, window: &Window, cx: &mut Context<Self>, make: impl FnOnce(String) -> Command) {
-        // a page shown hides the panes: nothing unseen is split or closed
-        if self.pages.shown.is_some() {
+        // a page shown hides the panes, and the keyboard in the panel isn't theirs: nothing unseen is split or closed
+        if self.pages.shown.is_some() || self.panel_focused() {
             return;
         }
         if let Some(pane_id) = self.active_pane(window, cx) {
@@ -1144,7 +1136,7 @@ impl Shell {
     fn resize_cursor(&self) -> Option<impl IntoElement> {
         let vertical = if let Some(d) = &self.divider {
             d.vertical
-        } else if self.sidebar_drag || self.review_drag {
+        } else if self.sidebar_drag || self.right.drag {
             true
         } else if self.agents_drag.is_some() {
             false

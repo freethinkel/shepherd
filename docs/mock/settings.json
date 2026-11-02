@@ -4,8 +4,6 @@
   "appearance": "dark",
   "font_size": 13,
   "sidebar_width": 236,
-  "review_open": true,
-  "review_width": 320,
   "compact_workspaces": true,
   "compact_agents": true,
   "status_icons": "dots",

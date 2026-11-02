@@ -16,7 +16,7 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.annotation_agents_menu, window);
         crate::ui::reap_popup(&mut self.ws_menu, window);
         crate::ui::reap_popup(&mut self.web_menu, window);
-        crate::ui::reap_popup(&mut self.new_tab_menu, window);
+        crate::ui::reap_popup(&mut self.right.plus, window);
         crate::ui::reap_popup(&mut self.pane_menu, window);
         crate::ui::reap_popup(&mut self.agent_menu, window);
         crate::ui::reap_popup(&mut self.spent_menu, window);
@@ -71,7 +71,7 @@ impl Render for Shell {
         if std::mem::take(&mut self.popup_closed) && !self.panes.values().any(|p| p.read(cx).focus_handle(cx).is_focused(window)) {
             self.focused = None;
         }
-        let overlaid = self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open()) || self.floating_open();
+        let overlaid = self.panel_focused() || self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open()) || self.floating_open();
         for f in &shown {
             if !self.panes.contains_key(&f.pane_id) {
                 let id = f.pane_id.clone();
@@ -116,19 +116,13 @@ impl Render for Shell {
         let covered = self.overlay_open(cx);
         self.sync_pages(covered, window, cx);
         let web = self.shown_page(cx);
-        // a browser tab sits among the workspace's tabs; a sidebar page in place of them: no workspace looks selected
-        let browsing = web.as_ref().is_some_and(|(key, _)| browser::is_tab(&key.0));
-        let sidebar_ws = if web.is_some() && !browsing { None } else { shown_ws.clone() };
+        // a sidebar page sits in place of the tabs: no workspace looks selected
+        let sidebar_ws = if web.is_some() { None } else { shown_ws.clone() };
         let sidebar = self.render_sidebar(&theme, &snapshot, &sidebar_ws, &shown_tab, window, cx);
         let (docked, peeking) = if sidebar_w > 0. { (Some(sidebar), None) } else { (None, Some(sidebar)) };
 
-        let tabbar = self.render_tab_bar(&theme, shown_ws.clone(), if browsing { self.pages.shown.clone() } else { shown_tab.clone() }, sidebar_w, window, cx);
+        let tabbar = self.render_tab_bar(&theme, shown_ws.clone(), shown_tab.clone(), sidebar_w, window, cx);
         let (tabbar, web_area) = match &web {
-            Some((key, _)) if browsing => {
-                let bar = self.render_browser_bar(key, &theme, window, cx);
-                let page = div().flex_1().min_h_0().flex().child(self.render_web_area(key, &theme, window, cx)).children(self.render_annotations(key, &theme, cx));
-                (tabbar, Some(div().flex_1().min_h_0().flex().flex_col().child(bar).child(page)))
-            }
             Some((key, entry)) => (self.render_web_bar(key, entry, &theme, sidebar_w, cx), Some(self.render_web_area(key, &theme, window, cx))),
             None => (tabbar, None),
         };
@@ -141,10 +135,17 @@ impl Render for Shell {
         let edges: Vec<f32> = splits.iter().map(|s| crate::model::split_edge(&frames, s)).collect();
         let floating = self.render_floating(&theme, window, cx);
         let grid = div()
+            .id("pane-grid")
             .flex_1()
             .min_h_0()
             .relative()
             .overflow_hidden()
+            // the pane under the click focuses itself
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                if this.right.focused.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .bg(theme.terminal.background)
             .child(
                 canvas(move |bounds, _, _| grid_bounds.set(Some(bounds)), |_, _, _, _| {})
@@ -250,7 +251,9 @@ impl Render for Shell {
             .children(floating);
 
         let show_bar = SettingsGlobal::of(cx).settings.show_status_bar;
-        let shown = if show_bar || self.review_open { self.shown_review(snapshot.as_ref(), window, cx) } else { Default::default() };
+        let pull_request_shown = self.pull_request_shown(window);
+        // the picker offers the pull request by what this says, so an open panel needs it too
+        let shown = if show_bar || self.right_panel_shown(window) { self.shown_review(snapshot.as_ref(), window, cx) } else { Default::default() };
         let statusbar = show_bar.then(|| {
             let pane = self.active_pane(window, cx);
             let on_branch = cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -277,7 +280,7 @@ impl Render for Shell {
             } else {
                 self.usage_menu.as_ref().is_some_and(|m| m.is_open()).then_some(Item::Usage)
             };
-            let on_review = cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_review(cx));
+            let on_review = cx.listener(|this, _: &ClickEvent, w, cx| this.toggle_review(w, cx));
             let show = SettingsGlobal::of(cx).settings.status_bar_show;
             div()
                 .flex_none()
@@ -285,15 +288,15 @@ impl Render for Shell {
                     this.statusbar_menu = Some(crate::ui::Popup::new(e.position));
                     cx.notify();
                 }))
-                .child(crate::ui::statusbar::bar(show, snapshot.as_ref(), pane.as_deref(), shown.review.as_ref(), &theme, open, self.review_open, on_branch, on_spent, on_usage, on_review, window, cx))
+                .child(crate::ui::statusbar::bar(show, snapshot.as_ref(), pane.as_deref(), shown.review.as_ref(), &theme, open, pull_request_shown, on_branch, on_spent, on_usage, on_review, window, cx))
         });
         let spring_back = self.pane_spring_back(window);
         let settings_page = self.settings.as_ref().map(|(view, _)| view.clone());
         let on_page = settings_page.is_some();
         // nothing to show outside a repo with a remote, and no PR label to close it from: it waits for one
         let has_remote = shown.key.is_some() && !matches!(shown.review, Some(crate::ui::review::Review::NoRemote));
-        let review = (self.review_open && !on_page && has_remote).then(|| self.render_review(&theme, &shown, window, cx));
-        if review.is_none() {
+        let right_panel = self.right_panel_shown(window).then(|| self.render_right_panel(&theme, &shown, has_remote, window, cx));
+        if !pull_request_shown {
             // a hidden panel's selection is not Cmd+C's to copy
             crate::ui::markdown::forget("review-");
         }
@@ -328,8 +331,8 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
-                if let Some(id) = this.shown_browser_tab().map(|t| t.id.clone()) {
-                    return this.close_browser_tab(&id, cx);
+                if this.panel_focused() {
+                    return this.close_active_surface(cx);
                 }
                 if let Some(tab) = this.shown_tab().filter(|_| this.pages.shown.is_none()) {
                     this.send(Command::CloseTab { tab_id: tab.tab_id }, cx, |_, _, _| {});
@@ -339,16 +342,24 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &SplitRight, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: false, cwd: None })))
             .on_action(cx.listener(|this, _: &SplitDown, w, cx| this.pane_command(w, cx, |pane_id| Command::Split { pane_id, down: true, cwd: None })))
             .on_action(cx.listener(|this, _: &ClosePane, w, cx| {
-                // a browser tab is its own one pane, as in Safari
-                if let Some(id) = this.shown_browser_tab().map(|t| t.id.clone()) {
-                    return this.close_browser_tab(&id, cx);
+                if this.panel_focused() {
+                    return this.close_active_surface(cx);
                 }
                 this.pane_command(w, cx, |pane_id| Command::ClosePane { pane_id })
             }))
             .on_action(cx.listener(|this, _: &ToggleZoom, w, cx| this.pane_command(w, cx, |pane_id| Command::Zoom { pane_id })))
             .on_action(cx.listener(|this, _: &crate::bindings::SwitchBackend, _, cx| this.next_backend(cx)))
-            .on_action(cx.listener(|this, _: &FocusLeft, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Left })))
-            .on_action(cx.listener(|this, _: &FocusRight, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Right })))
+            .on_action(cx.listener(|this, _: &FocusLeft, w, cx| {
+                if this.panel_focused() {
+                    return this.focus_panel(false, w, cx);
+                }
+                this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Left })
+            }))
+            .on_action(cx.listener(|this, _: &FocusRight, w, cx| {
+                if !this.enter_panel(w, cx) {
+                    this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Right })
+                }
+            }))
             .on_action(cx.listener(|this, _: &FocusUp, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Up })))
             .on_action(cx.listener(|this, _: &FocusDown, w, cx| this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Down })))
             .on_action(cx.listener(|this, _: &NavigateLeft, w, cx| this.navigate(Direction::Left, w, cx)))
@@ -364,15 +375,16 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &Tab7, _, cx| this.go_to_tab(6, cx)))
             .on_action(cx.listener(|this, _: &Tab8, _, cx| this.go_to_tab(7, cx)))
             .on_action(cx.listener(|this, _: &Tab9, _, cx| this.go_to_tab(8, cx)))
-            .on_action(cx.listener(|this, _: &PreviousTab, w, cx| this.step_tab(false, w, cx)))
-            .on_action(cx.listener(|this, _: &NextTab, w, cx| this.step_tab(true, w, cx)))
+            .on_action(cx.listener(|this, _: &PreviousTab, _, cx| this.step_tab(false, cx)))
+            .on_action(cx.listener(|this, _: &NextTab, _, cx| this.step_tab(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.step_workspace(false, cx)))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            .on_action(cx.listener(|this, _: &ToggleReview, _, cx| this.toggle_review(cx)))
-            .on_action(cx.listener(|this, _: &ReloadPage, _, cx| this.reload_shown_page(cx)))
+            .on_action(cx.listener(|this, _: &ToggleRightPanel, w, cx| this.toggle_right_panel(w, cx)))
+            .on_action(cx.listener(|this, _: &ToggleReview, w, cx| this.toggle_review(w, cx)))
+            .on_action(cx.listener(|this, _: &ReloadPage, w, cx| this.reload_shown_page(w, cx)))
             .on_action(cx.listener(|this, _: &FocusAddress, w, cx| this.focus_address(w, cx)))
-            .on_action(cx.listener(|this, _: &CopyPageUrl, _, cx| this.copy_page_url(cx)))
+            .on_action(cx.listener(|this, _: &CopyPageUrl, w, cx| this.copy_page_url(w, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
             .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
             .on_action(cx.listener(|this, _: &ChangeTheme, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Themes, w, cx)))
@@ -383,19 +395,19 @@ impl Render for Shell {
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
                 this.drag_divider(e.position, cx);
                 this.drag_sidebar(e.position.x, cx);
-                this.drag_review(e.position.x, w, cx);
+                this.drag_right_panel(e.position.x, w, cx);
                 this.drag_agents(e.position.y, w, cx);
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
                 this.end_sidebar_drag(cx);
-                this.end_review_drag(cx);
+                this.end_right_panel_drag(cx);
                 this.end_agents_drag(cx);
             }))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
                 this.end_sidebar_drag(cx);
-                this.end_review_drag(cx);
+                this.end_right_panel_drag(cx);
                 this.end_agents_drag(cx);
             }))
             .child(self.drag_strip())
@@ -420,7 +432,7 @@ impl Render for Shell {
                     None => el.child(grid),
                 }).children(statusbar)),
             })
-            .children(review.into_iter().flatten())
+            .children(right_panel.into_iter().flatten())
             // The sidebar closed: the window's left edge brings it out floating over the panes, as Arc's does.
             .when(!self.sidebar_open && sidebar_w == 0. && !on_page, |el| {
                 el.child(
