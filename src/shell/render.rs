@@ -390,6 +390,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, w, cx| this.toggle_right_panel(w, cx)))
             .on_action(cx.listener(|this, _: &ToggleReview, w, cx| this.toggle_review(w, cx)))
+            .on_action(cx.listener(|this, _: &ToggleDiff, w, cx| this.toggle_diff(w, cx)))
             .on_action(cx.listener(|this, _: &ReloadPage, w, cx| this.reload_shown_page(w, cx)))
             .on_action(cx.listener(|this, _: &FocusAddress, w, cx| this.focus_address(w, cx)))
             .on_action(cx.listener(|this, _: &CopyPageUrl, w, cx| this.copy_page_url(w, cx)))

@@ -3,7 +3,7 @@
 use super::changes::Changes;
 use super::review::ShownReview;
 use crate::ui::review::Review;
-use crate::ui::statusbar::fetching;
+use crate::ui::statusbar::{branch_of, fetching, pane_dir};
 use super::tabs::{Leading, Tab, Tabs, new_tab_button, plain_tint, tab_element};
 use super::*;
 use crate::right_panel::{Offer, PanelState, Surface, clamp_width, fits, offered, slides};
@@ -256,6 +256,17 @@ impl Shell {
     pub(super) fn toggle_right_panel(&mut self, window: &Window, cx: &mut Context<Self>) {
         let seen = self.right_panel_shown(window);
         self.update_panel(cx, |p| p.toggle_seen(seen));
+    }
+
+    /// The diff's key: as the pull request's, but a workspace may have no diff yet. In a repo, its first is made.
+    pub(super) fn toggle_diff(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let seen = self.right_panel_shown(window);
+        let mut missing = false;
+        self.update_panel(cx, |p| missing = !p.toggle_diff(seen));
+        let dir = pane_dir(self.snapshot.as_ref(), self.active_pane(window, cx).as_deref());
+        if missing && dir.is_some_and(|d| branch_of(&d, cx).is_some()) {
+            self.add_diff_surface(window, cx);
+        }
     }
 
     /// Zeron's takeover, from the strip's button: the panel takes the panes' room, which clip and keep their grids, or

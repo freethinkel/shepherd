@@ -91,6 +91,27 @@ fn the_pull_request_toggle_opens_switches_and_closes() {
 }
 
 #[test]
+fn the_diff_toggle_goes_to_the_last_diff_and_closes_on_one() {
+    let mut p = panel(&[b("1")]);
+    assert!(!p.toggle_diff(true), "no diff yet: one has to be made");
+    assert_eq!(p.active, Some(b("1")));
+
+    let (first, second) = (Surface::diff(1), Surface::diff(2));
+    p.add(first.clone());
+    p.add(second.clone());
+    p.activate(&first);
+    p.activate(&b("1"));
+    assert!(p.toggle_diff(true)); // seen on a browser: switches, not closes
+    assert_eq!(p.active, Some(first.clone()));
+    assert!(p.toggle_diff(true));
+    assert!(!p.open);
+    assert!(p.toggle_diff(false)); // and back
+    assert!(p.open);
+    assert_eq!(p.active, Some(first));
+    assert_eq!(p.tabs.len(), 3); // the tabs stay, nothing doubled
+}
+
+#[test]
 fn a_browser_tab_whose_page_is_gone_falls_back() {
     let mut p = panel(&[Surface::PullRequest, b("1"), b("2")]);
     p.retain_browsers(&["1"]);

@@ -138,6 +138,7 @@ pub(crate) fn action_icon(name: &str) -> &'static str {
         "ToggleSidebar" => "icons/sidebar-minimalistic-left.svg",
         "ToggleRightPanel" => "icons/sidebar-minimalistic-right.svg",
         "ToggleReview" => "icons/git-pull-request.svg",
+        "ToggleDiff" => "icons/solar/list.svg",
         "OpenSettings" => "icons/settings.svg",
         "ChangeTheme" => "icons/sun.svg",
         "ToggleSecureInput" => "icons/keyboard.svg",

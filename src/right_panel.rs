@@ -123,6 +123,16 @@ impl PanelState {
         }
     }
 
+    /// Closes the panel while it's seen on a diff, else shows the diff visited last. False when there is none to show.
+    pub fn toggle_diff(&mut self, on_screen: bool) -> bool {
+        if on_screen && matches!(self.active, Some(Surface::Diff(_))) {
+            self.shut();
+            return true;
+        }
+        let last = self.history.iter().rev().find(|s| matches!(s, Surface::Diff(_))).cloned();
+        last.map(|diff| self.add(diff)).is_some()
+    }
+
     /// Closes the browser tabs not in `live`.
     pub fn retain_browsers(&mut self, live: &[&str]) {
         let gone = |s: &&Surface| matches!(s, Surface::Browser(id) if !live.contains(&id.as_str()));
