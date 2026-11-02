@@ -1,5 +1,7 @@
 //! Cmd+click: links to the browser or the editor, images to the viewer over the pane, Markdown to the reader.
 use super::*;
+use crate::backend::Made;
+use crate::commands::Command;
 
 pub struct Preview {
     path: PathBuf,
@@ -141,17 +143,14 @@ impl File {
 
 /// Opens `file` at its line in the user's editor: Neovim in a pane to the right of `pane_id`, where the pane's shell
 /// runs; another editor here, over its SSH remoting for a machine's file.
-pub(super) async fn edit(client: &Client, pane_id: &str, cwd: &str, editor: Option<&str>, file: &File, line: Option<u32>, col: Option<u32>) {
+pub(super) async fn edit(backend: &Backend, pane_id: &str, cwd: &str, editor: Option<&str>, file: &File, line: Option<u32>, col: Option<u32>) {
     if is_nvim(editor) {
         // A terminal editor gets a pane to the right; its shell drops typeahead until the prompt is drawn.
-        let params = serde_json::json!({"target_pane_id": pane_id, "direction": "right", "focus": true, "cwd": cwd});
-        let Ok(r) = client.call("pane.split", params).await else { return };
-        let Some(new_pane) = r["pane"]["pane_id"].as_str() else { return };
-        let prompt = serde_json::json!({"type": "regex", "value": "\\S"});
-        let wait = serde_json::json!({"pane_id": new_pane, "source": "recent", "match": prompt, "timeout_ms": 5000});
-        let _ = client.call("pane.wait_for_output", wait).await;
+        let split = Command::Split { pane_id: pane_id.to_string(), down: false, cwd: Some(cwd.to_string()) };
+        let Ok(Made { pane_id: Some(new_pane), .. }) = backend.mux.run(split).await else { return };
+        let _ = backend.mux.prompt(new_pane.clone()).await;
         let text = nvim_command(editor.unwrap_or("nvim"), &file.path, line, col);
-        let _ = client.call("pane.send_input", serde_json::json!({"pane_id": new_pane, "text": text, "keys": ["enter"]})).await;
+        let _ = backend.mux.send(new_pane, Some(text)).await;
         return;
     }
     let Some(argv) = editor_argv(editor, file.machine.as_deref(), &file.path, line, col) else { return };
@@ -400,13 +399,12 @@ impl PaneTerminal {
             },
             Link::File { path, line, col } => (path, line, col),
         };
-        let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>() else { return };
+        let Some(PaneQueries(backend, rt)) = cx.try_global::<PaneQueries>() else { return };
         let editor = cx.try_global::<crate::settings::SettingsGlobal>().and_then(|s| s.settings.editor.clone());
         let machine = crate::herdr::shown_machine();
-        let (client, pane_id) = (client.clone(), self.pane_id.clone());
+        let (backend, pane_id) = (backend.clone(), self.pane_id.clone());
         let opened = rt.spawn(async move {
-            let pane = client.call("pane.get", serde_json::json!({"pane_id": pane_id})).await.map(|r| r["pane"].clone()).unwrap_or_default();
-            let cwd = pane["foreground_cwd"].as_str().or(pane["cwd"].as_str()).unwrap_or("/").to_string();
+            let cwd = backend.mux.cwd(pane_id.clone()).await.ok().flatten().unwrap_or_else(|| "/".into());
             let file = File::find(machine, &path, &cwd).await?;
             if is_image(&file.path) {
                 return file.local_copy().await.map(Opened::Image);
@@ -421,7 +419,7 @@ impl PaneTerminal {
                 let _ = tokio::process::Command::new("open").arg(&file.path).status().await;
                 return None;
             }
-            edit(&client, &pane_id, &cwd, editor.as_deref(), &file, line, col).await;
+            edit(&backend, &pane_id, &cwd, editor.as_deref(), &file, line, col).await;
             None
         });
         cx.spawn(async move |this, cx| match opened.await {
@@ -527,10 +525,10 @@ impl PaneTerminal {
     pub(super) fn edit_reader(&mut self, cx: &mut Context<Self>) {
         let Some((file, cwd)) = self.reader.as_ref().map(|r| (r.value.file.clone(), r.value.cwd.clone())) else { return };
         self.close_reader(cx);
-        let Some(PaneQueries(client, rt)) = cx.try_global::<PaneQueries>() else { return };
+        let Some(PaneQueries(backend, rt)) = cx.try_global::<PaneQueries>() else { return };
         let editor = cx.try_global::<crate::settings::SettingsGlobal>().and_then(|s| s.settings.editor.clone());
-        let (client, pane_id) = (client.clone(), self.pane_id.clone());
-        rt.spawn(async move { edit(&client, &pane_id, &cwd, editor.as_deref(), &file, None, None).await });
+        let (backend, pane_id) = (backend.clone(), self.pane_id.clone());
+        rt.spawn(async move { edit(&backend, &pane_id, &cwd, editor.as_deref(), &file, None, None).await });
     }
 
     pub(super) fn show_preview(&mut self, path: PathBuf, cx: &mut Context<Self>) {

@@ -96,7 +96,8 @@ mod tests {
 #[cfg(test)]
 mod input_paths {
     use super::*;
-    use crate::herdr::session::{Mode, Session, SessionEvent, client_socket};
+    use crate::backend::{Mode, SessionEvent, Terminal};
+    use crate::herdr::session::{Session, client_socket};
     use crate::herdr::socket;
     use crate::herdr::wire::{self, ClientMessage, ServerMessage};
     use futures::StreamExt;

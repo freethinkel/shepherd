@@ -56,6 +56,7 @@ app_actions! {
     OpenSettings: "Settings",
     ChangeTheme: "Change theme",
     ToggleSecureInput: "Secure keyboard entry",
+    SwitchBackend: "Switch backend (herdr, herdr-core, Rex, tmux)",
     CommandPanel: "Command panel",
     AgentsPanel: "Agents",
     NextWaitingAgent: "Next waiting agent",

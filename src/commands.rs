@@ -1,5 +1,5 @@
-//! herdr API requests for managing tabs, workspaces and panes. Pure: the shell sends them and follows herdr's
-//! events, never editing its own model.
+//! What the window asks a backend to do to its tabs, workspaces and panes, and how herdr's API says it. Pure: the shell
+//! sends them and follows the backend's events, never editing its own model.
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,7 +11,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Direction::Left => "left",
             Direction::Right => "right",
@@ -32,22 +32,15 @@ pub enum Command {
     CloseWorkspace { workspace_id: String },
     /// Moves `workspace_ids` together to before `before`, or to the end.
     MoveWorkspaces { workspace_ids: Vec<String>, before: Option<String> },
-    /// A linked worktree of the workspace's repo, opened as its own workspace; without a branch herdr names one.
-    CreateWorktree { workspace_id: String, branch: Option<String> },
-    /// Deletes a linked worktree's checkout and closes its workspace; the branch stays. Without `force` herdr
-    /// refuses a checkout with changes (`dirty_worktree_requires_force`).
-    RemoveWorktree { workspace_id: String, force: bool },
-    /// Every worktree of the workspace's repo (`git worktree list`), with the workspace each is open in.
-    ListWorktrees { workspace_id: String },
-    /// Opens a worktree of the workspace's repo at `path` as its own workspace.
-    OpenWorktree { workspace_id: String, path: String },
     RenameWorkspace { workspace_id: String, label: String },
-    Split { pane_id: String, down: bool },
+    /// A new pane beside this one, in `cwd` or where the pane is now, with the focus.
+    Split { pane_id: String, down: bool, cwd: Option<String> },
     ClosePane { pane_id: String },
     FocusPane { pane_id: String, direction: Direction },
-    /// Gives the pane herdr's focus, which is how herdr marks a done agent seen (done → idle). The focus is shared
-    /// with herdr's TUI clients, so it is sent only for a done agent you just looked at.
-    MarkSeen { pane_id: String },
+    /// Gives the pane the backend's focus, which is shared with its other clients.
+    Focus { pane_id: String },
+    /// The tab the window shows: the backend's focus follows it.
+    FocusTab { tab_id: String },
     Zoom { pane_id: String },
     /// Swaps two panes of one tab (herdr refuses `cross_tab`); the processes keep running.
     SwapPanes { source: String, target: String },
@@ -57,19 +50,11 @@ pub enum Command {
     /// Moves a pane into a new tab of `workspace_id`, or of its own workspace.
     MovePaneToNewTab { pane_id: String, workspace_id: Option<String> },
     SetSplitRatio { tab_id: String, path: Vec<bool>, ratio: f32 },
-    /// Enter in the pane, without attaching to it: a waiting agent takes its highlighted choice (Claude's and Codex's
-    /// is "Yes").
-    Approve { pane_id: String },
-    /// Your next message to an agent at its prompt, typed and sent with Enter, without attaching to the pane.
-    Reply { pane_id: String, text: String },
-    /// A plugin's action (`plugin.action` or a bare `action`), as herdr's keybinding runs it but for the pane
-    /// you are in: herdr's own focus is its TUI clients'.
-    InvokePluginAction { action_id: String, pane: Option<crate::model::Pane> },
 }
 
 impl Command {
-    /// The socket API method and params. New tabs and workspaces never take herdr's focus: that is shared with
-    /// its TUI clients, and Shepherd selects them locally.
+    /// herdr's API method and params. New tabs and workspaces never take herdr's focus: that is shared with its TUI
+    /// clients, and Shepherd selects them locally.
     pub fn request(&self) -> (&'static str, Value) {
         match self {
             Command::NewTab { workspace_id } => ("tab.create", json!({"workspace_id": workspace_id, "focus": false})),
@@ -91,32 +76,22 @@ impl Command {
             Command::MoveWorkspaces { workspace_ids, before } => {
                 ("workspace.move_block", json!({"workspace_ids": workspace_ids, "before_workspace_id": before}))
             }
-            Command::CreateWorktree { workspace_id, branch } => {
-                let mut params = json!({"workspace_id": workspace_id, "focus": false});
-                if let Some(branch) = branch {
-                    params["branch"] = json!(branch);
-                }
-                ("worktree.create", params)
-            }
-            Command::RemoveWorktree { workspace_id, force } => {
-                ("worktree.remove", json!({"workspace_id": workspace_id, "force": force}))
-            }
-            Command::ListWorktrees { workspace_id } => ("worktree.list", json!({"workspace_id": workspace_id})),
-            Command::OpenWorktree { workspace_id, path } => {
-                ("worktree.open", json!({"workspace_id": workspace_id, "path": path, "focus": false}))
-            }
             Command::RenameWorkspace { workspace_id, label } => {
                 ("workspace.rename", json!({"workspace_id": workspace_id, "label": label}))
             }
-            Command::Split { pane_id, down } => (
-                "pane.split",
-                json!({"target_pane_id": pane_id, "direction": if *down { "down" } else { "right" }, "focus": true}),
-            ),
+            Command::Split { pane_id, down, cwd } => {
+                let mut params = json!({"target_pane_id": pane_id, "direction": if *down { "down" } else { "right" }, "focus": true});
+                if let Some(cwd) = cwd {
+                    params["cwd"] = json!(cwd);
+                }
+                ("pane.split", params)
+            }
             Command::ClosePane { pane_id } => ("pane.close", json!({"pane_id": pane_id})),
             Command::FocusPane { pane_id, direction } => {
                 ("pane.focus_direction", json!({"pane_id": pane_id, "direction": direction.name()}))
             }
-            Command::MarkSeen { pane_id } => ("pane.focus", json!({"pane_id": pane_id})),
+            Command::Focus { pane_id } => ("pane.focus", json!({"pane_id": pane_id})),
+            Command::FocusTab { tab_id } => ("tab.focus", json!({"tab_id": tab_id})),
             Command::Zoom { pane_id } => ("pane.zoom", json!({"pane_id": pane_id, "mode": "toggle"})),
             Command::SwapPanes { source, target } => {
                 ("pane.swap", json!({"source_pane_id": source, "target_pane_id": target}))
@@ -139,30 +114,21 @@ impl Command {
             Command::SetSplitRatio { tab_id, path, ratio } => {
                 ("layout.set_split_ratio", json!({"tab_id": tab_id, "path": path, "ratio": ratio}))
             }
-            Command::Approve { pane_id } => ("pane.send_input", json!({"pane_id": pane_id, "keys": ["enter"]})),
-            Command::Reply { pane_id, text } => ("pane.send_input", json!({"pane_id": pane_id, "text": text, "keys": ["enter"]})),
-            Command::InvokePluginAction { action_id, pane } => {
-                let mut context = json!({"invocation_source": "keybinding"});
-                if let Some(p) = pane {
-                    context["focused_pane_id"] = json!(p.pane_id);
-                    context["workspace_id"] = json!(p.workspace_id);
-                    context["tab_id"] = json!(p.tab_id);
-                    context["focused_pane_cwd"] = json!(p.foreground_cwd.as_ref().or(p.cwd.as_ref()));
-                }
-                ("plugin.action.invoke", json!({"action_id": action_id, "context": context}))
-            }
         }
     }
 }
 
-/// The tab a `tab.create` or `workspace.create` response made (both carry `tab`).
-pub fn created_tab_id(result: &Value) -> Option<String> {
-    result["tab"]["tab_id"].as_str().map(str::to_string)
-}
-
-/// The tab a `pane.move` response put the pane in.
-pub fn moved_tab_id(result: &Value) -> Option<String> {
-    result["move_result"]["pane"]["tab_id"].as_str().map(str::to_string)
+/// herdr's call for a plugin's action (`plugin.action` or a bare `action`), as its keybinding runs it but for the pane
+/// you are in: herdr's own focus is its TUI clients'.
+pub fn plugin_action(action_id: &str, pane: Option<&crate::model::Pane>) -> Value {
+    let mut context = json!({"invocation_source": "keybinding"});
+    if let Some(p) = pane {
+        context["focused_pane_id"] = json!(p.pane_id);
+        context["workspace_id"] = json!(p.workspace_id);
+        context["tab_id"] = json!(p.tab_id);
+        context["focused_pane_cwd"] = json!(p.foreground_cwd.as_ref().or(p.cwd.as_ref()));
+    }
+    json!({"action_id": action_id, "context": context})
 }
 
 /// The branch herdr picks for a worktree created without one, from herdr's `generated_branch_slug`
@@ -238,23 +204,6 @@ mod tests {
             ("workspace.move_block", json!({"workspace_ids": ["w2", "w3"], "before_workspace_id": null}))
         );
         assert_eq!(
-            req(Command::RemoveWorktree { workspace_id: "w2".into(), force: false }),
-            ("worktree.remove", json!({"workspace_id": "w2", "force": false}))
-        );
-        assert_eq!(
-            req(Command::CreateWorktree { workspace_id: "w1".into(), branch: None }),
-            ("worktree.create", json!({"workspace_id": "w1", "focus": false}))
-        );
-        assert_eq!(
-            req(Command::CreateWorktree { workspace_id: "w1".into(), branch: Some("fix/login".into()) }),
-            ("worktree.create", json!({"workspace_id": "w1", "branch": "fix/login", "focus": false}))
-        );
-        assert_eq!(req(Command::ListWorktrees { workspace_id: "w1".into() }), ("worktree.list", json!({"workspace_id": "w1"})));
-        assert_eq!(
-            req(Command::OpenWorktree { workspace_id: "w1".into(), path: "/wt/fix".into() }),
-            ("worktree.open", json!({"workspace_id": "w1", "path": "/wt/fix", "focus": false}))
-        );
-        assert_eq!(
             req(Command::RenameWorkspace { workspace_id: "w1".into(), label: "api".into() }),
             ("workspace.rename", json!({"workspace_id": "w1", "label": "api"}))
         );
@@ -263,19 +212,20 @@ mod tests {
     #[test]
     fn panes() {
         assert_eq!(
-            req(Command::Split { pane_id: "w1:p1".into(), down: false }),
+            req(Command::Split { pane_id: "w1:p1".into(), down: false, cwd: None }),
             ("pane.split", json!({"target_pane_id": "w1:p1", "direction": "right", "focus": true}))
         );
         assert_eq!(
-            req(Command::Split { pane_id: "w1:p1".into(), down: true }),
-            ("pane.split", json!({"target_pane_id": "w1:p1", "direction": "down", "focus": true}))
+            req(Command::Split { pane_id: "w1:p1".into(), down: true, cwd: Some("/tmp".into()) }),
+            ("pane.split", json!({"target_pane_id": "w1:p1", "direction": "down", "focus": true, "cwd": "/tmp"}))
         );
         assert_eq!(req(Command::ClosePane { pane_id: "w1:p1".into() }), ("pane.close", json!({"pane_id": "w1:p1"})));
         assert_eq!(
             req(Command::FocusPane { pane_id: "w1:p1".into(), direction: Direction::Left }),
             ("pane.focus_direction", json!({"pane_id": "w1:p1", "direction": "left"}))
         );
-        assert_eq!(req(Command::MarkSeen { pane_id: "w1:p1".into() }), ("pane.focus", json!({"pane_id": "w1:p1"})));
+        assert_eq!(req(Command::Focus { pane_id: "w1:p1".into() }), ("pane.focus", json!({"pane_id": "w1:p1"})));
+        assert_eq!(req(Command::FocusTab { tab_id: "w1:t1".into() }), ("tab.focus", json!({"tab_id": "w1:t1"})));
         assert_eq!(req(Command::Zoom { pane_id: "w1:p1".into() }), ("pane.zoom", json!({"pane_id": "w1:p1", "mode": "toggle"})));
     }
 
@@ -310,37 +260,6 @@ mod tests {
             req(Command::SetSplitRatio { tab_id: "w1:t1".into(), path: vec![false, true], ratio: 0.25 }),
             ("layout.set_split_ratio", json!({"tab_id": "w1:t1", "path": [false, true], "ratio": 0.25}))
         );
-        assert_eq!(
-            req(Command::Approve { pane_id: "w1:p1".into() }),
-            ("pane.send_input", json!({"pane_id": "w1:p1", "keys": ["enter"]}))
-        );
-        assert_eq!(
-            req(Command::Reply { pane_id: "w1:p1".into(), text: "go on".into() }),
-            ("pane.send_input", json!({"pane_id": "w1:p1", "text": "go on", "keys": ["enter"]}))
-        );
-        assert_eq!(
-            req(Command::InvokePluginAction { action_id: "persiyanov.reviewr.toggle".into(), pane: None }),
-            ("plugin.action.invoke", json!({"action_id": "persiyanov.reviewr.toggle", "context": {"invocation_source": "keybinding"}}))
-        );
-    }
-
-    #[test]
-    fn created_tab_is_read_from_the_response() {
-        let result = json!({"type": "tab_created", "tab": {"tab_id": "w1:t3", "label": "3"}, "root_pane": {"pane_id": "w1:p9"}});
-        assert_eq!(created_tab_id(&result).as_deref(), Some("w1:t3"));
-        assert_eq!(created_tab_id(&json!({"type": "pong"})), None);
-        // workspace.create (herdr 0.9.3) carries the new workspace's first tab the same way.
-        let ws = json!({"type": "workspace_created", "workspace": {"workspace_id": "wAA", "active_tab_id": "wAA:t1"},
-                        "tab": {"tab_id": "wAA:t1"}, "root_pane": {"pane_id": "wAA:p1"}});
-        assert_eq!(created_tab_id(&ws).as_deref(), Some("wAA:t1"));
-    }
-
-    #[test]
-    fn moved_tab_is_read_from_the_response() {
-        // herdr 0.9.3 `pane.move` into another workspace: the pane gets that workspace's ids
-        let result = json!({"type": "pane_move", "move_result": {"changed": true, "previous_pane_id": "w1:p2",
-                            "pane": {"pane_id": "w2:p2", "tab_id": "w2:t2", "workspace_id": "w2"}}});
-        assert_eq!(moved_tab_id(&result).as_deref(), Some("w2:t2"));
-        assert_eq!(moved_tab_id(&json!({"type": "pane_swap"})), None);
+        assert_eq!(plugin_action("persiyanov.reviewr.toggle", None), json!({"action_id": "persiyanov.reviewr.toggle", "context": {"invocation_source": "keybinding"}}));
     }
 }

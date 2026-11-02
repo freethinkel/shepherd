@@ -45,7 +45,8 @@ impl Shell {
         self.toggle_command_panel(Kind::Worktrees, window, cx);
         let Some(panel) = self.command_panel.as_ref().map(|p| p.value.0.downgrade()) else { return };
         let repo = workspace_id.clone();
-        self.send_then(Command::ListWorktrees { workspace_id }, cx, move |shell, result, cx| {
+        let backend = self.backend.clone();
+        self.ask(async move { backend.worktrees.list(workspace_id).await }, cx, move |shell, result, cx| {
             let Some(panel) = panel.upgrade() else { return };
             match result {
                 Ok(list) => {
@@ -67,10 +68,11 @@ impl Shell {
     pub(super) fn new_worktree(&mut self, workspace_id: String, branch: String, cx: &mut Context<Self>) {
         let pending = (workspace_id.clone(), branch.clone());
         self.pending_worktrees.push(pending.clone());
-        self.send_then(Command::CreateWorktree { workspace_id, branch: Some(branch) }, cx, move |shell, result, cx| {
+        let backend = self.backend.clone();
+        self.ask(async move { backend.worktrees.create(workspace_id, branch).await }, cx, move |shell, result, cx| {
             shell.pending_worktrees.retain(|p| *p != pending);
             match result {
-                Ok(value) => shell.select_tab(crate::commands::created_tab_id(&value)),
+                Ok(made) => shell.select_tab(made.tab_id),
                 Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),
             }
             cx.notify();
@@ -90,7 +92,8 @@ impl Shell {
         self.removing.insert(workspace_id.clone());
         cx.notify();
         let id = workspace_id.clone();
-        self.send_then(Command::RemoveWorktree { workspace_id, force }, cx, move |shell, result, cx| {
+        let backend = self.backend.clone();
+        self.ask(async move { backend.worktrees.remove(workspace_id, force).await }, cx, move |shell, result, cx| {
             // on success the row keeps its spinner until herdr's snapshot drops the workspace
             if let Err(err) = result {
                 shell.removing.remove(&id);
@@ -119,7 +122,7 @@ impl Shell {
 
     pub(super) fn new_workspace(&mut self, cx: &mut Context<Self>) {
         self.send(Command::NewWorkspace { cwd: None }, cx, |shell, result, cx| {
-            shell.select_tab(crate::commands::created_tab_id(result));
+            shell.select_tab(result.tab_id.clone());
             cx.notify();
         });
     }

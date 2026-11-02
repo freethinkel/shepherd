@@ -42,15 +42,7 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
                 }
             }
         }
-        let gone = this.update(cx, |s, cx| {
-            s.popup_surface = None;
-            if cx.has_global::<crate::terminal::pane::TypingShell>() {
-                cx.remove_global::<crate::terminal::pane::TypingShell>();
-            }
-            s.show_popup(None, cx);
-            s.show_images(Default::default(), cx);
-        });
-        if gone.is_err() {
+        if this.update(cx, |s, cx| s.forget_popups(cx)).is_err() {
             return;
         }
         // ponytail: retry every 5 s (herdr restarting, a remote place whose client socket is not forwarded)
@@ -59,6 +51,16 @@ pub(super) async fn popup_loop(this: gpui::WeakEntity<Shell>, cx: &mut gpui::Asy
 }
 
 impl Shell {
+    /// The client shell is gone: what it showed and the typing that went through it.
+    pub(super) fn forget_popups(&mut self, cx: &mut Context<Self>) {
+        self.popup_surface = None;
+        if cx.has_global::<crate::terminal::pane::TypingShell>() {
+            cx.remove_global::<crate::terminal::pane::TypingShell>();
+        }
+        self.show_popup(None, cx);
+        self.show_images(Default::default(), cx);
+    }
+
     /// The pane grid in cells, once a pane has measured its font.
     pub(super) fn grid_cells(&self, cx: &App) -> Option<(u16, u16)> {
         let bounds = self.grid_bounds.get()?;
@@ -134,8 +136,9 @@ impl Shell {
                     .border_color(theme.border_strong)
                     .shadow_lg()
                     .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        let client = this.client.clone();
-                        this.rt.spawn(async move { client.call("popup.close", json!({})).await });
+                        if let Some(client) = this.backend.herdr() {
+                            this.rt.spawn(async move { client.call("popup.close", json!({})).await });
+                        }
                         cx.notify();
                     }))
                     .child(

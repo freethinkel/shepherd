@@ -5,6 +5,7 @@
 //! another herdr version, no socket — it falls back to a `herdr terminal session control <pane>` child (base64
 //! frames in, JSON command lines out), where mouse capture stays unknown.
 use super::wire::{self, AttachScrollDirection, AttachScrollSource, ClientMessage, MousePosition, ServerMessage};
+use crate::backend::{Mode, SessionEvent, Terminal};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Value, json};
@@ -48,18 +49,18 @@ fn api_socket() -> PathBuf {
 }
 
 pub(super) fn binary() -> String {
-    std::env::var("SHEPHERD_HERDR").ok().or_else(|| BINARY.read().unwrap().clone()).unwrap_or_else(find_herdr)
+    let found = || find_program("herdr").map_or_else(|| "herdr".into(), |p| p.to_string_lossy().into_owned());
+    std::env::var("SHEPHERD_HERDR").ok().or_else(|| BINARY.read().unwrap().clone()).unwrap_or_else(found)
 }
 
-/// `herdr` on PATH, else where its installers put it: an app opened from Finder gets launchd's bare PATH.
-fn find_herdr() -> String {
+/// A program on PATH, else where installers put it: an app opened from Finder gets launchd's bare PATH.
+pub fn find_program(name: &str) -> Option<PathBuf> {
     let home = crate::settings::home();
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .chain([home.join(".local/bin"), home.join(".cargo/bin"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()])
-        .map(|dir| dir.join(format!("herdr{}", std::env::consts::EXE_SUFFIX)))
+        .map(|dir| dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
         .find(|p| p.is_file())
-        .map_or_else(|| "herdr".into(), |p| p.to_string_lossy().into_owned())
 }
 
 /// Nothing listens on herdr's socket: it is missing, or a server died and left it behind.
@@ -184,31 +185,8 @@ fn session_command(args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub enum SessionEvent {
-    /// Terminal bytes to feed the emulator.
-    Frame(Vec<u8>),
-    /// Whether the pane's app asks for mouse reporting (socket sessions only).
-    MouseCapture(bool),
-    /// The kitty keyboard flags the pane's app asked for (socket sessions only).
-    KeyboardFlags(u16),
-    /// The grid herdr renders the terminal at (a client shell's popup only): the frames that follow are this size.
-    Size(u16, u16),
-    /// The stream is over: herdr's reason, its stderr, or why it could not run.
-    Ended(String),
-}
-
 pub struct Session {
     transport: Transport,
-}
-
-/// How a session holds its pane. herdr allows one controller, which types into the pane and sets its size;
-/// observers only watch, so herdr's other clients size the pane.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mode {
-    Control,
-    /// Control, replacing another controller.
-    Takeover,
-    Observe,
 }
 
 enum Transport {
@@ -279,44 +257,6 @@ impl Session {
         Ok((Session { transport: Transport::Cli { child: Some(child), stdin } }, rx))
     }
 
-    /// Whether this session reports [`SessionEvent::MouseCapture`] (the socket does, the CLI cannot).
-    pub fn knows_mouse_capture(&self) -> bool {
-        matches!(self.transport, Transport::Socket(_))
-    }
-
-    pub fn input(&self, bytes: &[u8]) {
-        self.send(
-            ClientMessage::Input { data: bytes.to_vec() },
-            || json!({"type": "terminal.input", "bytes": B64.encode(bytes)}),
-        );
-    }
-
-    pub fn resize(&self, cols: u16, rows: u16, (cell_width_px, cell_height_px): (u32, u32)) {
-        self.send(
-            ClientMessage::Resize { cols, rows, cell_width_px, cell_height_px, pixel_mouse: false },
-            || json!({"type": "terminal.resize", "cols": cols, "rows": rows}),
-        );
-    }
-
-    pub fn scroll(&self, up: bool, lines: u16, at: Option<(u16, u16)>) {
-        let direction = if up { AttachScrollDirection::Up } else { AttachScrollDirection::Down };
-        let (column, row) = (at.map(|a| a.0), at.map(|a| a.1));
-        self.send(
-            ClientMessage::AttachScroll { source: AttachScrollSource::Wheel, direction, lines, column, row, modifiers: 0 },
-            || json!({"type": "terminal.scroll", "direction": if up { "up" } else { "down" }, "lines": lines, "source": "wheel",
-                      "column": column, "row": row}),
-        );
-    }
-
-    /// `action` is `down` / `up` / `drag` / `move`, `button` is `left` / `right` / `middle` (herdr's CLI names).
-    pub fn mouse(&self, action: &str, button: &str, column: u16, row: u16, modifiers: u8) {
-        self.send(
-            ClientMessage::AttachMouse { kind: wire::mouse_kind(action, button), position: MousePosition::Cell { column, row }, geometry: None, modifiers, lines: 1 },
-            || json!({"type": "terminal.mouse", "action": action, "button": button,
-                      "column": column, "row": row, "modifiers": modifiers}),
-        );
-    }
-
     fn send(&self, message: ClientMessage, record: impl FnOnce() -> Value) {
         match &self.transport {
             Transport::Socket(stream) => drop(wire::write_message(&mut *stream.lock().unwrap(), &message)),
@@ -326,6 +266,50 @@ impl Session {
                 }
             }
         }
+    }
+}
+
+impl Terminal for Session {
+    fn input(&self, bytes: &[u8]) {
+        self.send(
+            ClientMessage::Input { data: bytes.to_vec() },
+            || json!({"type": "terminal.input", "bytes": B64.encode(bytes)}),
+        );
+    }
+
+    fn resize(&self, cols: u16, rows: u16, (cell_width_px, cell_height_px): (u32, u32)) {
+        self.send(
+            ClientMessage::Resize { cols, rows, cell_width_px, cell_height_px, pixel_mouse: false },
+            || json!({"type": "terminal.resize", "cols": cols, "rows": rows}),
+        );
+    }
+
+    fn scroll(&self, up: bool, lines: u16, at: Option<(u16, u16)>) {
+        let direction = if up { AttachScrollDirection::Up } else { AttachScrollDirection::Down };
+        let (column, row) = (at.map(|a| a.0), at.map(|a| a.1));
+        self.send(
+            ClientMessage::AttachScroll { source: AttachScrollSource::Wheel, direction, lines, column, row, modifiers: 0 },
+            || json!({"type": "terminal.scroll", "direction": if up { "up" } else { "down" }, "lines": lines, "source": "wheel",
+                      "column": column, "row": row}),
+        );
+    }
+
+    fn mouse(&self, action: &str, button: &str, column: u16, row: u16, modifiers: u8) {
+        self.send(
+            ClientMessage::AttachMouse { kind: wire::mouse_kind(action, button), position: MousePosition::Cell { column, row }, geometry: None, modifiers, lines: 1 },
+            || json!({"type": "terminal.mouse", "action": action, "button": button,
+                      "column": column, "row": row, "modifiers": modifiers}),
+        );
+    }
+
+    /// Frames are a screen herdr renders for this client.
+    fn raw(&self) -> bool {
+        false
+    }
+
+    /// The socket reports [`SessionEvent::MouseCapture`], the CLI cannot.
+    fn knows_mouse_capture(&self) -> bool {
+        !matches!(self.transport, Transport::Cli { .. })
     }
 }
 

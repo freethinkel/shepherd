@@ -14,6 +14,14 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
+/// What a program printed, or what it said on the way out.
+pub fn answer(out: std::process::Output) -> anyhow::Result<String> {
+    if !out.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string())
+}
+
 /// `line` run by the shell: `sh -c`, or on Windows `cmd /d /c` as herdr runs it there.
 pub fn shell(line: &str) -> Command {
     #[cfg(windows)]

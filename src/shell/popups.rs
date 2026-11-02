@@ -989,8 +989,8 @@ impl Shell {
             let (pane_id, at) = menu.value.clone();
             let chords = cx.try_global::<ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
             let items: [(&str, fn(String) -> Command); 4] = [
-                ("SplitRight", |pane_id| Command::Split { pane_id, down: false }),
-                ("SplitDown", |pane_id| Command::Split { pane_id, down: true }),
+                ("SplitRight", |pane_id| Command::Split { pane_id, down: false, cwd: None }),
+                ("SplitDown", |pane_id| Command::Split { pane_id, down: true, cwd: None }),
                 ("ToggleZoom", |pane_id| Command::Zoom { pane_id }),
                 ("ClosePane", |pane_id| Command::ClosePane { pane_id }),
             ];

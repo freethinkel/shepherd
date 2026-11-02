@@ -158,28 +158,19 @@ fn marks(panes: &[(Option<&str>, Option<&str>)], theme: &Theme) -> Vec<Mark> {
 /// The program a pane runs, from herdr's `pane.process_info`: the leader of its foreground group, `None` when that
 /// is the shell itself.
 // ponytail: a script shows as its interpreter (`brew` as ruby, `pnpm` as node); its `argv[1]` can name it if that matters.
-fn foreground(info: &serde_json::Value) -> Option<String> {
-    let group = info["foreground_process_group_id"].as_u64()?;
-    if info["shell_pid"].as_u64() == Some(group) {
-        return None;
-    }
-    let leader = info["foreground_processes"].as_array()?.iter().find(|p| p["pid"].as_u64() == Some(group))?;
-    Some(leader["name"].as_str()?.to_string())
-}
-
 /// Keeps [`TabBar::programs`] current for the shown workspace. herdr's snapshot and events don't say when a pane's
 /// foreground program changes, so this asks, also while another app has the focus: the window may still be in view.
-pub(super) async fn watch_programs(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, client: Client, cx: &mut gpui::AsyncApp) {
+pub(super) async fn watch_programs(this: gpui::WeakEntity<Shell>, rt: tokio::runtime::Handle, backend: Backend, cx: &mut gpui::AsyncApp) {
     loop {
         cx.background_executor().timer(PROGRAMS_EVERY).await;
         let Ok(panes) = this.update(cx, |s, _| s.plain_panes()) else { return };
-        let client = client.clone();
+        let backend = backend.clone();
         let found = rt
             .spawn(async move {
                 let mut found = Vec::new();
                 for pane_id in panes {
-                    if let Ok(r) = client.call("pane.process_info", json!({"pane_id": pane_id})).await {
-                        found.push((pane_id, foreground(&r["process_info"])));
+                    if let Ok(program) = backend.mux.program(pane_id.clone()).await {
+                        found.push((pane_id, program));
                     }
                 }
                 found
@@ -418,14 +409,6 @@ mod tests {
         assert_eq!(icons(&[(None, Some("top"))]), ["icons/solar/pulse.svg"]);
         let many: Vec<_> = ["git", "go", "cargo", "node", "docker", "tmux"].map(|p| (None, Some(p))).to_vec();
         assert_eq!(icons(&many).len(), MAX_MARKS);
-    }
-
-    #[test]
-    fn a_pane_runs_its_foreground_groups_leader() {
-        let info = |group: u64| json!({"shell_pid": 10, "foreground_process_group_id": group, "foreground_processes": [{"pid": 12, "name": "rg"}, {"pid": 11, "name": "nvim"}]});
-        assert_eq!(foreground(&info(11)).as_deref(), Some("nvim"));
-        assert_eq!(foreground(&info(10)), None); // the shell's prompt
-        assert_eq!(foreground(&info(99)), None); // gone already
     }
 
     #[test]

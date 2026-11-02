@@ -18,6 +18,7 @@ use gpui_base::input::{Input, InputEvent, InputState};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+mod backends;
 mod render;
 mod select;
 mod web;
@@ -43,24 +44,22 @@ enum Section {
     Appearance,
     Notifications,
     Usage,
-    Integrations,
     WebPages,
-    Herdr,
+    Backend,
     Worktrees,
     Shortcuts,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 11] = [
+    const ALL: [Section; 10] = [
         Section::General,
         Section::Terminal,
         Section::Appearance,
         Section::Notifications,
         Section::Usage,
-        Section::Integrations,
         Section::WebPages,
-        Section::Herdr,
+        Section::Backend,
         Section::Worktrees,
         Section::Shortcuts,
         Section::About,
@@ -73,9 +72,8 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::Notifications => "Notifications",
             Section::Usage => "Usage",
-            Section::Integrations => "Integrations",
             Section::WebPages => "Web pages",
-            Section::Herdr => "herdr",
+            Section::Backend => "Backend",
             Section::Worktrees => "Worktrees",
             Section::Shortcuts => "Shortcuts",
             Section::About => "About",
@@ -89,9 +87,8 @@ impl Section {
             Section::Appearance => "icons/tuning.svg",
             Section::Notifications => "icons/bell.svg",
             Section::Usage => "icons/clock-circle.svg",
-            Section::Integrations => "icons/widget.svg",
             Section::WebPages => "icons/solar/global.svg",
-            Section::Herdr => "icons/solar/server-2.svg",
+            Section::Backend => "icons/solar/server-2.svg",
             Section::Worktrees => "icons/git-branch.svg",
             Section::Shortcuts => "icons/keyboard.svg",
             Section::About => "icons/info-circle.svg",
@@ -152,16 +149,30 @@ pub struct SettingsView {
     integrations: Option<Result<Vec<Integration>, String>>,
     /// The integration being installed or removed.
     integration_busy: Option<String>,
+    /// herdr-core's `config.toml` as last read or written, or why it could not be.
+    hc_config: Result<HerdrConfig, String>,
+    /// Fields for `HC_FIELDS`, in order.
+    hc_fields: Vec<Entity<InputState>>,
+    /// What the Backend page says of the backend shown: empty while it is asked, `None` until then.
+    facts: Option<Vec<crate::backend::Fact>>,
+    /// The [`crate::backend::Job`] under way, by label.
+    job: Option<&'static str>,
+    /// What the last job or setting of the backend shown came to.
+    backend_note: Option<String>,
     /// The action whose chord the next keystroke becomes.
     recording: Option<&'static str>,
     /// The web pages' name and URL fields, in the settings' order; made as entries come, dropped as they go.
     web_fields: Vec<WebFields>,
     /// The places a web page can be listed in, as (key, name), once herdr has listed them.
     places: Option<Vec<(String, String)>>,
+    /// The backend the pages were last drawn for.
+    backend: crate::backend::Kind,
     /// Each worktree hooks project's fields, once Worktrees was shown; why `hooks.conf` could not be read.
     worktrees: Option<Result<Vec<ProjectFields>, String>>,
     /// herdr's sessions and the repos open in each, once herdr answered.
     worktree_sessions: Option<Vec<SessionRepos>>,
+    /// The repos open on the backend shown, as (name, main checkout), as the window last told.
+    open_repos: Vec<(String, String)>,
     /// The session Worktrees shows, with its machine's SSH target (`None` here); `None` is the one Shepherd is on.
     worktree_session: Option<(Option<String>, String)>,
     /// The projects shown open, as `session/name`; the rest show only their name and path.
@@ -196,6 +207,7 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     let saved = settings.save(&path);
     cx.global_mut::<SettingsGlobal>().error = saved.err().map(|e| format!("cannot save {}: {e:#}", path.display()));
     set_binary(settings.herdr_bin.clone());
+    crate::hc::set_sync(settings.hc_sync);
     set_socket(settings.herdr_socket.clone());
     cx.set_global(settings.theme(cx.window_appearance()));
     if translucent_changed {
@@ -225,6 +237,13 @@ impl SettingsView {
         cx.notify();
     }
 
+    pub fn set_repos(&mut self, repos: Vec<(String, String)>, cx: &mut Context<Self>) {
+        if self.open_repos != repos {
+            self.open_repos = repos;
+            cx.notify();
+        }
+    }
+
     pub fn show_web_pages(&mut self, cx: &mut Context<Self>) {
         self.section = Section::WebPages;
         cx.notify();
@@ -251,6 +270,12 @@ impl SettingsView {
                 let value = herdr_config.as_ref().ok().and_then(|c| c.str(key)).map(str::to_string);
                 field(value, empty, window, cx)
             })
+            .collect();
+
+        let hc_config = HerdrConfig::load(&crate::hc::facts::config_path()).map_err(|e| format!("{e:#}"));
+        let hc_fields: Vec<_> = backends::HC_FIELDS
+            .iter()
+            .map(|f| field(hc_config.as_ref().ok().and_then(|c| backends::hc_text(c, f.key)), f.empty, window, cx))
             .collect();
 
         let select_search = field(None, "Search", window, cx);
@@ -310,6 +335,14 @@ impl SettingsView {
                 }
             }));
         }
+        for (input, hc_field) in hc_fields.iter().zip(backends::HC_FIELDS) {
+            subscriptions.push(cx.subscribe_in(input, window, move |v: &mut Self, input, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let text = input.read(cx).value().trim().to_string();
+                    v.commit_hc(hc_field.key, text, cx);
+                }
+            }));
+        }
         // While recording, the next keystroke is the chord: intercepted before any binding (Cmd+Q included) runs.
         let view = cx.entity().downgrade();
         let settings_window = window.window_handle();
@@ -361,11 +394,18 @@ impl SettingsView {
             herdr_note: None,
             integrations: None,
             integration_busy: None,
+            hc_config,
+            hc_fields,
+            facts: None,
+            job: None,
+            backend_note: None,
             recording: None,
             web_fields: Vec::new(),
             places: None,
+            backend: settings.backend,
             worktrees: None,
             worktree_sessions: None,
+            open_repos: Vec::new(),
             worktree_session: None,
             worktree_open: Default::default(),
             worktree_adds: Vec::new(),
@@ -392,12 +432,22 @@ impl SettingsView {
         view
     }
 
-    /// The herdr sessions and machines a web page can be listed in, named as the session bar names them.
+    /// Where a web page can be listed: herdr's sessions and machines, named as the session bar names them. Another
+    /// backend lists every page.
     fn load_places(&mut self, cx: &mut Context<Self>) {
+        let kind = SettingsGlobal::of(cx).settings.backend;
+        if kind != crate::backend::Kind::Herdr {
+            self.places = Some(Vec::new());
+            return;
+        }
+        self.places = None;
         let list = cx.background_spawn(async { (crate::herdr::sessions().unwrap_or_default(), crate::herdr::machines().unwrap_or_default()) });
         cx.spawn(async move |v, cx| {
             let (sessions, machines) = list.await;
             let _ = v.update(cx, |v, cx| {
+                if SettingsGlobal::of(cx).settings.backend != crate::backend::Kind::Herdr {
+                    return; // left while herdr answered
+                }
                 let looks = &SettingsGlobal::of(cx).settings.place_looks;
                 let name = |key: &str, herdr: &str| looks.get(key).and_then(|l| l.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| herdr.to_string());
                 let sessions = sessions.iter().map(|s| (s.socket_path.clone(), name(&s.socket_path, &s.name)));
@@ -447,9 +497,12 @@ impl SettingsView {
             Ok(config) => {
                 self.herdr_config = Ok(config);
                 self.herdr_note = None;
-                self.herdr_call("server.reload_config", json!({}), cx, |v, result| {
-                    v.herdr_note = result.err().map(|e| format!("Saved, but herdr did not reload it: {e:#}"));
-                });
+                // on another backend the one setting left here is the worktrees folder, which Shepherd reads itself
+                if self.backend == crate::backend::Kind::Herdr {
+                    self.herdr_call("server.reload_config", json!({}), cx, |v, result| {
+                        v.herdr_note = result.err().map(|e| format!("Saved, but herdr did not reload it: {e:#}"));
+                    });
+                }
             }
             Err(e) => self.herdr_note = Some(format!("{e:#}")),
         }

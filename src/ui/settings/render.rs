@@ -5,13 +5,31 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::reap_popup(&mut self.open_select, window);
         self.sync_web_fields(window, cx);
-        if self.section == Section::Worktrees {
-            self.load_worktrees(window, cx);
-        }
         let theme = Theme::of(cx).clone();
         let global = SettingsGlobal::of(cx);
         let settings = global.settings.clone();
         let error = global.error.clone();
+        let on_herdr = settings.backend == crate::backend::Kind::Herdr;
+        if self.backend != settings.backend {
+            self.backend = settings.backend;
+            self.load_places(cx);
+            self.facts = None;
+            self.backend_note = None;
+            self.worktrees = None;
+            self.worktree_sessions = None;
+            self.worktree_session = None;
+            self.worktree_adds.clear();
+            self.open_repos.clear();
+            if on_herdr {
+                self.load_integrations(cx);
+            }
+        }
+        if self.section == Section::Worktrees {
+            self.load_worktrees(window, cx);
+        }
+        if self.section == Section::Backend && self.facts.is_none() {
+            self.load_facts(settings.backend, cx);
+        }
         // the number fields follow the setting when it changes elsewhere (a chevron, Cmd+=), even while typed in
         let shown = numbers(&settings);
         for (i, input) in [self.font_size.clone(), self.line_height.clone()].into_iter().enumerate() {
@@ -59,8 +77,9 @@ impl Render for SettingsView {
                         .child(gpui::svg().path(section.icon()).size(px(16.)).flex_none().text_color(theme.text_muted))
                         .child(section.label())
                         .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                            if section == Section::Integrations && v.section != section {
+                            if section == Section::Backend && v.section != section {
                                 v.load_integrations(cx); // installed from a terminal meanwhile
+                                v.facts = None;
                             }
                             v.section = section;
                             v.recording = None;
@@ -73,7 +92,7 @@ impl Render for SettingsView {
             Section::General => div().child(page_header(&theme, "General", "The window and what it shows.")).child(
                 card(&theme)
                     .child(
-                        toggle_row(&theme, true, "show-agents", "Agents", "Every agent herdr finds, at the bottom of the sidebar.", settings.show_agents).on_click(cx.listener(
+                        toggle_row(&theme, true, "show-agents", "Agents", "Every agent running, at the bottom of the sidebar.", settings.show_agents).on_click(cx.listener(
                             |_, _: &ClickEvent, _, cx| update(cx, |s| s.show_agents = !s.show_agents),
                         )),
                     )
@@ -272,8 +291,8 @@ impl Render for SettingsView {
                                 .on_click(|_: &ClickEvent, _, _| crate::notify::open_system_settings()),
                         )
                     })))
-                    .child(section_label(&theme, "In herdr's terminal app"))
-                    .child(
+                    .when(on_herdr, |page| page.child(section_label(&theme, "In herdr's terminal app")))
+                    .when(on_herdr, |page| page.child(
                         card(&theme)
                             .mt_0()
                             .child(
@@ -316,8 +335,8 @@ impl Render for SettingsView {
                                     v.edit_herdr("ui.sound.enabled", Some((!sounds).into()), cx)
                                 })),
                             ),
-                    )
-                    .child(note(&theme, herdr_note))
+                    ))
+                    .when(on_herdr, |page| page.child(note(&theme, herdr_note)))
             }
             Section::Usage => {
                 use crate::settings::UsageAgent;
@@ -353,61 +372,6 @@ impl Render for SettingsView {
                     )
                     .children(agents)
             }
-            Section::Integrations => {
-                let body = match &self.integrations {
-                    None => note(&theme, "Asking herdr…").into_any_element(),
-                    Some(Err(e)) => note(&theme, e.clone()).text_color(theme.danger).into_any_element(),
-                    Some(Ok(list)) => card(&theme)
-                        .children(list.iter().enumerate().map(|(i, integration)| {
-                            let busy = self.integration_busy.as_deref() == Some(integration.target.as_str());
-                            let (status, button) = match integration.state.as_str() {
-                                "current" => ("Installed", "Uninstall"),
-                                "outdated" => ("Update available", "Update"),
-                                _ => ("Not installed", "Install"),
-                            };
-                            let status = match integration.available {
-                                true => status.to_string(),
-                                false => format!("{status} · `{}` is not on PATH", integration.command),
-                            };
-                            let (target, install) = (integration.target.clone(), button != "Uninstall");
-                            // Zeron's tile: the agent's mark on a soft square, muted with the row when the agent is missing.
-                            let mark = crate::ui::command_panel::agent_icon(&integration.target);
-                            let ink = if integration.available { theme.text } else { theme.text_muted };
-                            let tile = div()
-                                .flex_none()
-                                .size(px(36.))
-                                .rounded(px(10.))
-                                .bg(theme.hover)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(gpui::svg().path(mark).size(px(18.)).text_color(crate::ui::command_panel::icon_ink(mark, ink)));
-                            card_row(&theme, i == 0)
-                                .min_h(px(52.))
-                                .py(px(8.))
-                                .when(!integration.available, |el| el.text_color(theme.text_muted))
-                                .child(tile)
-                                .child(row_text(&theme, integration.label.clone(), status))
-                                .child(
-                                    action(&theme, SharedString::from(format!("integration-{}", integration.target)), if busy { "…" } else { button })
-                                        .when(!busy, |el| {
-                                            el.on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                                                v.run_integration(target.clone(), install, cx)
-                                            }))
-                                        }),
-                                )
-                        }))
-                        .into_any_element(),
-                };
-                div()
-                    .child(page_header(
-                        &theme,
-                        "Integrations",
-                        "Hooks that tell herdr what each agent is doing: working, waiting for you, done.",
-                    ))
-                    .child(body)
-                    .children(self.herdr_note.clone().map(|text| note(&theme, text)))
-            }
             Section::WebPages => div()
                 .child(page_header(
                     &theme,
@@ -416,39 +380,47 @@ impl Render for SettingsView {
                 ))
                 .child(self.web_pages(&theme, cx)),
             Section::Worktrees => self.worktrees_page(&theme, cx),
-            Section::Herdr => div()
-                .child(page_header(&theme, "herdr", "Where Shepherd finds herdr. Empty fields use herdr's defaults."))
+            Section::Backend => div()
+                .child(page_header(&theme, "Backend", "What runs the terminals. Shepherd shows one at a time, with its own workspaces."))
                 .child(
                     card(&theme)
                         .child(
                             card_row(&theme, true)
-                                .child(row_text(&theme, "herdr binary", "A path to herdr, or the one on PATH."))
-                                .child(field(&theme, &self.herdr_bin)),
+                                .child(row_text(&theme, "Backend", "Sessions, machines, plugins and popups are herdr's."))
+                                .child(self.backend_select(&theme, settings.backend, cx)),
                         )
-                        .child(
-                            card_row(&theme, false)
-                                .child(row_text(&theme, "API socket", "Shepherd switches to a new socket when it restarts."))
-                                .child(field(&theme, &self.herdr_socket)),
-                        )
-                        .child(
-                            card_row(&theme, false)
-                                .child(row_text(
-                                    &theme,
-                                    "Connection",
-                                    self.ping.clone().unwrap_or_else(|| "Checks that herdr answers on this socket.".into()),
-                                ))
-                                .child(action(&theme, "ping", "Test connection").on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.test_connection(cx)))),
-                        ),
+                        .when(on_herdr, |card_el| {
+                            card_el
+                                .child(
+                                    card_row(&theme, false)
+                                        .child(row_text(&theme, "herdr binary", "A path to herdr, or the one on PATH. Empty uses herdr's default."))
+                                        .child(field(&theme, &self.herdr_bin)),
+                                )
+                                .child(
+                                    card_row(&theme, false)
+                                        .child(row_text(&theme, "API socket", "Shepherd switches to a new socket when it restarts."))
+                                        .child(field(&theme, &self.herdr_socket)),
+                                )
+                                .child(
+                                    card_row(&theme, false)
+                                        .child(row_text(
+                                            &theme,
+                                            "Connection",
+                                            self.ping.clone().unwrap_or_else(|| "Checks that herdr answers on this socket.".into()),
+                                        ))
+                                        .child(action(&theme, "ping", "Test connection").on_click(cx.listener(|v, _: &ClickEvent, _, cx| v.test_connection(cx)))),
+                                )
+                        }),
                 )
-                .child(section_label(&theme, "Server"))
-                .child({
+                .when(on_herdr, |page| page.child(section_label(&theme, "Agent integrations")).child(self.integrations_block(&theme, cx)))
+                .when(on_herdr, |page| page.child(section_label(&theme, "herdr server")))
+                .when(on_herdr, |page| page.child({
                     let resume = herdr.bool("session.resume_agents_on_restore", true);
                     let history = herdr.bool("experimental.pane_history", false);
                     let channel = herdr.str("update.channel").unwrap_or("stable").to_string();
                     let fields = [
                         ("Shell", "For new panes. Empty is $SHELL."),
                         ("New pane folder", "follow, home, current or a path. follow takes the folder of the pane it opens from."),
-                        ("Worktrees folder", "Where new worktrees are checked out."),
                     ];
                     card(&theme)
                         .mt_0()
@@ -474,8 +446,9 @@ impl Render for SettingsView {
                                 })),
                             ),
                         )
-                })
-                .child(note(&theme, herdr_note)),
+                }))
+                .when(on_herdr, |page| page.child(note(&theme, herdr_note)))
+                .children(self.backend_block(&theme, settings.backend, cx)),
             Section::About => {
                 let updates = Updates::of(cx).clone();
                 let button = match &updates {

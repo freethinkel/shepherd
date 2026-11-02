@@ -330,6 +330,7 @@ mod tests {
             foreground_cwd: None,
             agent_session: None,
             state_change_seq: 0,
+            report: None,
         };
         let (a, b, c) = (pane("a", "w1"), pane("b", "w2"), pane("c", "w2"));
         let agents = [&a, &b, &c];

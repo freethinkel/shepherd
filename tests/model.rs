@@ -1,3 +1,4 @@
+use shepherd::backend::Change;
 use shepherd::model::{AgentScope, AgentSort, AgentStatus, Frac, Since, Snapshot, ago, attachable, split_path};
 
 fn fixture() -> Snapshot {
@@ -20,16 +21,16 @@ fn parses_snapshot() {
 fn only_a_pane_update_that_changes_nothing_shown_is_held() {
     let s = fixture();
     let update = |title: &str, status: &str| {
-        serde_json::json!({"event": "pane_updated", "data": {"type": "pane_updated", "pane": {
+        Change::Pane(Box::new(serde_json::from_value(serde_json::json!({
             "pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "terminal_id": "term_b", "agent_status": status,
             "focused": true, "cwd": "/tmp/demo", "revision": 8, "agent": "claude",
-            "terminal_title": format!("◐ {title}"), "terminal_title_stripped": title}}})
+            "terminal_title": format!("◐ {title}"), "terminal_title_stripped": title})).unwrap()))
     };
     assert!(s.holds(&update("fixing tests", "working")));
     assert!(!s.holds(&update("fixing more tests", "working")));
     assert!(!s.holds(&update("fixing tests", "done")));
-    assert!(!s.holds(&serde_json::json!({"event": "tab_focused", "data": {}})));
-    assert!(!s.holds(&serde_json::Value::Null)); // a resync
+    assert!(!s.holds(&Change::Focused));
+    assert!(!s.holds(&Change::Any)); // a resync
 }
 
 #[test]

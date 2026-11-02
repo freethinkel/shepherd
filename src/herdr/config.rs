@@ -22,11 +22,15 @@ pub fn config_path() -> PathBuf {
     dir().join("config.toml")
 }
 
-/// herdr's folder, with its config and its sessions' sockets: `$XDG_CONFIG_HOME/herdr`, else `%APPDATA%\herdr` on
-/// Windows, else `~/.config/herdr`.
+/// herdr's folder, with its config and its sessions' sockets.
 pub(super) fn dir() -> PathBuf {
+    config_home().join("herdr")
+}
+
+/// Where herdr and hc keep their folders: `$XDG_CONFIG_HOME`, else `%APPDATA%` on Windows, else `~/.config`.
+pub fn config_home() -> PathBuf {
     let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("APPDATA").filter(|_| cfg!(windows)).map(PathBuf::from));
-    config.unwrap_or_else(|| crate::settings::home().join(".config")).join("herdr")
+    config.unwrap_or_else(|| crate::settings::home().join(".config"))
 }
 
 /// The file as herdr reads it; a missing one is empty, so every key reads as herdr's default.
@@ -53,6 +57,12 @@ impl HerdrConfig {
 
     pub fn int(&self, key: &str, default: i64) -> i64 {
         self.get(key).and_then(Value::as_integer).unwrap_or(default)
+    }
+
+    /// A number, whichever way the file writes it.
+    pub fn number(&self, key: &str) -> Option<f64> {
+        let value = self.get(key)?;
+        value.as_float().or(value.as_integer().map(|n| n as f64))
     }
 
     pub fn str(&self, key: &str) -> Option<&str> {

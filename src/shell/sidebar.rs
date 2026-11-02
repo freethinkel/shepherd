@@ -731,7 +731,8 @@ impl Shell {
             .child(self.place_bar(theme, list_offset, window, cx))
     }
 
-    /// Arc's space bar: a button for each herdr session and machine, the shown one lit, and + for a new one.
+    /// Arc's space bar: a button for each herdr session and machine, the shown one lit, and + for a new one. Off herdr
+    /// there are none, and only the settings stay.
     /// `offset` is the workspace list's: the lit square under the buttons moves as far toward the next place as the list
     /// has moved toward it.
     fn place_bar(&self, theme: &Theme, offset: f32, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -900,7 +901,7 @@ impl Shell {
                                 .flex_none()
                                 .mx_auto()
                                 .relative()
-                                .w(px(self.places.len() as f32 * step - (step - 30.)))
+                                .w(px((self.places.len() as f32 * step - (step - 30.)).max(0.)))
                                 .h(px(30.))
                                 .child(gpui::canvas(move |bounds, _, _| motion.borrow_mut().row = Some(bounds), |_, _, _, _| {}).absolute().size_full())
                                 .children(lit)
@@ -909,21 +910,23 @@ impl Shell {
                         ),
                 )),
             )
-            .child(
-                div()
-                    .id("place-new")
-                    .tooltip(tip("New session", None))
-                    .size(px(30.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg))
-                    .child(gpui::svg().path("icons/plus.svg").size(px(16.)).text_color(theme.text_muted))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_session_dialog(window, cx))),
-            )
+            .when(self.backend.herdr().is_some(), |bar| {
+                bar.child(
+                    div()
+                        .id("place-new")
+                        .tooltip(tip("New session", None))
+                        .size(px(30.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(8.))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(hover_bg))
+                        .child(gpui::svg().path("icons/plus.svg").size(px(16.)).text_color(theme.text_muted))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_session_dialog(window, cx))),
+                )
+            })
     }
 }
 
