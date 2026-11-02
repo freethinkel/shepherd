@@ -1,5 +1,5 @@
 use shepherd::backend::Change;
-use shepherd::model::{AgentScope, AgentSort, AgentStatus, Frac, Since, Snapshot, ago, attachable, split_path};
+use shepherd::model::{AgentScope, AgentSort, AgentStatus, Frac, Since, Snapshot, ago, attachable, split_path, thread_shown};
 
 fn fixture() -> Snapshot {
     let value: serde_json::Value = serde_json::from_str(include_str!("fixtures/snapshot.json")).unwrap();
@@ -489,4 +489,65 @@ fn a_dropped_workspace_group_takes_the_place_of_the_one_it_is_dropped_on() {
     // up: before the one dropped on, worktrees along
     assert_eq!(shepherd::model::group_move(&groups, 1, 0), Some((ids(&["b", "b1"]), Some("a".into()))));
     assert_eq!(shepherd::model::group_move(&groups, 1, 1), None);
+}
+
+/// A project (`w1`) with an idle worktree (`w2`) and a worktree (`w3`) running two agents in one tab and one in another.
+fn project() -> Snapshot {
+    let pane = |id: &str, workspace: &str, tab: &str, status: &str| {
+        serde_json::json!({"pane_id": id, "tab_id": tab, "workspace_id": workspace, "terminal_id": id, "agent_status": status, "agent": "claude"})
+    };
+    let workspace = |id: &str| serde_json::json!({"workspace_id": id, "label": id, "number": 1, "active_tab_id": null, "agent_status": "idle"});
+    serde_json::from_value(serde_json::json!({
+        "workspaces": [workspace("w1"), workspace("w2"), workspace("w3")],
+        "tabs": [],
+        "panes": [pane("a", "w3", "t1", "working"), pane("b", "w3", "t2", "blocked"), serde_json::json!({"pane_id": "shell", "tab_id": "t3", "workspace_id": "w2", "terminal_id": "shell", "agent_status": "idle"})],
+        "layouts": [],
+    }))
+    .unwrap()
+}
+
+fn ids(threads: &[shepherd::model::Thread]) -> Vec<String> {
+    threads.iter().map(|(w, p)| p.map_or(w.workspace_id.clone(), |p| p.pane_id.clone())).collect()
+}
+
+#[test]
+fn agents_go_on_their_shelves_and_a_workspace_without_one_settles() {
+    let s = project();
+    let shelves = s.shelves(None);
+    assert_eq!(ids(&shelves.active), ["b"]);
+    assert_eq!(ids(&shelves.working), ["a"]);
+    // a plain shell is no agent
+    assert_eq!(ids(&shelves.settled), ["w1", "w2"]);
+}
+
+#[test]
+fn the_project_select_narrows_the_shelves_and_one_gone_shows_them_all() {
+    let s = project();
+    let shelves = s.shelves(Some("w2"));
+    assert_eq!((ids(&shelves.active), ids(&shelves.settled)), (Vec::<String>::new(), vec!["w2".to_string()]));
+    assert_eq!(ids(&s.shelves(Some("another-places")).working), ["a"]);
+}
+
+#[test]
+fn the_search_finds_a_thread_by_its_title_workspace_or_project() {
+    let mut s = project();
+    s.panes[0].terminal_title_stripped = Some("Fix the Parser".into());
+    let shelves = s.shelves(None);
+    let (titled, settled) = (shelves.working[0], shelves.settled[0]);
+    assert!(s.thread_matches(titled, "parser"));
+    assert!(s.thread_matches(titled, "w3"));
+    assert!(!s.thread_matches(settled, "parser"));
+    assert!(s.thread_matches(settled, ""), "an empty search keeps them all");
+}
+
+#[test]
+fn the_list_marks_the_shown_tabs_agent_or_else_the_workspaces_first_card() {
+    let s = project();
+    let shelves = s.shelves(None);
+    let threads: Vec<_> = shelves.active.iter().chain(&shelves.working).chain(&shelves.settled).copied().collect();
+    let lit = |workspace, tab| (0..threads.len()).filter(|i| thread_shown(&threads, *i, workspace, tab)).collect::<Vec<_>>();
+    assert_eq!(lit(Some("w3"), Some("t1")), [1], "the shown agent, not its neighbour");
+    assert_eq!(lit(Some("w3"), Some("t9")), [0], "a tab without an agent still marks its workspace");
+    assert_eq!(lit(Some("w1"), None), [2]);
+    assert_eq!(lit(None, Some("t1")), Vec::<usize>::new(), "a web page is shown: nothing is");
 }

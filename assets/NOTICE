@@ -9,6 +9,9 @@ Solar icon set, Linear style (assets/solar-linear.json)
   By 480 Design (https://www.figma.com/community/file/1166831539721848736), Creative Commons Attribution 4.0
   International (https://creativecommons.org/licenses/by/4.0/); taken as published at https://iconify.design.
 
+Lucide (assets/icons/lucide-*.svg)
+  From https://lucide.dev (lucide-static 0.460.0), ISC license.
+
 Simple Icons (assets/icons/<name>-mark.svg for: bat, bazel, bun, cloudflare, cmake, consul, dart, deno, docker, dotnet, elixir, ffmpeg, flutter, git, github, gitlab, go, helix, htop, java, kubernetes, lua, mongodb, mysql, neovim, nextflow, nginx, nix, node, nomad, ollama, packer, php, podman, postgresql, python, rclone, redis, ruby, rust, sqlite, supabase, swift, tailscale, task, terraform, tmux, turbo, uv, vagrant, vault, vim, zig)
   From https://simpleicons.org (simple-icons 16.36.0), with their <title> removed. CC0 1.0, except:
     deno-mark: MIT, https://github.com/denoland/docs/blob/5dee713844c7447f80acd4093caa9d350d80bf36/static/img/logo.svg

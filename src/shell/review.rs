@@ -596,14 +596,19 @@ fn footer_button(id: &'static str, icon: &'static str, label: &'static str, ink:
         })
 }
 
-/// The title (a click opens it), its state (and conflicts while open), number and author.
-fn request_card(theme: &Theme, r: &Request) -> AnyElement {
-    let (label, color) = match r.pr.state {
+/// A PR state as it is written and coloured.
+pub(super) fn pr_tone(state: &str, theme: &Theme) -> (&'static str, Hsla) {
+    match state {
         "draft" => ("Draft", theme.text_muted),
         "merged" => ("Merged", theme.accent),
         "closed" => ("Closed", theme.danger),
         _ => ("Open", theme.success),
-    };
+    }
+}
+
+/// The title (a click opens it), its state (and conflicts while open), number and author.
+fn request_card(theme: &Theme, r: &Request) -> AnyElement {
+    let (label, color) = pr_tone(r.pr.state, theme);
     let number = format!("{}{}", if r.pr.gitlab { "!" } else { "#" }, r.pr.number);
     let (url, accent) = (r.pr.url.clone(), theme.accent);
     div()

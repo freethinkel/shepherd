@@ -89,14 +89,24 @@ impl Render for SettingsView {
             )));
 
         let body = match self.section {
-            Section::General => div().child(page_header(&theme, "General", "The window and what it shows.")).child(
+            Section::General => div().child(page_header(&theme, "General", "The window and what it shows.")).child(section_label(&theme, "Sidebar")).child(
                 card(&theme)
+                    .mt_0()
                     .child(
-                        toggle_row(&theme, true, "show-agents", "Agents", "Every agent running, at the bottom of the sidebar.", settings.show_agents).on_click(cx.listener(
+                        card_row(&theme, true)
+                            .child(row_text(&theme, "Style", "Herdr's workspaces with the agents under them, or T3 Code's project select over a flat list of agents."))
+                            .child(self.sidebar_select(&theme, settings.sidebar_style, cx)),
+                    )
+                    // the T3 Code sidebar's list is its agents
+                    .when(settings.sidebar_style == SidebarStyle::Herdr, |el| el.child(
+                        toggle_row(&theme, false, "show-agents", "Agents", "Every agent running, at the bottom of the sidebar.", settings.show_agents).on_click(cx.listener(
                             |_, _: &ClickEvent, _, cx| update(cx, |s| s.show_agents = !s.show_agents),
                         )),
-                    )
-                    .child(card_row(&theme, false).child(row_text(
+                    )),
+            ).child(section_label(&theme, "Window")).child(
+                card(&theme)
+                    .mt_0()
+                    .child(card_row(&theme, true).child(row_text(
                         &theme,
                         "Status icons",
                         "How an agent's state shows. Dots and Symbols are herdr's styles; Animated is Zeron's, a pulse while an agent works.",

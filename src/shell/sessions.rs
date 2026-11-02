@@ -513,7 +513,7 @@ impl Shell {
     pub(super) fn place_preview(&self, place: &Place, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let settings = SettingsGlobal::of(cx).settings.clone();
         let heading = div().px(px(16.)).pt(px(8.)).pb(px(6.)).text_size(px(11.)).text_color(theme.text_faint).truncate().child(place.look(cx).0);
-        let column = div().size_full().flex().flex_col().children(self.web_rows(Some(&place.key()), false, theme, window, cx)).child(heading);
+        let column = div().size_full().flex().flex_col().children(self.web_rows(Some(&place.key()), false, theme, window, cx)).child(heading).children(self.thread_bar(theme, self.snapshots.get(&place.key()), false, cx));
         let Some(snapshot) = self.snapshots.get(&place.key()) else {
             if matches!(place, Place::Session(s) if !s.running) {
                 let why = "Not running: it starts when you get there";
@@ -523,7 +523,7 @@ impl Shell {
         };
         // the rows the sidebar draws once the swipe lands, on the tab herdr would show there first
         let shown_ws = snapshot.pick_tab_in(None, None).map(|t| t.workspace_id.clone());
-        let rows = self.workspace_rows(theme, Some(snapshot), &shown_ws, false, window.is_window_active(), cx);
+        let rows = self.sidebar_rows(theme, Some(snapshot), &shown_ws, None, false, window.is_window_active(), cx);
         let workspaces = div().flex_1().min_h_0().overflow_hidden().px(px(8.)).flex().flex_col().gap(px(2.)).children(rows.into_iter().map(|(_, row)| row));
         let new_workspace = div()
             .flex_none()
@@ -542,7 +542,7 @@ impl Shell {
         if settings.attention_agents {
             agents.retain(|e| crate::notify::wants_attention(e.pane.agent_status));
         }
-        let agents = (settings.show_agents && any_agents).then(|| {
+        let agents = (settings.shows_agents_section() && any_agents).then(|| {
             let heading = div().px(px(16.)).pt(px(12.)).pb(px(4.)).border_t_1().border_color(theme.border).text_size(px(11.)).text_color(theme.text_faint).child("Agents");
             let list = div()
                 .flex_none()
@@ -562,7 +562,8 @@ impl Shell {
                 .child(div().flex_none().h(px(4.)));
             [heading.into_any_element(), list.into_any_element()]
         });
-        column.child(workspaces).child(new_workspace).children(agents.into_iter().flatten()).into_any_element()
+        // T3 Code's bar has this button
+        column.child(workspaces).when(settings.sidebar_style == crate::settings::SidebarStyle::Herdr, |el| el.child(new_workspace)).children(agents.into_iter().flatten()).into_any_element()
     }
 
     /// Moves the window to a session on this Mac: its socket goes in the settings, and everything the last server's
