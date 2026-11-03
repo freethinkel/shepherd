@@ -2101,6 +2101,7 @@ rename to new_name.rs
         assert!(out.status.success(), "{script}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
+    #[cfg(unix)] // its tests are unix-only: on Windows it would be dead code, an error under clippy's -D warnings
     fn take(dir: &tempfile::TempDir, base: Option<&str>) -> (CheckoutDiff, Vec<FileDiff>) {
         let diff = capture(dir.path().to_str().unwrap(), base).unwrap();
         let files = parse_patch(&diff.patch);
