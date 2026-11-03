@@ -12,7 +12,13 @@ Argument: `$ARGUMENTS`. Empty means `patch`; `minor` and `major` bump that part;
 1. Check the state; stop and say why if any of these fail:
    - the branch is `main` and `git fetch origin` shows it is not behind `origin/main`;
    - `Cargo.toml` and `Cargo.lock` have no uncommitted changes (the bump commit must hold only the version);
-   - the new version is greater than the current one (`make -s version`) and `v<new>` is not already a tag.
+   - the new version is greater than the current one (`make -s version`) and `v<new>` is not already a tag;
+   - the `release.yml` run on `HEAD` passed. It runs clippy (`-D warnings`) and the tests on a real Windows, which
+     the Mac's don't see: code under `cfg(unix)`, CRLF from git. Find it with `gh run list --workflow release.yml
+     --commit $(git rev-parse HEAD) --json databaseId,status,conclusion`; still running, wait with `gh run watch <id>
+     --exit-status` (not piped, or the exit code is lost); no run for `HEAD`, start one with `gh workflow run
+     release.yml --ref main` (its version is released already, so it only builds and tests). Failed: stop with the
+     failing step's log (`gh run view <id> --log-failed`).
    Other uncommitted files are fine: leave them alone, do not stash or commit them.
 2. Show the notes the release will get: `git log --no-merges --format='- %s' $(git describe --tags --abbrev=0)..HEAD | grep -vE '^- (docs|release):'`.
    If the list is empty, stop: there is nothing to release.
