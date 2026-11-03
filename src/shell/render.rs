@@ -75,7 +75,11 @@ impl Render for Shell {
         if std::mem::take(&mut self.popup_closed) && !self.panes.values().any(|p| p.read(cx).focus_handle(cx).is_focused(window)) {
             self.focused = None;
         }
-        let overlaid = self.panel_focused() || self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open()) || self.floating_open();
+        // a click on a pane, a menu or a field takes the keys from the sidebar's cursor
+        if self.sidebar_cursor.is_some() && !self.focus.is_focused(window) {
+            self.sidebar_cursor = None;
+        }
+        let overlaid = self.sidebar_cursor.is_some() || self.panel_focused() || self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open()) || self.floating_open();
         for f in &shown {
             if !self.panes.contains_key(&f.pane_id) {
                 let id = f.pane_id.clone();
@@ -308,10 +312,13 @@ impl Render for Shell {
             // a hidden panel's selection is not Cmd+C's to copy
             crate::ui::markdown::forget("review-");
         }
+        // the sidebar or the right panel has the keys, not a field in it: herdr's chords work there too
+        let side_keys = (self.sidebar_cursor.is_some() || self.panel_focused()) && self.focus.is_focused(window);
         let root = div()
             .id("root")
+            .when(side_keys, |el| el.key_context(crate::bindings::PANEL))
             .track_focus(&self.focus)
-            .capture_key_down(cx.listener(|s, e: &gpui::KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|s, e: &gpui::KeyDownEvent, window, cx| {
                 s.touch(cx);
                 // Cmd+C (Ctrl+C off macOS) over a selection in the review panel copies it, not the pane's
                 let m = &e.keystroke.modifiers;
@@ -323,8 +330,39 @@ impl Render for Shell {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                     cx.stop_propagation();
                 }
+                // Cmd+Enter (Ctrl+Enter off macOS) in a diff sends its comments, a card still open among them
+                if copy && e.keystroke.key == "enter"
+                    && s.panel_focused()
+                    && let Some(crate::right_panel::Surface::Diff(id)) = s.panel().and_then(|p| p.active.clone())
+                {
+                    cx.stop_propagation();
+                    s.send_diff_comments(&id, window, cx);
+                }
             }))
             .capture_any_mouse_down(cx.listener(|s, _: &MouseDownEvent, _, cx| s.touch(cx)))
+            // the sidebar's cursor, or a diff with the keyboard in the panel: only with the keys at the root, not in a field
+            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
+                let m = &e.keystroke.modifiers;
+                if m.platform || m.control || m.alt || !this.focus.is_focused(window) {
+                    return;
+                }
+                let key = e.keystroke.key.as_str();
+                let diff = match this.panel().and_then(|p| p.active.clone()) {
+                    Some(crate::right_panel::Surface::Diff(id)) if this.panel_focused() => this.right.diffs.get(&id).cloned(),
+                    _ => None,
+                };
+                let taken = match diff {
+                    Some(_) if key == "escape" => {
+                        this.focus_panel(false, window, cx);
+                        true
+                    }
+                    Some(diff) => diff.update(cx, |d, cx| d.nav_key(key, m.shift, window, cx)),
+                    None => this.sidebar_key(key, cx),
+                };
+                if taken {
+                    cx.stop_propagation();
+                }
+            }))
             .relative()
             .size_full()
             .flex()
@@ -333,9 +371,12 @@ impl Render for Shell {
             .text_color(theme.text)
             .font_family(theme.font_ui.clone())
             .text_size(px(13.))
-            .on_action(cx.listener(|this, _: &NewTab, _, cx| {
-                if let Some(tab) = this.shown_tab() {
-                    this.new_tab(tab.workspace_id, cx);
+            .on_action(cx.listener(|this, _: &NewTab, w, cx| {
+                let Some(tab) = this.shown_tab() else { return };
+                // with the keyboard in the right panel, its new tab: a page, its address to type in, as a browser's
+                match this.panel_focused() {
+                    true => this.new_browser_tab(tab.workspace_id, None, true, w, cx),
+                    false => this.new_tab(tab.workspace_id, cx),
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
@@ -355,15 +396,26 @@ impl Render for Shell {
                 }
                 this.pane_command(w, cx, |pane_id| Command::ClosePane { pane_id })
             }))
-            .on_action(cx.listener(|this, _: &ToggleZoom, w, cx| this.pane_command(w, cx, |pane_id| Command::Zoom { pane_id })))
+            .on_action(cx.listener(|this, _: &ToggleZoom, w, cx| {
+                // with the keys in the right panel, it takes the panes' room or gives it back, and keeps the keys
+                if this.panel_focused() {
+                    return this.update_panel(cx, |p| p.expanded = !p.expanded);
+                }
+                this.pane_command(w, cx, |pane_id| Command::Zoom { pane_id })
+            }))
             .on_action(cx.listener(|this, _: &crate::bindings::SwitchBackend, _, cx| this.next_backend(cx)))
             .on_action(cx.listener(|this, _: &FocusLeft, w, cx| {
                 if this.panel_focused() {
                     return this.focus_panel(false, w, cx);
                 }
-                this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Left })
+                if !this.enter_sidebar(w, cx) {
+                    this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Left })
+                }
             }))
             .on_action(cx.listener(|this, _: &FocusRight, w, cx| {
+                if this.sidebar_cursor.is_some() {
+                    return this.leave_sidebar(cx);
+                }
                 if !this.enter_panel(w, cx) {
                     this.pane_command(w, cx, |pane_id| Command::FocusPane { pane_id, direction: Direction::Right })
                 }
@@ -388,6 +440,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.step_workspace(false, cx)))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.step_workspace(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &FocusSidebar, w, cx| this.focus_sidebar(w, cx)))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, w, cx| this.toggle_right_panel(w, cx)))
             .on_action(cx.listener(|this, _: &ToggleReview, w, cx| this.toggle_review(w, cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, w, cx| this.toggle_diff(w, cx)))

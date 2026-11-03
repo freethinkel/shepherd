@@ -259,6 +259,8 @@ pub(super) enum ChangesEvent {
     Open { dir: String, root: String, path: String },
     /// A file's menu, for the image dialog.
     Preview { dir: String, root: String, path: String },
+    /// Cmd+Enter in a comment's field: the comments go to the agent.
+    Send,
 }
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
@@ -309,6 +311,14 @@ pub(super) struct Changes {
     hover: Option<HoverRow>,
     comment_key: u64,
     pub(super) sending: bool,
+    /// The file the keyboard's cursor is on, by index.
+    cursor: Option<usize>,
+    /// The keyboard is in this diff: the cursor shows. The shell says so each render.
+    pub(super) keys: bool,
+    /// Where the keyboard goes back to when a comment's card closes: the shell's own, the panel's while it has them.
+    pub(super) back: Option<gpui::FocusHandle>,
+    /// A card just closed: the next render gives the keyboard `back`.
+    refocus: bool,
 }
 
 impl Changes {
@@ -347,6 +357,10 @@ impl Changes {
             hover: None,
             comment_key: 0,
             sending: false,
+            cursor: None,
+            keys: false,
+            back: None,
+            refocus: false,
         }
     }
 
@@ -580,6 +594,81 @@ impl Changes {
         let top = self.list.logical_scroll_top().item_ix;
         let ix = self.row_ranges.iter().position(|range| range.contains(&top))?;
         Some(self.parsed.as_ref()?.files.get(ix)?.path.clone())
+    }
+
+    /// A key with the keyboard in the panel, as in the sidebar: j/k and ↓/↑ move the cursor over file headers and the
+    /// lines of open files, l/→ opens the file (or steps into it), h/← goes up to the file's header and shuts it,
+    /// Enter or o flips a file, c (or Enter) on a line comments on it, Shift+j/k and Shift+↓/↑ scroll a few lines,
+    /// Space and Shift+Space a page, g/G the first and last row. False when the key isn't the diff's.
+    // ponytail: the cursor is a row index, so a file opening mid-tween (one stand-in row) is stepped over, and a new
+    // capture can move it to another line
+    pub(super) fn nav_key(&mut self, key: &str, shift: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.rows.is_empty() {
+            return false;
+        }
+        let stop = |row: &DiffRow| matches!(row, DiffRow::FileHeader { .. } | DiffRow::Line { .. } | DiffRow::SplitLine { .. });
+        let top = self.list.logical_scroll_top().item_ix;
+        let file_top = self.row_ranges.iter().find(|r| r.contains(&top)).map_or(0, |r| r.start);
+        let at = self.cursor.filter(|c| *c < self.rows.len()).unwrap_or(file_top);
+        let file = self.rows[at].file();
+        let header = self.row_ranges.get(file).map_or(at, |r| r.start);
+        let next = self.rows.iter().enumerate().skip(at + 1).find(|(_, r)| stop(r)).map(|(i, _)| i);
+        let prev = self.rows[..at].iter().rposition(stop);
+        let collapsed = self.parsed.as_ref().and_then(|p| p.files.get(file)).is_some_and(|f| self.folds.get(&f.path).is_some_and(|fold| fold.collapsed));
+        let page = (f32::from(self.list.viewport_bounds().size.height) - 40.).max(40.);
+        let to = match key {
+            "down" | "j" if shift => return self.scrolled(px(60.), cx),
+            "up" | "k" if shift => return self.scrolled(px(-60.), cx),
+            "space" => return self.scrolled(px(if shift { -page } else { page }), cx),
+            "down" | "j" => next.unwrap_or(at),
+            "up" | "k" => prev.unwrap_or(at),
+            "g" if shift => self.rows.iter().rposition(stop).unwrap_or(at),
+            "g" => 0,
+            "right" | "l" if at == header && collapsed => {
+                self.toggle_fold(file, cx);
+                at
+            }
+            "right" | "l" => next.unwrap_or(at),
+            "left" | "h" if at == header && !collapsed => {
+                self.toggle_fold(file, cx);
+                at
+            }
+            "left" | "h" => header,
+            "enter" | "o" if at == header => {
+                self.toggle_fold(file, cx);
+                at
+            }
+            "enter" | "c" => {
+                if let Some((path, side, line)) = self.anchor_at(at) {
+                    self.open_draft(path, side, line, None, window, cx);
+                }
+                return true;
+            }
+            _ => return false,
+        };
+        self.cursor = Some(to);
+        self.list.scroll_to_reveal_item(to);
+        cx.notify();
+        true
+    }
+
+    /// The line a comment on row `ix` is about: its new side, else its old.
+    fn anchor_at(&self, ix: usize) -> Option<(String, CommentSide, u32)> {
+        let row = *self.rows.get(ix)?;
+        let file = self.parsed.as_ref()?.files.get(row.file())?;
+        let line = |hunk: u32, slot: u32| file.hunks.get(hunk as usize)?.lines.get(slot as usize).and_then(line_anchor);
+        let anchor = match row {
+            DiffRow::Line { hunk, line: slot, .. } => line(hunk, slot),
+            DiffRow::SplitLine { hunk, left, right, .. } => right.and_then(|r| line(hunk, r)).or_else(|| left.and_then(|l| line(hunk, l))),
+            _ => None,
+        }?;
+        Some((file.path.clone(), anchor.0, anchor.1))
+    }
+
+    fn scrolled(&mut self, by: Pixels, cx: &mut Context<Self>) -> bool {
+        self.list.scroll_by(by);
+        cx.notify();
+        true
     }
 
     /// Swap one file's body rows (everything after its header) for `new_body`, splicing both the row model and the list
@@ -839,8 +928,12 @@ impl Changes {
         // Enter commits and Shift+Enter breaks the line, as a composer's
         let input = cx.new(|cx| TextareaState::new(window, cx).placeholder("Request a change…").submit_on_enter(true));
         let events = cx.subscribe(&input, |this: &mut Self, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
+            if let InputEvent::PressEnter { secondary, .. } = event {
                 this.commit_draft(cx);
+                // Cmd+Enter (Ctrl+Enter off macOS): the field takes it, so the send goes by way of the shell
+                if *secondary {
+                    cx.emit(ChangesEvent::Send);
+                }
             }
         });
         input.update(cx, |input, cx| {
@@ -869,12 +962,14 @@ impl Changes {
 
     fn cancel_draft(&mut self, cx: &mut Context<Self>) {
         self.draft = None;
+        self.refocus = true;
         self.sync_comment_rows(cx);
         cx.notify();
     }
 
-    fn commit_draft(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn commit_draft(&mut self, cx: &mut Context<Self>) {
         let Some(draft) = self.draft.take() else { return };
+        self.refocus = true;
         let body = draft.input.read(cx).value().trim().to_string();
         if let (false, Some(dir)) = (body.is_empty(), self.dir.clone()) {
             let comments = self.comments.entry(dir).or_default();
@@ -1049,7 +1144,18 @@ impl Changes {
         None
     }
 
+    /// Row `ix`, lit under the keyboard's cursor (a file header lights itself).
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let row = self.render_row_inner(ix, window, cx);
+        let lit = self.keys && self.cursor == Some(ix) && !matches!(self.rows.get(ix), Some(DiffRow::FileHeader { .. }));
+        if !lit {
+            return row;
+        }
+        let accent = Theme::of(cx).accent;
+        div().relative().w_full().child(row).child(div().absolute().inset_0().bg(accent.opacity(0.1)).border_l_2().border_color(accent)).into_any_element()
+    }
+
+    fn render_row_inner(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let empty = || gpui::Empty.into_any_element();
         let Some(parsed) = &self.parsed else { return empty() };
         let files = parsed.files.clone();
@@ -1195,9 +1301,13 @@ impl Changes {
             .gap(px(8.0))
             .px(px(12.0))
             .bg(theme.wash(0.025))
+            .when(self.keys && self.cursor.is_some() && self.cursor == self.row_ranges.get(ix).map(|r| r.start), |el| el.bg(theme.selected))
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_fold(ix, cx)))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.cursor = this.row_ranges.get(ix).map(|r| r.start);
+                this.toggle_fold(ix, cx)
+            }))
             .on_mouse_down(MouseButton::Right, {
                 let path = file.path.clone();
                 cx.listener(move |this, e: &MouseDownEvent, _, cx| {
@@ -1968,6 +2078,11 @@ impl Render for Changes {
         crate::ui::reap_popup(&mut self.scope_menu, window);
         crate::ui::reap_popup(&mut self.ref_menu, window);
         crate::ui::reap_popup(&mut self.file_menu, window);
+        if std::mem::take(&mut self.refocus)
+            && let Some(back) = &self.back
+        {
+            window.focus(back, cx);
+        }
         let theme = Theme::of(cx).clone();
         let notice = |text: SharedString, warn: bool| {
             div().flex_1().flex().items_center().justify_center().px(px(16.0)).text_size(px(12.0)).text_color(if warn { theme.warning.opacity(0.85) } else { theme.text_faint }).child(text).into_any_element()
@@ -1997,6 +2112,25 @@ impl Render for Changes {
                             .when_some(sticky_header, |el, header| el.child(header))
                             .child(crate::ui::scrollbar("changes-scrollbar", &self.list, &theme)),
                     )
+                    // what the keys do, while they're here
+                    .when(self.keys, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .px(px(12.0))
+                                .py(px(4.0))
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .text_size(px(11.0))
+                                .text_color(theme.text_faint)
+                                .truncate()
+                                .child(if cfg!(target_os = "macos") {
+                                    "j k move · l open · h close · c comment · ⌘↵ send · ⇧j ⇧k scroll · esc back"
+                                } else {
+                                    "j k move · l open · h close · c comment · ctrl+↵ send · ⇧j ⇧k scroll · esc back"
+                                }),
+                        )
+                    })
                     .into_any_element()
             }
         };
@@ -2025,6 +2159,7 @@ impl Shell {
         let key = surface.key().to_string();
         let tab = key.clone();
         let changes = cx.new(Changes::new);
+        changes.update(cx, |c, _| c.back = Some(self.focus.clone()));
         cx.subscribe_in(&changes, window, move |this, _, event: &ChangesEvent, window, cx| match event {
             ChangesEvent::Discard { dir, target } => {
                 this.right.discard = Some(crate::ui::Popup::new(DiscardAsk { tab: tab.clone(), dir: dir.clone(), target: target.clone() }));
@@ -2032,6 +2167,7 @@ impl Shell {
             }
             ChangesEvent::Open { dir, root, path } => this.edit_diff_file(dir, root, path, cx),
             ChangesEvent::Preview { dir, root, path } => this.preview_diff_file(dir, root, path, window, cx),
+            ChangesEvent::Send => this.send_diff_comments(&tab, window, cx),
         })
         .detach();
         self.right.diffs.insert(key, changes);
@@ -2098,8 +2234,15 @@ impl Shell {
     pub(super) fn sync_diffs(&mut self, shown: &ShownReview, window: &Window, cx: &mut Context<Self>) {
         let active = self.panel().and_then(|p| p.active.clone()).filter(|_| self.right_panel_shown(window));
         let in_use = window.is_window_active();
+        let keys = self.panel_focused() && self.focus.is_focused(window);
         for (id, changes) in &self.right.diffs {
             let here = matches!(&active, Some(Surface::Diff(a)) if a == id);
+            changes.update(cx, |changes, cx| {
+                if changes.keys != (here && keys) {
+                    changes.keys = here && keys;
+                    cx.notify();
+                }
+            });
             changes.update(cx, |changes, cx| changes.show(shown.dir.as_deref().filter(|_| here), shown.branch.as_deref().filter(|_| here), here && in_use, cx));
         }
     }
@@ -2115,8 +2258,14 @@ impl Shell {
     }
 
     /// Only a click in the footer comes here.
-    fn send_diff_comments(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(agent), Some(changes)) = (self.diff_recipient(id, window, cx), self.right.diffs.get(id).cloned()) else { return };
+    pub(super) fn send_diff_comments(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(changes) = self.right.diffs.get(id).cloned() else { return };
+        // a card still open is a comment too
+        changes.update(cx, |changes, cx| changes.commit_draft(cx));
+        if changes.read(cx).comment_count() == 0 {
+            return;
+        }
+        let Some(agent) = self.diff_recipient(id, window, cx) else { return crate::ui::toast::error(cx, "No agent here to send the comments to") };
         let Some((dir, prompt, ids)) = changes.update(cx, |changes, _| changes.take_prompt()) else { return };
         let name = agent.agent.clone().unwrap_or_default();
         let (backend, pane) = (self.backend.clone(), agent.pane_id);
@@ -2218,8 +2367,10 @@ impl Shell {
             .flex()
             .flex_col()
             // keys to the panel, a comment's field, and tab keys; a pane's click takes them back
+            // also when the panel had them but a field took them since (a page's address, a tab gone): its own field
+            // takes them back on this same press
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                if !this.panel_focused() {
+                if !this.panel_focused() || !this.focus.is_focused(window) {
                     this.focus_panel(true, window, cx);
                 }
             }))

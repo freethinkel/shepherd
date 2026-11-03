@@ -218,6 +218,7 @@ impl Shell {
         match on {
             true => {
                 self.right.focused = self.shown_tab().map(|t| t.workspace_id);
+                self.sidebar_cursor = None;
                 // a pane hands its keys over; `sync_pages` gives them to the page
                 window.focus(&self.focus, cx);
             }
@@ -259,7 +260,8 @@ impl Shell {
     }
 
     /// The diff's key: as the pull request's, but a workspace may have no diff yet. In a repo, its first is made.
-    pub(super) fn toggle_diff(&mut self, window: &Window, cx: &mut Context<Self>) {
+    /// The keyboard goes along: to the diff shown, back to the panes when it closes.
+    pub(super) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let seen = self.right_panel_shown(window);
         let mut missing = false;
         self.update_panel(cx, |p| missing = !p.toggle_diff(seen));
@@ -267,6 +269,8 @@ impl Shell {
         if missing && dir.is_some_and(|d| branch_of(&d, cx).is_some()) {
             self.add_diff_surface(window, cx);
         }
+        let on_diff = self.panel().is_some_and(|p| p.open && matches!(p.active, Some(Surface::Diff(_))));
+        self.focus_panel(on_diff, window, cx);
     }
 
     /// Zeron's takeover, from the strip's button: the panel takes the panes' room, which clip and keep their grids, or

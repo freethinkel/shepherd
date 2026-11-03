@@ -212,6 +212,11 @@ pub struct Shell {
     /// The status bar's right-click menu of its labels, where it was clicked.
     statusbar_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     agents_scroll: gpui::ScrollHandle,
+    /// The sidebar's keyboard cursor (cmd-e): while it's up, the sidebar has the keys.
+    sidebar_cursor: Option<sidebar::SidebarItem>,
+    /// The cursor moved: its row scrolls into view when next drawn.
+    reveal_cursor: Rc<Cell<bool>>,
+    workspaces_scroll: gpui::ScrollHandle,
     tab_bar: tab_bar::TabBar,
     /// Holds keyboard focus when no pane can (renames ended, a tab of only Shepherd's own pane), so the app's
     /// actions still dispatch.
@@ -532,6 +537,9 @@ impl Shell {
                     merge_failure: None,
                     pending_worktrees: Vec::new(),
                     agents_scroll: gpui::ScrollHandle::new(),
+                    sidebar_cursor: None,
+                    reveal_cursor: Default::default(),
+                    workspaces_scroll: gpui::ScrollHandle::new(),
                     tab_bar: Default::default(),
                     focus: cx.focus_handle(),
                     confirm_focus: cx.focus_handle(),
@@ -966,11 +974,35 @@ impl Shell {
 
     /// Ghostty's `performable:goto_split`: focus the pane on that side of the terminal you are in; with none there,
     /// the key goes on to whatever has focus, so Ctrl+L still clears a shell and Ctrl+H still deletes in a field.
-    fn navigate(&mut self, direction: Direction, window: &Window, cx: &mut Context<Self>) {
+    fn navigate(&mut self, direction: Direction, window: &mut Window, cx: &mut Context<Self>) {
+        // out of the sidebar or the right panel, toward the panes
+        match direction {
+            Direction::Right if self.sidebar_cursor.is_some() => return self.leave_sidebar(cx),
+            Direction::Left if self.panel_focused() => return self.focus_panel(false, window, cx),
+            Direction::Up | Direction::Down if self.sidebar_cursor.is_some() => {
+                self.sidebar_key(if direction == Direction::Up { "up" } else { "down" }, cx);
+                return;
+            }
+            _ => {}
+        }
         let focused = self.panes.iter().find(|(_, pane)| pane.read(cx).focus_handle(cx).is_focused(window)).map(|(id, _)| id.clone());
         let tab = self.shown_tab().map(|t| t.tab_id);
         let layout = self.snapshot.as_ref().and_then(|s| s.layouts.iter().find(|l| Some(&l.tab_id) == tab.as_ref()));
-        let next = focused.filter(|_| self.pages.shown.is_none()).zip(layout).and_then(|(id, l)| l.neighbor(&id, direction).map(str::to_string));
+        let next = focused.clone().filter(|_| self.pages.shown.is_none()).zip(layout).and_then(|(id, l)| l.neighbor(&id, direction).map(str::to_string));
+        // past the leftmost or rightmost pane, out to the sidebar or the right panel as FocusLeft/Right go; a vim there
+        // keeps the key for its own splits (vim-tmux-navigator's way). ponytail: `programs` is polled every 2 s, so a
+        // vim started just now can lose its first key to the sidebar
+        let vim = focused.as_ref().and_then(|p| self.tab_bar.programs.get(p)).is_some_and(|p| p.contains("vim") || p == "vi");
+        if next.is_none() && focused.is_some() && self.pages.shown.is_none() && !vim {
+            let out = match direction {
+                Direction::Left => self.enter_sidebar(window, cx),
+                Direction::Right => self.enter_panel(window, cx),
+                _ => false,
+            };
+            if out {
+                return;
+            }
+        }
         let (Some(next), Some(tab), Some(snapshot)) = (next, tab, self.snapshot.as_mut()) else { return cx.propagate() };
         // herdr's word comes back over an event, its coalescing and a whole snapshot: the window moves now, and herdr
         // is told the pane rather than the side, so the two agree. ponytail: a snapshot already on its way undoes this until the next one.

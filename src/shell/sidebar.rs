@@ -322,7 +322,10 @@ impl Shell {
             };
             // its right-click menu open: lit until it closes
             let menu_on = live && self.ws_menu.as_ref().is_some_and(|m| m.is_open() && m.value.0 == w.workspace_id);
+            let ring = live.then(|| self.cursor_ring(&SidebarItem::Workspace(w.workspace_id.clone()), &self.workspaces_scroll, theme)).flatten();
             row(theme, selected, SharedString::from(format!("ws-{}", w.workspace_id)))
+                .relative()
+                .children(ring)
                 .h(px(if two { WS_TWO_LINES } else { ws_h }))
                 .when(menu_on && !selected, |el| el.bg(theme.hover))
                 .when(live, |el| pane_drag::accept_pane_in_workspace(el, &w.workspace_id, theme.accent.opacity(0.15), cx))
@@ -602,6 +605,7 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.workspaces_scroll)
                     // a sideways swipe moves between places, not down the list
                     .map(|mut el| {
                         el.style().restrict_scroll_to_axis = Some(true);
@@ -983,6 +987,179 @@ pub(super) enum AgentMenu {
     Project(String),
 }
 
+/// A row the sidebar's keyboard cursor stands on: a workspace, or an agent by its pane.
+#[derive(Clone, PartialEq)]
+pub(super) enum SidebarItem {
+    Workspace(String),
+    Agent(String),
+}
+
+impl Shell {
+    /// The rows the cursor walks, top to bottom as drawn: workspaces with the worktrees of open groups, then the agents
+    /// of open projects.
+    // ponytail: the Herdr sidebar's order; T3 Code's list walks the same workspaces and draws no cursor
+    fn sidebar_items(&self, cx: &App) -> Vec<SidebarItem> {
+        let Some(s) = self.snapshot.as_ref() else { return Vec::new() };
+        let mut items = Vec::new();
+        for (w, kids) in crate::model::groups(s.workspace_tree()) {
+            items.push(SidebarItem::Workspace(w.workspace_id.clone()));
+            if !self.folded.contains(&w.workspace_id) {
+                items.extend(kids.iter().map(|k| SidebarItem::Workspace(k.workspace_id.clone())));
+            }
+        }
+        if SettingsGlobal::of(cx).settings.shows_agents_section() {
+            let grouped = self.agent_sort == AgentSort::Grouped;
+            items.extend(
+                self.shown_agents(cx)
+                    .into_iter()
+                    .filter(|a| !grouped || !self.agents_folded.contains(&a.project.0))
+                    .map(|a| SidebarItem::Agent(a.pane.pane_id)),
+            );
+        }
+        items
+    }
+
+    /// cmd-e: the keys to the sidebar, the cursor on the workspace shown; again, back to the panes.
+    pub(super) fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_cursor.is_some() {
+            return self.leave_sidebar(cx);
+        }
+        // Settings stands in for the sidebar and has its own keys
+        if self.settings.is_some() {
+            return;
+        }
+        if !self.sidebar_open {
+            self.toggle_sidebar(cx);
+        }
+        self.release_panel();
+        let shown = self.shown_tab().map(|t| SidebarItem::Workspace(t.workspace_id));
+        self.sidebar_cursor = shown.or_else(|| self.sidebar_items(cx).into_iter().next());
+        if self.sidebar_cursor.is_some() {
+            self.reveal_cursor.set(true);
+            window.focus(&self.focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// The keys back to the panes: forgetting the pane focused has the next render focus herdr's again.
+    pub(super) fn leave_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_cursor.take().is_some() {
+            self.focused = None;
+        }
+        cx.notify();
+    }
+
+    /// A key while the sidebar has the keys: j/k and ↓/↑ move, Enter opens and goes back to the panes, Space shows
+    /// what's under the cursor and stays, h/← folds a group (or goes up to it), l/→ opens one, Esc leaves. False when
+    /// the key isn't the sidebar's.
+    pub(super) fn sidebar_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let Some(at) = self.sidebar_cursor.clone() else { return false };
+        let items = self.sidebar_items(cx);
+        let i = items.iter().position(|it| *it == at);
+        let mut move_to = |to: Option<usize>| {
+            if let Some(item) = to.and_then(|to| items.get(to)) {
+                self.sidebar_cursor = Some(item.clone());
+                self.reveal_cursor.set(true);
+            }
+        };
+        match key {
+            "down" | "j" => move_to(Some(i.map_or(0, |i| (i + 1).min(items.len().saturating_sub(1))))),
+            "up" | "k" => move_to(Some(i.map_or(0, |i| i.saturating_sub(1)))),
+            "enter" | "space" => {
+                self.open_sidebar_item(&at, key == "enter", cx);
+                if key == "enter" {
+                    self.leave_sidebar(cx);
+                }
+            }
+            "left" | "h" | "right" | "l" => {
+                let SidebarItem::Workspace(id) = &at else { return true };
+                let Some(s) = self.snapshot.as_ref() else { return true };
+                let groups = crate::model::groups(s.workspace_tree());
+                let fold = matches!(key, "left" | "h");
+                if let Some((_, kids)) = groups.iter().find(|(w, kids)| w.workspace_id == *id && !kids.is_empty()) {
+                    // a header: fold or open it, as its chevron does
+                    if self.folded.contains(id) != fold {
+                        let kid_h = if SettingsGlobal::of(cx).settings.compact_workspaces { 26. } else { WS_TWO_LINES };
+                        let full = kids.len() as f32 * (kid_h + 2.);
+                        let id = id.clone();
+                        self.toggle_fold(&id, full, cx);
+                    }
+                } else if fold && let Some((w, _)) = groups.iter().find(|(_, kids)| kids.iter().any(|k| k.workspace_id == *id)) {
+                    // a worktree: up to its group's header
+                    self.sidebar_cursor = Some(SidebarItem::Workspace(w.workspace_id.clone()));
+                    self.reveal_cursor.set(true);
+                }
+            }
+            "escape" => self.leave_sidebar(cx),
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+
+    /// Shows the cursor's workspace or agent; `focus` gives an agent's pane the keys.
+    fn open_sidebar_item(&mut self, item: &SidebarItem, focus: bool, cx: &mut Context<Self>) {
+        let Some(s) = self.snapshot.as_ref() else { return };
+        match item {
+            SidebarItem::Workspace(id) => {
+                let target = s.workspaces.iter().find(|w| &w.workspace_id == id).and_then(|w| w.active_tab_id.clone()).or_else(|| s.tabs_of(id).first().map(|t| t.tab_id.clone()));
+                self.select_tab(target);
+            }
+            SidebarItem::Agent(pane_id) => {
+                let Some(tab_id) = s.panes.iter().find(|p| &p.pane_id == pane_id).map(|p| p.tab_id.clone()) else { return };
+                match focus {
+                    true => self.show_agent(tab_id, pane_id.clone(), cx),
+                    false => self.select_tab(Some(tab_id)),
+                }
+            }
+        }
+    }
+
+    /// FocusLeft from the leftmost pane: the keys to the sidebar. False when a pane lies that way; already there, it
+    /// stays.
+    pub(super) fn enter_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.sidebar_cursor.is_some() {
+            return true;
+        }
+        let tab = self.shown_tab().map(|t| t.tab_id);
+        let layout = self.snapshot.as_ref().and_then(|s| s.layouts.iter().find(|l| Some(&l.tab_id) == tab.as_ref()));
+        let beside = self.active_pane(window, cx).is_some_and(|p| layout.is_some_and(|l| l.has_neighbor(&p, Direction::Left)));
+        if !beside {
+            self.focus_sidebar(window, cx);
+        }
+        !beside
+    }
+
+    /// The cursor's ring over row `item`, while the sidebar has the keys. Just moved, it scrolls the row (in the list
+    /// `scroll` tracks) into view once laid out.
+    pub(super) fn cursor_ring(&self, item: &SidebarItem, scroll: &gpui::ScrollHandle, theme: &Theme) -> Option<Div> {
+        (self.sidebar_cursor.as_ref() == Some(item)).then(|| {
+            let (reveal, scroll) = (self.reveal_cursor.clone(), scroll.clone());
+            let follow = gpui::canvas(
+                move |row, window, _| {
+                    if !reveal.replace(false) {
+                        return;
+                    }
+                    let (view, mut at, pad) = (scroll.bounds(), scroll.offset(), px(8.));
+                    if row.top() < view.top() {
+                        at.y += view.top() - row.top() + pad;
+                    } else if row.bottom() > view.bottom() {
+                        at.y -= row.bottom() - view.bottom() + pad;
+                    } else {
+                        return;
+                    }
+                    at.y = at.y.clamp(-scroll.max_offset().y, px(0.));
+                    scroll.set_offset(at);
+                    window.refresh();
+                },
+                |_, _, _, _| {},
+            )
+            .size_full();
+            div().absolute().inset_0().rounded(px(8.)).border_1().border_color(theme.accent.opacity(0.7)).child(follow)
+        })
+    }
+}
+
 /// An agent row's height in the list.
 fn agent_row_h(compact: bool) -> f32 {
     if compact { 30. } else { 44. }
@@ -1051,7 +1228,10 @@ impl Shell {
                 let mark = || gpui::svg().path(mark).size(px(14.)).flex_none().text_color(crate::ui::command_panel::icon_ink(mark, theme.text_muted));
                 // under a project heading, only a worktree's own name says where the agent is
                 let place = (!grouped || workspace != &project.1).then(|| workspace.clone());
+                let ring = live.then(|| self.cursor_ring(&SidebarItem::Agent(pane.pane_id.clone()), &self.agents_scroll, theme)).flatten();
                 let agent = row(theme, selected, SharedString::from(format!("agent-{}", pane.pane_id)))
+                    .relative()
+                    .children(ring)
                     .h(px(row_h))
                     .when(!selected && matches!(menu_for, Some(AgentMenu::Agent(p)) if *p == pane.pane_id), |el| el.bg(theme.hover))
                     .child(status_dot(pane.agent_status, theme))

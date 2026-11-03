@@ -48,6 +48,7 @@ app_actions! {
     PreviousWorkspace: "Previous workspace",
     NextWorkspace: "Next workspace",
     ToggleSidebar: "Toggle sidebar",
+    FocusSidebar: "Focus sidebar",
     ToggleRightPanel: "Toggle right panel",
     ToggleReview: "Toggle pull request",
     ToggleDiff: "Toggle diff",
@@ -95,6 +96,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("PreviousWorkspace", "cmd-up"),
     ("NextWorkspace", "cmd-down"),
     ("ToggleSidebar", "cmd-b"),
+    ("FocusSidebar", "cmd-e"),
     ("ToggleRightPanel", "cmd-alt-b"),
     ("ToggleDiff", "cmd-shift-g"),
     ("FontSizeUp", "cmd-="),
@@ -141,6 +143,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("PreviousWorkspace", "ctrl-shift-pageup"),
     ("NextWorkspace", "ctrl-shift-pagedown"),
     ("ToggleSidebar", "ctrl-shift-b"),
+    ("FocusSidebar", "ctrl-shift-s"),
     ("ToggleRightPanel", "ctrl-alt-b"),
     ("ToggleDiff", "ctrl-shift-g"),
     ("FontSizeUp", "ctrl-="),
@@ -247,6 +250,7 @@ fn menus(secure_input: bool) -> Vec<gpui::Menu> {
         ]),
         Menu::new("View").items([
             I::action("Toggle Sidebar", ToggleSidebar),
+            I::action("Focus Sidebar", FocusSidebar),
             I::action("Toggle Right Panel", ToggleRightPanel),
             I::action("Toggle Pull Request", ToggleReview),
             I::action("Toggle Diff", ToggleDiff),
@@ -312,6 +316,10 @@ impl gpui::Global for HerdrBindings {}
 /// second key would get in the way of typing elsewhere.
 const TERMINAL: &str = "Terminal";
 
+/// The sidebar or the right panel with the keys (not one of its fields): herdr's chords for Shepherd's actions work
+/// there too, as in a pane (`prefix+z` zooms the panel, `prefix+h` goes back to the panes).
+pub const PANEL: &str = "Panel";
+
 /// Shepherd's keys that mean something only on a page: in a pane, where herdr's chords live, they give way to herdr's.
 const PAGE_ACTIONS: [&str; 3] = ["ReloadPage", "FocusAddress", "CopyPageUrl"];
 
@@ -334,12 +342,13 @@ fn rebind_herdr(cx: &mut App, shepherd: &[(String, String)]) {
     let mut bindings: Vec<KeyBinding> = previous
         .iter()
         .filter(|chord| !next.iter().any(|(_, k)| k == *chord))
-        .map(|chord| KeyBinding::new(chord, NoAction, Some(TERMINAL)))
+        .flat_map(|chord| [TERMINAL, PANEL].map(|context| KeyBinding::new(chord, NoAction, Some(context))))
         .collect();
-    bindings.extend(next.iter().filter_map(|(bind, chord)| match bind {
-        Bind::App(action) => binding(action, chord, Some(TERMINAL)),
-        Bind::Command(command) => Some(KeyBinding::new(chord, command.clone(), Some(TERMINAL))),
-    }));
+    bindings.extend(next.iter().flat_map(|(bind, chord)| match bind {
+        Bind::App(action) => vec![binding(action, chord, Some(TERMINAL)), binding(action, chord, Some(PANEL))],
+        // a herdr command runs in a pane: not from a panel
+        Bind::Command(command) => vec![Some(KeyBinding::new(chord, command.clone(), Some(TERMINAL)))],
+    }).flatten());
     cx.bind_keys(bindings);
     cx.set_global(HerdrBindings(next.into_iter().map(|(_, chord)| chord).collect()));
 }

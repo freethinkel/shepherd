@@ -76,15 +76,7 @@ impl Render for SettingsView {
                         .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
                         .child(gpui::svg().path(section.icon()).size(px(16.)).flex_none().text_color(theme.text_muted))
                         .child(section.label())
-                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| {
-                            if section == Section::Backend && v.section != section {
-                                v.load_integrations(cx); // installed from a terminal meanwhile
-                                v.facts = None;
-                            }
-                            v.section = section;
-                            v.recording = None;
-                            cx.notify();
-                        }))
+                        .on_click(cx.listener(move |v, _: &ClickEvent, _, cx| v.show_section(section, cx)))
                 },
             )));
 
@@ -533,11 +525,28 @@ impl Render for SettingsView {
             .track_focus(&self.focus)
             .size_full()
             .flex()
-            .on_key_down(cx.listener(|v, e: &KeyDownEvent, _, cx| {
-                if e.keystroke.key == "escape" && v.recording.is_none() {
+            .on_key_down(cx.listener(|v, e: &KeyDownEvent, window, cx| {
+                if v.recording.is_some() {
+                    return;
+                }
+                if e.keystroke.key == "escape" {
                     cx.stop_propagation();
                     cx.emit(Close);
+                    return;
                 }
+                // j/k and ↓/↑ go from section to section, with the keys on the page rather than in a field
+                let m = &e.keystroke.modifiers;
+                if m.platform || m.control || m.alt || !v.focus.is_focused(window) {
+                    return;
+                }
+                let at = Section::ALL.iter().position(|s| *s == v.section).unwrap_or(0);
+                let to = match e.keystroke.key.as_str() {
+                    "down" | "j" => (at + 1).min(Section::ALL.len() - 1),
+                    "up" | "k" => at.saturating_sub(1),
+                    _ => return,
+                };
+                cx.stop_propagation();
+                v.show_section(Section::ALL[to], cx);
             }))
             .child(nav)
             .child(

@@ -232,6 +232,16 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
 
 impl SettingsView {
     /// Turns to the Usage page.
+    fn show_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if section == Section::Backend && self.section != section {
+            self.load_integrations(cx); // installed from a terminal meanwhile
+            self.facts = None;
+        }
+        self.section = section;
+        self.recording = None;
+        cx.notify();
+    }
+
     pub fn show_usage(&mut self, cx: &mut Context<Self>) {
         self.section = Section::Usage;
         cx.notify();
