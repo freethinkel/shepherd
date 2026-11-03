@@ -2092,7 +2092,8 @@ rename to new_name.rs
     /// `path` in a throwaway repo, a commit on `main` holding `a.txt`, `b.txt`, a `.gitignore` for `*.log`.
     fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        sh(dir.path(), "git init -q -b main && git config user.email t@t && git config user.name t && printf 'one\ntwo\n' > a.txt && printf 'keep\n' > b.txt && printf '*.log\n' > .gitignore && mkdir sub && printf 'x\n' > sub/c.txt && git add -A && git commit -qm base");
+        // autocrlf off: Git for Windows has it on, and a discard's checkout would write the files back with CRLF
+        sh(dir.path(), "git init -q -b main && git config user.email t@t && git config user.name t && git config core.autocrlf false && printf 'one\ntwo\n' > a.txt && printf 'keep\n' > b.txt && printf '*.log\n' > .gitignore && mkdir sub && printf 'x\n' > sub/c.txt && git add -A && git commit -qm base");
         dir
     }
 
