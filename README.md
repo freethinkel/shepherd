@@ -13,13 +13,16 @@ https://github.com/user-attachments/assets/9b3f5fae-8eee-4697-89b4-37d232250117
 - The sidebar lists workspaces. A repo's worktrees fold under it with their branch, changes against main and PR state. Right-click creates, opens or removes a worktree.
 - The sidebar's `…` menu or Settings > General switches it to T3 Code's look: a project select over a flat list of agents, with Working and Settled shelves at the bottom.
 - Under the sidebar, herdr sessions and saved SSH machines sit in a bar, like Arc's spaces. A two-finger swipe goes to the next one. The bar is herdr's: Shepherd shows one backend at a time, and another backend's sessions are its workspaces.
-- The agents list at the bottom shows every agent herdr detects in any workspace, with its status (working, blocked, done, idle), the task in its title and how long it has waited. Click one to jump to its pane.
+- The agents list at the bottom shows every agent herdr detects in any workspace, with its status (working, blocked, done, idle), the task in its title and how long it has waited. Click one to jump to its pane, or press `⌘J` to go to the next waiting one.
 - When an agent you can't see starts waiting or finishes, macOS shows a notification and the Dock icon counts it until you look at that tab. Approve on the notification answers the agent without opening Shepherd.
 - Tabs show what runs in their panes: an agent, or a program such as Neovim, `cargo` or `btop`, each with its logo. Drag tabs to reorder them. Drag a pane by its grip onto another pane to split or swap, or onto a tab to move it there.
 - Dividers between panes snap to the cell grid herdr lays out, and the terminal reflows while you drag.
-- The terminal draws ligatures, Kitty images and box drawing on its own. Shepherd reads scrollback from herdr once and scrolls it locally. `⌘`-click opens links, files, folders and images.
+- The terminal draws ligatures, Kitty images and box drawing on its own. Shepherd reads scrollback from herdr once and scrolls it locally. `⌘`-click opens files, folders and images, and links in the right panel's browser.
 - herdr's own `[keys]` work in Shepherd, and its popups float over the panes.
-- `⌥⌘B` opens the review panel: the branch's PR (gh) or MR (glab) with its description, checks or pipeline jobs and their logs. It works for SSH machines too.
+- `⌥⌘B` opens the right panel beside the panes, one per workspace. Drag its edge to resize it, or expand it over the panes. Its tabs are:
+  - Diffs (`⇧⌘G`): the working tree, the branch against a base, or an agent's last turn, unified or split. Comment on lines and send the comments to an agent, discard changes, or open a file in your editor.
+  - Pull request: the branch's PR (gh) or MR (glab) with its description, checks or pipeline jobs and their logs. It works for SSH machines too.
+  - Browser tabs. A toolbar button picks elements on the page, or an area dragged over it, with a note on each, and sends them to an agent as one prompt.
 - Web pages (Settings → Web pages) list local tools, such as a dev server or a dashboard, above the workspaces. A click shows the page in the system web view in place of the tabs and panes, and it keeps its state while hidden. A page can be listed in one place only, and opened on the machine shown, through an SSH forward.
 - `⌘K` opens a command panel with every action, workspace and tab. `⇧⌘A` opens the agents panel.
 - The status bar shows the branch, its PR and CI, the current folder, the focused agent and your Claude and Codex plan limits.
@@ -76,8 +79,11 @@ Shepherd shows the same sessions as `tmux attach`: a session is a workspace, a w
 | `⌘1` … `⌘9`, `⇧⌘[`, `⇧⌘]` | Go to a tab, previous or next tab |
 | `⌘↑`, `⌘↓` | Previous or next workspace |
 | `⇧⌘N` | New workspace |
-| `⌘B`, `⌥⌘B` | Toggle the sidebar, the review panel |
+| `⌘B`, `⌘E` | Toggle the sidebar, move the keys to it and back |
+| `⌥⌘B`, `⇧⌘G` | Toggle the right panel, its diff |
 | `⌘K`, `⇧⌘A` | Command panel, agents panel |
+| `⌘J` | Next waiting agent |
+| `⌘R`, `⌘L`, `⇧⌘C` | On a web page: reload, address field, copy the URL |
 | `⌘=`, `⌘-`, `⌘0` | Text size up, down, default |
 | `⌘,` | Settings |
 
