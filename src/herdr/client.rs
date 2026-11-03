@@ -61,7 +61,11 @@ impl Client {
     /// `types`, and `pane.agent_status_changed` for each of `panes`.
     pub async fn subscribe(&self, types: &[&str], panes: &[String]) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         let statuses = panes.iter().map(|p| json!({"type": "pane.agent_status_changed", "pane_id": p}));
-        let subscriptions: Vec<Value> = types.iter().map(|t| json!({"type": t})).chain(statuses).collect();
+        self.subscribe_to(types.iter().map(|t| json!({"type": t})).chain(statuses).collect()).await
+    }
+
+    /// `events.subscribe` with these subscriptions as they are (`{"type": …, "pane_id": …}`).
+    pub async fn subscribe_to(&self, subscriptions: Vec<Value>) -> anyhow::Result<mpsc::UnboundedReceiver<Value>> {
         let (w, mut lines) = self.send("events.subscribe", json!({"subscriptions": subscriptions})).await?;
         let first = lines.next_line().await?.ok_or_else(|| anyhow!("herdr closed the connection"))?;
         into_result(serde_json::from_str(&first)?)?;

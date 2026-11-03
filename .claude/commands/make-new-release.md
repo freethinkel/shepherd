@@ -17,7 +17,7 @@ Argument: `$ARGUMENTS`. Empty means `patch`; `minor` and `major` bump that part;
      the Mac's don't see: code under `cfg(unix)`, CRLF from git. Find it with `gh run list --workflow release.yml
      --commit $(git rev-parse HEAD) --json databaseId,status,conclusion`; still running, wait with `gh run watch <id>
      --exit-status` (not piped, or the exit code is lost); no run for `HEAD`, start one with `gh workflow run
-     release.yml --ref main` (its version is released already, so it only builds and tests). Failed: stop with the
+     release.yml --ref main` (its version is released already, so it only lints and tests). Failed: stop with the
      failing step's log (`gh run view <id> --log-failed`).
    Other uncommitted files are fine: leave them alone, do not stash or commit them.
 2. Show the notes the release will get: `git log --no-merges --format='- %s' $(git describe --tags --abbrev=0)..HEAD | grep -vE '^- (docs|release):'`.

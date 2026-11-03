@@ -92,7 +92,7 @@ pub struct PaneQueries(pub Backend, pub tokio::runtime::Handle);
 
 impl gpui::Global for PaneQueries {}
 
-/// herdr's scrollback position; frames do not carry it, `pane.get` does.
+/// herdr's scrollback position; frames do not carry it, `pane.scroll_changed` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Deserialize)]
 pub struct ScrollState {
     pub offset_from_bottom: u32,
@@ -221,11 +221,10 @@ pub struct PaneTerminal {
     /// The kitty keyboard flags the pane's app asked for (from herdr; 0, legacy keys, until it says otherwise).
     keyboard_flags: u16,
     scroll: ScrollState,
-    /// A `pane.get` is out; `scroll_stale` asks for one more when it lands.
-    scroll_fetching: bool,
-    scroll_stale: bool,
-    /// Output arrived since herdr was last asked for the scroll position; asked when the pane is next drawn, so
-    /// hidden panes (kept attached for a quick tab switch) never ask.
+    /// herdr's last report of the scroll position, shown once a local prediction (`scroll_local_until`) ends.
+    scroll_reported: Option<ScrollState>,
+    _scroll_events: Option<Task<()>>,
+    /// Output arrived since the scroll position was last shown; shown when the pane is next drawn.
     scroll_due: bool,
     scrollbar: HerdrScroll,
     _scrollbar_drag: Task<()>,
@@ -294,8 +293,8 @@ impl PaneTerminal {
             mouse_capture: false,
             keyboard_flags: 0,
             scroll: ScrollState::default(),
-            scroll_fetching: false,
-            scroll_stale: false,
+            scroll_reported: None,
+            _scroll_events: None,
             scroll_due: false,
             scrollbar,
             _scrollbar_drag: scrollbar_drag,
@@ -374,6 +373,9 @@ impl PaneTerminal {
                         }
                         if !pane.observing && !pane.held.is_empty() {
                             session.input(&std::mem::take(&mut pane.held));
+                        }
+                        if pane._scroll_events.is_none() && !session.raw() {
+                            pane.watch_scroll(cx);
                         }
                         pane.session = Some(session);
                         pane.mouse_capture = false;
@@ -460,7 +462,58 @@ impl PaneTerminal {
         }
     }
 
-    /// Ask herdr where its view sits in the scrollback. One request at a time; a burst of frames costs one more.
+    /// Follows herdr's `pane.scroll_changed` for the pane: herdr reports where its view sits as output grows the
+    /// history or the view moves, so frames ask nothing (a `pane.get` per burst of frames cost herdr ~11% CPU). A
+    /// stream herdr ends (events_lost, a restart) is opened again.
+    fn watch_scroll(&mut self, cx: &mut Context<Self>) {
+        let Some((client, rt)) = cx.try_global::<PaneQueries>().and_then(|PaneQueries(backend, rt)| Some((backend.herdr()?, rt.clone()))) else { return };
+        let pane_id = self.pane_id.clone();
+        self._scroll_events = Some(cx.spawn(async move |this, cx| loop {
+            let (client, pane_id) = (client.clone(), pane_id.clone());
+            let opened = rt.spawn(async move {
+                // subscribed before the read, so a change between the two still arrives
+                let events = client.subscribe_to(vec![serde_json::json!({"type": "pane.scroll_changed", "pane_id": pane_id})]).await?;
+                let mut now = client.call("pane.get", serde_json::json!({"pane_id": pane_id})).await?;
+                anyhow::Ok((events, now["pane"]["scroll"].take()))
+            });
+            if let Ok(Ok((mut events, now))) = opened.await {
+                let mut next = now;
+                loop {
+                    if let Ok(scroll) = serde_json::from_value::<ScrollState>(next)
+                        && this.update(cx, |pane, cx| pane.reported_scroll(scroll, cx)).is_err()
+                    {
+                        return;
+                    }
+                    let Some(mut event) = events.recv().await else { break };
+                    next = event["data"]["scroll"].take();
+                }
+            }
+            if this.update(cx, |_, _| ()).is_err() {
+                return;
+            }
+            cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+        }));
+    }
+
+    fn reported_scroll(&mut self, scroll: ScrollState, cx: &mut Context<Self>) {
+        self.scroll_reported = Some(scroll);
+        self.show_scroll(scroll, cx);
+    }
+
+    fn show_scroll(&mut self, mut scroll: ScrollState, cx: &mut Context<Self>) {
+        if self.scroll_local_until.is_some_and(|t| std::time::Instant::now() < t) {
+            scroll.offset_from_bottom = self.scroll.offset_from_bottom.min(scroll.max_offset_from_bottom);
+        }
+        if self.live.is_some() {
+            scroll.offset_from_bottom = self.emulator.display_offset() as u32; // herdr itself stays at its bottom
+        }
+        if scroll != self.scroll {
+            self.scroll = scroll;
+            cx.notify();
+        }
+    }
+
+    /// Shows the scroll position: a program's own stream from the emulator, herdr's from its last report.
     fn refresh_scroll(&mut self, cx: &mut Context<Self>) {
         if self.session.as_ref().is_some_and(|s| s.raw()) {
             let scroll = ScrollState {
@@ -474,36 +527,9 @@ impl PaneTerminal {
             }
             return;
         }
-        let Some((client, rt)) = cx.try_global::<PaneQueries>().and_then(|PaneQueries(backend, rt)| Some((backend.herdr()?, rt))) else { return };
-        if self.scroll_fetching {
-            self.scroll_stale = true;
-            return;
+        if let Some(scroll) = self.scroll_reported {
+            self.show_scroll(scroll, cx);
         }
-        self.scroll_fetching = true;
-        let pane_id = self.pane_id.clone();
-        let call = rt.spawn(async move { client.call("pane.get", serde_json::json!({"pane_id": pane_id})).await });
-        cx.spawn(async move |this, cx| {
-            let scroll: Option<ScrollState> = call.await.ok().and_then(Result::ok).and_then(|r| serde_json::from_value(r["pane"]["scroll"].clone()).ok());
-            let _ = this.update(cx, |pane, cx| {
-                pane.scroll_fetching = false;
-                if let Some(mut scroll) = scroll {
-                    if pane.scroll_local_until.is_some_and(|t| std::time::Instant::now() < t) {
-                        scroll.offset_from_bottom = pane.scroll.offset_from_bottom.min(scroll.max_offset_from_bottom);
-                    }
-                    if pane.live.is_some() {
-                        scroll.offset_from_bottom = pane.emulator.display_offset() as u32; // herdr itself stays at its bottom
-                    }
-                    if scroll != pane.scroll {
-                        pane.scroll = scroll;
-                        cx.notify();
-                    }
-                }
-                if std::mem::take(&mut pane.scroll_stale) {
-                    pane.refresh_scroll(cx);
-                }
-            });
-        })
-        .detach();
     }
 
     /// Scroll herdr by `delta` lines (positive = up, into history) and move the thumb now, not a round trip later.

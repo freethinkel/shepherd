@@ -1,2 +1,0 @@
-- [ ] Make the tabs more fancy - rex
-- [ ] Check the herdr gpui

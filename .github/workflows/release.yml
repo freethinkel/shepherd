@@ -1,7 +1,7 @@
-# Every push to main builds and tests Shepherd.app and builds Shepherd for Linux and Windows (x86_64 and aarch64
-# each). When Cargo.toml's version has no release yet, the run tags v<version> and publishes a universal (arm64 +
-# x86_64) Shepherd as a zip and a dmg, each Linux architecture as a tar.gz, a .deb and an .rpm, and each Windows
-# architecture as a zip with the exe: bump the version to release. With the signing secrets set the app is signed
+# Every push to main lints and tests Shepherd on macOS, Linux and Windows. When Cargo.toml's version has no release
+# yet, the run also builds Shepherd, tags v<version> and publishes a universal (arm64 + x86_64) Shepherd as a zip and
+# a dmg, each Linux architecture (x86_64, aarch64) as a tar.gz, a .deb and an .rpm, and each Windows architecture as a
+# zip with the exe: bump the version to release. With the signing secrets set the app is signed
 # with the Developer ID and notarized; without them, ad hoc. The Windows exe is not signed.
 name: release
 
@@ -18,7 +18,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Cargo.toml's version has no release yet: only then are the apps built and packed, which is most of a run's time
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      new: ${{ steps.check.outputs.new }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if gh release view "v$(make -s version)" >/dev/null 2>&1; then echo new=false; else echo new=true; fi >> "$GITHUB_OUTPUT"
+
   macos:
+    needs: version
     # the SDK it links against picks the window chrome: built with an SDK before 26, the app keeps the old traffic lights
     runs-on: macos-26
     env:
@@ -39,7 +53,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Signing keychain
-        if: env.MACOS_CERT_P12 != ''
+        if: env.MACOS_CERT_P12 != '' && needs.version.outputs.new == 'true'
         env:
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -62,9 +76,11 @@ jobs:
       - run: make lint
       - run: make test
       - name: Build, sign, notarize
+        if: needs.version.outputs.new == 'true'
         run: make ${{ env.MACOS_CERT_P12 != '' && 'notarize' || 'dist' }}
 
       - uses: actions/upload-artifact@v4
+        if: needs.version.outputs.new == 'true'
         with:
           name: Shepherd-macos
           path: |
@@ -76,6 +92,7 @@ jobs:
       matrix:
         # the oldest supported Ubuntu: its glibc is the oldest the packages run on
         runner: [ubuntu-22.04, ubuntu-22.04-arm]
+    needs: version
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -91,6 +108,7 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev \
             libvulkan-dev libfontconfig-dev libfreetype-dev libssl-dev libzstd-dev libwebkit2gtk-4.1-dev libgtk-3-dev
       - uses: taiki-e/install-action@v2
+        if: needs.version.outputs.new == 'true'
         with:
           tool: cargo-deb,cargo-generate-rpm
       - uses: Swatinem/rust-cache@v2
@@ -99,9 +117,11 @@ jobs:
       - run: make test
       # one build, packed as a tar.gz, a .deb and an .rpm; it tells of new releases (src/update.rs)
       - run: scripts/linux-dist.sh
+        if: needs.version.outputs.new == 'true'
         env:
           SHEPHERD_UPDATE_CHECK: 1
       - uses: actions/upload-artifact@v4
+        if: needs.version.outputs.new == 'true'
         with:
           name: Shepherd-linux-${{ runner.arch }}
           path: target/linux-dist/*
@@ -116,6 +136,7 @@ jobs:
           # cross-built: Zig crashes building libghostty-vt on the windows-11-arm runner (0xc0000005); not checked or
           # tested itself, and the release goes out without it if it fails
           - { arch: aarch64, target: aarch64-pc-windows-msvc, cross: true }
+    needs: version
     runs-on: windows-latest
     continue-on-error: ${{ matrix.cross == true }}
     defaults:
@@ -152,22 +173,25 @@ jobs:
         if: ${{ !matrix.cross }}
       # it tells of new releases (src/update.rs)
       - run: cargo build --release --target ${{ matrix.target }}
+        if: needs.version.outputs.new == 'true'
         env:
           SHEPHERD_UPDATE_CHECK: 1
       # no make on the runner: Cargo.toml's version as scripts/linux-dist.sh reads it
-      - run: |
+      - if: needs.version.outputs.new == 'true'
+        run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           mkdir -p target/windows-dist
           7z a "target/windows-dist/Shepherd-$version-windows-${{ matrix.arch }}.zip" ./target/${{ matrix.target }}/release/shepherd.exe
       - uses: actions/upload-artifact@v4
+        if: needs.version.outputs.new == 'true'
         with:
           name: Shepherd-windows-${{ matrix.arch }}
           path: target/windows-dist/*
 
   release:
-    needs: [macos, linux, windows]
+    needs: [version, macos, linux, windows]
     # Windows aarch64 may fail (it is cross-built): the step below still requires the x86_64 zip
-    if: ${{ !cancelled() && needs.macos.result == 'success' && needs.linux.result == 'success' }}
+    if: ${{ !cancelled() && needs.version.outputs.new == 'true' && needs.macos.result == 'success' && needs.linux.result == 'success' }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
