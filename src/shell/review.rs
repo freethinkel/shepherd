@@ -24,6 +24,23 @@ pub(super) struct ShownReview {
     pub review: Option<Review>,
 }
 
+/// The review panel's tabs under a PR's head.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Tab {
+    #[default]
+    Summary,
+    Timeline,
+    Code,
+    Checks,
+}
+
+impl Tab {
+    /// `summary`, `timeline`, `code`, `checks`.
+    fn of_name(name: &str) -> Option<Tab> {
+        [Tab::Summary, Tab::Timeline, Tab::Code, Tab::Checks].into_iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(name))
+    }
+}
+
 /// A merge the panel asks about before it runs.
 #[derive(Clone)]
 pub(super) struct MergeAsk {
@@ -44,6 +61,18 @@ impl Shell {
     pub fn toggle_review(&mut self, window: &Window, cx: &mut Context<Self>) {
         let seen = self.right_panel_shown(window);
         self.update_panel(cx, |p| p.toggle_pull_request(seen));
+    }
+
+    /// Shows the review panel's tab `name` (`summary`, `timeline`, `code`, `checks`), or with `menu` its "…" menu
+    /// under the panel's top right corner, for screenshots.
+    pub fn show_review_tab(&mut self, name: &str, window: &Window, cx: &mut Context<Self>) {
+        if name == "menu" {
+            let size = window.viewport_size();
+            self.review_menu = Some(crate::ui::Popup::new(gpui::point(size.width - px(290.), px(112.))));
+        } else if let Some(tab) = Tab::of_name(name) {
+            self.review_tab = tab;
+        }
+        cx.notify();
     }
 
     /// Asks gh or glab again about the branch the panel shows while its checks run; called every `REVIEW_POLL`.
@@ -121,7 +150,17 @@ impl Shell {
     pub(super) fn render_review(&mut self, theme: &Theme, shown: &ShownReview, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let panel_width = self.right_panel_drawn(window);
         let (key, review, branch) = (shown.key.clone(), shown.review.clone(), shown.branch.clone());
-        let busy = key.as_deref().is_some_and(|k| fetching::<Review>(k, cx));
+        // the PR's timeline and diff are cached by its number, apart from the branch's review
+        let pr_key = match (&shown.dir, &review) {
+            (Some(dir), Some(Review::Found { request: Some(r), .. })) => Some(format!("{dir}\n{}\n{}", r.pr.gitlab, r.pr.number)),
+            _ => None,
+        };
+        let busy = key.as_deref().is_some_and(|k| fetching::<Review>(k, cx))
+            || pr_key.as_deref().is_some_and(|k| match self.review_tab {
+                Tab::Timeline => fetching::<Timeline>(k, cx),
+                Tab::Code => fetching::<PrDiff>(k, cx),
+                _ => false,
+            });
 
         let gitlab = matches!(&review, Some(Review::Found { request: Some(r), .. }) if r.pr.gitlab)
             || matches!(&review, Some(Review::Found { pipeline: Some(_), .. }) | Some(Review::NoTool("glab") | Review::NoLogin("glab", _)));
@@ -139,18 +178,29 @@ impl Shell {
                 } else {
                     titlebar_button(theme, "review-refresh", "icons/solar/refresh.svg")
                         .tooltip(tip("Refresh", None))
-                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| refetch::<Review>(&key, cx)))
+                        .on_click(cx.listener({
+                            let pr_key = pr_key.clone();
+                            move |_, _: &ClickEvent, _, cx| {
+                                refetch::<Review>(&key, cx);
+                                if let Some(k) = &pr_key {
+                                    refetch::<Timeline>(k, cx);
+                                    refetch::<PrDiff>(k, cx);
+                                }
+                            }
+                        }))
                         .into_any_element()
                 }
             }));
         let (dir, key_or) = (shown.dir.clone().unwrap_or_default(), key.clone().unwrap_or_default());
 
         let mut footer = None;
+        // where the "…" menu was clicked and the PR it is about
+        let mut menu: Option<(gpui::Point<Pixels>, Request)> = None;
         // the PR's head and its tabs, above the body that scrolls
         let mut top = None;
         let body: Vec<AnyElement> = match (&key, review) {
             (None, _) => vec![empty(theme, "No branch", "The focused pane isn't in a git repo.")],
-            (Some(_), None) => vec![div().pt(px(24.)).flex().justify_center().child(crate::ui::loader::spinner(2.5, window)).into_any_element()],
+            (Some(_), None) => vec![loading(window)],
             (Some(_), Some(Review::NoRemote)) => vec![empty(theme, "No remote", "This repo has no origin to ask about.")],
             (Some(_), Some(Review::NoTool(tool))) => vec![empty(theme, format!("{tool} isn't installed"), format!("Install it to see the {noun} here: brew install {tool}"))],
             (Some(_), Some(Review::NoLogin(tool, host))) => {
@@ -256,26 +306,68 @@ impl Shell {
                             }
                         });
                         footer = request_footer(theme, r, running, &self.review_acting, on_approve, on_merge, on_cancel, on_ready);
-                        let checks_tab = self.review_checks_tab;
-                        let pick = |to: bool| {
-                            cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.review_checks_tab = to;
+                        let tab = self.review_tab;
+                        let pick = |to: Tab| -> Listener {
+                            Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.review_tab = to;
                                 cx.notify();
-                            })
+                            }))
                         };
-                        let tabs = tab_bar(theme, checks_tab, checks_title, ci, pick(false), pick(true), pick(true), window);
-                        top = Some(div().flex_none().flex().flex_col().child(request_head(theme, r)).child(tabs).into_any_element());
-                        if checks_tab {
-                            out.push(checks_el.unwrap_or_else(|| empty(theme, format!("No {}", checks_title.to_lowercase()), "Nothing has run on this branch yet.")));
-                        } else {
-                            out.push(summary(theme, r));
-                            if !r.body.trim().is_empty() {
-                                let toggle = cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.review_collapsed = !this.review_collapsed;
-                                    cx.notify();
-                                });
-                                out.push(description(theme, &r.body, self.review_collapsed, toggle));
+                        let tabs = tab_bar(theme, tab, checks_title, ci, &pick, window);
+                        let menu_open = self.review_menu.as_ref().is_some_and(|m| m.is_open());
+                        let menu_button = titlebar_button(theme, "review-menu", "icons/more-horizontal.svg")
+                            .when(menu_open, |el| el.bg(theme.hover))
+                            .tooltip(tip("More", None))
+                            .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
+                                this.review_menu = Some(crate::ui::Popup::new(e.position()));
+                                cx.notify();
+                            }))
+                            .into_any_element();
+                        top = Some(div().flex_none().flex().flex_col().child(request_head(theme, r, menu_button)).child(tabs).into_any_element());
+                        menu = self.review_menu.as_ref().map(|m| (m.value, r.clone()));
+                        let pr_key = pr_key.clone().unwrap_or_default();
+                        match tab {
+                            Tab::Summary => {
+                                out.push(summary(theme, r));
+                                if !r.body.trim().is_empty() {
+                                    let toggle = cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.review_collapsed = !this.review_collapsed;
+                                        cx.notify();
+                                    });
+                                    out.push(description(theme, &r.body, self.review_collapsed, toggle));
+                                }
                             }
+                            Tab::Timeline => out.push(match cached(&pr_key, REVIEW_TTL, crate::ui::review::read_timeline, cx) {
+                                None => loading(window),
+                                Some(Err(why)) => empty(theme, "Couldn't load the timeline", why),
+                                Some(Ok(events)) if events.is_empty() => empty(theme, "Nothing yet", "No comments, reviews or commits."),
+                                Some(Ok(events)) => timeline(theme, &events),
+                            }),
+                            Tab::Code => out.push(match cached(&pr_key, REVIEW_TTL, crate::ui::review::read_diff, cx) {
+                                None => loading(window),
+                                Some(Err(why)) => empty(theme, "Couldn't load the diff", why),
+                                Some(Ok((files, _))) if files.is_empty() => empty(theme, "No changes", format!("This {noun} changes no files.")),
+                                Some(Ok((files, cut))) => {
+                                    let url = r.pr.url.clone();
+                                    // a small PR's files show unfolded; a click flips a file from what it was
+                                    let unfolded = files.len() <= SMALL_PR;
+                                    let open: Vec<bool> = files.iter().map(|f| unfolded != self.review_files.contains(&format!("{url}\n{}", f.path))).collect();
+                                    let on_file: Rc<dyn Fn(String, &mut App)> = Rc::new({
+                                        let this = cx.entity().downgrade();
+                                        move |path, cx| {
+                                            let _ = this.update(cx, |s, cx| {
+                                                let key = format!("{url}\n{path}");
+                                                if !s.review_files.remove(&key) {
+                                                    s.review_files.insert(key);
+                                                }
+                                                cx.notify();
+                                            });
+                                        }
+                                    });
+                                    code(theme, &files, &open, cut, &r.pr, on_file)
+                                }
+                            }),
+                            Tab::Checks => out.push(checks_el.unwrap_or_else(|| empty(theme, format!("No {}", checks_title.to_lowercase()), "Nothing has run on this branch yet."))),
                         }
                     }
                     None => {
@@ -310,8 +402,203 @@ impl Shell {
                     .children(body),
             )
             .children(footer)
+            .children(menu.and_then(|(at, r)| self.render_review_menu(theme, at, &r, pr_key.clone(), key.clone(), window, cx)))
             .into_any_element()
     }
+
+    /// The agent the review panel's "…" menu talks to: the shown pane's, else the workspace's first.
+    fn review_agent(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<crate::model::Pane> {
+        let workspace = self.shown_tab()?.workspace_id;
+        let pane = self.active_pane(window, cx);
+        let agents = self.snapshot.as_ref()?.agents_in(&workspace, SettingsGlobal::of(cx).settings.annotation_agents);
+        crate::annotations::default_recipient(&agents, pane.as_deref(), Some(&workspace)).cloned()
+    }
+
+    /// Puts `text` in the agent's prompt, without sending it, and gives it the keyboard; an agent whose pane isn't
+    /// shown gets it on the clipboard instead.
+    fn ask_agent(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(agent) = self.review_agent(window, cx) else { return crate::ui::toast::error(cx, "No agent here to ask") };
+        let name = agent.agent.clone().unwrap_or_default();
+        match self.panes.get(&agent.pane_id).cloned() {
+            Some(pane) => {
+                pane.update(cx, |pane, cx| pane.paste(&text, cx));
+                self.release_panel();
+                window.focus(&pane.focus_handle(cx), cx);
+            }
+            None => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                crate::ui::toast::info(cx, format!("Copied: paste it to {name}"), None);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Sends `prompt` to the agent, as the diff's comments go.
+    fn tell_agent(&mut self, prompt: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(agent) = self.review_agent(window, cx) else { return crate::ui::toast::error(cx, "No agent here to send it to") };
+        let name = agent.agent.clone().unwrap_or_default();
+        let (backend, pane) = (self.backend.clone(), agent.pane_id);
+        self.ask(async move { backend.mux.send(pane, Some(prompt)).await }, cx, move |_, result, cx| match result {
+            Ok(_) => crate::ui::toast::info(cx, format!("Sent to {name}"), None),
+            Err(e) => crate::ui::toast::error(cx, format!("Not sent to {name}: {e:#}")),
+        });
+    }
+
+    /// The "…" menu: the agent's questions about the PR, then refresh, open and copy.
+    #[allow(clippy::too_many_arguments)]
+    fn render_review_menu(
+        &mut self,
+        theme: &Theme,
+        at: gpui::Point<Pixels>,
+        r: &Request,
+        pr_key: Option<String>,
+        key: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        type Act = Box<dyn Fn(&mut Shell, &mut Window, &mut Context<Shell>)>;
+        let menu = self.review_menu.as_ref()?;
+        let agent = self.review_agent(window, cx).and_then(|a| a.agent);
+        let prompts = review_prompts(r);
+        let host = if r.pr.gitlab { "GitLab" } else { "GitHub" };
+        let noun = if r.pr.gitlab { "MR" } else { "PR" };
+        let number = format!("{}{}", if r.pr.gitlab { "!" } else { "#" }, r.pr.number);
+        let item = |id: &'static str, icon: &'static str, label: String, hint: Option<String>, off: bool, act: Act| {
+            let hover = theme.hover;
+            div()
+                .id(id)
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .child(div().h(px(18.)).flex().items_center().child(menu_mark(icon, theme.text_muted)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .child(div().line_height(px(18.)).text_color(theme.text).child(label))
+                        .children(hint.map(|h| div().text_size(px(11.)).line_height(px(15.)).text_color(theme.text_faint).child(h))),
+                )
+                .map(|el| {
+                    if off {
+                        el.opacity(0.45)
+                    } else {
+                        el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            if let Some(m) = this.review_menu.as_mut() {
+                                m.close();
+                            }
+                            act(this, window, cx);
+                            cx.notify();
+                        }))
+                    }
+                })
+        };
+        let to = agent.clone().unwrap_or_else(|| "the agent".into());
+        let no_agent = agent.is_none();
+        let (ask, explain, fix) = prompts;
+        let (url, url2) = (r.pr.url.clone(), r.pr.url.clone());
+        let checkout = format!("{} checkout {}", if r.pr.gitlab { "glab mr" } else { "gh pr" }, r.pr.number);
+        let copy = |text: String, said: &'static str| -> Act {
+            Box::new(move |_, _, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                crate::ui::toast::info(cx, said, None);
+            })
+        };
+        let card = menu_card(theme, "review-menu-card", 260.)
+            .max_w(px(320.))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if let Some(m) = this.review_menu.as_mut() {
+                    m.close();
+                }
+                cx.notify();
+            }))
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .text_size(px(12.))
+            .child(item(
+                "review-menu-refresh",
+                "icons/solar/refresh.svg",
+                "Refresh".into(),
+                None,
+                false,
+                Box::new(move |_, _, cx| {
+                    if let Some(k) = &key {
+                        refetch::<Review>(k, cx);
+                    }
+                    if let Some(k) = &pr_key {
+                        refetch::<Timeline>(k, cx);
+                        refetch::<PrDiff>(k, cx);
+                    }
+                }),
+            ))
+            .child(item(
+                "review-menu-ask",
+                "icons/lucide-message-circle-question.svg",
+                "Ask a question".into(),
+                Some(format!("Puts the {noun} in {to}'s prompt.")),
+                no_agent,
+                Box::new(move |this, window, cx| this.ask_agent(ask.clone(), window, cx)),
+            ))
+            .child(item(
+                "review-menu-explain",
+                "icons/solar/document-text.svg",
+                format!("Explain this {noun}"),
+                Some("A walk through the diff and what to read closely.".into()),
+                no_agent,
+                Box::new(move |this, window, cx| this.tell_agent(explain.clone(), window, cx)),
+            ))
+            .child(item(
+                "review-menu-fix",
+                "icons/solar/pen.svg",
+                "Fix review findings".into(),
+                Some("Asks for its comments and failing checks to be dealt with.".into()),
+                no_agent,
+                Box::new(move |this, window, cx| this.tell_agent(fix.clone(), window, cx)),
+            ))
+            .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
+            .child(item("review-menu-open", "icons/solar/square-arrow-right-up.svg", format!("Open on {host}"), None, false, Box::new(move |_, _, cx| cx.open_url(&url))))
+            .child(item("review-menu-link", "icons/solar/link.svg", "Copy link".into(), None, false, copy(url2, "Copied the link")))
+            .child(item("review-menu-number", "icons/solar/copy.svg", format!("Copy {noun} number"), None, false, copy(number, "Copied the number")))
+            .child(item("review-menu-checkout", "icons/terminal.svg", "Copy checkout command".into(), None, false, copy(checkout, "Copied the checkout command")));
+        let card = crate::ui::menu_motion("review-menu-in", menu, card);
+        Some(gpui::deferred(gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(card)).with_priority(1).into_any_element())
+    }
+}
+
+/// What the "…" menu gives the agent about `r`: the question's start, left to finish, and the requests to explain it
+/// and to deal with its findings.
+fn review_prompts(r: &Request) -> (String, String, String) {
+    let (noun, cli) = if r.pr.gitlab { ("merge request", "glab mr") } else { ("pull request", "gh pr") };
+    let number = format!("{}{}", if r.pr.gitlab { "!" } else { "#" }, r.pr.number);
+    let which = format!("{noun} {number} \"{}\" ({})", r.title, r.pr.url);
+    let ask = format!("About {which}: ");
+    let explain = format!(
+        "Explain {which}. Read it with `{cli} view {n}` and its diff with `{cli} diff {n}`, then walk me through the change: what it does, \
+         in what order to read it, and which parts deserve a close look.",
+        n = r.pr.number
+    );
+    let comments = if r.pr.gitlab { format!("`glab mr view {} --comments`", r.pr.number) } else { format!("`gh pr view {} --comments` and `gh api repos/{{owner}}/{{repo}}/pulls/{}/comments`", r.pr.number, r.pr.number) };
+    let checks = if r.pr.gitlab { "`glab ci status`".to_string() } else { format!("`gh pr checks {}`", r.pr.number) };
+    let fix = format!(
+        "Deal with the review findings on {which}: read its comments ({comments}) and its failing checks ({checks}), \
+         fix in this checkout what should be fixed, and tell me what you left and why."
+    );
+    (ask, explain, fix)
+}
+
+/// A click handler handed to a tab.
+type Listener = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+/// The Timeline tab's cache entry: a PR's events, or why they couldn't be read.
+type Timeline = Result<Vec<crate::ui::review::Event>, String>;
+/// The Code tab's: a PR's files and whether the diff was cut short, or why it couldn't be read.
+type PrDiff = Result<(Vec<crate::changes::FileDiff>, bool), String>;
+
+fn loading(window: &mut Window) -> AnyElement {
+    div().pt(px(24.)).flex().justify_center().child(crate::ui::loader::spinner(2.5, window)).into_any_element()
 }
 
 fn empty(theme: &Theme, title: impl Into<SharedString>, hint: impl Into<SharedString>) -> AnyElement {
@@ -327,18 +614,24 @@ fn empty(theme: &Theme, title: impl Into<SharedString>, hint: impl Into<SharedSt
         .into_any_element()
 }
 
-// ponytail: one body remembered; the panel shows one description at a time
-/// `body`'s blocks, parsed once while it stays the same: a drag over it redraws every move.
+/// `body`'s blocks, parsed once while it stays around: a drag over the text redraws every move, and the timeline
+/// shows a body per comment.
 fn parsed(body: &str) -> Rc<Vec<crate::ui::review::Block>> {
     thread_local! {
-        static LAST: std::cell::RefCell<(String, Rc<Vec<crate::ui::review::Block>>)> = Default::default();
+        static SEEN: std::cell::RefCell<std::collections::HashMap<String, Rc<Vec<crate::ui::review::Block>>>> = Default::default();
     }
-    LAST.with(|last| {
-        let mut last = last.borrow_mut();
-        if last.0 != body {
-            *last = (body.to_string(), Rc::new(markdown(body)));
+    SEEN.with(|seen| {
+        let mut seen = seen.borrow_mut();
+        if let Some(blocks) = seen.get(body) {
+            return blocks.clone();
         }
-        last.1.clone()
+        // a PR's worth, more or less; past that start over rather than keep every body ever shown
+        if seen.len() > 256 {
+            seen.clear();
+        }
+        let blocks = Rc::new(markdown(body));
+        seen.insert(body.to_string(), blocks.clone());
+        blocks
     })
 }
 
@@ -610,7 +903,7 @@ fn pill(icon: &'static str, label: impl Into<SharedString>, color: Hsla) -> Div 
 
 /// The PR's head: its project and number (a click opens it) with its state; the title; the author, when it last
 /// changed and the command that checks it out (a click copies it); the branches and how much it changes.
-fn request_head(theme: &Theme, r: &Request) -> AnyElement {
+fn request_head(theme: &Theme, r: &Request, menu: AnyElement) -> AnyElement {
     let (label, color) = pr_tone(r.pr.state, theme);
     let number = format!("{}{}", if r.pr.gitlab { "!" } else { "#" }, r.pr.number);
     let (accent, text) = (theme.accent, theme.text);
@@ -642,7 +935,8 @@ fn request_head(theme: &Theme, r: &Request) -> AnyElement {
         .gap(px(6.))
         .when(open_now && !r.mergeable, |el| el.child(pill("icons/solar/close-circle.svg", "Conflicts", theme.danger)))
         .when(open_now && r.accepted, |el| el.child(pill("icons/solar/check-circle.svg", "Approved", theme.success)))
-        .child(pill("icons/git-pull-request.svg", label, color));
+        .child(pill("icons/git-pull-request.svg", label, color))
+        .child(menu);
     let title = div()
         .id("review-title")
         .text_size(px(15.))
@@ -653,13 +947,7 @@ fn request_head(theme: &Theme, r: &Request) -> AnyElement {
         .hover(move |s| s.text_color(accent))
         .child(if r.title.is_empty() { number.clone() } else { r.title.clone() })
         .on_click(open);
-    let updated = r.updated.map(|at| {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(at);
-        match crate::model::ago(Duration::from_secs((now - at).max(0) as u64)).as_str() {
-            "now" => "updated just now".to_string(),
-            ago => format!("updated {ago} ago"),
-        }
-    });
+    let updated = r.updated.map(|at| format!("updated {}", ago_text(at)));
     let checkout = format!("{} checkout {}", if r.pr.gitlab { "glab mr" } else { "gh pr" }, r.pr.number);
     let mono = theme.font_terminal.clone();
     let byline = div()
@@ -768,22 +1056,13 @@ fn ci_line(checks: &[Check], pipeline: Option<CheckState>, gitlab: bool) -> Opti
     Some((state, words))
 }
 
-/// Summary and Checks (or Pipeline) as one segmented control, and how CI went beside them (a click shows the checks).
-#[allow(clippy::too_many_arguments)]
-fn tab_bar(
-    theme: &Theme,
-    checks_tab: bool,
-    checks_title: &'static str,
-    ci: Option<(CheckState, String)>,
-    on_summary: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_checks: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_ci: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    window: &mut Window,
-) -> AnyElement {
+/// The tabs as one segmented control, and how CI went beside them (a click shows the checks).
+fn tab_bar(theme: &Theme, shown: Tab, checks_title: &'static str, ci: Option<(CheckState, String)>, pick: &dyn Fn(Tab) -> Listener, window: &mut Window) -> AnyElement {
     let (text, muted, on) = (theme.text, theme.text_muted, theme.card);
-    let tab = |id: &'static str, label: &'static str, selected: bool| {
+    let tab = |t: Tab, label: &'static str| {
+        let selected = t == shown;
         div()
-            .id(id)
+            .id(SharedString::from(format!("review-tab-{t:?}")))
             .h(px(24.))
             .px(px(10.))
             .flex()
@@ -793,6 +1072,7 @@ fn tab_bar(
             .font_weight(gpui::FontWeight::MEDIUM)
             .map(|el| if selected { el.bg(on).text_color(text) } else { el.text_color(muted).cursor_pointer().hover(move |s| s.text_color(text)) })
             .child(label)
+            .on_click(pick(t))
     };
     let tabs = div()
         .flex_none()
@@ -802,8 +1082,11 @@ fn tab_bar(
         .p(px(2.))
         .rounded(px(8.))
         .bg(theme.hover)
-        .child(tab("review-tab-summary", "Summary", !checks_tab).on_click(on_summary))
-        .child(tab("review-tab-checks", checks_title, checks_tab).on_click(on_checks));
+        .child(tab(Tab::Summary, "Summary"))
+        .child(tab(Tab::Timeline, "Timeline"))
+        .child(tab(Tab::Code, "Code"))
+        .child(tab(Tab::Checks, checks_title));
+    let on_ci = pick(Tab::Checks);
     div()
         .flex_none()
         .px(px(12.))
@@ -826,10 +1109,273 @@ fn tab_bar(
                 .text_color(muted)
                 .cursor_pointer()
                 .hover(move |s| s.text_color(text))
+                .tooltip(tip(words.clone(), None))
                 .child(check_icon(theme, state, 14., window))
                 .child(div().min_w_0().truncate().child(words))
                 .on_click(on_ci)
         }))
+        .into_any_element()
+}
+
+/// How long ago unix second `at` was: "just now", "5m ago", "2d ago".
+fn ago_text(at: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(at);
+    match crate::model::ago(Duration::from_secs((now - at).max(0) as u64)).as_str() {
+        "now" => "just now".to_string(),
+        ago => format!("{ago} ago"),
+    }
+}
+
+/// A person's initial in a small circle, standing in for their avatar.
+fn avatar(theme: &Theme, who: &str) -> Div {
+    let initial = who.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+    div()
+        .size(px(20.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(theme.hover)
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .child(initial)
+}
+
+/// The Timeline tab: what happened on the PR, oldest first. A comment, or a review that says something, is a card with
+/// its text; the rest are one line each, a push with its commits under it.
+fn timeline(theme: &Theme, events: &[crate::ui::review::Event]) -> AnyElement {
+    use crate::ui::review::Happened;
+    let mono = theme.font_terminal.clone();
+    let item = |i: usize, e: &crate::ui::review::Event| -> AnyElement {
+        let (icon, color, said): (&'static str, Hsla, String) = match &e.what {
+            Happened::Opened => ("icons/git-pull-request.svg", theme.success, "opened this".into()),
+            Happened::Commented => ("icons/solar/chat-round-line.svg", theme.text_muted, "commented".into()),
+            Happened::Approved => ("icons/solar/check-circle.svg", theme.success, "approved".into()),
+            Happened::Changes => ("icons/solar/close-circle.svg", theme.danger, "requested changes".into()),
+            Happened::Reviewed => ("icons/solar/eye.svg", theme.text_muted, "reviewed".into()),
+            Happened::Commits(c) => ("icons/solar/git-commit.svg", theme.text_muted, format!("pushed {} commit{}", c.len(), if c.len() == 1 { "" } else { "s" })),
+            Happened::Merged => ("icons/git-pull-request.svg", theme.accent, "merged this".into()),
+            Happened::Closed => ("icons/solar/close-circle.svg", theme.danger, "closed this".into()),
+            Happened::Note => ("icons/solar/pen.svg", theme.text_faint, e.body.clone()),
+        };
+        let card = !e.body.trim().is_empty() && !matches!(e.what, Happened::Note);
+        let line = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_size(px(12.))
+            .text_color(theme.text_muted)
+            .child(if card { avatar(theme, &e.who) } else { div().size(px(20.)).flex_none().flex().items_center().justify_center().child(gpui::svg().path(icon).size(px(14.)).text_color(color)) })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    // one run of text, the name set apart: two children would stack
+                    .child({
+                        let who = if e.who.is_empty() { String::new() } else { format!("{} ", e.who) };
+                        let name = gpui::HighlightStyle { color: Some(theme.text), font_weight: Some(gpui::FontWeight::MEDIUM), ..Default::default() };
+                        gpui::StyledText::new(format!("{who}{said}")).with_highlights([(0..who.len(), name)])
+                    }),
+            )
+            .when(card && !matches!(e.what, Happened::Commented), |el| el.child(gpui::svg().path(icon).size(px(14.)).flex_none().text_color(color)))
+            .child(div().flex_none().text_color(theme.text_faint).child(ago_text(e.at)));
+        let commits = match &e.what {
+            Happened::Commits(c) => Some(div().pl(px(28.)).flex().flex_col().gap(px(2.)).text_size(px(12.)).children(c.iter().map(|(sha, headline)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().flex_none().font_family(mono.clone()).text_color(theme.text_faint).child(sha.clone()))
+                    .child(div().min_w_0().truncate().text_color(theme.text).child(headline.clone()))
+            }))),
+            _ => None,
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(line)
+            .children(commits)
+            .when(card, |el| {
+                el.child(
+                    div()
+                        .ml(px(28.))
+                        .p(px(10.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.card)
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .text_size(px(13.))
+                        .text_color(theme.text)
+                        .children(crate::ui::markdown::render(&parsed(&e.body), &format!("review-tl-{i}"), theme)),
+                )
+            })
+            .into_any_element()
+    };
+    div().flex().flex_col().gap(px(14.)).children(events.iter().enumerate().map(|(i, e)| item(i, e))).into_any_element()
+}
+
+/// Up to this many files, the Code tab opens with every file's diff unfolded.
+const SMALL_PR: usize = 3;
+/// How many of a file's diff lines the Code tab draws; the rest are a link to the host.
+const MAX_FILE_LINES: usize = 400;
+
+/// The Code tab: the PR's files with what each adds and removes; a click on one unfolds its diff (`open` is which
+/// are), and `on_file` folds or unfolds one by its path.
+fn code(theme: &Theme, files: &[crate::changes::FileDiff], open: &[bool], cut: bool, pr: &crate::ui::statusbar::Pr, on_file: Rc<dyn Fn(String, &mut App)>) -> AnyElement {
+    use crate::changes::{FileStatus, LineKind};
+    let mono = theme.font_terminal.clone();
+    let (hover, accent) = (theme.hover, theme.accent);
+    let page = if pr.gitlab { format!("{}/diffs", pr.url) } else { format!("{}/files", pr.url) };
+    let (adds, dels) = files.iter().fold((0, 0), |(a, d), f| (a + f.additions as u64, d + f.deletions as u64));
+    let open_page = |id: gpui::ElementId, label: String| {
+        let page = page.clone();
+        div().id(id).cursor_pointer().text_color(accent).hover(|s| s.underline()).child(label).on_click(move |_, _, cx| cx.open_url(&page))
+    };
+    let heading = div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .text_size(px(12.))
+        .text_color(theme.text_muted)
+        .child(div().flex_1().child(format!("{} file{} changed", thousands(files.len() as u64), if files.len() == 1 { "" } else { "s" })))
+        .child(div().font_family(mono.clone()).text_color(theme.success).child(format!("+{}", thousands(adds))))
+        .child(div().font_family(mono.clone()).text_color(theme.danger).child(format!("-{}", thousands(dels))));
+    let diff = |i: usize, f: &crate::changes::FileDiff| -> AnyElement {
+        let gutter = (f.max_line.max(1).to_string().len() as f32) * 7. + 10.;
+        let number = |n: Option<u32>, color: Hsla| {
+            div().w(px(gutter)).flex_none().pr(px(6.)).flex().justify_end().text_color(color).child(n.map(|n| n.to_string()).unwrap_or_default())
+        };
+        let mut rows: Vec<AnyElement> = crate::changes::file_notices(f)
+            .into_iter()
+            .map(|n| div().px(px(10.)).py(px(4.)).text_color(theme.text_faint).child(n).into_any_element())
+            .collect();
+        let mut shown = 0;
+        let total: usize = f.hunks.iter().map(|h| h.lines.len()).sum();
+        'hunks: for h in &f.hunks {
+            rows.push(div().px(px(10.)).py(px(3.)).bg(theme.diff_hunk).text_color(theme.text_faint).truncate().child(h.header.clone()).into_any_element());
+            for l in &h.lines {
+                if shown == MAX_FILE_LINES {
+                    break 'hunks;
+                }
+                shown += 1;
+                let (marker, ink, bg) = match l.kind {
+                    LineKind::Add => ("+", theme.diff_add, Some(theme.diff_add.opacity(0.08))),
+                    LineKind::Del => ("-", theme.diff_del, Some(theme.diff_del.opacity(0.08))),
+                    _ => (" ", theme.text_faint, None),
+                };
+                let text = l.text.replace('\t', "    ");
+                rows.push(
+                    div()
+                        .flex()
+                        .items_start()
+                        .when_some(bg, |el, bg| el.bg(bg))
+                        .child(number(l.old_no, theme.text_faint.opacity(0.8)))
+                        .child(number(l.new_no, theme.text_faint.opacity(0.8)))
+                        .child(div().w(px(14.)).flex_none().text_color(ink).child(marker))
+                        .child(div().flex_1().min_w_0().pr(px(8.)).text_color(theme.text).child(if text.is_empty() { " ".to_string() } else { text }))
+                        .into_any_element(),
+                );
+            }
+        }
+        if shown < total {
+            rows.push(
+                div()
+                    .px(px(10.))
+                    .py(px(6.))
+                    .flex()
+                    .gap(px(6.))
+                    .text_color(theme.text_faint)
+                    .child(format!("{} more lines", thousands((total - shown) as u64)))
+                    .child(open_page(("review-code-more", i).into(), format!("Open on {} ↗", if pr.gitlab { "GitLab" } else { "GitHub" })))
+                    .into_any_element(),
+            );
+        }
+        div()
+            .ml(px(6.))
+            .mt(px(2.))
+            .mb(px(6.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.border)
+            .overflow_hidden()
+            .font_family(mono.clone())
+            .text_size(px(11.5))
+            .line_height(px(17.))
+            .children(rows)
+            .into_any_element()
+    };
+    let rows = files.iter().enumerate().flat_map(|(i, f)| {
+        let unfolded = open.get(i).copied().unwrap_or(false);
+        let (folder, name) = match f.path.rsplit_once('/') {
+            Some((folder, name)) => (format!("{folder}/"), name.to_string()),
+            None => (String::new(), f.path.clone()),
+        };
+        let tint = match f.status {
+            FileStatus::Added => theme.success,
+            FileStatus::Deleted => theme.danger,
+            _ => theme.text,
+        };
+        let on_file = on_file.clone();
+        let path = f.path.clone();
+        let row = div()
+            .id(("review-file", i))
+            .h(px(26.))
+            .px(px(6.))
+            .mx(px(-6.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .text_size(px(12.))
+            .child(gpui::svg().path(if unfolded { "icons/alt-arrow-down.svg" } else { "icons/alt-arrow-right.svg" }).size(px(12.)).flex_none().text_color(theme.text_faint))
+            .child(crate::ui::file_icons::icon(&f.path, theme.appearance).size(px(14.)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .when_some(f.old_path.clone(), |el, old| el.child(gpui::StyledText::new(format!("{old} → ")).with_highlights([(0..old.len() + 5, gpui::HighlightStyle { color: Some(theme.text_faint), ..Default::default() })])))
+                    .child(gpui::StyledText::new(format!("{folder}{name}")).with_highlights([
+                        (0..folder.len(), gpui::HighlightStyle { color: Some(theme.text_faint), ..Default::default() }),
+                        (folder.len()..folder.len() + name.len(), gpui::HighlightStyle { color: Some(tint), ..Default::default() }),
+                    ])),
+            )
+            .when(f.binary, |el| el.child(div().flex_none().text_color(theme.text_faint).child("binary")))
+            .when(!f.binary, |el| {
+                el.child(div().flex_none().font_family(mono.clone()).text_color(theme.success).child(format!("+{}", f.additions)))
+                    .child(div().flex_none().font_family(mono.clone()).text_color(theme.danger).child(format!("-{}", f.deletions)))
+            })
+            .on_click(move |_, _, cx| on_file(path.clone(), cx))
+            .into_any_element();
+        std::iter::once(row).chain(unfolded.then(|| diff(i, f)))
+    });
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .child(div().pb(px(6.)).child(heading))
+        .children(rows.collect::<Vec<_>>())
+        .when(cut, |el| {
+            el.child(
+                div()
+                    .pt(px(6.))
+                    .flex()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .text_color(theme.text_faint)
+                    .child("The diff is too big to show whole.")
+                    .child(open_page("review-code-cut".into(), "See it all ↗".into())),
+            )
+        })
         .into_any_element()
 }
 

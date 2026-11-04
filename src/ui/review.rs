@@ -882,6 +882,186 @@ fn gitlab_rest(dir: &str, branch: &str, host: &str) -> Review {
     Review::Found { request, checks: all.unwrap_or(own), pipeline: Some(pipeline) }
 }
 
+/// One thing that happened on a PR or MR, for the Timeline tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Event {
+    /// Unix seconds.
+    pub at: i64,
+    /// Who did it; empty when the host doesn't say.
+    pub who: String,
+    pub what: Happened,
+    /// What they wrote, markdown; empty for most.
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Happened {
+    Opened,
+    Commented,
+    Approved,
+    Changes,
+    /// A review without a verdict (GitHub's COMMENTED, DISMISSED).
+    Reviewed,
+    /// Commits pushed in a row by the same person: their short hash and first line.
+    Commits(Vec<(String, String)>),
+    Merged,
+    Closed,
+    /// Anything else GitLab notes by itself; its words are the body.
+    Note,
+}
+
+/// What `gh pr view --json` is asked for the timeline.
+const GITHUB_TIMELINE: &str = "author,createdAt,comments,reviews,commits,state,mergedAt,mergedBy,closedAt";
+
+/// [`GITHUB_TIMELINE`]'s answer, read: the PR's events, oldest first.
+pub fn parse_github_timeline(json: &str) -> Option<Vec<Event>> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let login = |who: &Value| who["login"].as_str().unwrap_or("").to_string();
+    let at = |t: &Value| t.as_str().and_then(unix_secs);
+    let mut out = Vec::new();
+    if let Some(t) = at(&v["createdAt"]) {
+        out.push(Event { at: t, who: login(&v["author"]), what: Happened::Opened, body: String::new() });
+    }
+    for c in v["comments"].as_array().into_iter().flatten() {
+        let Some(t) = at(&c["createdAt"]) else { continue };
+        out.push(Event { at: t, who: login(&c["author"]), what: Happened::Commented, body: c["body"].as_str().unwrap_or("").into() });
+    }
+    for r in v["reviews"].as_array().into_iter().flatten() {
+        let Some(t) = at(&r["submittedAt"]) else { continue };
+        let what = match r["state"].as_str() {
+            Some("APPROVED") => Happened::Approved,
+            Some("CHANGES_REQUESTED") => Happened::Changes,
+            _ => Happened::Reviewed,
+        };
+        out.push(Event { at: t, who: login(&r["author"]), what, body: r["body"].as_str().unwrap_or("").into() });
+    }
+    for c in v["commits"].as_array().into_iter().flatten() {
+        let Some(t) = at(&c["committedDate"]).or_else(|| at(&c["authoredDate"])) else { continue };
+        let author = &c["authors"][0];
+        let who = author["login"].as_str().filter(|l| !l.is_empty()).or(author["name"].as_str()).unwrap_or("");
+        let sha: String = c["oid"].as_str().unwrap_or("").chars().take(7).collect();
+        let line = c["messageHeadline"].as_str().unwrap_or("").to_string();
+        out.push(Event { at: t, who: who.into(), what: Happened::Commits(vec![(sha, line)]), body: String::new() });
+    }
+    if let Some(t) = at(&v["mergedAt"]) {
+        out.push(Event { at: t, who: login(&v["mergedBy"]), what: Happened::Merged, body: String::new() });
+    } else if v["state"].as_str() == Some("CLOSED")
+        && let Some(t) = at(&v["closedAt"])
+    {
+        out.push(Event { at: t, who: String::new(), what: Happened::Closed, body: String::new() });
+    }
+    Some(in_order(out))
+}
+
+/// `glab api projects/:id/merge_requests/<iid>` and its `/notes`, read: the MR's events, oldest first. GitLab notes
+/// commits, approvals, merges and the rest itself, as system notes.
+pub fn parse_gitlab_timeline(mr: &str, notes: &str) -> Option<Vec<Event>> {
+    let mr: Value = serde_json::from_str(mr).ok()?;
+    let notes: Value = serde_json::from_str(notes).ok()?;
+    let mut out = Vec::new();
+    if let Some(t) = mr["created_at"].as_str().and_then(unix_secs) {
+        out.push(Event { at: t, who: mr["author"]["username"].as_str().unwrap_or("").into(), what: Happened::Opened, body: String::new() });
+    }
+    for n in notes.as_array()? {
+        let Some(t) = n["created_at"].as_str().and_then(unix_secs) else { continue };
+        let who = n["author"]["username"].as_str().unwrap_or("").to_string();
+        let body = n["body"].as_str().unwrap_or("").trim().to_string();
+        if n["system"].as_bool() != Some(true) {
+            out.push(Event { at: t, who, what: Happened::Commented, body });
+            continue;
+        }
+        let first = body.lines().next().unwrap_or("");
+        let what = if first.starts_with("added ") && first.contains("commit") {
+            Happened::Commits(gitlab_commits(&body))
+        } else if first == "approved this merge request" {
+            Happened::Approved
+        } else if first == "requested changes" {
+            Happened::Changes
+        } else if first == "merged" {
+            Happened::Merged
+        } else if first == "closed" {
+            Happened::Closed
+        } else {
+            out.push(Event { at: t, who, what: Happened::Note, body: first.to_string() });
+            continue;
+        };
+        out.push(Event { at: t, who, what, body: String::new() });
+    }
+    Some(in_order(out))
+}
+
+/// A GitLab "added N commits" note's commits: `<li>abc12345 - Fix it</li>`.
+fn gitlab_commits(body: &str) -> Vec<(String, String)> {
+    body.split("<li>")
+        .skip(1)
+        .filter_map(|item| {
+            let item = item.split("</li>").next()?;
+            let (sha, line) = item.split_once(" - ")?;
+            let sha = sha.trim();
+            // "1 commit from branch …" lines aren't commits
+            (!sha.contains(' ') && !sha.is_empty()).then(|| (sha.chars().take(7).collect(), line.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Oldest first, commits pushed in a row by one person as one event.
+fn in_order(mut events: Vec<Event>) -> Vec<Event> {
+    events.sort_by_key(|e| e.at);
+    let mut out: Vec<Event> = Vec::new();
+    for e in events {
+        if let (Some(last), Happened::Commits(more)) = (out.last_mut(), &e.what)
+            && last.who == e.who
+            && let Happened::Commits(run) = &mut last.what
+        {
+            run.extend(more.iter().cloned());
+            last.at = e.at;
+            continue;
+        }
+        out.push(e);
+    }
+    out
+}
+
+/// A PR's or MR's timeline; `key` is the located repo directory, `gitlab` or not and its number, a line apart. A
+/// failure's line is the error.
+pub fn read_timeline(key: &str) -> Option<Result<Vec<Event>, String>> {
+    let mut parts = key.split('\n');
+    let (dir, gitlab, number) = (parts.next()?, parts.next()? == "true", parts.next()?);
+    let said = |(out, err): (String, String), parse: &dyn Fn(&str) -> Option<Vec<Event>>| {
+        parse(&out).ok_or_else(|| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the timeline").to_string())
+    };
+    Some(if gitlab {
+        let mr = run("glab", &["api", &format!("projects/:id/merge_requests/{number}")], dir).map_err(|e| e.to_string());
+        let notes = run("glab", &["api", &format!("projects/:id/merge_requests/{number}/notes?sort=asc&order_by=created_at&per_page=100")], dir).map_err(|e| e.to_string());
+        mr.and_then(|mr| notes.and_then(|notes| said(notes, &|n| parse_gitlab_timeline(&mr.0, n))))
+    } else {
+        run("gh", &["pr", "view", number, "--json", GITHUB_TIMELINE], dir).map_err(|e| e.to_string()).and_then(|o| said(o, &parse_github_timeline))
+    })
+}
+
+/// The most of a PR's diff the Code tab reads.
+const MAX_DIFF_BYTES: usize = 3 * 1024 * 1024;
+
+/// A PR's or MR's diff as the host has it, its files in order, and whether it was cut at [`MAX_DIFF_BYTES`]; `key`
+/// as [`read_timeline`]'s.
+#[allow(clippy::type_complexity)]
+pub fn read_diff(key: &str) -> Option<Result<(Vec<crate::changes::FileDiff>, bool), String>> {
+    let mut parts = key.split('\n');
+    let (dir, gitlab, number) = (parts.next()?, parts.next()? == "true", parts.next()?);
+    let got = if gitlab { run("glab", &["mr", "diff", number, "--raw"], dir) } else { run("gh", &["pr", "diff", number, "--color", "never"], dir) };
+    Some(got.map_err(|e| e.to_string()).and_then(|(mut patch, err)| {
+        if patch.trim().is_empty() && !err.trim().is_empty() {
+            return Err(err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the diff").to_string());
+        }
+        let cut = patch.len() > MAX_DIFF_BYTES;
+        if cut {
+            let end = patch[..patch.floor_char_boundary(MAX_DIFF_BYTES)].rfind('\n').unwrap_or(0);
+            patch.truncate(end);
+        }
+        Ok((crate::changes::parse_patch(&patch), cut))
+    }))
+}
+
 pub use zeron_markdown::{Block, InlineRun};
 
 /// `text` as Zeron's markdown blocks (pulldown-cmark), for a panel without HTML: comments (GitHub's templates are
@@ -1087,6 +1267,55 @@ mod tests {
             "pipelines":{"nodes":[{"iid":"55","status":"SUCCESS","path":"/g/p/-/pipelines/9"}]}}}}"#;
         let (request, pipeline, _, iid) = parse_gitlab_review(none, "https://gl", "g/p", 0).unwrap();
         assert_eq!((request, pipeline.map(|p| p.1), iid.as_deref()), (None, Some(CheckState::Success), Some("55")), "the branch's own pipeline, its jobs asked for apart");
+    }
+
+    #[test]
+    fn a_github_timeline() {
+        let json = r#"{"author":{"login":"egor"},"createdAt":"2026-10-12T10:00:00Z","state":"MERGED",
+            "mergedAt":"2026-10-12T15:00:00Z","mergedBy":{"login":"anna"},"closedAt":"2026-10-12T15:00:00Z",
+            "comments":[{"author":{"login":"anna"},"body":"Looks good","createdAt":"2026-10-12T12:00:00Z"}],
+            "reviews":[{"author":{"login":"anna"},"state":"APPROVED","body":"","submittedAt":"2026-10-12T14:00:00Z"}],
+            "commits":[
+              {"oid":"aaaaaaaaaa","messageHeadline":"One","committedDate":"2026-10-12T10:30:00Z","authors":[{"login":"egor","name":"Egor"}]},
+              {"oid":"bbbbbbbbbb","messageHeadline":"Two","committedDate":"2026-10-12T11:00:00Z","authors":[{"login":"egor","name":"Egor"}]},
+              {"oid":"cccccccccc","messageHeadline":"Three","committedDate":"2026-10-12T13:00:00Z","authors":[{"login":"","name":"Egor K"}]}]}"#;
+        let events = parse_github_timeline(json).unwrap();
+        let got: Vec<_> = events.iter().map(|e| (e.who.as_str(), e.what.clone())).collect();
+        assert_eq!(
+            got,
+            [
+                ("egor", Happened::Opened),
+                ("egor", Happened::Commits(vec![("aaaaaaa".into(), "One".into()), ("bbbbbbb".into(), "Two".into())])),
+                ("anna", Happened::Commented),
+                ("Egor K", Happened::Commits(vec![("ccccccc".into(), "Three".into())])),
+                ("anna", Happened::Approved),
+                ("anna", Happened::Merged),
+            ],
+            "oldest first, commits in a row by one person together"
+        );
+        assert_eq!(events[2].body, "Looks good");
+    }
+
+    #[test]
+    fn a_gitlab_timeline() {
+        let mr = r#"{"created_at":"2026-10-12T10:00:00.000Z","author":{"username":"vlad"}}"#;
+        let notes = r#"[
+            {"body":"added 2 commits\n\n<ul><li>1234567890 - First</li><li>abcdef1234 - Second</li></ul>\n\n[Compare with previous version](x)","author":{"username":"vlad"},"created_at":"2026-10-12T11:00:00Z","system":true},
+            {"body":"Why this?","author":{"username":"egor"},"created_at":"2026-10-12T12:00:00Z","system":false},
+            {"body":"approved this merge request","author":{"username":"egor"},"created_at":"2026-10-12T13:00:00Z","system":true},
+            {"body":"changed the description","author":{"username":"vlad"},"created_at":"2026-10-12T14:00:00Z","system":true}]"#;
+        let events = parse_gitlab_timeline(mr, notes).unwrap();
+        let got: Vec<_> = events.iter().map(|e| (e.who.as_str(), e.what.clone(), e.body.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("vlad", Happened::Opened, ""),
+                ("vlad", Happened::Commits(vec![("1234567".into(), "First".into()), ("abcdef1".into(), "Second".into())]), ""),
+                ("egor", Happened::Commented, "Why this?"),
+                ("egor", Happened::Approved, ""),
+                ("vlad", Happened::Note, "changed the description"),
+            ]
+        );
     }
 
     #[test]

@@ -67,9 +67,10 @@ fn main() {
         if std::env::var_os("SHEPHERD_SETTINGS").is_some() {
             shepherd::shell::Shell::toggle_settings(cx);
         }
-        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions|review`: opens that panel once the first snapshot is likely in (screenshots).
+        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions|review[:tab]`: opens that panel once the first snapshot is likely in (screenshots).
         if let Ok(which) = std::env::var("SHEPHERD_PANEL") {
-            let review = which == "review";
+            // `review:timeline` opens the review panel on its Timeline tab, `review:menu` with its "…" menu open
+            let review = which.strip_prefix("review").map(|tab| tab.trim_start_matches(':').to_string());
             use shepherd::ui::command_panel::Kind;
             let kind = match which.as_str() {
                 "agents" => Kind::Agents,
@@ -82,7 +83,13 @@ fn main() {
                 cx.update(|cx| {
                     let Some(window) = cx.windows().into_iter().find_map(|w| w.downcast::<shepherd::shell::Shell>()) else { return };
                     let _ = window.update(cx, |shell, window, cx| {
-                        if review { shell.toggle_review(window, cx) } else { shell.toggle_command_panel(kind, window, cx) }
+                        match &review {
+                            Some(tab) => {
+                                shell.toggle_review(window, cx);
+                                shell.show_review_tab(tab, window, cx);
+                            }
+                            None => shell.toggle_command_panel(kind, window, cx),
+                        }
                     });
                 })
             })

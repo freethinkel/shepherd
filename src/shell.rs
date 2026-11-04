@@ -155,8 +155,13 @@ pub struct Shell {
     merge_confirm: Option<crate::ui::Popup<review::MergeAsk>>,
     /// The review panel's description is folded away under its heading.
     review_collapsed: bool,
-    /// The review panel shows its Checks tab, not its Summary.
-    review_checks_tab: bool,
+    /// The review panel's "…" menu, where it was clicked.
+    review_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
+    /// The review panel's tab under a PR's head.
+    review_tab: review::Tab,
+    /// The files a click on the review panel's Code tab flipped (unfolded, or folded on a small PR), by the PR's page
+    /// and the path, a line apart.
+    review_files: std::collections::HashSet<String>,
     agent_sort: AgentSort,
     /// Saved in the settings when a drag ends.
     agents_height: Option<f32>,
@@ -508,7 +513,9 @@ impl Shell {
                     review_swipe: None,
                     review_spring: None,
                     review_collapsed: false,
-                    review_checks_tab: false,
+                    review_menu: None,
+                    review_tab: Default::default(),
+                    review_files: Default::default(),
                     agent_sort: SettingsGlobal::of(cx).settings.agent_sort,
                     agents_height: SettingsGlobal::of(cx).settings.agents_height,
                     agents_drag: None,
