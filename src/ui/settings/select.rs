@@ -202,6 +202,14 @@ impl SettingsView {
         self.select(theme, "sidebar-select", labels, index, SharedString::default(), |_| None, |i, cx| update(cx, |s| s.sidebar_style = STYLES[i].0), cx)
     }
 
+    /// Which of Rex's cursor shaders draws the cursor's trail.
+    pub(super) fn cursor_effect_select(&self, theme: &Theme, current: crate::settings::CursorEffect, cx: &mut Context<Self>) -> Div {
+        use crate::settings::CursorEffect;
+        let labels = CursorEffect::ALL.iter().map(|e| SharedString::from(e.label())).collect();
+        let index = CursorEffect::ALL.iter().position(|e| *e == current);
+        self.select(theme, "cursor-effect-select", labels, index, SharedString::default(), |_| None, |i, cx| update(cx, |s| s.cursor_effect = CursorEffect::ALL[i]), cx)
+    }
+
     /// What runs the terminals: every window moves there at once.
     pub(super) fn backend_select(&self, theme: &Theme, current: crate::backend::Kind, cx: &mut Context<Self>) -> Div {
         use crate::backend::Kind;

@@ -166,6 +166,13 @@ impl Render for SettingsView {
                                 |_, _: &ClickEvent, _, cx| update(cx, |s| s.animated_cursor = !s.animated_cursor),
                             )),
                         )
+                        .when(settings.animated_cursor, |el| {
+                            el.child(
+                                card_row(&theme, false)
+                                    .child(row_text(&theme, "Cursor trail", "Rex's cursor shaders: Warp, Comet, Blaze and the rest."))
+                                    .child(self.cursor_effect_select(&theme, settings.cursor_effect, cx)),
+                            )
+                        })
                         .child(
                             card_row(&theme, false)
                                 .child(row_text(&theme, "Editor", if crate::terminal::pane::is_nvim(settings.editor.as_deref()) {

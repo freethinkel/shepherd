@@ -22,6 +22,7 @@ use gpui::{
 };
 
 use crate::herdr::graphics::PaneImage;
+use crate::settings::CursorEffect;
 use crate::theme::{Appearance, Theme, rgb_to_hsl};
 
 use super::sprite;
@@ -229,8 +230,8 @@ pub struct TerminalPrepaint {
     /// measured the grid with.
     line_h: Pixels,
     cursor: Option<PaintQuad>,
-    /// [`CursorTrail`]'s quad, painted under the text.
-    trail: Option<(gpui::Path<Pixels>, Hsla)>,
+    /// [`trail_shapes`], painted under the text.
+    trail: Vec<(gpui::Path<Pixels>, gpui::Background)>,
     /// herdr's Kitty images, lowest z first, and whether each goes under the text.
     images: Vec<(Bounds<Pixels>, Arc<RenderImage>, bool)>,
     /// The focused block cursor is opaque, so it goes under the text (whose
@@ -337,7 +338,7 @@ impl gpui::Element for TerminalElement {
                 cell_w,
                 line_h,
                 cursor: None,
-                trail: None,
+                trail: Vec::new(),
                 images: Vec::new(),
                 cursor_under_text: false,
                 marked: None,
@@ -366,19 +367,19 @@ impl gpui::Element for TerminalElement {
         });
         // Ghostty's cursor_smear, focused only; the state is dropped on a frame that skips it, so
         // the cursor comes back without a trail after a blur or a hidden spell.
-        let trail = match (id, cursor_rect) {
-            (Some(id), Some(rect))
-                if self.focused
-                    && !cx.reduce_motion()
-                    && crate::settings::SettingsGlobal::of(cx).settings.animated_cursor =>
-            {
+        let settings = &crate::settings::SettingsGlobal::of(cx).settings;
+        let effect = settings.animated_cursor.then_some(settings.cursor_effect);
+        let trail = match (id, cursor_rect, effect) {
+            (Some(id), Some(rect), Some(effect)) if self.focused && !cx.reduce_motion() => {
                 window.with_element_state(id, |trail: Option<CursorTrail>, window| {
                     let mut trail = trail.unwrap_or_default();
-                    let corners = trail.step(rect, Instant::now());
-                    if corners.is_some() {
+                    let shapes = trail
+                        .track(rect, Instant::now())
+                        .and_then(|(from, to, t)| trail_shapes(effect, from, to, t, theme.cursor, &theme.terminal.ansi));
+                    if shapes.is_some() {
                         window.request_animation_frame();
                     }
-                    (corners, trail)
+                    (shapes, trail)
                 })
             }
             _ => None,
@@ -448,15 +449,19 @@ impl gpui::Element for TerminalElement {
             }
             .corner_radii(px(1.))
         });
-        let trail = trail.and_then(|corners| {
-            let mut path = gpui::PathBuilder::fill();
-            path.move_to(corners[0]);
-            for corner in &corners[1..] {
-                path.line_to(*corner);
-            }
-            path.close();
-            path.build().ok().map(|path| (path, theme.cursor))
-        });
+        let trail = trail
+            .into_iter()
+            .flatten()
+            .filter_map(|(corners, fill)| {
+                let mut path = gpui::PathBuilder::fill();
+                path.move_to(corners.first()?.map(px));
+                for corner in &corners[1..] {
+                    path.line_to(corner.map(px));
+                }
+                path.close();
+                path.build().ok().map(|path| (path, fill))
+            })
+            .collect();
 
         let selection = selection_outlines(&selected)
             .iter()
@@ -546,8 +551,8 @@ impl gpui::Element for TerminalElement {
             for path in prepaint.selection.drain(..) {
                 window.paint_path(path, selection);
             }
-            if let Some((path, color)) = prepaint.trail.take() {
-                window.paint_path(path, color);
+            for (path, fill) in prepaint.trail.drain(..) {
+                window.paint_path(path, fill);
             }
             if prepaint.cursor_under_text
                 && let Some(cursor) = prepaint.cursor.take()
@@ -657,14 +662,18 @@ impl CursorTrail {
     /// TL, TR, BR, BL as (x, y) signs; y grows down.
     const CORNERS: [(f32, f32); 4] = [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)];
 
-    /// The trail's corners at `now`, `None` when there is none to draw.
-    fn step(&mut self, rect: Bounds<Pixels>, now: Instant) -> Option<[Point<Pixels>; 4]> {
+    /// Notes the cursor at `rect`; the last move: from where, to where, how many seconds ago.
+    fn track(&mut self, rect: Bounds<Pixels>, now: Instant) -> Option<(Bounds<Pixels>, Bounds<Pixels>, f32)> {
         if self.at.is_none_or(|(at, _)| at != rect) {
             self.from = self.at.map(|(at, _)| at);
             self.at = Some((rect, now));
         }
         let ((to, since), from) = (self.at?, self.from?);
-        let t = now.duration_since(since).as_secs_f32();
+        Some((from, to, now.duration_since(since).as_secs_f32()))
+    }
+
+    /// The warp trail's corners `t` seconds into a move, `None` when there is none to draw.
+    fn warp(from: Bounds<Pixels>, to: Bounds<Pixels>, t: f32) -> Option<[Point<Pixels>; 4]> {
         let (to, from) = (Self::corners(to), Self::corners(from));
         let (dx, dy) = (to[2].x - from[2].x, to[2].y - from[2].y);
         let height = to[2].y - to[1].y;
@@ -696,6 +705,148 @@ impl CursorTrail {
         let (hw, hh) = (f32::from(rect.size.width) * 0.5 * Self::THICKNESS_X, f32::from(rect.size.height) * 0.5);
         Self::CORNERS.map(|(x, y)| Point::new(f32::from(c.x) + x * hw, f32::from(c.y) + y * hh))
     }
+}
+
+/// A filled polygon and what fills it.
+type TrailShape = (Vec<Point<f32>>, gpui::Background);
+
+/// Rex's cursor shaders `t` seconds into a move from `from` to `to`, `None` once done. GPUI runs no
+/// custom shaders, so each SDF becomes the polygon it fills (the convex hull of the rects it spans),
+/// and a glow becomes a grown copy under it, faint.
+/// Rex's fixed colors come from the theme: the cursor's, and the ANSI palette's for Frozen, Gradient
+/// and Rainbow.
+// ponytail: Blaze's accent edge folds into the glow, Rainbow's plasma and Gradient's cycling into a
+// two-stop gradient; a real shader pass if GPUI ever takes one.
+fn trail_shapes(effect: CursorEffect, from: Bounds<Pixels>, to: Bounds<Pixels>, t: f32, color: Hsla, ansi: &[Hsla; 16]) -> Option<Vec<TrailShape>> {
+    use CursorEffect::*;
+    type P = Point<f32>;
+    let quad = |r: Bounds<Pixels>| {
+        let (o, s) = (r.origin.map(f32::from), r.size.map(f32::from));
+        [o, point(o.x + s.width, o.y), point(o.x + s.width, o.y + s.height), point(o.x, o.y + s.height)]
+    };
+    let lerp = |a: P, b: P, k: f32| point(a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k);
+    // a rect's corners pushed `d` out, TL TR BR BL
+    let grow = |q: [P; 4], d: f32| std::array::from_fn::<P, 4, _>(|i| {
+        let (x, y) = CursorTrail::CORNERS[i];
+        point(q[i].x + x * d, q[i].y + y * d)
+    });
+    let cubic = |x: f32| 1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3);
+    let (a, b) = (quad(from), quad(to));
+    let (ca, cb) = (lerp(a[0], a[2], 0.5), lerp(b[0], b[2], 0.5));
+    let travel = (cb.x - ca.x).hypot(cb.y - ca.y);
+    let (w, h) = (f32::from(to.size.width), f32::from(to.size.height));
+    // the cursor moved `k` of the way back to where it was
+    let back = |k: f32| b.map(|p| point(p.x + (ca.x - cb.x) * k, p.y + (ca.y - cb.y) * k));
+    // CSS's angle (0 up, clockwise) of the move, for a gradient from where it was to where it is
+    let angle = (cb.x - ca.x).atan2(ca.y - cb.y).to_degrees();
+    Some(match effect {
+        Warp => vec![(CursorTrail::warp(from, to, t)?.map(|p| p.map(f32::from)).to_vec(), color.into())],
+        // cursor_sweep: TRAIL_LENGTH 0.5, DURATION 0.2, EaseOutCubic
+        Sweep if t < 0.2 && travel > h * 1.5 => vec![(hull(b.into_iter().chain(back(0.5 * (1.0 - cubic(t / 0.2))))), color.into())],
+        // cursor_blaze and kin: DURATION 0.3, the trail reaching back (1−t)³ of the jump
+        Blaze | BlazeTapered | BlazeNoTrail | Frozen if t < 0.3 => {
+            let e = (1.0 - t / 0.3).powi(3);
+            let (core, glow): (Hsla, Hsla) = match effect {
+                // Rex's ice cyan edged in blue
+                Frozen => (ansi[6], ansi[4]),
+                _ => (color, color),
+            };
+            let tail: Vec<P> = match effect {
+                BlazeNoTrail => Vec::new(),
+                BlazeTapered => vec![lerp(cb, ca, e)],
+                _ => back(e).to_vec(),
+            };
+            const HALO: f32 = 3.0;
+            let halo = grow(b, HALO).into_iter().chain(tail.iter().flat_map(|&p| grow([p; 4], HALO)));
+            let mut shapes = vec![(hull(halo), glow.opacity(0.5 * e).into())];
+            if effect != BlazeNoTrail {
+                shapes.push((hull(b.into_iter().chain(tail)), core.into()));
+            }
+            shapes
+        }
+        // Rex's comet: DURATION 0.32, a tail of WIDTH 0.42 heights that eases into the head
+        Comet if t < 0.32 && travel >= w * 1.5 => {
+            let age = t / 0.32;
+            let tail = lerp(ca, cb, cubic(age));
+            let r = h * 0.42;
+            let tint = Hsla { l: color.l + (1.0 - color.l) * 0.25, ..color };
+            let ramp = |alpha: f32| {
+                gpui::linear_gradient(angle, gpui::linear_color_stop(tint.opacity(0.0), 0.0), gpui::linear_color_stop(tint.opacity(alpha), 1.0))
+            };
+            let fade = 1.0 - age;
+            vec![(capsule(tail, cb, r * 0.45, r * 2.2), ramp(0.3 * fade)), (capsule(tail, cb, r * 0.2, r), ramp(fade))]
+        }
+        // cursor_rainbow / cursor_gradient: a hexagon whose trailing corner lags, the sides catching up twice as fast
+        Rainbow | Gradient if t < if effect == Rainbow { 0.5 } else { 0.25 } => {
+            let duration = if effect == Rainbow { 0.5 } else { 0.25 };
+            let sign = |v: f32| if v.abs() < 0.5 { 0.0 } else { v.signum() };
+            let (sx, sy) = (sign(cb.x - ca.x), sign(cb.y - ca.y));
+            let dots = CursorTrail::CORNERS.map(|(x, y)| x * sx + y * sy);
+            let least = dots.iter().copied().fold(f32::MAX, f32::min);
+            let (slow, fast) = (cubic(t / duration), cubic(2.0 * t / duration));
+            let lagging = (0..4).map(|i| lerp(a[i], b[i], if least < 0.0 && dots[i] == least { slow } else { fast }));
+            let fill = match effect {
+                Rainbow => {
+                    // the theme's red, yellow, green, cyan, blue, magenta, turning with time and with where the cursor lands
+                    const RING: [usize; 6] = [1, 3, 2, 6, 4, 5];
+                    let at = (((cb.x + cb.y) / 600.0 + t * 2.0).fract() * 6.0) as usize;
+                    gpui::linear_gradient(
+                        angle,
+                        gpui::linear_color_stop(ansi[RING[at % 6]].opacity(0.0), 0.0),
+                        gpui::linear_color_stop(ansi[RING[(at + 2) % 6]], 1.0),
+                    )
+                }
+                // Rex's gold to blue, top down
+                _ => gpui::linear_gradient(
+                    180.0,
+                    gpui::linear_color_stop(ansi[3].opacity(0.8), 0.0),
+                    gpui::linear_color_stop(ansi[4].opacity(0.8), 1.0),
+                ),
+            }
+            .color_space(gpui::ColorSpace::Oklab);
+            vec![(hull(b.into_iter().chain(lagging)), fill)]
+        }
+        _ => return None,
+    })
+}
+
+/// The convex hull of `points` (Andrew's monotone chain).
+fn hull(points: impl IntoIterator<Item = Point<f32>>) -> Vec<Point<f32>> {
+    let mut points: Vec<_> = points.into_iter().collect();
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    if points.len() < 3 {
+        return points;
+    }
+    let turn = |o: Point<f32>, a: Point<f32>, b: Point<f32>| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    let mut hull: Vec<Point<f32>> = Vec::with_capacity(points.len() * 2);
+    for &p in &points {
+        while hull.len() >= 2 && turn(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(p);
+    }
+    let lower = hull.len() + 1;
+    for &p in points[..points.len() - 1].iter().rev() {
+        while hull.len() >= lower && turn(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(p);
+    }
+    hull.pop();
+    hull
+}
+
+/// A tapered capsule from a `tail` of radius `r0` to a `head` of radius `r1`, its ends round.
+fn capsule(tail: Point<f32>, head: Point<f32>, r0: f32, r1: f32) -> Vec<Point<f32>> {
+    let along = (head.y - tail.y).atan2(head.x - tail.x);
+    let arc = |c: Point<f32>, r: f32, start: f32| {
+        (0..=8).map(move |i| {
+            let a = start + std::f32::consts::PI * i as f32 / 8.0;
+            point(c.x + r * a.cos(), c.y + r * a.sin())
+        })
+    };
+    let half = std::f32::consts::FRAC_PI_2;
+    arc(head, r1, along - half).chain(arc(tail, r0, along + half)).collect()
 }
 
 /// Shape one grid row into segments placed by column.
@@ -977,14 +1128,28 @@ mod tests {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
         let mut trail = CursorTrail::default();
-        assert!(trail.step(cell(0.), t0).is_none(), "the first sighting has no trail");
-        assert!(trail.step(cell(1.), t0).is_none(), "nor does typing");
-        assert!(trail.step(cell(10.), t0).is_some(), "a jump does");
-        let c = trail.step(cell(10.), at(100)).unwrap();
+        let mut step = |rect, now| trail.track(rect, now).and_then(|(from, to, t)| CursorTrail::warp(from, to, t));
+        assert!(step(cell(0.), t0).is_none(), "the first sighting has no trail");
+        assert!(step(cell(1.), t0).is_none(), "nor does typing");
+        assert!(step(cell(10.), t0).is_some(), "a jump does");
+        let c = step(cell(10.), at(100)).unwrap();
         // moving right: the right edge has landed, at the center plus 0.9 of the half width
         assert_eq!((c[1].x, c[2].x), (px(109.5), px(109.5)));
         assert!(c[0].x > px(0.5) && c[0].x < px(100.5), "{c:?}");
-        assert!(trail.step(cell(10.), at(200)).is_none(), "and it is gone after DURATION");
+        assert!(step(cell(10.), at(200)).is_none(), "and it is gone after DURATION");
+    }
+
+    #[test]
+    fn every_cursor_effect_draws_a_jump_and_is_gone_after_it() {
+        let cell = |col: f32, row: f32| Bounds::new(point(px(col * 10.), px(row * 20.)), size(px(10.), px(20.)));
+        for effect in CursorEffect::ALL {
+            let shapes = trail_shapes(effect, cell(0., 0.), cell(10., 3.), 0.05, gpui::red(), &[gpui::red(); 16]).unwrap_or_else(|| panic!("{effect:?}"));
+            assert!(shapes.iter().all(|(p, _)| p.len() >= 3), "{effect:?}");
+            assert!(trail_shapes(effect, cell(0., 0.), cell(10., 3.), 0.6, gpui::red(), &[gpui::red(); 16]).is_none(), "{effect:?}");
+        }
+        // two cells a diagonal apart: a hexagon, the corners each cell hides dropped
+        let square = |x: f32| [(0., 0.), (1., 0.), (1., 1.), (0., 1.)].map(|(a, b)| point(a + x, b + x));
+        assert_eq!(hull(square(0.).into_iter().chain(square(2.))).len(), 6);
     }
 
     #[test]

@@ -89,6 +89,8 @@ pub struct Settings {
     pub copy_on_select: bool,
     /// A jump of the cursor leaves a short trail behind it, as Ghostty's cursor_smear shader draws.
     pub animated_cursor: bool,
+    /// Which of Rex's cursor shaders draws that trail.
+    pub cursor_effect: CursorEffect,
     /// macOS Secure Keyboard Entry while a Shepherd window is in front: other apps cannot read the keys typed.
     pub secure_input: bool,
     /// The window lets the desktop show through: blurred on macOS, and elsewhere as the compositor does it. On by
@@ -151,6 +153,58 @@ impl UsageAgent {
         match self {
             UsageAgent::Claude => "Claude",
             UsageAgent::Codex => "Codex",
+        }
+    }
+}
+
+/// Rex's cursor shaders, by Rex's names. An unknown (future) value reads as Warp.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CursorEffect {
+    /// A band half the jump long that shrinks into the cursor.
+    Sweep,
+    /// A soft tapered tail chasing the cursor.
+    Comet,
+    /// A glowing band the whole jump long, shrinking into the cursor.
+    Blaze,
+    /// Blaze narrowing to a point where the cursor was.
+    BlazeTapered,
+    /// Only Blaze's glow around the cursor.
+    BlazeNoTrail,
+    Rainbow,
+    Gradient,
+    /// Blaze in ice blue.
+    Frozen,
+    /// Ghostty's cursor_smear: a quad whose leading corners land first.
+    #[default]
+    #[serde(other)]
+    Warp,
+}
+
+impl CursorEffect {
+    pub const ALL: [CursorEffect; 9] = [
+        CursorEffect::Warp,
+        CursorEffect::Sweep,
+        CursorEffect::Comet,
+        CursorEffect::Blaze,
+        CursorEffect::BlazeTapered,
+        CursorEffect::BlazeNoTrail,
+        CursorEffect::Rainbow,
+        CursorEffect::Gradient,
+        CursorEffect::Frozen,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CursorEffect::Warp => "Warp",
+            CursorEffect::Sweep => "Sweep",
+            CursorEffect::Comet => "Comet",
+            CursorEffect::Blaze => "Blaze",
+            CursorEffect::BlazeTapered => "Blaze, tapered",
+            CursorEffect::BlazeNoTrail => "Blaze, no trail",
+            CursorEffect::Rainbow => "Rainbow",
+            CursorEffect::Gradient => "Gradient",
+            CursorEffect::Frozen => "Frozen",
         }
     }
 }
@@ -328,6 +382,7 @@ impl Default for Settings {
             dock_badge: true,
             copy_on_select: true,
             animated_cursor: true,
+            cursor_effect: CursorEffect::default(),
             secure_input: false,
             translucent_window: cfg!(target_os = "macos"),
             window_buttons: true,
