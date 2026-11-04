@@ -1,6 +1,13 @@
 //! The window's frame of views: titlebar, sidebar, tab bar, panes, panels and toasts, laid out each frame.
 use super::*;
 
+/// An unfocused pane of a split shows at this opacity.
+const INACTIVE_PANE: f32 = 0.6;
+/// The room between two panes in the comfortable pane style; half of it at the grid's edges.
+const PANE_GAP: f32 = 8.;
+/// The highlighted active pane's ring.
+const ACTIVE_RING: f32 = 2.;
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         for image in self.retired_images.drain(..) {
@@ -140,6 +147,13 @@ impl Render for Shell {
         let grid_bounds = self.grid_bounds.clone();
         let ring = theme.accent.opacity(0.5);
         let split = frames.len() > 1;
+        let (comfortable, highlight) = {
+            let s = &SettingsGlobal::of(cx).settings;
+            (s.pane_style == crate::settings::PaneStyle::Comfortable, s.highlight_active_pane)
+        };
+        let radius = px(if comfortable { crate::terminal::pane::CARD_RADIUS } else { 0. });
+        // the pane the keys go to, else herdr's focused one: a click focuses a pane here without telling herdr
+        let active = self.active_pane(window, cx);
         let pane_drop = self.pane_drop_overlay(&frames, &shown_tab_id, &theme, window, cx);
         let edges: Vec<f32> = splits.iter().map(|s| crate::model::split_edge(&frames, s)).collect();
         let floating = self.render_floating(&theme, window, cx);
@@ -155,7 +169,8 @@ impl Render for Shell {
                     cx.notify();
                 }
             }))
-            .bg(theme.terminal.background)
+            // comfortable: the panes are cards on a shade darker than theirs
+            .bg(if comfortable { theme.terminal.background.blend(gpui::black().opacity(0.25)) } else { theme.terminal.background })
             .child(
                 canvas(move |bounds, _, _| grid_bounds.set(Some(bounds)), |_, _, _, _| {})
                     .absolute()
@@ -182,11 +197,15 @@ impl Render for Shell {
                     .left(relative(f.frame.x))
                     .top(relative(f.frame.y))
                     .w(relative(f.frame.w))
-                    .h(relative(f.frame.h));
+                    .h(relative(f.frame.h))
+                    .when(comfortable, |el| el.p(px(PANE_GAP / 2.)));
                 match self.panes.get(&f.pane_id) {
                     Some(pane) => {
                         // a lone pane needs no marker of which pane has focus
-                        let focused = split && pane.read(cx).focus_handle(cx).is_focused(window);
+                        let is_active = active.as_deref() == Some(f.pane_id.as_str());
+                        let (focused, dimmed) = (highlight && split && is_active, split && !is_active);
+                        // comfortable: every card has an edge, the highlighted one the accent's
+                        let edge = comfortable && !focused;
                         let pane_id = f.pane_id.clone();
                         let group = SharedString::from(format!("pane-{}", f.pane_id));
                         let grip = self.pane_grip(&f.pane_id, &shown_tab_id, &group, &theme, cx);
@@ -199,10 +218,16 @@ impl Render for Shell {
                         )
                         .child(
                             // cached: a frame the pane did not cause (a spinner, a hover elsewhere) reuses its grid
-                            div().size_full().relative().child(pane.clone().cached(gpui::StyleRefinement::default().size_full())).when(focused, |el| {
-                                // ponytail: overlay, not a border on the container, which shrank the grid by 1px
-                                el.child(div().absolute().inset_0().border_1().border_color(ring))
-                            }),
+                            div()
+                                .size_full()
+                                .relative()
+                                .child(pane.clone().cached(gpui::StyleRefinement::default().size_full()))
+                                // the pane at 60%: its background over it, not `opacity`, which a cached pane's
+                                // replayed frame may not pick up
+                                .when(dimmed, |el| el.child(div().absolute().inset_0().rounded(radius).bg(theme.terminal.background.opacity(1. - INACTIVE_PANE))))
+                                // ponytail: overlays, not a border on the container, which shrank the grid by its width
+                                .when(focused, |el| el.child(div().absolute().inset_0().rounded(radius).border(px(ACTIVE_RING)).border_color(ring)))
+                                .when(edge, |el| el.child(div().absolute().inset_0().rounded(radius).border_1().border_color(theme.border_strong))),
                         )
                         .child(grip)
                     }
@@ -216,7 +241,8 @@ impl Render for Shell {
                     ),
                 }
             }));
-        let (seam, seam_lit) = (theme.border_strong, theme.accent);
+        // comfortable: the gap shows the seam, which lights up only to be dragged
+        let (seam, seam_lit) = (if comfortable { gpui::transparent_black() } else { theme.border_strong }, theme.accent);
         let grid = grid
             .children(splits.into_iter().zip(edges).map(|(split, edge)| {
                 let dragging = self.divider.as_ref().is_some_and(|d| d.path == split.path);

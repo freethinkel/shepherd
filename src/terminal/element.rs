@@ -368,7 +368,7 @@ impl gpui::Element for TerminalElement {
         // Ghostty's cursor_smear, focused only; the state is dropped on a frame that skips it, so
         // the cursor comes back without a trail after a blur or a hidden spell.
         let settings = &crate::settings::SettingsGlobal::of(cx).settings;
-        let effect = settings.animated_cursor.then_some(settings.cursor_effect);
+        let effect = (settings.cursor_effect != CursorEffect::None).then_some(settings.cursor_effect);
         let trail = match (id, cursor_rect, effect) {
             (Some(id), Some(rect), Some(effect)) if self.focused && !cx.reduce_motion() => {
                 window.with_element_state(id, |trail: Option<CursorTrail>, window| {
@@ -718,7 +718,8 @@ type TrailShape = (Vec<Point<f32>>, gpui::Background);
 // ponytail: Blaze's accent edge folds into the glow, Rainbow's plasma and Gradient's cycling into a
 // two-stop gradient; a real shader pass if GPUI ever takes one.
 fn trail_shapes(effect: CursorEffect, from: Bounds<Pixels>, to: Bounds<Pixels>, t: f32, color: Hsla, ansi: &[Hsla; 16]) -> Option<Vec<TrailShape>> {
-    use CursorEffect::*;
+    // not `*`: its None would hide Option's
+    use CursorEffect::{Blaze, BlazeNoTrail, BlazeTapered, Comet, Frozen, Gradient, Rainbow, Sweep, Warp};
     type P = Point<f32>;
     let quad = |r: Bounds<Pixels>| {
         let (o, s) = (r.origin.map(f32::from), r.size.map(f32::from));
@@ -1142,7 +1143,7 @@ mod tests {
     #[test]
     fn every_cursor_effect_draws_a_jump_and_is_gone_after_it() {
         let cell = |col: f32, row: f32| Bounds::new(point(px(col * 10.), px(row * 20.)), size(px(10.), px(20.)));
-        for effect in CursorEffect::ALL {
+        for effect in CursorEffect::ALL.into_iter().filter(|e| *e != CursorEffect::None) {
             let shapes = trail_shapes(effect, cell(0., 0.), cell(10., 3.), 0.05, gpui::red(), &[gpui::red(); 16]).unwrap_or_else(|| panic!("{effect:?}"));
             assert!(shapes.iter().all(|(p, _)| p.len() >= 3), "{effect:?}");
             assert!(trail_shapes(effect, cell(0., 0.), cell(10., 3.), 0.6, gpui::red(), &[gpui::red(); 16]).is_none(), "{effect:?}");

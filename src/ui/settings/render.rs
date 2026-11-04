@@ -1,5 +1,6 @@
 //! Settings' window: the section list beside the shown section's page.
 use super::*;
+use crate::settings::PaneStyle;
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -162,17 +163,26 @@ impl Render for SettingsView {
                                 ),
                         )
                         .child(
-                            toggle_row(&theme, false, "animated-cursor", "Animated cursor", "A jump of the cursor leaves a short trail behind it.", settings.animated_cursor).on_click(cx.listener(
-                                |_, _: &ClickEvent, _, cx| update(cx, |s| s.animated_cursor = !s.animated_cursor),
+                            card_row(&theme, false)
+                                .child(row_text(&theme, "Cursor shader", "The trail a jump of the cursor leaves: Rex's Warp, Comet, Blaze and the rest."))
+                                .child(self.cursor_effect_select(&theme, settings.cursor_effect, cx)),
+                        )
+                        .child(
+                            card_row(&theme, false).child(row_text(&theme, "Pane style", "Rounded cards apart from each other, or edge to edge.")).child(
+                                crate::ui::segmented(
+                                    &theme,
+                                    "pane-style",
+                                    &[(PaneStyle::Comfortable, "Comfortable", Some("icons/lucide-layout-grid.svg")), (PaneStyle::Compact, "Compact", Some("icons/lucide-grid-2x2.svg"))],
+                                    settings.pane_style,
+                                    |style, cx| update(cx, |s| s.pane_style = style),
+                                ),
+                            ),
+                        )
+                        .child(
+                            toggle_row(&theme, false, "highlight-active-pane", "Highlight active pane", "The focused pane of a split is ringed in the accent color.", settings.highlight_active_pane).on_click(cx.listener(
+                                |_, _: &ClickEvent, _, cx| update(cx, |s| s.highlight_active_pane = !s.highlight_active_pane),
                             )),
                         )
-                        .when(settings.animated_cursor, |el| {
-                            el.child(
-                                card_row(&theme, false)
-                                    .child(row_text(&theme, "Cursor trail", "Rex's cursor shaders: Warp, Comet, Blaze and the rest."))
-                                    .child(self.cursor_effect_select(&theme, settings.cursor_effect, cx)),
-                            )
-                        })
                         .child(
                             card_row(&theme, false)
                                 .child(row_text(&theme, "Editor", if crate::terminal::pane::is_nvim(settings.editor.as_deref()) {
