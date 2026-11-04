@@ -67,12 +67,13 @@ fn main() {
         if std::env::var_os("SHEPHERD_SETTINGS").is_some() {
             shepherd::shell::Shell::toggle_settings(cx);
         }
-        // `SHEPHERD_PANEL=commands|agents|workspaces`: opens that panel once the first snapshot is likely in (screenshots).
+        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions`: opens that panel once the first snapshot is likely in (screenshots).
         if let Ok(which) = std::env::var("SHEPHERD_PANEL") {
             use shepherd::ui::command_panel::Kind;
             let kind = match which.as_str() {
                 "agents" => Kind::Agents,
                 "workspaces" => Kind::Workspaces,
+                "sessions" => Kind::Sessions,
                 _ => Kind::Commands,
             };
             cx.spawn(async move |cx| {

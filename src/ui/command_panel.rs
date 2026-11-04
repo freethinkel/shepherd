@@ -27,6 +27,8 @@ pub enum Run {
     /// Show this worktree of `repo`'s repo (a workspace of its checkout): its workspace when one has it open, else
     /// herdr opens it.
     Worktree { repo: String, path: String, workspace_id: Option<String> },
+    /// Show this herdr session or saved machine, by its key in the sessions bar.
+    Place(String),
 }
 
 /// The heading an item sits under; also searched, so "tab" finds the tabs.
@@ -40,6 +42,7 @@ pub enum Section {
     Branches,
     Themes,
     Worktrees,
+    Sessions,
 }
 
 impl Section {
@@ -53,6 +56,7 @@ impl Section {
             Section::Branches => "Branches",
             Section::Themes => "Themes",
             Section::Worktrees => "Worktrees",
+            Section::Sessions => "Sessions",
         }
     }
 }
@@ -80,7 +84,7 @@ impl Item {
         match self.run {
             Run::Action(_) | Run::Branch(_) | Run::Herdr(_) | Run::Theme(_) => self.label.clone(),
             // the branch, then its folder
-            Run::Worktree { .. } => [Some(self.label.as_str()), self.hint.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" "),
+            Run::Worktree { .. } | Run::Place(_) => [Some(self.label.as_str()), self.hint.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" "),
             Run::Tab(_) => [Some(self.label.as_str()), self.hint.as_deref(), Some(self.section.title())].into_iter().flatten().collect::<Vec<_>>().join(" "),
         }
     }
@@ -95,6 +99,7 @@ pub enum Kind {
     Branches,
     Themes,
     Worktrees,
+    Sessions,
 }
 
 impl Kind {
@@ -106,6 +111,7 @@ impl Kind {
             Kind::Branches => "", // opened from the status bar, no chord
             Kind::Worktrees => "", // opened from a workspace's menu, no chord
             Kind::Themes => "ChangeTheme",
+            Kind::Sessions => "SessionsPanel",
         }
     }
 }
@@ -144,6 +150,7 @@ pub(crate) fn action_icon(name: &str) -> &'static str {
         "ToggleSecureInput" => "icons/keyboard.svg",
         "AgentsPanel" => "icons/bot.svg",
         "WorkspacesPanel" => "icons/folder.svg",
+        "SessionsPanel" => "icons/monitor.svg",
         "Quit" => "icons/logout-2.svg",
         _ => "icons/terminal.svg",
     }
@@ -521,7 +528,7 @@ impl Panel {
     pub fn new(kind: Kind, items: Vec<Item>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let items = match kind {
             Kind::Commands => with_recent(items, &crate::settings::SettingsGlobal::of(cx).settings.recent_commands),
-            Kind::Agents | Kind::Workspaces | Kind::Branches | Kind::Themes | Kind::Worktrees => items,
+            Kind::Agents | Kind::Workspaces | Kind::Branches | Kind::Themes | Kind::Worktrees | Kind::Sessions => items,
         };
         let theme = Theme::of(cx).clone();
         let placeholder = match kind {
@@ -531,6 +538,7 @@ impl Panel {
             Kind::Branches => "Switch branch",
             Kind::Themes => "Change theme",
             Kind::Worktrees => "Open worktree",
+            Kind::Sessions => "Switch session",
         };
         let input = cx.new(|cx| {
             let mut input = InputState::new(window, cx).placeholder(placeholder);
@@ -677,6 +685,8 @@ impl Render for Panel {
                 // herdr always lists the repo's own checkout, so an empty list is one still on its way
                 Kind::Worktrees if self.items.is_empty() => ("Looking…", "The worktrees of this repo show up here."),
                 Kind::Worktrees => ("No results", "Try a branch or a folder."),
+                Kind::Sessions if self.items.is_empty() => ("No sessions", "herdr's sessions and saved machines show up here."),
+                Kind::Sessions => ("No results", "Try a session or a machine."),
             };
             div().py(px(24.)).flex().flex_col().items_center().gap(px(6.)).child(title).child(div().text_color(theme.text_muted).child(hint))
         });
