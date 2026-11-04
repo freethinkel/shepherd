@@ -709,6 +709,7 @@ impl Shell {
                 None => Vec::new(),
             },
             Kind::Worktrees => Vec::new(), // herdr's list fills it: see `open_worktrees_panel`
+            Kind::Sessions => self.place_items(cx),
             Kind::Themes => {
                 let appearance = Theme::of(cx).appearance;
                 let dark = appearance == crate::theme::Appearance::Dark;
@@ -751,6 +752,12 @@ impl Shell {
                     let dark = Theme::of(cx).appearance == crate::theme::Appearance::Dark;
                     let id = id.clone();
                     crate::ui::settings::update(cx, |s| *if dark { &mut s.theme_dark } else { &mut s.theme_light } = id);
+                }
+                PanelEvent::Run(Run::Place(key)) => {
+                    let place = this.places.iter().find(|p| &p.key() == key && !this.places_shown(p)).cloned();
+                    if let Some(place) = place {
+                        this.switch_to(place, cx);
+                    }
                 }
                 PanelEvent::Run(Run::Worktree { repo, path, workspace_id }) => {
                     let open_tab = workspace_id.as_ref().and_then(|id| {

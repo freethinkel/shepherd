@@ -372,6 +372,33 @@ impl Shell {
         cx.notify();
     }
 
+    /// The bar's places as the sessions panel's rows, in its order: by their name in Shepherd, the one shown marked
+    /// "current", a machine with its target and a stopped session as stopped.
+    pub(super) fn place_items(&self, cx: &App) -> Vec<crate::ui::command_panel::Item> {
+        use crate::ui::command_panel::{Item, Run, Section};
+        self.places
+            .iter()
+            .map(|place| {
+                let hint = match place {
+                    _ if self.places_shown(place) => Some("current".to_string()),
+                    Place::Machine(m) => Some(m.target.clone()),
+                    Place::Session(s) if !s.running => Some("stopped".to_string()),
+                    Place::Session(_) => None,
+                };
+                Item {
+                    key: format!("place:{}", place.key()),
+                    section: Section::Sessions,
+                    icon: if matches!(place, Place::Machine(_)) { "icons/remote-server.svg" } else { "icons/monitor.svg" },
+                    label: place.look(cx).0,
+                    hint,
+                    chord: None,
+                    status: None,
+                    run: Run::Place(place.key()),
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn switch_to(&mut self, place: Place, cx: &mut Context<Self>) {
         match place {
             Place::Session(s) => self.switch_session(s, cx),
