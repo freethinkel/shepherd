@@ -1771,7 +1771,7 @@ fn meta_line_row(text: &str, theme: &Theme, pad_left: f32) -> AnyElement {
 }
 
 /// The paint-only syntax runs for one diff line.
-fn line_runs(line: &DiffLine, highlights: Option<&DiffHighlights>, theme: &Theme) -> Vec<gpui::TextRun> {
+pub(super) fn line_runs(line: &DiffLine, highlights: Option<&DiffHighlights>, theme: &Theme) -> Vec<gpui::TextRun> {
     let spans = highlights.map(|h| h.spans(line)).unwrap_or(&[]);
     let mono = font(theme.font_terminal.clone());
     let plain_color = theme.text.opacity(0.92);

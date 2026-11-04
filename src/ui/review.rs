@@ -1042,13 +1042,81 @@ pub fn read_timeline(key: &str) -> Option<Result<Vec<Event>, String>> {
 /// The most of a PR's diff the Code tab reads.
 const MAX_DIFF_BYTES: usize = 3 * 1024 * 1024;
 
-/// A PR's or MR's diff as the host has it, its files in order, and whether it was cut at [`MAX_DIFF_BYTES`]; `key`
-/// as [`read_timeline`]'s.
-#[allow(clippy::type_complexity)]
-pub fn read_diff(key: &str) -> Option<Result<(Vec<crate::changes::FileDiff>, bool), String>> {
+/// One commit's patch: git's here, where the branch has it (a merge against its first parent), else GitHub's.
+fn commit_patch(dir: &str, gitlab: bool, sha: &str) -> Result<(String, String), std::io::Error> {
+    let local = crate::herdr::git(dir, &["show", "--format=", "--no-color", "--diff-merges=first-parent", sha]).ok().filter(|o| o.status.success());
+    if let Some(out) = local {
+        return Ok((String::from_utf8_lossy(&out.stdout).into_owned(), String::new()));
+    }
+    if gitlab {
+        return Ok((String::new(), format!("{} isn't here: fetch the branch to see it", &sha[..sha.len().min(7)])));
+    }
+    run("gh", &["api", &format!("repos/{{owner}}/{{repo}}/commits/{sha}"), "-H", "Accept: application/vnd.github.diff"], dir)
+}
+
+/// Files with more diff lines than this aren't colored by syntax: the Code tab draws only the start of them anyway.
+const MAX_HIGHLIGHT_LINES: usize = 3000;
+
+/// A PR's file in the Code tab: its diff and its lines' syntax colors, where its language has them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrFile {
+    pub diff: crate::changes::FileDiff,
+    pub highlights: Option<crate::changes::DiffHighlights>,
+}
+
+/// A PR's or MR's commits, newest first: the full hash and the first line; `key` as [`read_timeline`]'s.
+pub fn read_commits(key: &str) -> Option<Result<Vec<(String, String)>, String>> {
     let mut parts = key.split('\n');
     let (dir, gitlab, number) = (parts.next()?, parts.next()? == "true", parts.next()?);
-    let got = if gitlab { run("glab", &["mr", "diff", number, "--raw"], dir) } else { run("gh", &["pr", "diff", number, "--color", "never"], dir) };
+    let got = if gitlab {
+        run("glab", &["api", &format!("projects/:id/merge_requests/{number}/commits?per_page=100")], dir)
+    } else {
+        run("gh", &["pr", "view", number, "--json", "commits"], dir)
+    };
+    Some(got.map_err(|e| e.to_string()).and_then(|(out, err)| {
+        parse_commits(&out, gitlab).ok_or_else(|| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the commits").to_string())
+    }))
+}
+
+/// `gh pr view --json commits` (oldest first) or GitLab's MR commits (newest first), read newest first.
+pub fn parse_commits(json: &str, gitlab: bool) -> Option<Vec<(String, String)>> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let list = if gitlab { v.as_array()? } else { v["commits"].as_array()? };
+    let mut out: Vec<(String, String)> = list
+        .iter()
+        .filter_map(|c| {
+            let sha = c["oid"].as_str().or(c["id"].as_str())?;
+            let line = c["messageHeadline"].as_str().or(c["title"].as_str()).unwrap_or("");
+            Some((sha.to_string(), line.to_string()))
+        })
+        .collect();
+    if !gitlab {
+        out.reverse();
+    }
+    Some(out)
+}
+
+/// What a file's diff says, as a key: a file viewed stays so until its diff changes.
+pub fn fingerprint(f: &crate::changes::FileDiff) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for line in f.hunks.iter().flat_map(|h| &h.lines) {
+        (line.kind as u8, &line.text).hash(&mut h);
+    }
+    format!("{}\t{:016x}", f.path, h.finish())
+}
+
+/// A PR's or MR's diff as the host has it, its files in order, and whether it was cut at [`MAX_DIFF_BYTES`]; `key`
+/// as [`read_timeline`]'s, with a commit after it for that commit's own diff (from git here, else from GitHub).
+pub fn read_diff(key: &str) -> Option<Result<(Vec<PrFile>, bool), String>> {
+    let mut parts = key.split('\n');
+    let (dir, gitlab, number) = (parts.next()?, parts.next()? == "true", parts.next()?);
+    let commit = parts.next().filter(|c| !c.is_empty());
+    let got = match commit {
+        Some(sha) => commit_patch(dir, gitlab, sha),
+        None if gitlab => run("glab", &["mr", "diff", number, "--raw"], dir),
+        None => run("gh", &["pr", "diff", number, "--color", "never"], dir),
+    };
     Some(got.map_err(|e| e.to_string()).and_then(|(mut patch, err)| {
         if patch.trim().is_empty() && !err.trim().is_empty() {
             return Err(err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the diff").to_string());
@@ -1058,7 +1126,17 @@ pub fn read_diff(key: &str) -> Option<Result<(Vec<crate::changes::FileDiff>, boo
             let end = patch[..patch.floor_char_boundary(MAX_DIFF_BYTES)].rfind('\n').unwrap_or(0);
             patch.truncate(end);
         }
-        Ok((crate::changes::parse_patch(&patch), cut))
+        let files = crate::changes::parse_patch(&patch)
+            .into_iter()
+            .map(|diff| {
+                let lines: usize = diff.hunks.iter().map(|h| h.lines.len()).sum();
+                let highlights = zeron_syntax::language_for_path(&diff.path)
+                    .filter(|_| lines <= MAX_HIGHLIGHT_LINES && !diff.binary)
+                    .and_then(|lang| crate::changes::excerpt_highlights(&diff, lang));
+                PrFile { diff, highlights }
+            })
+            .collect();
+        Ok((files, cut))
     }))
 }
 
@@ -1067,7 +1145,7 @@ pub use zeron_markdown::{Block, InlineRun};
 /// `text` as Zeron's markdown blocks (pulldown-cmark), for a panel without HTML: comments (GitHub's templates are
 /// full of them) and tags (`<details>`, `<br>`) dropped; a task's `[x]` as a check box.
 pub fn markdown(text: &str) -> Vec<Block> {
-    let mut blocks: Vec<Block> = zeron_markdown::parse_full(&strip_comments(text)).blocks.iter().map(|b| b.block.clone()).collect();
+    let mut blocks: Vec<Block> = zeron_markdown::parse_full(&img_tags(&strip_comments(text))).blocks.iter().map(|b| b.block.clone()).collect();
     blocks.iter_mut().for_each(tidy);
     blocks.retain(|b| !matches!(b, Block::Paragraph { runs } if runs_text(runs).trim().is_empty() && !has_image(runs)));
     blocks
@@ -1115,6 +1193,114 @@ fn strip_comments(text: &str) -> String {
         rest = rest[start..].find("-->").map_or("", |end| &rest[start + end + 3..]);
     }
     out + rest
+}
+
+/// `<img src="…" alt="…">` (what GitHub writes for a dropped screenshot) as markdown's `![alt](src)`: the tags go
+/// otherwise, the image with them.
+fn img_tags(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<img ").or_else(|| rest.find("<IMG ")) {
+        let Some(end) = rest[start..].find('>') else { break };
+        let tag = &rest[start..start + end + 1];
+        out.push_str(&rest[..start]);
+        let attr = |name: &str| {
+            let at = tag.find(&format!("{name}="))? + name.len() + 1;
+            let quote = tag[at..].chars().next().filter(|c| *c == '"' || *c == '\'')?;
+            let value = &tag[at + 1..];
+            Some(value[..value.find(quote)?].to_string())
+        };
+        match attr("src") {
+            Some(src) => out.push_str(&format!("![{}]({})", attr("alt").unwrap_or_default().replace(['[', ']'], ""), src.replace(' ', "%20"))),
+            None => out.push_str(tag),
+        }
+        rest = &rest[start + end + 1..];
+    }
+    out + rest
+}
+
+/// The images' sources in `blocks`, each once, in document order.
+pub fn image_sources(blocks: &[Block], out: &mut Vec<String>) {
+    let runs = |runs: &[InlineRun], out: &mut Vec<String>| {
+        for image in runs.iter().filter_map(|r| r.style.image.as_ref()) {
+            if !out.contains(&image.source) {
+                out.push(image.source.clone());
+            }
+        }
+    };
+    for block in blocks {
+        match block {
+            Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r, out),
+            Block::BlockQuote { children } => image_sources(children, out),
+            Block::List { items, .. } => items.iter().for_each(|item| image_sources(item, out)),
+            Block::Table { header, rows, .. } => header.iter().chain(rows.iter().flatten()).for_each(|cell| runs(cell, out)),
+            _ => {}
+        }
+    }
+}
+
+/// An image in a PR's description or comments, fetched into a file here: `None` when it couldn't be.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrImage(pub Option<std::path::PathBuf>);
+
+/// The most of an image the panel fetches.
+const MAX_IMAGE_BYTES: u64 = 16 << 20;
+
+/// Fetches an image of a PR's text; `key` is the located repo directory, `gitlab` or not, the PR's page and the
+/// image's source, a line apart. A GitLab upload (`/uploads/…`) is under the project's page; one on the PR's own host
+/// goes with the CLI's token, as a private repo's attachments need.
+pub fn read_image(key: &str) -> Option<PrImage> {
+    let mut parts = key.splitn(4, '\n');
+    let (dir, gitlab, page, source) = (parts.next()?, parts.next()? == "true", parts.next()?, parts.next()?);
+    let url = if source.starts_with("https://") || source.starts_with("http://") {
+        source.to_string()
+    } else if gitlab && source.starts_with("/uploads/") {
+        let project = page.split_once("/-/").map_or(page, |(p, _)| p);
+        format!("{project}{source}")
+    } else {
+        return Some(PrImage(None));
+    };
+    let pr_host = host(page);
+    let token = (host(&url) == pr_host).then(|| pr_host.as_deref().and_then(|h| cli_token(dir, gitlab, h))).flatten();
+    Some(PrImage(fetch_image(&url, gitlab, token.as_deref())))
+}
+
+/// The CLI's token for `host`, asked once per run.
+fn cli_token(dir: &str, gitlab: bool, host: &str) -> Option<String> {
+    static SEEN: std::sync::Mutex<Option<std::collections::HashMap<String, Option<String>>>> = std::sync::Mutex::new(None);
+    if let Some(token) = SEEN.lock().unwrap().get_or_insert_default().get(host) {
+        return token.clone();
+    }
+    let out = if gitlab { run("glab", &["config", "get", "token", "--host", host], dir) } else { run("gh", &["auth", "token", "--hostname", host], dir) };
+    let token = out.ok().map(|(out, _)| out.trim().to_string()).filter(|t| !t.is_empty() && !t.contains(' '));
+    SEEN.lock().unwrap().get_or_insert_default().insert(host.to_string(), token.clone());
+    token
+}
+
+fn fetch_image(url: &str, gitlab: bool, token: Option<&str>) -> Option<std::path::PathBuf> {
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(15))).build().into();
+    let mut request = agent.get(url);
+    if let Some(token) = token {
+        request = if gitlab { request.header("PRIVATE-TOKEN", token) } else { request.header("Authorization", format!("token {token}")) };
+    }
+    let mut response = request.call().ok()?;
+    let kind = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+    if !kind.starts_with("image/") {
+        return None;
+    }
+    let bytes = response.body_mut().with_config().limit(MAX_IMAGE_BYTES).read_to_vec().ok()?;
+    let ext = ["svg", "png", "gif", "webp", "jpeg"].into_iter().find(|e| kind.contains(e)).unwrap_or("png");
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        h.finish()
+    };
+    let folder = crate::settings::cache_dir().join("files").join(format!("{hash:016x}"));
+    std::fs::create_dir_all(&folder).ok()?;
+    let path = folder.join(format!("image.{ext}"));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
 }
 
 /// `s` without its HTML tags (`<br>`, `</details>`); a `<` not opening one stays.
@@ -1267,6 +1453,23 @@ mod tests {
             "pipelines":{"nodes":[{"iid":"55","status":"SUCCESS","path":"/g/p/-/pipelines/9"}]}}}}"#;
         let (request, pipeline, _, iid) = parse_gitlab_review(none, "https://gl", "g/p", 0).unwrap();
         assert_eq!((request, pipeline.map(|p| p.1), iid.as_deref()), (None, Some(CheckState::Success), Some("55")), "the branch's own pipeline, its jobs asked for apart");
+    }
+
+    #[test]
+    fn commits_newest_first() {
+        let gh = r#"{"commits":[{"oid":"aaa","messageHeadline":"One"},{"oid":"bbb","messageHeadline":"Two"}]}"#;
+        assert_eq!(parse_commits(gh, false).unwrap(), [("bbb".to_string(), "Two".to_string()), ("aaa".to_string(), "One".to_string())]);
+        let gl = r#"[{"id":"ccc","title":"Three"},{"id":"ddd","title":"Four"}]"#;
+        assert_eq!(parse_commits(gl, true).unwrap()[0].0, "ccc", "GitLab's come newest first already");
+    }
+
+    #[test]
+    fn img_tags_become_images() {
+        let body = "Before\n\n<img width=\"600\" alt=\"The panel\" src=\"https://github.com/user-attachments/assets/abc\" />\n\nafter";
+        let mut sources = Vec::new();
+        image_sources(&markdown(body), &mut sources);
+        assert_eq!(sources, ["https://github.com/user-attachments/assets/abc"]);
+        assert_eq!(img_tags("<img src='a.png'> and <b>bold</b>"), "![](a.png) and <b>bold</b>");
     }
 
     #[test]

@@ -30,6 +30,7 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.merge_failure, window);
         crate::ui::reap_popup(&mut self.merge_confirm, window);
         crate::ui::reap_popup(&mut self.review_menu, window);
+        crate::ui::reap_popup(&mut self.review_commit_menu, window);
         crate::ui::reap_popup(&mut self.right.discard, window);
         crate::ui::reap_popup(&mut self.right.agents, window);
         crate::ui::reap_popup(&mut self.session_dialog, window);

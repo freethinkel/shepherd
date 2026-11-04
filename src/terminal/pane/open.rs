@@ -43,26 +43,7 @@ pub struct Reader {
     copied: bool,
 }
 
-/// The images' sources in `blocks`, each once, in document order.
-pub(super) fn image_sources(blocks: &[crate::ui::review::Block], out: &mut Vec<String>) {
-    use crate::ui::review::Block;
-    let runs = |runs: &[crate::ui::review::InlineRun], out: &mut Vec<String>| {
-        for image in runs.iter().filter_map(|r| r.style.image.as_ref()) {
-            if !out.contains(&image.source) {
-                out.push(image.source.clone());
-            }
-        }
-    };
-    for block in blocks {
-        match block {
-            Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r, out),
-            Block::BlockQuote { children } => image_sources(children, out),
-            Block::List { items, .. } => items.iter().for_each(|item| image_sources(item, out)),
-            Block::Table { header, rows, .. } => header.iter().chain(rows.iter().flatten()).for_each(|cell| runs(cell, out)),
-            _ => {}
-        }
-    }
-}
+pub(super) use crate::ui::review::image_sources;
 
 /// A web image, downloaded into the cache under the extension its type has (a badge's URL often has none).
 pub(super) async fn download(url: &str) -> Option<PathBuf> {

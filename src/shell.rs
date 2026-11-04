@@ -157,6 +157,14 @@ pub struct Shell {
     review_collapsed: bool,
     /// The PR or MR the review panel showed at its last render, for the keys that copy its link and number.
     review_request: Option<crate::ui::review::Request>,
+    /// Files marked viewed in the review panel's Code tab, by the PR's page: their `review::fingerprint`s. Read from
+    /// the cache folder the first time they're asked for.
+    review_viewed: Option<HashMap<String, std::collections::HashSet<String>>>,
+    /// The commit the Code tab shows alone, by the PR's page; else all of them.
+    review_commit: Option<(String, String)>,
+    /// The Code tab's commit picker, where it was clicked, and whether it lists every commit.
+    review_commit_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
+    review_commit_more: bool,
     /// The review panel's body, for its scrollbar.
     review_scroll: gpui::ScrollHandle,
     /// The review panel's "…" menu, where it was clicked.
@@ -518,6 +526,10 @@ impl Shell {
                     review_spring: None,
                     review_collapsed: false,
                     review_request: None,
+                    review_viewed: None,
+                    review_commit: None,
+                    review_commit_menu: None,
+                    review_commit_more: false,
                     review_scroll: gpui::ScrollHandle::new(),
                     review_menu: None,
                     review_tab: Default::default(),
