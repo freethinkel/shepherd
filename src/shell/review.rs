@@ -63,12 +63,13 @@ impl Shell {
         self.update_panel(cx, |p| p.toggle_pull_request(seen));
     }
 
-    /// Shows the review panel's tab `name` (`summary`, `timeline`, `code`, `checks`), or with `menu` its "…" menu
-    /// under the panel's top right corner, for screenshots.
+    /// Shows the review panel's tab `name` (`summary`, `timeline`, `code`, `checks`), or with `menu` its "…" menu, for
+    /// screenshots.
     pub fn show_review_tab(&mut self, name: &str, window: &Window, cx: &mut Context<Self>) {
         if name == "menu" {
             let size = window.viewport_size();
-            self.review_menu = Some(crate::ui::Popup::new(gpui::point(size.width - px(290.), px(112.))));
+            let at = self.review_anchors.borrow().get("menu").map_or(gpui::point(size.width - px(16.), px(112.)), |b| b.bottom_right() + gpui::point(px(0.), px(4.)));
+            self.review_menu = Some(crate::ui::Popup::new(at));
         } else if let Some(tab) = Tab::of_name(name) {
             self.review_tab = tab;
         }
@@ -318,11 +319,15 @@ impl Shell {
                         };
                         let tabs = tab_bar(theme, tab, checks_title, ci, &pick, window);
                         let menu_open = self.review_menu.as_ref().is_some_and(|m| m.is_open());
+                        // the menu hangs under the button, its right edge at the button's
                         let menu_button = titlebar_button(theme, "review-menu", "icons/more-horizontal.svg")
+                            .relative()
                             .when(menu_open, |el| el.bg(theme.hover))
                             .tooltip(tip("More", None))
+                            .child(anchor_probe(&self.review_anchors, "menu"))
                             .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
-                                this.review_menu = Some(crate::ui::Popup::new(e.position()));
+                                let at = this.review_anchors.borrow().get("menu").map_or(e.position(), |b| b.bottom_right() + gpui::point(px(0.), px(4.)));
+                                this.review_menu = Some(crate::ui::Popup::new(at));
                                 cx.notify();
                             }))
                             .into_any_element();
@@ -535,8 +540,12 @@ impl Shell {
             .when(menu_open, |el| el.bg(theme.selected))
             .child(div().min_w_0().truncate().child(picked.unwrap_or_else(|| if commit.is_some() { "One commit".into() } else { "All commits".into() })))
             .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(12.)).flex_none().text_color(theme.text_faint))
+            .relative()
+            .child(anchor_probe(&self.review_anchors, "commits"))
             .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
-                this.review_commit_menu = Some(crate::ui::Popup::new(e.position()));
+                // the list hangs under the picker, at its left edge
+                let at = this.review_anchors.borrow().get("commits").map_or(e.position(), |b| b.bottom_left() + gpui::point(px(0.), px(4.)));
+                this.review_commit_menu = Some(crate::ui::Popup::new(at));
                 this.review_commit_more = false;
                 cx.notify();
             }));
@@ -551,8 +560,8 @@ impl Shell {
         let all_open = !open.is_empty() && open.iter().all(|o| *o);
         let fold_all = (n > 0).then(|| {
             let keys: Vec<(String, bool)> = files.iter().zip(unfolded).map(|(f, u)| (format!("{}\n{}", r.pr.url, f.diff.path), *u)).collect();
-            titlebar_button(theme, "review-fold-all", if all_open { "icons/collapse-arrows.svg" } else { "icons/expand-arrows.svg" })
-                .tooltip(tip(if all_open { "Collapse all" } else { "Expand all" }, None))
+            titlebar_button(theme, "review-fold-all", "icons/fold-vertical.svg")
+                .tooltip(tip(if all_open { "Collapse all files" } else { "Expand all files" }, None))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     for (key, unfolded) in &keys {
                         if *unfolded == all_open {
@@ -646,6 +655,15 @@ impl Shell {
             .children(fold_all)
             .children(menu)
             .into_any_element()
+    }
+
+    /// An image of the PR's text in the panes' image viewer, the one a diff's image opens in: it's a pane's and takes
+    /// its keys there, so the keyboard goes along.
+    fn preview_review_image(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.active_pane(window, cx).and_then(|id| self.panes.get(&id)).cloned() else { return };
+        self.release_panel();
+        window.focus(&pane.focus_handle(cx), cx);
+        pane.update(cx, |pane, cx| pane.show_preview(path, cx));
     }
 
     /// The shown PR's link (`link`) or number on the clipboard, while the review panel is what the right panel shows.
@@ -829,7 +847,7 @@ impl Shell {
             .child(item("review-menu-number", "icons/solar/copy.svg", format!("Copy {noun} number"), None, false, copy(number, "Copied the number")).children(keys("CopyPrNumber").map(|k| shortcut(theme, k))))
             .child(item("review-menu-checkout", "icons/terminal.svg", "Copy checkout command".into(), None, false, copy(checkout, "Copied the checkout command")));
         let card = crate::ui::menu_motion("review-menu-in", menu, card);
-        Some(gpui::deferred(gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(card)).with_priority(1).into_any_element())
+        Some(gpui::deferred(gpui::anchored().position(at).anchor(gpui::Anchor::TopRight).snap_to_window_with_margin(px(8.)).child(card)).with_priority(1).into_any_element())
     }
 }
 
@@ -914,7 +932,12 @@ fn pr_look(r: &Request, dir: &str, bodies: &[&str], cx: &mut App) -> crate::ui::
         })
         .collect();
     let image: Option<Rc<dyn Fn(&str) -> Option<std::path::PathBuf>>> = (!images.is_empty()).then(|| Rc::new(move |source: &str| images.get(source).cloned()) as Rc<dyn Fn(&str) -> Option<std::path::PathBuf>>);
-    crate::ui::markdown::Look { link: Some(link), image, ..Default::default() }
+    let open_image: Rc<dyn Fn(&std::path::Path, &mut Window, &mut App)> = Rc::new(|path, window, cx| {
+        let Some(shell) = cx.try_global::<super::browser::Links>().and_then(|l| l.0.upgrade()) else { return };
+        let path = path.to_path_buf();
+        shell.update(cx, |s, cx| s.preview_review_image(path, window, cx));
+    });
+    crate::ui::markdown::Look { link: Some(link), image, open_image: Some(open_image), ..Default::default() }
 }
 
 /// `body`'s blocks, parsed once while it stays around: a drag over the text redraws every move, and the timeline
@@ -1241,15 +1264,11 @@ fn request_head(theme: &Theme, r: &Request, menu: AnyElement) -> AnyElement {
         .child(pill("icons/git-pull-request.svg", label, color))
         .child(menu);
     let title = div()
-        .id("review-title")
         .text_size(px(15.))
         .line_height(px(20.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(theme.text)
-        .cursor_pointer()
-        .hover(move |s| s.text_color(accent))
-        .child(if r.title.is_empty() { number.clone() } else { r.title.clone() })
-        .on_click(open);
+        .child(if r.title.is_empty() { number.clone() } else { r.title.clone() });
     let updated = r.updated.map(|at| format!("updated {}", ago_text(at)));
     let checkout = format!("{} checkout {}", if r.pr.gitlab { "glab mr" } else { "gh pr" }, r.pr.number);
     let mono = theme.font_terminal.clone();
@@ -1303,10 +1322,13 @@ fn request_head(theme: &Theme, r: &Request, menu: AnyElement) -> AnyElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
+                .flex()
+                .items_center()
+                .gap(px(4.))
                 .font_family(mono.clone())
                 .text_color(theme.text_faint)
-                .child(if r.head.is_empty() { r.base.clone() } else { format!("{} ← {}", r.base, r.head) }),
+                .child(branch_chip("review-base", &r.base, theme).flex_none())
+                .when(!r.head.is_empty(), |el| el.child(div().flex_none().child("←")).child(branch_chip("review-head", &r.head, theme).min_w_0())),
         )
         .children(r.diff.map(|d| {
             div()
@@ -1333,6 +1355,28 @@ fn request_head(theme: &Theme, r: &Request, menu: AnyElement) -> AnyElement {
         .child(byline)
         .child(branches)
         .into_any_element()
+}
+
+/// A branch's name; a click copies it.
+fn branch_chip(id: &'static str, name: &str, theme: &Theme) -> Stateful<Div> {
+    let (text, name) = (theme.text, name.to_string());
+    div()
+        .id(id)
+        .truncate()
+        .cursor_pointer()
+        .hover(move |s| s.text_color(text))
+        .tooltip(tip("Copy branch name", None))
+        .child(name.clone())
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(name.clone()));
+            crate::ui::toast::info(cx, format!("Copied {name}"), None);
+        })
+}
+
+/// Records where the element it's in was laid out, under `name`: a menu opens from there.
+fn anchor_probe(anchors: &Rc<std::cell::RefCell<HashMap<&'static str, gpui::Bounds<Pixels>>>>, name: &'static str) -> impl IntoElement {
+    let anchors = anchors.clone();
+    canvas(move |bounds, _, _| anchors.borrow_mut().insert(name, bounds), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
 }
 
 /// How CI went, as the tabs' line says it: its state and a few words.
@@ -1413,7 +1457,11 @@ fn tab_bar(theme: &Theme, shown: Tab, checks_title: &'static str, ci: Option<(Ch
                 .cursor_pointer()
                 .hover(move |s| s.text_color(text))
                 .tooltip(tip(words.clone(), None))
-                .child(check_icon(theme, state, 14., window))
+                // a running check's spinner would redraw the window all the time; the Checks tab has it
+                .map(|el| match state {
+                    CheckState::Running => el.child(gpui::svg().path("icons/solar/clock-circle.svg").size(px(14.)).flex_none().text_color(theme.warning)),
+                    _ => el.child(check_icon(theme, state, 14., window)),
+                })
                 .child(div().min_w_0().truncate().child(words))
                 .on_click(on_ci)
         }))

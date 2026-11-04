@@ -670,6 +670,7 @@ impl PaneTerminal {
             link: Some(std::rc::Rc::new(move |url: &str, _: &mut Window, cx: &mut App| {
                 let _ = pane.update(cx, |pane, cx| pane.follow_link(url, cx));
             })),
+            open_image: None,
         };
         let card = dialog_card("markdown-reader", &frame, theme)
             .on_mouse_down_out(cx.listener(|pane, _, _, cx| pane.close_reader(cx)))

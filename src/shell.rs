@@ -165,6 +165,8 @@ pub struct Shell {
     /// The Code tab's commit picker, where it was clicked, and whether it lists every commit.
     review_commit_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     review_commit_more: bool,
+    /// Where the review panel's menu buttons were drawn last, by name: their menus open under them.
+    review_anchors: Rc<std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
     /// The review panel's body, for its scrollbar.
     review_scroll: gpui::ScrollHandle,
     /// The review panel's "…" menu, where it was clicked.
@@ -530,6 +532,7 @@ impl Shell {
                     review_commit: None,
                     review_commit_menu: None,
                     review_commit_more: false,
+                    review_anchors: Default::default(),
                     review_scroll: gpui::ScrollHandle::new(),
                     review_menu: None,
                     review_tab: Default::default(),

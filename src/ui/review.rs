@@ -1042,6 +1042,66 @@ pub fn read_timeline(key: &str) -> Option<Result<Vec<Event>, String>> {
 /// The most of a PR's diff the Code tab reads.
 const MAX_DIFF_BYTES: usize = 3 * 1024 * 1024;
 
+/// An MR's patch, made from GitLab's API (`/diffs`, else the older `/changes`) rather than `glab mr diff`, whose
+/// output and flags vary with its version; that is the last resort.
+fn gitlab_patch(dir: &str, number: &str) -> Result<(String, String), std::io::Error> {
+    let mut said = String::new();
+    for path in [format!("projects/:id/merge_requests/{number}/diffs?per_page=100"), format!("projects/:id/merge_requests/{number}/changes")] {
+        let (out, err) = run("glab", &["api", "--paginate", &path], dir)?;
+        if let Some(patch) = gitlab_diffs_patch(&out) {
+            return Ok((patch, String::new()));
+        }
+        said = if err.trim().is_empty() { out } else { err };
+    }
+    let (out, err) = run("glab", &["mr", "diff", number, "--raw"], dir)?;
+    Ok(if out.trim().is_empty() { (out, if err.trim().is_empty() { said } else { err }) } else { (out, err) })
+}
+
+/// GitLab's MR diffs as one patch: `/diffs` pages (arrays, one after another with `--paginate`) or `/changes` (an
+/// object with them under `changes`), each file with git's headers put back. `None` without any.
+pub fn gitlab_diffs_patch(json: &str) -> Option<String> {
+    let mut files = Vec::new();
+    for page in serde_json::Deserializer::from_str(json).into_iter::<Value>() {
+        let page = page.ok()?;
+        match &page {
+            Value::Array(list) => files.extend(list.iter().cloned()),
+            Value::Object(o) if o.contains_key("changes") => files.extend(page["changes"].as_array().into_iter().flatten().cloned()),
+            _ => return None,
+        }
+    }
+    if files.is_empty() && !json.trim_start().starts_with('[') {
+        return None;
+    }
+    let mut out = String::new();
+    for f in &files {
+        let (old, new) = (f["old_path"].as_str()?, f["new_path"].as_str()?);
+        let (added, deleted, renamed) = (f["new_file"].as_bool() == Some(true), f["deleted_file"].as_bool() == Some(true), f["renamed_file"].as_bool() == Some(true));
+        let diff = f["diff"].as_str().unwrap_or("");
+        out.push_str(&format!("diff --git a/{old} b/{new}\n"));
+        if added {
+            out.push_str("new file mode 100644\n");
+        }
+        if deleted {
+            out.push_str("deleted file mode 100644\n");
+        }
+        if renamed {
+            out.push_str(&format!("rename from {old}\nrename to {new}\n"));
+        }
+        if diff.is_empty() {
+            if !renamed {
+                out.push_str(&format!("Binary files a/{old} and b/{new} differ\n"));
+            }
+            continue;
+        }
+        out.push_str(&format!("--- {}\n+++ {}\n", if added { "/dev/null".into() } else { format!("a/{old}") }, if deleted { "/dev/null".into() } else { format!("b/{new}") }));
+        out.push_str(diff);
+        if !diff.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    Some(out)
+}
+
 /// One commit's patch: git's here, where the branch has it (a merge against its first parent), else GitHub's.
 fn commit_patch(dir: &str, gitlab: bool, sha: &str) -> Result<(String, String), std::io::Error> {
     let local = crate::herdr::git(dir, &["show", "--format=", "--no-color", "--diff-merges=first-parent", sha]).ok().filter(|o| o.status.success());
@@ -1114,12 +1174,14 @@ pub fn read_diff(key: &str) -> Option<Result<(Vec<PrFile>, bool), String>> {
     let commit = parts.next().filter(|c| !c.is_empty());
     let got = match commit {
         Some(sha) => commit_patch(dir, gitlab, sha),
-        None if gitlab => run("glab", &["mr", "diff", number, "--raw"], dir),
+        None if gitlab => gitlab_patch(dir, number),
         None => run("gh", &["pr", "diff", number, "--color", "never"], dir),
     };
     Some(got.map_err(|e| e.to_string()).and_then(|(mut patch, err)| {
         if patch.trim().is_empty() && !err.trim().is_empty() {
-            return Err(err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the diff").to_string());
+            // glab's first line can be a bare "ERROR": what it says comes after
+            let said: Vec<&str> = err.lines().map(str::trim).filter(|l| !l.is_empty()).take(3).collect();
+            return Err(if said.is_empty() { "Couldn't read the diff".into() } else { said.join(" ") });
         }
         let cut = patch.len() > MAX_DIFF_BYTES;
         if cut {
@@ -1453,6 +1515,20 @@ mod tests {
             "pipelines":{"nodes":[{"iid":"55","status":"SUCCESS","path":"/g/p/-/pipelines/9"}]}}}}"#;
         let (request, pipeline, _, iid) = parse_gitlab_review(none, "https://gl", "g/p", 0).unwrap();
         assert_eq!((request, pipeline.map(|p| p.1), iid.as_deref()), (None, Some(CheckState::Success), Some("55")), "the branch's own pipeline, its jobs asked for apart");
+    }
+
+    #[test]
+    fn a_gitlab_mr_diff_from_its_api() {
+        let pages = r#"[{"old_path":"a.rs","new_path":"a.rs","new_file":false,"renamed_file":false,"deleted_file":false,"diff":"@@ -1,2 +1,2 @@\n-x\n+y\n z\n"}]
+            [{"old_path":"b.rs","new_path":"b.rs","new_file":true,"renamed_file":false,"deleted_file":false,"diff":"@@ -0,0 +1 @@\n+new\n"},
+             {"old_path":"old.txt","new_path":"new.txt","new_file":false,"renamed_file":true,"deleted_file":false,"diff":""}]"#;
+        let files = crate::changes::parse_patch(&gitlab_diffs_patch(pages).unwrap());
+        let got: Vec<_> = files.iter().map(|f| (f.path.as_str(), f.additions, f.deletions)).collect();
+        assert!(got.contains(&("a.rs", 1, 1)) && got.contains(&("b.rs", 1, 0)), "{got:?}");
+        assert!(files.iter().any(|f| f.path == "new.txt" && f.old_path.as_deref() == Some("old.txt")), "a rename keeps both paths");
+        assert_eq!(gitlab_diffs_patch(r#"{"message":"404 Not found"}"#), None, "an error isn't a diff");
+        let changes = r#"{"changes":[{"old_path":"c.rs","new_path":"c.rs","diff":"@@ -1 +1 @@\n-a\n+b\n"}]}"#;
+        assert_eq!(crate::changes::parse_patch(&gitlab_diffs_patch(changes).unwrap()).len(), 1);
     }
 
     #[test]
