@@ -66,7 +66,8 @@ app_actions! {
     SessionsPanel: "Sessions",
     ReloadPage: "Reload page",
     FocusAddress: "Focus page address",
-    CopyPageUrl: "Copy page URL",
+    CopyPageUrl: "Copy page URL, or the pull request's link",
+    CopyPrNumber: "Copy pull request number",
     Quit: "Quit",
 }
 
@@ -112,6 +113,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("ReloadPage", "cmd-r"),
     ("FocusAddress", "cmd-l"),
     ("CopyPageUrl", "cmd-shift-c"),
+    ("CopyPrNumber", "cmd-shift-k"),
     ("Quit", "cmd-q"),
 ];
 

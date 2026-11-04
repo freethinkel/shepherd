@@ -61,8 +61,17 @@ impl gpui::Global for Links {}
 /// else to the system.
 pub(crate) fn open_link(url: &str, cx: &mut App) {
     let web = url.starts_with("http://") || url.starts_with("https://");
-    let shell = cx.try_global::<Links>().and_then(|l| l.0.upgrade()).filter(|_| web && SettingsGlobal::of(cx).settings.web_links_inside);
-    match shell {
+    if web && SettingsGlobal::of(cx).settings.web_links_inside {
+        open_inside(url, cx);
+    } else {
+        cx.open_url(url);
+    }
+}
+
+/// `url` in a browser tab in the right panel, whatever the setting for terminal links says: the review panel's PR
+/// pages go there. A tab of the workspace's that opened on it is shown again rather than made twice.
+pub(crate) fn open_inside(url: &str, cx: &mut App) {
+    match cx.try_global::<Links>().and_then(|l| l.0.upgrade()) {
         Some(shell) => shell.update(cx, |s, cx| {
             s.browser.pending = Some(url.to_string());
             cx.notify();
@@ -130,7 +139,14 @@ impl Shell {
     pub(super) fn sync_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(url) = self.browser.pending.take() {
             match self.shown_tab() {
-                Some(tab) => self.new_browser_tab(tab.workspace_id, Some(url), false, window, cx),
+                Some(tab) => match self.browser.tabs.iter().find(|t| t.workspace == tab.workspace_id && t.url == url) {
+                    Some(open) => {
+                        let surface = Surface::Browser(open.id.clone());
+                        self.right.panels.entry(tab.workspace_id).or_default().add(surface);
+                        cx.notify();
+                    }
+                    None => self.new_browser_tab(tab.workspace_id, Some(url), false, window, cx),
+                },
                 None => cx.open_url(&url),
             }
         }

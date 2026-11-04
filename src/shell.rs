@@ -155,6 +155,10 @@ pub struct Shell {
     merge_confirm: Option<crate::ui::Popup<review::MergeAsk>>,
     /// The review panel's description is folded away under its heading.
     review_collapsed: bool,
+    /// The PR or MR the review panel showed at its last render, for the keys that copy its link and number.
+    review_request: Option<crate::ui::review::Request>,
+    /// The review panel's body, for its scrollbar.
+    review_scroll: gpui::ScrollHandle,
     /// The review panel's "…" menu, where it was clicked.
     review_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// The review panel's tab under a PR's head.
@@ -513,6 +517,8 @@ impl Shell {
                     review_swipe: None,
                     review_spring: None,
                     review_collapsed: false,
+                    review_request: None,
+                    review_scroll: gpui::ScrollHandle::new(),
                     review_menu: None,
                     review_tab: Default::default(),
                     review_files: Default::default(),

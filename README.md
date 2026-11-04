@@ -21,7 +21,7 @@ https://github.com/user-attachments/assets/9b3f5fae-8eee-4697-89b4-37d232250117
 - herdr's own `[keys]` work in Shepherd, and its popups float over the panes.
 - `⌥⌘B` opens the right panel beside the panes, one per workspace. Drag its edge to resize it, or expand it over the panes. Its tabs are:
   - Diffs (`⇧⌘G`): the working tree, the branch against a base, or an agent's last turn, unified or split. Comment on lines and send the comments to an agent, discard changes, or open a file in your editor.
-  - Pull request: the branch's PR (gh) or MR (glab) with its description, checks or pipeline jobs and their logs. It works for SSH machines too.
+  - Pull request: the branch's PR (gh) or MR (glab). Its tabs show the summary and description, the timeline of comments, reviews and commits, the diff, and the checks or pipeline jobs with their logs. Its `…` menu asks the agent about the PR, has it explain the PR or fix the review findings, and copies the link or number. It works for SSH machines too.
   - Browser tabs. A toolbar button picks elements on the page, or an area dragged over it, with a note on each, and sends them to an agent as one prompt.
 - Web pages (Settings → Web pages) list local tools, such as a dev server or a dashboard, above the workspaces. A click shows the page in the system web view in place of the tabs and panes, and it keeps its state while hidden. A page can be listed in one place only, and opened on the machine shown, through an SSH forward.
 - `⌘K` opens a command panel with every action, workspace and tab. `⇧⌘A` opens the agents panel.
@@ -84,6 +84,7 @@ Shepherd shows the same sessions as `tmux attach`: a session is a workspace, a w
 | `⌘K`, `⇧⌘A` | Command panel, agents panel |
 | `⌘J` | Next waiting agent |
 | `⌘R`, `⌘L`, `⇧⌘C` | On a web page: reload, address field, copy the URL |
+| `⇧⌘C`, `⇧⌘K` | On a pull request: copy its link, its number |
 | `⌘=`, `⌘-`, `⌘0` | Text size up, down, default |
 | `⌘,` | Settings |
 

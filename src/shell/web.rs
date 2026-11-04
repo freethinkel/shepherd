@@ -838,8 +838,9 @@ impl Shell {
 
     /// The shown page's URL on the clipboard: where it is now, or the entry's for a page on a machine, whose own is
     /// its forward's.
+    /// Without a page shown, the shown pull request's link.
     pub(super) fn copy_page_url(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let Some((key, entry)) = self.visible_entry(window, cx) else { return };
+        let Some((key, entry)) = self.visible_entry(window, cx) else { return self.copy_review(true, window, cx) };
         let now = self.pages.live.get(&key).filter(|_| key.1.is_none()).and_then(|p| p.view.url().ok());
         let url = now.unwrap_or_else(|| normalize(&entry.url));
         // an empty browser tab has nothing to copy

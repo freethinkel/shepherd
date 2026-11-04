@@ -150,6 +150,10 @@ impl Shell {
     pub(super) fn render_review(&mut self, theme: &Theme, shown: &ShownReview, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let panel_width = self.right_panel_drawn(window);
         let (key, review, branch) = (shown.key.clone(), shown.review.clone(), shown.branch.clone());
+        self.review_request = match &review {
+            Some(Review::Found { request, .. }) => request.clone(),
+            _ => None,
+        };
         // the PR's timeline and diff are cached by its number, apart from the branch's review
         let pr_key = match (&shown.dir, &review) {
             (Some(dir), Some(Review::Found { request: Some(r), .. })) => Some(format!("{dir}\n{}\n{}", r.pr.gitlab, r.pr.number)),
@@ -388,22 +392,43 @@ impl Shell {
             .child(header)
             .children(top)
             .child(
+                // the app's scrollbar over the body's right edge, as the settings page has it
                 div()
-                    .id("review-body")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .p(px(12.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(16.))
-                    // one reset for the description's and the logs' selectable text, before either paints
-                    .child(crate::ui::markdown::frame_reset())
-                    .children(body),
+                    .child(
+                        div()
+                            .id("review-body")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.review_scroll)
+                            .p(px(12.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(16.))
+                            // one reset for the description's and the logs' selectable text, before either paints
+                            .child(crate::ui::markdown::frame_reset())
+                            .children(body),
+                    )
+                    .child(crate::ui::scrollbar("review-scrollbar", &self.review_scroll, theme)),
             )
             .children(footer)
             .children(menu.and_then(|(at, r)| self.render_review_menu(theme, at, &r, pr_key.clone(), key.clone(), window, cx)))
             .into_any_element()
+    }
+
+    /// The shown PR's link (`link`) or number on the clipboard, while the review panel is what the right panel shows.
+    pub(super) fn copy_review(&mut self, link: bool, window: &Window, cx: &mut Context<Self>) {
+        let shown = self.right_panel_shown(window) && self.panel().is_some_and(|p| p.active == Some(crate::right_panel::Surface::PullRequest));
+        let Some(r) = self.review_request.as_ref().filter(|_| shown) else { return };
+        let (text, said) = if link {
+            (r.pr.url.clone(), "Copied the link")
+        } else {
+            (format!("{}{}", if r.pr.gitlab { "!" } else { "#" }, r.pr.number), "Copied the number")
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        crate::ui::toast::info(cx, said, None);
     }
 
     /// The agent the review panel's "…" menu talks to: the shown pane's, else the workspace's first.
@@ -463,6 +488,11 @@ impl Shell {
         let host = if r.pr.gitlab { "GitLab" } else { "GitHub" };
         let noun = if r.pr.gitlab { "MR" } else { "PR" };
         let number = format!("{}{}", if r.pr.gitlab { "!" } else { "#" }, r.pr.number);
+        let chords = cx.try_global::<crate::bindings::ActiveBindings>().map(|b| b.0.clone()).unwrap_or_default();
+        // the keys bound to `action`, as the menu shows them: ⇧⌘C
+        let keys = |action: &str| {
+            chords.iter().find(|(name, _)| name == action).map(|(_, keys)| keys.split_whitespace().map(crate::ui::command_panel::glyphs).collect::<Vec<_>>().join(" "))
+        };
         let item = |id: &'static str, icon: &'static str, label: String, hint: Option<String>, off: bool, act: Act| {
             let hover = theme.hover;
             div()
@@ -478,6 +508,7 @@ impl Shell {
                     div()
                         .flex()
                         .flex_col()
+                        .flex_1()
                         .min_w_0()
                         .child(div().line_height(px(18.)).text_color(theme.text).child(label))
                         .children(hint.map(|h| div().text_size(px(11.)).line_height(px(15.)).text_color(theme.text_faint).child(h))),
@@ -560,13 +591,22 @@ impl Shell {
                 Box::new(move |this, window, cx| this.tell_agent(fix.clone(), window, cx)),
             ))
             .child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border))
-            .child(item("review-menu-open", "icons/solar/square-arrow-right-up.svg", format!("Open on {host}"), None, false, Box::new(move |_, _, cx| cx.open_url(&url))))
-            .child(item("review-menu-link", "icons/solar/link.svg", "Copy link".into(), None, false, copy(url2, "Copied the link")))
-            .child(item("review-menu-number", "icons/solar/copy.svg", format!("Copy {noun} number"), None, false, copy(number, "Copied the number")))
+            .child(item("review-menu-open", "icons/solar/global.svg", format!("Open {noun}"), Some("In a browser tab here.".into()), false, {
+                let url = url.clone();
+                Box::new(move |_, _, cx| super::browser::open_inside(&url, cx))
+            }))
+            .child(item("review-menu-open-outside", "icons/solar/square-arrow-right-up.svg", format!("Open on {host}"), Some("In the default browser.".into()), false, Box::new(move |_, _, cx| cx.open_url(&url))))
+            .child(item("review-menu-link", "icons/solar/link.svg", "Copy link".into(), None, false, copy(url2, "Copied the link")).children(keys("CopyPageUrl").map(|k| shortcut(theme, k))))
+            .child(item("review-menu-number", "icons/solar/copy.svg", format!("Copy {noun} number"), None, false, copy(number, "Copied the number")).children(keys("CopyPrNumber").map(|k| shortcut(theme, k))))
             .child(item("review-menu-checkout", "icons/terminal.svg", "Copy checkout command".into(), None, false, copy(checkout, "Copied the checkout command")));
         let card = crate::ui::menu_motion("review-menu-in", menu, card);
         Some(gpui::deferred(gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(card)).with_priority(1).into_any_element())
     }
+}
+
+/// A menu item's keys, at its right.
+fn shortcut(theme: &Theme, keys: String) -> Div {
+    div().flex_none().pl(px(16.)).h(px(18.)).flex().items_center().text_color(theme.text_faint).child(keys)
 }
 
 /// What the "…" menu gives the agent about `r`: the question's start, left to finish, and the requests to explain it
@@ -612,6 +652,19 @@ fn empty(theme: &Theme, title: impl Into<SharedString>, hint: impl Into<SharedSt
         .child(div().text_color(theme.text).child(title.into()))
         .child(div().text_size(px(12.)).text_color(theme.text_muted).child(hint.into()))
         .into_any_element()
+}
+
+/// Markdown whose links open in a browser tab here, as the panel's own do; a link that isn't a web page goes to the
+/// system.
+fn inside_links() -> crate::ui::markdown::Look {
+    let link: Rc<dyn Fn(&str, &mut Window, &mut App)> = Rc::new(|url, _, cx| {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            super::browser::open_inside(url, cx);
+        } else {
+            cx.open_url(url);
+        }
+    });
+    crate::ui::markdown::Look { link: Some(link), ..Default::default() }
 }
 
 /// `body`'s blocks, parsed once while it stays around: a drag over the text redraws every move, and the timeline
@@ -665,7 +718,7 @@ fn description(theme: &Theme, body: &str, collapsed: bool, toggle: impl Fn(&Clic
                     .gap(px(8.))
                     .text_size(px(13.))
                     .text_color(theme.text)
-                    .children(crate::ui::markdown::render(&parsed(body), "review-md", theme)),
+                    .children(crate::ui::markdown::render_with(&parsed(body), "review-md", theme, &inside_links())),
             )
         })
         .into_any_element()
@@ -909,7 +962,7 @@ fn request_head(theme: &Theme, r: &Request, menu: AnyElement) -> AnyElement {
     let (accent, text) = (theme.accent, theme.text);
     let open = {
         let url = r.pr.url.clone();
-        move |_: &ClickEvent, _: &mut Window, cx: &mut App| cx.open_url(&url)
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| super::browser::open_inside(&url, cx)
     };
     let project = div()
         .id("review-project")
@@ -925,7 +978,7 @@ fn request_head(theme: &Theme, r: &Request, menu: AnyElement) -> AnyElement {
         .children(repo_of(&r.pr.url).map(|repo| div().min_w_0().truncate().child(repo)))
         .child(div().flex_none().text_color(accent).child(number.clone()))
         .child(gpui::svg().path("icons/solar/square-arrow-right-up.svg").size(px(12.)).flex_none().text_color(accent))
-        .tooltip(tip(format!("Open on {}", if r.pr.gitlab { "GitLab" } else { "GitHub" }), None))
+        .tooltip(tip("Open in a browser tab", None))
         .on_click(open.clone());
     let open_now = r.pr.state == "open";
     let states = div()
@@ -1213,7 +1266,7 @@ fn timeline(theme: &Theme, events: &[crate::ui::review::Event]) -> AnyElement {
                         .gap(px(8.))
                         .text_size(px(13.))
                         .text_color(theme.text)
-                        .children(crate::ui::markdown::render(&parsed(&e.body), &format!("review-tl-{i}"), theme)),
+                        .children(crate::ui::markdown::render_with(&parsed(&e.body), &format!("review-tl-{i}"), theme, &inside_links())),
                 )
             })
             .into_any_element()
@@ -1236,7 +1289,7 @@ fn code(theme: &Theme, files: &[crate::changes::FileDiff], open: &[bool], cut: b
     let (adds, dels) = files.iter().fold((0, 0), |(a, d), f| (a + f.additions as u64, d + f.deletions as u64));
     let open_page = |id: gpui::ElementId, label: String| {
         let page = page.clone();
-        div().id(id).cursor_pointer().text_color(accent).hover(|s| s.underline()).child(label).on_click(move |_, _, cx| cx.open_url(&page))
+        div().id(id).cursor_pointer().text_color(accent).hover(|s| s.underline()).child(label).on_click(move |_, _, cx| super::browser::open_inside(&page, cx))
     };
     let heading = div()
         .flex()
@@ -1566,7 +1619,7 @@ fn checks_section(
                     })
             })
         })
-        .when_some(pipeline.map(|(url, _)| url), |el, url| el.cursor_pointer().hover(|s| s.underline()).on_click(move |_, _, cx| cx.open_url(&url)));
+        .when_some(pipeline.map(|(url, _)| url), |el, url| el.cursor_pointer().hover(|s| s.underline()).on_click(move |_, _, cx| super::browser::open_inside(&url, cx)));
     let row = |i: usize, c: &Check, window: &mut Window| {
         let group: SharedString = format!("review-check-{i}").into();
         let action = c.action();
@@ -1614,7 +1667,7 @@ fn checks_section(
                     let on_log = on_log.clone();
                     el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, cx| on_log(job.clone(), cx))
                 }
-                (None, None, Some(url)) => el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, cx| cx.open_url(&url)),
+                (None, None, Some(url)) => el.cursor_pointer().hover(move |s| s.bg(hover)).on_click(move |_, _, cx| super::browser::open_inside(&url, cx)),
                 (None, None, None) => el,
             })
     };
@@ -1695,7 +1748,7 @@ fn log_box(theme: &Theme, i: usize, text: Option<&str>, url: Option<String>, win
                         .cursor_pointer()
                         .hover(move |s| s.text_color(accent))
                         .child("Open job ↗")
-                        .on_click(move |_, _, cx| cx.open_url(&url))
+                        .on_click(move |_, _, cx| super::browser::open_inside(&url, cx))
                 })),
         )
         .child(match text {
