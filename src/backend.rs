@@ -169,6 +169,11 @@ pub trait Terminal: Send {
     fn raw(&self) -> bool {
         true
     }
+    /// Saves an image on the terminal's machine and pastes its path, as `herdr --remote` does for a remote host's
+    /// apps, which cannot read the Mac's clipboard. `false` when this terminal cannot.
+    fn paste_image(&self, _extension: &str, _bytes: &[u8]) -> bool {
+        false
+    }
     /// Whether this terminal tells when its app captures the mouse.
     fn knows_mouse_capture(&self) -> bool {
         true

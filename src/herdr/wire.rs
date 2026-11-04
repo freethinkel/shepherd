@@ -17,7 +17,8 @@ const MAX_FRAME_SIZE: usize = 32 * 1024 * 1024;
 pub enum ClientMessage {
     TerminalHello { version: u32, cols: u16, rows: u16, cell_width_px: u32, cell_height_px: u32, pixel_mouse: bool },
     Input { data: Vec<u8> },
-    ClipboardImage,
+    /// An image from the Mac's clipboard, for herdr to save on its own machine and paste the path of into the pane.
+    ClipboardImage { target: ClipboardImageTarget, extension: String, data: Vec<u8> },
     Resize { cols: u16, rows: u16, cell_width_px: u32, cell_height_px: u32, pixel_mouse: bool },
     Detach,
     AttachTerminal,
@@ -54,6 +55,15 @@ pub enum ClientMessage {
     /// A named control message of herdr's client-shell ("endpoint") protocol, its data JSON.
     EndpointControl { kind: String, data: String },
 }
+
+/// herdr's `ClientClipboardImageTarget`: who pastes the image. A terminal session is a direct terminal.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum ClipboardImageTarget {
+    DirectTerminal,
+}
+
+/// herdr's `MAX_CLIPBOARD_IMAGE_PAYLOAD`: a bigger image drops the connection.
+pub const MAX_CLIPBOARD_IMAGE: usize = 16 * 1024 * 1024;
 
 /// herdr's `ClientHostThemeUpdate`: a color or the appearance of the terminal a client shell runs in.
 #[derive(Debug, Clone, Serialize)]
@@ -516,6 +526,10 @@ mod tests {
         let bytes = |m: &ClientMessage| bincode::serde::encode_to_vec(m, bincode::config::standard()).unwrap();
         assert_eq!(bytes(&ClientMessage::Input { data: b"ab".to_vec() }), [1, 2, b'a', b'b']);
         assert_eq!(bytes(&ClientMessage::Detach), [4]);
+        assert_eq!(
+            bytes(&ClientMessage::ClipboardImage { target: ClipboardImageTarget::DirectTerminal, extension: "png".into(), data: vec![7] }),
+            [2, 0, 3, b'p', b'n', b'g', 1, 7]
+        );
         assert_eq!(
             bytes(&ClientMessage::ControlTerminal { target: "w:p".into(), takeover: true }),
             [8, 3, b'w', b':', b'p', 1]

@@ -277,6 +277,19 @@ impl Terminal for Session {
         );
     }
 
+    fn paste_image(&self, extension: &str, bytes: &[u8]) -> bool {
+        let Transport::Socket(stream) = &self.transport else { return false };
+        if bytes.len() > wire::MAX_CLIPBOARD_IMAGE {
+            return false;
+        }
+        let message = ClientMessage::ClipboardImage {
+            target: wire::ClipboardImageTarget::DirectTerminal,
+            extension: extension.into(),
+            data: bytes.to_vec(),
+        };
+        wire::write_message(&mut *stream.lock().unwrap(), &message).is_ok()
+    }
+
     fn resize(&self, cols: u16, rows: u16, (cell_width_px, cell_height_px): (u32, u32)) {
         self.send(
             ClientMessage::Resize { cols, rows, cell_width_px, cell_height_px, pixel_mouse: false },
