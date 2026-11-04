@@ -255,8 +255,11 @@ fn picture(image: &InlineImage, alt: &str, key: &str, theme: &Theme, look: &Look
         move || div().text_color(faint).child(alt.clone()).into_any_element()
     });
     if let Some(open) = look.open_image.clone() {
+        // the wrapper holds the column's width, or the image's own width would stretch it past the column
         return div()
             .id(SharedString::from(key.to_string()))
+            .max_w_full()
+            .min_w_0()
             .cursor_pointer()
             .child(shown)
             .on_click(move |_, window, cx| open(&path, window, cx))
@@ -265,6 +268,8 @@ fn picture(image: &InlineImage, alt: &str, key: &str, theme: &Theme, look: &Look
     match (image.link.clone(), look.link.clone()) {
         (Some(url), Some(follow)) => div()
             .id(SharedString::from(key.to_string()))
+            .max_w_full()
+            .min_w_0()
             .cursor_pointer()
             .child(shown)
             .on_click(move |_, window, cx| follow(&url, window, cx))
