@@ -16,7 +16,7 @@ NOTARY_PROFILE ?= shepherd-notary
 NOTARY_KEYCHAIN ?=
 export SIGN_IDENTITY
 
-.PHONY: help build run test lint linux app app-debug open install universal dist notarize version ghostty-themes deploy-site clean
+.PHONY: help build run test lint linux linux-test linux-lint linux-shot app app-debug open install universal dist notarize version ghostty-themes deploy-site clean
 
 help: ## This list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
@@ -38,6 +38,26 @@ linux: ## Linux tar.gz, .deb and .rpm for this Mac's architecture, built in Dock
 	# the build goes to a volume: cargo-deb's temp folder can't be cleared on the Mac's bind-mounted target
 	docker run --rm -v "$(CURDIR)":/src -v shepherd-cargo:/root/.cargo/registry -v shepherd-cargo-git:/root/.cargo/git \
 		-v shepherd-target:/target -e CARGO_TARGET_DIR=/target -w /src shepherd-linux scripts/linux-dist.sh
+
+# Linux without a toolchain: the same checks and the fixture's screenshot in Docker (scripts/dev.Dockerfile). The debug
+# build is kept in the shepherd-target volume, next to `make linux`'s release one.
+DEV_IMAGE = docker build -q -t shepherd-linux -f scripts/linux.Dockerfile scripts >/dev/null \
+	&& docker build -q -t shepherd-dev -f scripts/dev.Dockerfile scripts >/dev/null
+DEV_RUN = docker run --rm -v "$(CURDIR)":/src -v shepherd-cargo:/root/.cargo/registry -v shepherd-cargo-git:/root/.cargo/git \
+	-v shepherd-target:/target -e CARGO_TARGET_DIR=/target -w /src
+OUT ?= target/shot-linux.png
+
+linux-test: ## All tests, on Linux in Docker
+	$(DEV_IMAGE)
+	$(DEV_RUN) shepherd-dev cargo test
+
+linux-lint: ## Clippy, warnings as errors, on Linux in Docker
+	$(DEV_IMAGE)
+	$(DEV_RUN) shepherd-dev cargo clippy --all-targets -- -D warnings
+
+linux-shot: ## The fixture's window on Linux in Docker, in OUT (target/shot-linux.png); PANEL=sessions opens a panel
+	$(DEV_IMAGE)
+	$(DEV_RUN) -e HOST_UID=$$(id -u) -e HOST_GID=$$(id -g) $(if $(PANEL),-e SHEPHERD_PANEL=$(PANEL)) shepherd-dev docs/mock/shot-linux.sh $(OUT)
 
 app: ## Release Shepherd.app in target/release
 	scripts/bundle.sh release

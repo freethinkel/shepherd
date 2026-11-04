@@ -8,34 +8,11 @@ mock=$PWD/docs/mock
 base=$HOME/.cache/shepherd-mock
 out=${1:-docs/screenshot.png}
 
-repo() { # path, origin name
-  [ -d "$1/.git" ] && return
-  mkdir -p "$1"
-  git -C "$1" init -q -b main
-  git -C "$1" -c user.name=mock -c user.email=mock@example.com commit -q --allow-empty -m "init"
-  git -C "$1" remote add origin "https://github.com/freethinkel/$2.git"
-}
-worktree() { # repo path, worktree path, branch
-  [ -d "$2" ] && return
-  mkdir -p "$(dirname "$2")"
-  git -C "$1" worktree add -q -b "$3" "$2"
-}
-dev=$base/Developer
-repo "$dev/pet/shepherd" shepherd
-repo "$dev/pet/collie" collie
-repo "$dev/pet/herdr" herdr
-mkdir -p "$dev/infra/kuzyo"
-worktree "$dev/pet/shepherd" "$dev/worktrees/shepherd/sidebar-polish" sidebar-polish
-worktree "$dev/pet/shepherd" "$dev/worktrees/shepherd/review-panel" review-panel
-worktree "$dev/pet/collie" "$dev/worktrees/collie/voice-local-models" voice-local-models
+. "$mock/fixture.sh"
 
 # the window goes on the display the real settings last saved; without one it opens centered at the default size
 display=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/Library/Application Support/shepherd/settings.json")))["window"]["display"])' 2>/dev/null || true)
 sed -e "s|\$HOME|$HOME|g" -e "s|\$DISPLAY|$display|" "$mock/settings.json" > "$base/settings.json"
-
-# herdr's folder ($XDG_CONFIG_HOME/herdr) is the fixture's too: the socket there reads as the default session, and
-# nothing live is on it
-mkdir -p "$base/xdg/herdr" && : > "$base/xdg/herdr/config.toml"
 
 cargo build -q
 SHEPHERD_MOCK=$mock SHEPHERD_SETTINGS_FILE=$base/settings.json SHEPHERD_HERDR=$mock/bin/herdr \
