@@ -67,8 +67,9 @@ fn main() {
         if std::env::var_os("SHEPHERD_SETTINGS").is_some() {
             shepherd::shell::Shell::toggle_settings(cx);
         }
-        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions`: opens that panel once the first snapshot is likely in (screenshots).
+        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions|review`: opens that panel once the first snapshot is likely in (screenshots).
         if let Ok(which) = std::env::var("SHEPHERD_PANEL") {
+            let review = which == "review";
             use shepherd::ui::command_panel::Kind;
             let kind = match which.as_str() {
                 "agents" => Kind::Agents,
@@ -80,7 +81,9 @@ fn main() {
                 cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
                 cx.update(|cx| {
                     let Some(window) = cx.windows().into_iter().find_map(|w| w.downcast::<shepherd::shell::Shell>()) else { return };
-                    let _ = window.update(cx, |shell, window, cx| shell.toggle_command_panel(kind, window, cx));
+                    let _ = window.update(cx, |shell, window, cx| {
+                        if review { shell.toggle_review(window, cx) } else { shell.toggle_command_panel(kind, window, cx) }
+                    });
                 })
             })
             .detach();

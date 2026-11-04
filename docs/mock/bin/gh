@@ -6,7 +6,7 @@ case "$1 $2" in
   "api user") echo freethinkel ;;
   "pr view")
     case "$3" in
-      review-panel) sed -e "s/@NOW@/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" -e "s/@AGO@/$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ)/" "$dir/pr-42.json" ;;
+      review-panel) sed -e "s/@NOW@/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" -e "s/@AGO@/$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "-5 min" +%Y-%m-%dT%H:%M:%SZ)/" "$dir/pr-42.json" ;;
       *) echo "no pull requests found for branch \"$3\"" >&2; exit 1 ;;
     esac ;;
   *) exit 1 ;;

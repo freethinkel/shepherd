@@ -153,10 +153,10 @@ pub struct Shell {
     review_log: Option<(String, String)>,
     /// Asks before the review panel's Merge.
     merge_confirm: Option<crate::ui::Popup<review::MergeAsk>>,
-    /// The review panel shows the whole description, not its first lines.
-    review_expanded: bool,
-    /// The description's whole height at the last paint: whether it has more than its folded lines.
-    review_body_h: Rc<Cell<f32>>,
+    /// The review panel's description is folded away under its heading.
+    review_collapsed: bool,
+    /// The review panel shows its Checks tab, not its Summary.
+    review_checks_tab: bool,
     agent_sort: AgentSort,
     /// Saved in the settings when a drag ends.
     agents_height: Option<f32>,
@@ -507,8 +507,8 @@ impl Shell {
                     review_page: None,
                     review_swipe: None,
                     review_spring: None,
-                    review_expanded: false,
-                    review_body_h: Default::default(),
+                    review_collapsed: false,
+                    review_checks_tab: false,
                     agent_sort: SettingsGlobal::of(cx).settings.agent_sort,
                     agents_height: SettingsGlobal::of(cx).settings.agents_height,
                     agents_drag: None,

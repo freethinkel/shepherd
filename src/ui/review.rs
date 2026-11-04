@@ -27,8 +27,14 @@ pub struct Request {
     pub title: String,
     pub author: String,
     pub body: String,
-    /// The branch it goes into.
+    /// The branch it goes into, and the one it comes from.
     pub base: String,
+    pub head: String,
+    /// When it last changed, unix seconds.
+    pub updated: Option<i64>,
+    pub labels: Vec<String>,
+    /// Files changed, lines added and removed (not in glab's REST answer).
+    pub diff: Option<Diff>,
     /// No conflicts with the base, as far as the host knows.
     pub mergeable: bool,
     /// The CLI's user may approve it: not their own GitHub PR, a GitLab MR its rules let them.
@@ -46,6 +52,13 @@ pub struct Request {
     /// How it merges unless told otherwise: squashed, its branch deleted after (GitLab's settings for it).
     pub squash: bool,
     pub remove_branch: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Diff {
+    pub files: u64,
+    pub additions: u64,
+    pub deletions: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -314,7 +327,8 @@ pub const ROOT: &str = "Pipeline";
 /// jobs, else the branch's own pipeline, in one GraphQL query; the CLI's user too.
 const GITLAB_QUERY: &str = "query($path: ID!, $branch: String!) { currentUser { username } project(fullPath: $path) { \
     mergeRequests(sourceBranches: [$branch], first: 1, sort: CREATED_DESC) { nodes { \
-    iid title state draft webUrl description targetBranch conflicts autoMergeEnabled squash forceRemoveSourceBranch \
+    iid title state draft webUrl description targetBranch sourceBranch updatedAt conflicts autoMergeEnabled squash forceRemoveSourceBranch \
+    labels { nodes { title } } diffStatsSummary { additions deletions fileCount } \
     author { username } approved approvedBy { nodes { username } } userPermissions { canApprove } \
     discussions(first: 100) { nodes { resolvable resolved } } \
     reviewers { nodes { username mergeRequestInteraction { reviewState } } } \
@@ -374,6 +388,12 @@ pub fn parse_gitlab_review(json: &str, base: &str, path: &str, now: i64) -> Opti
         author: mr["author"]["username"].as_str().unwrap_or("").into(),
         body: mr["description"].as_str().unwrap_or("").into(),
         base: mr["targetBranch"].as_str().unwrap_or("").into(),
+        head: mr["sourceBranch"].as_str().unwrap_or("").into(),
+        updated: mr["updatedAt"].as_str().and_then(unix_secs),
+        labels: mr["labels"]["nodes"].as_array().into_iter().flatten().filter_map(|l| l["title"].as_str()).map(String::from).collect(),
+        diff: mr["diffStatsSummary"].as_object().and_then(|d| {
+            Some(Diff { files: d.get("fileCount")?.as_u64()?, additions: d.get("additions")?.as_u64()?, deletions: d.get("deletions")?.as_u64()? })
+        }),
         mergeable: mr["conflicts"].as_bool() != Some(true),
         can_approve: mr["userPermissions"]["canApprove"].as_bool().unwrap_or(true),
         approved: !me.is_empty() && approvers.iter().any(|a| a == me),
@@ -504,6 +524,11 @@ fn request(v: &Value, json: &str, login: &str, body: &str, viewer: &str) -> Opti
         author: author.into(),
         body: v[body].as_str().unwrap_or("").into(),
         base: v["baseRefName"].as_str().or(v["target_branch"].as_str()).unwrap_or("").into(),
+        head: v["headRefName"].as_str().or(v["source_branch"].as_str()).unwrap_or("").into(),
+        updated: v["updatedAt"].as_str().or(v["updated_at"].as_str()).and_then(unix_secs),
+        // GitHub's are objects with a name, glab's REST answer plain strings
+        labels: v["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().or(l.as_str())).map(String::from).collect(),
+        diff: v["changedFiles"].as_u64().zip(v["additions"].as_u64()).zip(v["deletions"].as_u64()).map(|((files, additions), deletions)| Diff { files, additions, deletions }),
         mergeable: v["mergeable"].as_str() != Some("CONFLICTING") && v["has_conflicts"].as_bool() != Some(true),
         can_approve: !me(&v["author"]),
         approved: reviews.iter().any(|r| me(&r["author"]) && r["state"].as_str() == Some("APPROVED")),
@@ -782,7 +807,7 @@ fn missing(e: &std::io::Error, tool: &'static str) -> Review {
 }
 
 /// What `gh pr view` is asked for.
-const GITHUB_FIELDS: &str = "number,title,state,isDraft,url,author,body,statusCheckRollup,baseRefName,mergeable,latestReviews,reviewDecision,reviewRequests,autoMergeRequest";
+const GITHUB_FIELDS: &str = "number,title,state,isDraft,url,author,body,statusCheckRollup,baseRefName,mergeable,latestReviews,reviewDecision,reviewRequests,autoMergeRequest,headRefName,updatedAt,labels,additions,deletions,changedFiles";
 
 fn github(dir: &str, branch: &str, host: &str) -> Review {
     let (out, err) = match run("gh", &["pr", "view", branch, "--json", GITHUB_FIELDS], dir) {
@@ -961,6 +986,7 @@ mod tests {
     fn a_github_pr_and_its_checks() {
         let json = r#"{"number":7,"title":"Fix it","state":"OPEN","isDraft":false,"url":"https://github.com/a/b/pull/7",
             "author":{"login":"egor"},"body":"Hi","baseRefName":"main","mergeable":"CONFLICTING","reviewDecision":"APPROVED",
+            "headRefName":"fix","updatedAt":"2026-10-12T23:00:00Z","labels":[{"name":"bug"}],"additions":1200,"deletions":3,"changedFiles":4,
             "latestReviews":[{"author":{"login":"anna"},"state":"APPROVED"}],
             "statusCheckRollup":[
               {"__typename":"CheckRun","name":"lint","workflowName":"CI","status":"COMPLETED","conclusion":"FAILURE",
@@ -972,6 +998,8 @@ mod tests {
         let (request, checks) = parse_github(json, "anna", now).unwrap();
         assert_eq!((request.base.as_str(), request.mergeable, request.can_approve, request.approved, request.accepted), ("main", false, true, true, true));
         assert!(!parse_github(json, "egor", now).unwrap().0.can_approve, "not one's own");
+        assert_eq!((request.head.as_str(), request.updated, request.labels.as_slice()), ("fix", unix_secs("2026-10-12T23:00:00Z"), ["bug".to_string()].as_slice()));
+        assert_eq!(request.diff, Some(Diff { files: 4, additions: 1200, deletions: 3 }));
         assert_eq!((request.title.as_str(), request.author.as_str(), request.pr.state, request.pr.number), ("Fix it", "egor", "open", 7));
         let lint = Check {
             name: "lint".into(),
@@ -1002,9 +1030,11 @@ mod tests {
     #[test]
     fn a_gitlab_mr_and_its_pipeline() {
         let mr = r#"{"iid":93,"title":"SMS gates","state":"opened","draft":true,"web_url":"https://gl/mr/93",
-            "author":{"username":"vlad"},"description":"Body","target_branch":"dev","has_conflicts":false}"#;
+            "author":{"username":"vlad"},"description":"Body","target_branch":"dev","has_conflicts":false,
+            "source_branch":"sms","labels":["backend"],"updated_at":"2026-10-12T23:00:00.000Z"}"#;
         let mut request = parse_gitlab_mr(mr, "").unwrap();
         assert_eq!((request.base.as_str(), request.mergeable), ("dev", true));
+        assert_eq!((request.head.as_str(), request.labels.as_slice(), request.diff), ("sms", ["backend".to_string()].as_slice(), None), "glab's REST labels are strings");
         gitlab_approvals(r#"{"approved":true,"user_has_approved":true,"user_can_approve":false}"#, &mut request);
         assert_eq!((request.can_approve, request.approved, request.accepted), (false, true, true));
         assert_eq!((request.pr.state, request.pr.gitlab, request.author.as_str(), request.body.as_str()), ("draft", true, "vlad", "Body"));
@@ -1033,7 +1063,8 @@ mod tests {
     fn a_gitlab_review_in_one_query() {
         let json = r#"{"data":{"currentUser":{"username":"egor"},"project":{"mergeRequests":{"nodes":[{
             "iid":"402","title":"Hide maps","state":"opened","draft":false,"webUrl":"https://gl/g/p/-/merge_requests/402",
-            "description":"Body","targetBranch":"develop","conflicts":false,"autoMergeEnabled":true,"squash":true,
+            "description":"Body","targetBranch":"develop","sourceBranch":"maps","conflicts":false,
+            "labels":{"nodes":[{"title":"web"}]},"diffStatsSummary":{"additions":10,"deletions":2,"fileCount":3},"autoMergeEnabled":true,"squash":true,
             "forceRemoveSourceBranch":true,"author":{"username":"egor"},"approved":true,
             "approvedBy":{"nodes":[{"username":"dima"}]},"userPermissions":{"canApprove":true},
             "discussions":{"nodes":[{"resolvable":true,"resolved":false},{"resolvable":true,"resolved":true},{"resolvable":false,"resolved":false}]},
@@ -1047,6 +1078,7 @@ mod tests {
         let r = request.unwrap();
         assert_eq!((r.pr.number, r.pr.state, r.base.as_str(), r.mergeable, r.approved, r.accepted), (402, "open", "develop", true, false, true));
         assert_eq!((r.unresolved, r.auto_merge, r.squash, r.remove_branch), (Some(1), true, true, true));
+        assert_eq!((r.head.as_str(), r.labels.as_slice(), r.diff), ("maps", ["web".to_string()].as_slice(), Some(Diff { files: 3, additions: 10, deletions: 2 })));
         let said: Vec<_> = r.reviewers.iter().map(|rv| (rv.name.as_str(), rv.verdict)).collect();
         assert_eq!(said, [("vlad", Verdict::Changes), ("anna", Verdict::Pending), ("dima", Verdict::Approved)], "an approver who wasn't asked counts too");
         assert_eq!(pipeline, Some(("https://gl/g/p/-/pipelines/7".into(), CheckState::Running)));

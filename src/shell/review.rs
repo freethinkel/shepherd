@@ -7,8 +7,6 @@ use crate::ui::statusbar::{branch_of, cached, fetching, pane_dir, refetch};
 
 /// How often gh or glab are asked again about a branch, as the status bar asks about its PR.
 const REVIEW_TTL: Duration = Duration::from_secs(120);
-/// How much of a description shows folded: about six lines.
-const FOLDED: f32 = 120.;
 /// How often while one of its checks runs or waits to.
 pub(super) const REVIEW_POLL: Duration = Duration::from_secs(10);
 /// Past this a swipe over the checks pages when the fingers lift; short of it, the page springs back.
@@ -43,7 +41,7 @@ pub(super) struct MergeAsk {
 }
 
 impl Shell {
-    pub(super) fn toggle_review(&mut self, window: &Window, cx: &mut Context<Self>) {
+    pub fn toggle_review(&mut self, window: &Window, cx: &mut Context<Self>) {
         let seen = self.right_panel_shown(window);
         self.update_panel(cx, |p| p.toggle_pull_request(seen));
     }
@@ -148,6 +146,8 @@ impl Shell {
         let (dir, key_or) = (shown.dir.clone().unwrap_or_default(), key.clone().unwrap_or_default());
 
         let mut footer = None;
+        // the PR's head and its tabs, above the body that scrolls
+        let mut top = None;
         let body: Vec<AnyElement> = match (&key, review) {
             (None, _) => vec![empty(theme, "No branch", "The focused pane isn't in a git repo.")],
             (Some(_), None) => vec![div().pt(px(24.)).flex().justify_center().child(crate::ui::loader::spinner(2.5, window)).into_any_element()],
@@ -159,6 +159,58 @@ impl Shell {
             (Some(_), Some(Review::Failed(why))) => vec![empty(theme, format!("Couldn't load the {noun}"), why)],
             (Some(_), Some(Review::Found { request, checks, pipeline })) => {
                 let mut out = Vec::new();
+                let checks_title = if gitlab { "Pipeline" } else { "Checks" };
+                let ci = ci_line(&checks, pipeline.as_ref().map(|(_, s)| *s), gitlab);
+                let checks_el = (!checks.is_empty() || pipeline.is_some()).then(|| {
+                    let this = cx.entity().downgrade();
+                    let (dir, key) = (dir.clone(), key_or.clone());
+                    let on_act: OnAct = Rc::new(move |busy, calls, cx| {
+                        let dir = dir.clone();
+                        let job = move || calls.iter().try_for_each(|c| act(&dir, c));
+                        let _ = this.update(cx, |s, cx| s.review_act(busy, key.clone(), job, cx));
+                    });
+                    let pages = crate::ui::review::pages(&checks);
+                    let picked = self.review_page.as_ref().filter(|(k, _)| *k == key_or).and_then(|(_, name)| pages.iter().position(|(n, _)| n == name));
+                    let page = picked.unwrap_or_else(|| crate::ui::review::default_page(&pages));
+                    let this = cx.entity().downgrade();
+                    let names: Vec<String> = pages.iter().map(|(n, _)| n.clone()).collect();
+                    // the panel's whole width: pages slide in from its edge
+                    let width = panel_width;
+                    let on_page: OnPage = Rc::new({
+                        let (names, key) = (names.clone(), key_or.clone());
+                        move |to, cx| {
+                            let _ = this.update(cx, |s, cx| s.page_to(&key, &names, page, to, width, cx));
+                        }
+                    });
+                    let (offset, beside) = self.review_offset(&names, page, width, window);
+                    // the log asked for, read again while its job runs
+                    let shown_log = self.review_log.as_ref().filter(|(k, _)| *k == key_or).map(|(_, job)| job.clone());
+                    let log = shown_log.and_then(|job| {
+                        let c = checks.iter().find(|c| c.job.as_deref() == Some(job.as_str()))?;
+                        let log_key = format!("{}\n{gitlab}\n{job}\n{}", shown.dir.as_deref().unwrap_or_default(), c.repo.as_deref().unwrap_or_default());
+                        let busy = matches!(c.state, CheckState::Running | CheckState::Pending);
+                        let ttl = if busy { Duration::from_secs(5) } else { Duration::MAX };
+                        Some((job, cached(&log_key, ttl, crate::ui::review::read_log, cx)))
+                    });
+                    let this = cx.entity().downgrade();
+                    let on_log: Rc<dyn Fn(String, &mut App)> = Rc::new({
+                        let key = key_or.clone();
+                        move |job, cx| {
+                            let _ = this.update(cx, |s, cx| {
+                                let open = s.review_log.as_ref().is_some_and(|(k, j)| *k == key && *j == job);
+                                s.review_log = (!open).then(|| (key.clone(), job));
+                                cx.notify();
+                            });
+                        }
+                    });
+                    let paging = Paging { pages, page, on_page, offset, beside, width, log, on_log };
+                    let section = checks_section(theme, checks_title, &checks, pipeline.clone(), gitlab, &self.review_acting, on_act, paging, window);
+                    let key = key_or.clone();
+                    div()
+                        .on_scroll_wheel(cx.listener(move |this, e: &gpui::ScrollWheelEvent, _, cx| this.review_scroll(e, &key, &names, page, width, cx)))
+                        .child(section)
+                        .into_any_element()
+                });
                 match &request {
                     Some(r) => {
                         let on_approve = cx.listener({
@@ -204,69 +256,32 @@ impl Shell {
                             }
                         });
                         footer = request_footer(theme, r, running, &self.review_acting, on_approve, on_merge, on_cancel, on_ready);
-                        out.push(request_card(theme, r))
-                    }
-                    None => out.push(empty(theme, format!("No {noun}"), format!("{} has none yet.", branch.unwrap_or_default()))),
-                }
-                if !checks.is_empty() || pipeline.is_some() {
-                    let this = cx.entity().downgrade();
-                    let (dir, key) = (dir.clone(), key_or.clone());
-                    let on_act: OnAct = Rc::new(move |busy, calls, cx| {
-                        let dir = dir.clone();
-                        let job = move || calls.iter().try_for_each(|c| act(&dir, c));
-                        let _ = this.update(cx, |s, cx| s.review_act(busy, key.clone(), job, cx));
-                    });
-                    let title = if gitlab { "Pipeline" } else { "Checks" };
-                    let pages = crate::ui::review::pages(&checks);
-                    let picked = self.review_page.as_ref().filter(|(k, _)| *k == key_or).and_then(|(_, name)| pages.iter().position(|(n, _)| n == name));
-                    let page = picked.unwrap_or_else(|| crate::ui::review::default_page(&pages));
-                    let this = cx.entity().downgrade();
-                    let names: Vec<String> = pages.iter().map(|(n, _)| n.clone()).collect();
-                    // the panel's whole width: pages slide in from its edge
-                    let width = panel_width;
-                    let on_page: OnPage = Rc::new({
-                        let (names, key) = (names.clone(), key_or.clone());
-                        move |to, cx| {
-                            let _ = this.update(cx, |s, cx| s.page_to(&key, &names, page, to, width, cx));
-                        }
-                    });
-                    let (offset, beside) = self.review_offset(&names, page, width, window);
-                    // the log asked for, read again while its job runs
-                    let shown_log = self.review_log.as_ref().filter(|(k, _)| *k == key_or).map(|(_, job)| job.clone());
-                    let log = shown_log.and_then(|job| {
-                        let c = checks.iter().find(|c| c.job.as_deref() == Some(job.as_str()))?;
-                        let log_key = format!("{}\n{gitlab}\n{job}\n{}", shown.dir.as_deref().unwrap_or_default(), c.repo.as_deref().unwrap_or_default());
-                        let busy = matches!(c.state, CheckState::Running | CheckState::Pending);
-                        let ttl = if busy { Duration::from_secs(5) } else { Duration::MAX };
-                        Some((job, cached(&log_key, ttl, crate::ui::review::read_log, cx)))
-                    });
-                    let this = cx.entity().downgrade();
-                    let on_log: Rc<dyn Fn(String, &mut App)> = Rc::new({
-                        let key = key_or.clone();
-                        move |job, cx| {
-                            let _ = this.update(cx, |s, cx| {
-                                let open = s.review_log.as_ref().is_some_and(|(k, j)| *k == key && *j == job);
-                                s.review_log = (!open).then(|| (key.clone(), job));
+                        let checks_tab = self.review_checks_tab;
+                        let pick = |to: bool| {
+                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.review_checks_tab = to;
                                 cx.notify();
-                            });
+                            })
+                        };
+                        let tabs = tab_bar(theme, checks_tab, checks_title, ci, pick(false), pick(true), pick(true), window);
+                        top = Some(div().flex_none().flex().flex_col().child(request_head(theme, r)).child(tabs).into_any_element());
+                        if checks_tab {
+                            out.push(checks_el.unwrap_or_else(|| empty(theme, format!("No {}", checks_title.to_lowercase()), "Nothing has run on this branch yet.")));
+                        } else {
+                            out.push(summary(theme, r));
+                            if !r.body.trim().is_empty() {
+                                let toggle = cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.review_collapsed = !this.review_collapsed;
+                                    cx.notify();
+                                });
+                                out.push(description(theme, &r.body, self.review_collapsed, toggle));
+                            }
                         }
-                    });
-                    let paging = Paging { pages, page, on_page, offset, beside, width, log, on_log };
-                    let section = checks_section(theme, title, &checks, pipeline, gitlab, &self.review_acting, on_act, paging, window);
-                    let key = key_or.clone();
-                    out.push(
-                        div()
-                            .on_scroll_wheel(cx.listener(move |this, e: &gpui::ScrollWheelEvent, _, cx| this.review_scroll(e, &key, &names, page, width, cx)))
-                            .child(section)
-                            .into_any_element(),
-                    );
-                }
-                if let Some(r) = request.filter(|r| !r.body.trim().is_empty()) {
-                    let toggle = cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.review_expanded = !this.review_expanded;
-                        cx.notify();
-                    });
-                    out.push(description(theme, &r.body, self.review_expanded, self.review_body_h.clone(), toggle));
+                    }
+                    None => {
+                        out.push(empty(theme, format!("No {noun}"), format!("{} has none yet.", branch.unwrap_or_default())));
+                        out.extend(checks_el);
+                    }
                 }
                 out
             }
@@ -279,6 +294,7 @@ impl Shell {
             .flex_col()
             .overflow_hidden()
             .child(header)
+            .children(top)
             .child(
                 div()
                     .id("review-body")
@@ -326,77 +342,39 @@ fn parsed(body: &str) -> Rc<Vec<crate::ui::review::Block>> {
     })
 }
 
-/// The description, drawn whole: folded, cut to its first lines with their bottom fading out. The heading, or a
-/// click on the folded text (not a drag selecting it), unfolds and folds it. `height` is the whole text's height at
-/// the last paint: a short one has nothing to fold.
-fn description(
-    theme: &Theme,
-    body: &str,
-    expanded: bool,
-    height: Rc<Cell<f32>>,
-    toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let long = height.get() > FOLDED + 1.;
-    let folded = long && !expanded;
-    let toggle = Rc::new(toggle);
-    let on_heading = toggle.clone();
+/// The description under a heading that folds it away.
+fn description(theme: &Theme, body: &str, collapsed: bool, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
     let text = theme.text;
-    let blocks = div()
-        .flex_none()
-        .relative()
-        .flex()
-        .flex_col()
-        .gap(px(6.))
-        .children(crate::ui::markdown::render(&parsed(body), "review-md", theme))
-        .child(
-            canvas(
-                move |bounds, window, _| {
-                    let h = f32::from(bounds.size.height);
-                    if (height.replace(h) - h).abs() > 0.5 {
-                        window.refresh();
-                    }
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .size_full(),
-        );
-    let body = div()
-        .id("review-description-body")
-        .flex()
-        .flex_col()
-        .child(blocks)
-        .when(folded, |el| {
-            el.max_h(px(FOLDED)).overflow_hidden().cursor_pointer().on_click(move |e, window, cx| {
-                if crate::ui::markdown::selected_text().is_none() {
-                    toggle(e, window, cx);
-                }
-            })
-        });
     div()
         .flex()
         .flex_col()
-        .gap(px(6.))
-        .text_size(px(12.))
-        .text_color(theme.text_muted)
+        .gap(px(10.))
         .child(
             div()
                 .id("review-description")
                 .flex()
                 .items_center()
                 .gap(px(4.))
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_faint)
+                .text_color(theme.text_muted)
+                .cursor_pointer()
+                .hover(move |s| s.text_color(text))
                 .child("Description")
-                .when(long, |el| {
-                    el.cursor_pointer()
-                        .hover(move |s| s.text_color(text))
-                        .child(gpui::svg().path(if expanded { "icons/alt-arrow-up.svg" } else { "icons/alt-arrow-down.svg" }).size(px(12.)).text_color(theme.text_faint))
-                        .on_click(move |e, window, cx| on_heading(e, window, cx))
-                }),
+                .child(gpui::svg().path(if collapsed { "icons/alt-arrow-right.svg" } else { "icons/alt-arrow-down.svg" }).size(px(12.)).text_color(theme.text_faint))
+                .on_click(toggle),
         )
-        .map(|el| if folded { el.child(crate::ui::edge_fade::bottom_faded(48., body)) } else { el.child(body) })
+        .when(!collapsed, |el| {
+            el.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .text_size(px(13.))
+                    .text_color(theme.text)
+                    .children(crate::ui::markdown::render(&parsed(body), "review-md", theme)),
+            )
+        })
         .into_any_element()
 }
 
@@ -480,21 +458,6 @@ impl Shell {
         }
         cx.notify();
     }
-}
-
-/// A state badge: `label` on a wash of `color`.
-fn badge(label: &'static str, color: gpui::Hsla) -> Div {
-    div()
-        .px(px(7.))
-        .h(px(18.))
-        .flex()
-        .items_center()
-        .rounded(px(9.))
-        .bg(color.opacity(0.15))
-        .text_color(color)
-        .text_size(px(11.))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .child(label)
 }
 
 /// The panel's bottom bar while the PR or MR is open (a draft's has Mark as ready): Approve, which once one has reads Approved and takes it back
@@ -606,83 +569,348 @@ pub(super) fn pr_tone(state: &str, theme: &Theme) -> (&'static str, Hsla) {
     }
 }
 
-/// The title (a click opens it), its state (and conflicts while open), number and author.
-fn request_card(theme: &Theme, r: &Request) -> AnyElement {
+/// `1234567` as `1,234,567`.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The project a PR's or MR's page belongs to: `owner/repo` of `https://github.com/owner/repo/pull/42`.
+fn repo_of(url: &str) -> Option<String> {
+    let project = url.split_once("/-/merge_requests/").or_else(|| url.split_once("/pull/"))?.0;
+    crate::ui::review::repo_path(project)
+}
+
+/// A state pill: `icon` and `label` in `color`, on a wash of it inside its edge.
+fn pill(icon: &'static str, label: impl Into<SharedString>, color: Hsla) -> Div {
+    div()
+        .flex_none()
+        .h(px(22.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(color.opacity(0.35))
+        .bg(color.opacity(0.1))
+        .text_color(color)
+        .text_size(px(12.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .child(gpui::svg().path(icon).size(px(13.)).text_color(color))
+        .child(label.into())
+}
+
+/// The PR's head: its project and number (a click opens it) with its state; the title; the author, when it last
+/// changed and the command that checks it out (a click copies it); the branches and how much it changes.
+fn request_head(theme: &Theme, r: &Request) -> AnyElement {
     let (label, color) = pr_tone(r.pr.state, theme);
     let number = format!("{}{}", if r.pr.gitlab { "!" } else { "#" }, r.pr.number);
-    let (url, accent) = (r.pr.url.clone(), theme.accent);
+    let (accent, text) = (theme.accent, theme.text);
+    let open = {
+        let url = r.pr.url.clone();
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| cx.open_url(&url)
+    };
+    let project = div()
+        .id("review-project")
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .text_color(theme.text_muted)
+        .hover(move |s| s.text_color(text))
+        .children(repo_of(&r.pr.url).map(|repo| div().min_w_0().truncate().child(repo)))
+        .child(div().flex_none().text_color(accent).child(number.clone()))
+        .child(gpui::svg().path("icons/solar/square-arrow-right-up.svg").size(px(12.)).flex_none().text_color(accent))
+        .tooltip(tip(format!("Open on {}", if r.pr.gitlab { "GitLab" } else { "GitHub" }), None))
+        .on_click(open.clone());
+    let open_now = r.pr.state == "open";
+    let states = div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .when(open_now && !r.mergeable, |el| el.child(pill("icons/solar/close-circle.svg", "Conflicts", theme.danger)))
+        .when(open_now && r.accepted, |el| el.child(pill("icons/solar/check-circle.svg", "Approved", theme.success)))
+        .child(pill("icons/git-pull-request.svg", label, color));
+    let title = div()
+        .id("review-title")
+        .text_size(px(15.))
+        .line_height(px(20.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .cursor_pointer()
+        .hover(move |s| s.text_color(accent))
+        .child(if r.title.is_empty() { number.clone() } else { r.title.clone() })
+        .on_click(open);
+    let updated = r.updated.map(|at| {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(at);
+        match crate::model::ago(Duration::from_secs((now - at).max(0) as u64)).as_str() {
+            "now" => "updated just now".to_string(),
+            ago => format!("updated {ago} ago"),
+        }
+    });
+    let checkout = format!("{} checkout {}", if r.pr.gitlab { "glab mr" } else { "gh pr" }, r.pr.number);
+    let mono = theme.font_terminal.clone();
+    let byline = div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_size(px(12.))
+        .text_color(theme.text_faint)
+        .when(!r.author.is_empty(), |el| {
+            let initial = r.author.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+            el.child(
+                div()
+                    .size(px(18.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(theme.hover)
+                    .text_size(px(10.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text_muted)
+                    .child(initial),
+            )
+            .child(div().min_w_0().truncate().text_color(theme.text).child(r.author.clone()))
+        })
+        .children(updated.map(|u| div().flex_none().child(format!("· {u}"))))
+        .child(div().flex_1())
+        .child(
+            div()
+                .id("review-checkout")
+                .flex_none()
+                .font_family(mono.clone())
+                .text_color(theme.text_muted)
+                .cursor_pointer()
+                .hover(move |s| s.text_color(text))
+                .tooltip(tip("Copy", None))
+                .child(checkout.clone())
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(checkout.clone()));
+                    crate::ui::toast::info(cx, "Copied the checkout command", None);
+                }),
+        );
+    let branches = div()
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .text_size(px(12.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_family(mono.clone())
+                .text_color(theme.text_faint)
+                .child(if r.head.is_empty() { r.base.clone() } else { format!("{} ← {}", r.base, r.head) }),
+        )
+        .children(r.diff.map(|d| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(gpui::svg().path("icons/solar/file-text.svg").size(px(13.)).text_color(theme.text_faint))
+                .child(div().text_color(theme.text_muted).child(format!("{} file{}", thousands(d.files), if d.files == 1 { "" } else { "s" })))
+                .child(div().font_family(mono.clone()).text_color(theme.success).child(format!("+{}", thousands(d.additions))))
+                .child(div().font_family(mono.clone()).text_color(theme.danger).child(format!("-{}", thousands(d.deletions))))
+        }));
     div()
+        .px(px(12.))
+        .pt(px(12.))
+        .pb(px(12.))
         .flex()
         .flex_col()
         .gap(px(8.))
-        .child(
+        .border_b_1()
+        .border_color(theme.border)
+        .child(div().flex().items_center().gap(px(8.)).child(project).child(states))
+        .child(title)
+        .child(byline)
+        .child(branches)
+        .into_any_element()
+}
+
+/// How CI went, as the tabs' line says it: its state and a few words.
+fn ci_line(checks: &[Check], pipeline: Option<CheckState>, gitlab: bool) -> Option<(CheckState, String)> {
+    if checks.is_empty() && pipeline.is_none() {
+        return None;
+    }
+    let state = pipeline.unwrap_or_else(|| crate::ui::review::worst(checks.iter().map(|c| c.state)));
+    let count = |states: &[CheckState]| checks.iter().filter(|c| states.contains(&c.state)).count();
+    let some = |n: usize, what: &str| format!("{n} {}{} {what}", if gitlab { "job" } else { "check" }, if n == 1 { "" } else { "s" });
+    let words = match state {
+        CheckState::Success if gitlab => "Pipeline passed".into(),
+        CheckState::Success => "All checks passed".into(),
+        CheckState::Failed => match count(&[CheckState::Failed]) {
+            0 => "Pipeline failed".into(),
+            n => some(n, "failed"),
+        },
+        CheckState::Running | CheckState::Pending => match count(&[CheckState::Running, CheckState::Pending]) {
+            0 => "Pipeline running".into(),
+            n => some(n, "running"),
+        },
+        CheckState::Skipped => "Checks skipped".into(),
+    };
+    Some((state, words))
+}
+
+/// Summary and Checks (or Pipeline) as one segmented control, and how CI went beside them (a click shows the checks).
+#[allow(clippy::too_many_arguments)]
+fn tab_bar(
+    theme: &Theme,
+    checks_tab: bool,
+    checks_title: &'static str,
+    ci: Option<(CheckState, String)>,
+    on_summary: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_checks: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_ci: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    window: &mut Window,
+) -> AnyElement {
+    let (text, muted, on) = (theme.text, theme.text_muted, theme.card);
+    let tab = |id: &'static str, label: &'static str, selected: bool| {
+        div()
+            .id(id)
+            .h(px(24.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .rounded(px(6.))
+            .text_size(px(12.))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .map(|el| if selected { el.bg(on).text_color(text) } else { el.text_color(muted).cursor_pointer().hover(move |s| s.text_color(text)) })
+            .child(label)
+    };
+    let tabs = div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .p(px(2.))
+        .rounded(px(8.))
+        .bg(theme.hover)
+        .child(tab("review-tab-summary", "Summary", !checks_tab).on_click(on_summary))
+        .child(tab("review-tab-checks", checks_title, checks_tab).on_click(on_checks));
+    div()
+        .flex_none()
+        .px(px(12.))
+        .py(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .border_b_1()
+        .border_color(theme.border)
+        .child(tabs)
+        .child(div().flex_1())
+        .children(ci.map(|(state, words)| {
             div()
-                .id("review-title")
-                .text_size(px(14.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .cursor_pointer()
-                .hover(move |s| s.text_color(accent))
-                .child(if r.title.is_empty() { number.clone() } else { r.title.clone() })
-                .on_click(move |_, _, cx| cx.open_url(&url)),
-        )
-        .child(
-            div()
+                .id("review-ci")
+                .min_w_0()
                 .flex()
                 .items_center()
                 .gap(px(6.))
                 .text_size(px(12.))
-                .text_color(theme.text_muted)
-                .child(badge(label, color))
-                .when(r.pr.state == "open" && r.accepted, |el| el.child(badge("Approved", theme.success)))
-                .when(r.pr.state == "open" && !r.mergeable, |el| el.child(badge("Conflicts", theme.danger)))
-                .child(number)
-                .when(!r.author.is_empty(), |el| el.child(div().min_w_0().truncate().child(format!("by {}", r.author)))),
-        )
-        .when(!r.reviewers.is_empty() || r.unresolved.is_some_and(|n| n > 0), |el| {
-            use crate::ui::review::Verdict;
-            el.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(12.))
-                    .text_color(theme.text_muted)
-                    .children(r.reviewers.iter().map(|rv| {
-                        let (icon, color, said) = match rv.verdict {
-                            Verdict::Approved => ("icons/check.svg", theme.success, "approved"),
-                            Verdict::Changes => ("icons/solar/close-circle.svg", theme.danger, "requested changes"),
-                            Verdict::Commented => ("icons/solar/chat-round-dots.svg", theme.text_muted, "commented"),
-                            Verdict::Pending => ("icons/solar/clock-circle.svg", theme.text_faint, "hasn't reviewed yet"),
-                        };
-                        div()
-                            .id(SharedString::from(format!("review-reviewer-{}", rv.name)))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .tooltip(tip(format!("{} {said}", rv.name), None))
-                            .child(gpui::svg().path(icon).size(px(13.)).flex_none().text_color(color))
-                            .child(rv.name.clone())
-                    }))
-                    .children(r.unresolved.filter(|n| *n > 0).map(|n| badge_owned(format!("{n} unresolved"), theme.warning))),
-            )
-        })
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(move |s| s.text_color(text))
+                .child(check_icon(theme, state, 14., window))
+                .child(div().min_w_0().truncate().child(words))
+                .on_click(on_ci)
+        }))
         .into_any_element()
 }
 
-/// [`badge`] with a label of its own.
-fn badge_owned(label: String, color: gpui::Hsla) -> Div {
+/// The Summary tab's properties: who reviews it and what they said, its labels, and (GitLab) its open threads.
+fn summary(theme: &Theme, r: &Request) -> AnyElement {
+    use crate::ui::review::Verdict;
+    let none = || div().text_color(theme.text_faint).child("None").into_any_element();
+    let row = |icon: &'static str, name: &'static str, value: AnyElement| {
+        div()
+            .flex()
+            .items_start()
+            .gap(px(8.))
+            .child(
+                div()
+                    .w(px(96.))
+                    .h(px(22.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(theme.text_muted)
+                    .child(gpui::svg().path(icon).size(px(14.)).flex_none().text_color(theme.text_faint))
+                    .child(name),
+            )
+            .child(div().flex_1().min_w_0().min_h(px(22.)).flex().flex_wrap().items_center().gap(px(6.)).child(value))
+    };
+    let reviewers = if r.reviewers.is_empty() {
+        none()
+    } else {
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(10.))
+            .children(r.reviewers.iter().map(|rv| {
+                let (icon, color, said) = match rv.verdict {
+                    Verdict::Approved => ("icons/solar/check-circle.svg", theme.success, "approved"),
+                    Verdict::Changes => ("icons/solar/close-circle.svg", theme.danger, "requested changes"),
+                    Verdict::Commented => ("icons/solar/chat-round-dots.svg", theme.text_muted, "commented"),
+                    Verdict::Pending => ("icons/solar/clock-circle.svg", theme.text_faint, "hasn't reviewed yet"),
+                };
+                div()
+                    .id(SharedString::from(format!("review-reviewer-{}", rv.name)))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_color(theme.text)
+                    .tooltip(tip(format!("{} {said}", rv.name), None))
+                    .child(gpui::svg().path(icon).size(px(14.)).flex_none().text_color(color))
+                    .child(rv.name.clone())
+            }))
+            .into_any_element()
+    };
+    let labels = if r.labels.is_empty() {
+        none()
+    } else {
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(4.))
+            .children(r.labels.iter().map(|l| {
+                div().h(px(20.)).px(px(6.)).flex().items_center().rounded(px(5.)).bg(theme.hover).text_color(theme.text).child(l.clone())
+            }))
+            .into_any_element()
+    };
     div()
-        .px(px(7.))
-        .h(px(18.))
         .flex()
-        .items_center()
-        .rounded(px(9.))
-        .bg(color.opacity(0.15))
-        .text_color(color)
-        .text_size(px(11.))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .child(label)
+        .flex_col()
+        .gap(px(6.))
+        .text_size(px(12.))
+        .child(row("icons/solar/users-group-rounded.svg", "Reviewers", reviewers))
+        .child(row("icons/solar/tag.svg", "Labels", labels))
+        .children(r.unresolved.map(|n| {
+            let value = match n {
+                0 => div().text_color(theme.text_faint).child("All resolved"),
+                n => div().text_color(theme.warning).child(format!("{n} unresolved")),
+            };
+            row("icons/solar/chat-round-dots.svg", "Threads", value.into_any_element())
+        }))
+        .into_any_element()
 }
 
 /// Runs CLI calls for a button, under its busy key.
