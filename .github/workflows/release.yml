@@ -192,9 +192,9 @@ jobs:
           name: Shepherd-windows-${{ matrix.arch }}
           path: target/windows-dist/*
 
+  # out once the Mac and Linux builds are: Windows, slowest to build, joins it in release-windows
   release:
-    needs: [version, macos, linux, windows]
-    # Windows aarch64 may fail (it is cross-built): the step below still requires the x86_64 zip
+    needs: [version, macos, linux]
     if: ${{ !cancelled() && needs.version.outputs.new == 'true' && needs.macos.result == 'success' && needs.linux.result == 'success' }}
     runs-on: ubuntu-latest
     env:
@@ -209,7 +209,8 @@ jobs:
           merge-multiple: true
       - name: Release a new version
         run: |
-          ls dist/*-windows-x86_64.zip >/dev/null
+          # a Windows zip built by now is release-windows' to add
+          rm -f dist/*-windows-*
           tag="v$(make -s version)"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "$tag is already released"
@@ -222,3 +223,25 @@ jobs:
             } > "$RUNNER_TEMP/notes.md"
             gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "$tag" --notes-file "$RUNNER_TEMP/notes.md"
           fi
+
+  # the Windows zips added to the release made without them
+  release-windows:
+    needs: [version, release, windows]
+    if: ${{ !cancelled() && needs.version.outputs.new == 'true' && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Shepherd-windows-*
+          path: dist
+          merge-multiple: true
+      - name: Add the Windows zips
+        run: |
+          # Windows aarch64 may be missing (it is cross-built and may fail); the x86_64 zip may not
+          if ls dist/*.zip >/dev/null 2>&1; then
+            gh release upload "v$(make -s version)" dist/*.zip --clobber
+          fi
+          ls dist/*-windows-x86_64.zip >/dev/null
