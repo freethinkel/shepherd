@@ -108,6 +108,7 @@ fn offer_row(offer: Offer) -> (&'static str, &'static str) {
         Offer::Browser => ("icons/solar/global.svg", "Browser"),
         Offer::Diffs => (DIFF_ICON, "Diffs"),
         Offer::PullRequest => ("icons/git-pull-request.svg", "Pull request"),
+        Offer::Device => ("icons/solar/smartphone.svg", "Device"),
     }
 }
 
@@ -309,6 +310,7 @@ impl Shell {
         match offer {
             Offer::PullRequest => self.update_panel(cx, |p| p.add(Surface::PullRequest)),
             Offer::Diffs => self.add_diff_surface(window, cx),
+            Offer::Device => self.open_device_picker(cx),
             Offer::Browser => {
                 if let Some(tab) = self.shown_tab() {
                     self.new_browser_tab(tab.workspace_id, None, true, window, cx);
@@ -331,6 +333,7 @@ impl Shell {
                 }),
                 Surface::Diff(id) => (self.right.diffs.get(id).map_or("Diff".to_string(), |c| c.read(cx).tab_title().to_string()), mark(DIFF_ICON)),
                 Surface::PullRequest => (pull_request_title(shown), if fetching_review { Leading::Spinner } else { mark("icons/git-pull-request.svg") }),
+                Surface::Device(key) => (self.device_label(key), mark("icons/solar/smartphone.svg")),
             };
             Tab::titled(s.key(), title, leading, theme, window)
         };
@@ -345,6 +348,10 @@ impl Shell {
                 self.update_panel(cx, |p| p.close(surface));
             }
             Surface::PullRequest => self.update_panel(cx, |p| p.close(surface)),
+            Surface::Device(_) => {
+                self.update_panel(cx, |p| p.close(surface));
+                self.sync_devices();
+            }
         }
     }
 
@@ -376,6 +383,7 @@ impl Shell {
                     .child(page)
                     .into_any_element()
             }
+            Some(Surface::Device(key)) => self.render_device(&key, theme, window, cx),
             Some(Surface::Diff(_)) | None => self.render_surface_picker(theme, cx).into_any_element(),
         };
         let panel = div().id("right-panel").w(px(width)).h_full().flex_none().flex().flex_col().overflow_hidden().bg(theme.wash(0.05)).border_l_1().border_color(theme.border).child(strip).child(body);
@@ -446,7 +454,8 @@ impl Shell {
                         cx.stop_propagation();
                         this.update_panel(cx, |p| p.activate(&surface));
                         // a page takes the keyboard from a click on its tab; the pull request has no use for it
-                        this.focus_panel(matches!(surface, Surface::Browser(_)), window, cx);
+                        let typed_into = matches!(&surface, Surface::Browser(_)) || matches!(&surface, Surface::Device(k) if k != crate::device::KEY);
+                        this.focus_panel(typed_into, window, cx);
                     }))
                     .into_any_element(),
             );

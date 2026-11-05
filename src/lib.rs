@@ -9,6 +9,7 @@ pub mod backend;
 pub mod bindings;
 pub mod changes;
 pub mod commands;
+pub mod device;
 pub mod hc;
 pub mod herdr;
 pub mod mock;

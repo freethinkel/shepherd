@@ -11,6 +11,8 @@ pub enum Surface {
     Diff(String),
     /// The shown pane's branch's pull request.
     PullRequest,
+    /// A simulator or emulator, by `Device::key`; the bare `device` lists them.
+    Device(String),
 }
 
 const PULL_REQUEST_KEY: &str = "pull-request";
@@ -25,7 +27,7 @@ impl Surface {
     /// What the strip knows the tab by.
     pub fn key(&self) -> &str {
         match self {
-            Surface::Browser(id) | Surface::Diff(id) => id,
+            Surface::Browser(id) | Surface::Diff(id) | Surface::Device(id) => id,
             Surface::PullRequest => PULL_REQUEST_KEY,
         }
     }
@@ -34,6 +36,7 @@ impl Surface {
         match key {
             PULL_REQUEST_KEY => Surface::PullRequest,
             id if id.starts_with(DIFF_PREFIX) => Surface::Diff(id.to_string()),
+            id if id.starts_with(crate::device::KEY) => Surface::Device(id.to_string()),
             id => Surface::Browser(id.to_string()),
         }
     }
@@ -153,14 +156,16 @@ pub enum Offer {
     Browser,
     Diffs,
     PullRequest,
+    Device,
 }
 
-/// A page needs a window that can embed it; a diff, a repo; a pull request, a remote to ask.
+/// A page needs a window that can embed it; a diff, a repo; a pull request, a remote to ask. Devices are always offered:
+/// their tab says what the machine lacks.
 pub fn offered(has_remote: bool, in_repo: bool, embeds_pages: bool) -> Vec<Offer> {
     let browser = embeds_pages.then_some(Offer::Browser);
     let diffs = in_repo.then_some(Offer::Diffs);
     let request = has_remote.then_some(Offer::PullRequest);
-    browser.into_iter().chain(diffs).chain(request).collect()
+    browser.into_iter().chain(diffs).chain(request).chain([Offer::Device]).collect()
 }
 
 /// Whether the panel slides, between two renders' (workspace shown, its panel open): it does when opened or closed in

@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "description": "Shepherd's 3D device view; build.sh bundles it into assets/device3d/viewer.js",
+  "devDependencies": {
+    "esbuild": "0.25.10",
+    "three": "0.187.0"
+  }
+}

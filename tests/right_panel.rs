@@ -121,11 +121,11 @@ fn a_browser_tab_whose_page_is_gone_falls_back() {
 
 #[test]
 fn offers_follow_the_remote_and_the_platform() {
-    assert_eq!(offered(true, true, true), [Offer::Browser, Offer::Diffs, Offer::PullRequest]);
-    assert_eq!(offered(false, true, true), [Offer::Browser, Offer::Diffs]);
-    assert_eq!(offered(false, false, true), [Offer::Browser]);
-    assert_eq!(offered(true, true, false), [Offer::Diffs, Offer::PullRequest]);
-    assert!(offered(false, false, false).is_empty());
+    assert_eq!(offered(true, true, true), [Offer::Browser, Offer::Diffs, Offer::PullRequest, Offer::Device]);
+    assert_eq!(offered(false, true, true), [Offer::Browser, Offer::Diffs, Offer::Device]);
+    assert_eq!(offered(false, false, true), [Offer::Browser, Offer::Device]);
+    assert_eq!(offered(true, true, false), [Offer::Diffs, Offer::PullRequest, Offer::Device]);
+    assert_eq!(offered(false, false, false), [Offer::Device]);
 }
 
 #[test]

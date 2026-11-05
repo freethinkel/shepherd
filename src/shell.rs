@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 mod annotations;
 mod browser;
 mod changes;
+mod device;
 mod divider;
 mod floating;
 mod merge;
@@ -318,6 +319,8 @@ pub struct Shell {
     /// Web integrations' pages, and the one shown in place of the tabs and panes.
     pages: web::Pages,
     browser: browser::Browser,
+    /// Simulators and emulators shown in the right panel.
+    devices: device::Devices,
     /// A place's right-click menu in the bar, and where it was clicked.
     place_menu: Option<crate::ui::Popup<(sessions::Place, gpui::Point<Pixels>)>>,
     /// The Edit dialog of a place's name and icon.
@@ -624,6 +627,7 @@ impl Shell {
                     ws_reorder: Default::default(),
                     pages: Default::default(),
                     browser: Default::default(),
+                    devices: Default::default(),
                     lit_seen: Cell::new(-1.),
                     bar_glide: Cell::new(None),
                     place_menu: None,

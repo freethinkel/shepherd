@@ -109,3 +109,26 @@ herdr
   Changes: only the messages a terminal session uses; the rest are index placeholders.
   generated_branch and branch_path_slug in src/commands.rs follow herdr's generated_branch_slug and
   branch_to_path_slug (src/worktree.rs at v0.9.3).
+
+t3code (web/device3d/t3code, bundled into assets/device3d/viewer.js)
+  The Device panel's 3D view and its controls, from https://github.com/pingdotgg/t3code (packages/client-runtime/
+  src/device and apps/web/src/components/device), MIT License, Copyright (c) 2026 T3 Tools Inc. Adapted: Apple's
+  models load from their USDZ (web/device3d/usd.ts) instead of t3code's converted GLBs, iPhone Duo's hinge rig rebuilt
+  from Apple's model there; the fold glyphs in assets/icons/fold-*.svg are t3code's DeviceDuoGlyph.
+
+serve-sim (src/device/duo-hid.m)
+  iPhone Duo's hinge and orientation, from serve-sim's SimDuoHID (https://github.com/EvanBacon/serve-sim, 0.1.49),
+  Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0), Copyright 2026 Evan Bacon. Changes: orientations
+  by name, adding face up and face down; no sweep or buttons.
+
+simdriver (vendor/simdriver)
+  simdriver 0.2.4 (https://crates.io/crates/simdriver), MIT License, Copyright (c) 2026 simdriver contributors, with
+  private headers from Meta's idb (MIT). Patched to stream and touch a foldable's other screen and to turn a sideways
+  one; its license and NOTICE are in vendor/simdriver, the changes listed in its Cargo.toml.
+
+three.js (bundled into assets/device3d/viewer.js)
+  https://threejs.org (three 0.187.0), MIT License, Copyright © 2010-2026 three.js authors.
+
+Apple device models (not shipped)
+  The 3D view fetches Apple's AR models of its devices from apple.com on the user's machine the first time one is
+  shown (src/device/models.rs) and keeps them in the cache; Shepherd neither includes nor redistributes them.

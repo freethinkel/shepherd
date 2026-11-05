@@ -1,0 +1,12 @@
+# Generates include/simdriver.h from the crate's FFI surface.
+# Regenerate: cargo run -p simdriver --example gen_header
+# Verified current by tests/c_abi.rs (header_is_current).
+language = "C"
+include_guard = "SIMDRIVER_H"
+no_includes = true
+sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
+usize_is_size_t = true
+
+[export]
+# QUEUE_CAP leaks through __internal's re-exports; the C ABI does not expose it.
+exclude = ["QUEUE_CAP"]
