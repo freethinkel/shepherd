@@ -223,8 +223,14 @@ export function normalizeAppleDuo(root: Object3D) {
     cutAtHinge(baked(mesh), name).forEach((piece, i) => halves[i].add(piece));
   }
   const cover = halves[0].getObjectByName(DUO.cover);
-  if (!cover) throw new Error("iPhone Duo model has no cover display");
+  const inner = halves[0].getObjectByName("inner-display-left");
+  if (!cover || !(inner instanceof Mesh)) throw new Error("iPhone Duo model has no cover or inner display");
   cover.name = "cover-display";
+  // the hinge's axis in the inner screen's plane, as t3code's: Apple's lies a little above it, which opens a gap
+  // between the screen's halves as it folds
+  inner.geometry.computeBoundingBox();
+  const lift = -inner.geometry.boundingBox!.max.z;
+  for (const half of halves) for (const mesh of meshes(half)) mesh.geometry.translate(0, 0, lift);
   for (const half of halves)
     for (const mesh of meshes(half)) mesh.geometry = toCreasedNormals(mesh.geometry, Math.PI / 6);
   const duo = new Group();

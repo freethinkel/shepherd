@@ -2,10 +2,12 @@
 // (`simctl spawn`), which registers the virtual sensors the Duo reads them from and reports to them. One command per
 // line on stdin, `OK` or `ERROR` back per line, until EOF:
 //   angle <0…180>            the hinge, in degrees (0 closed, 180 flat)
+//   sweep <from> <to> <ms>   the hinge moved from one angle to another over a while, easing out, as a hand does:
+//                            SpringBoard's fold transition follows the hinge, and a jump can leave it stuck
 //   orientation <name>       how it's held: portrait, pud, landscape-left, landscape-right, faceup, facedown
 // Built on first use with the simulator SDK (src/device/duo.rs). From serve-sim's SimDuoHID
 // (https://github.com/EvanBacon/serve-sim, Sources/SimDuoHID/main.m at 0.1.49), Apache License 2.0, Copyright 2026
-// Evan Bacon; changed: orientations by name (adding faceup and facedown), no sweep or buttons.
+// Evan Bacon; changed: orientations by name (adding faceup and facedown), no buttons.
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 #import <mach/mach_time.h>
@@ -98,14 +100,28 @@ int main(void) {
         char *line = NULL; size_t capacity = 0;
         while (getline(&line, &capacity, stdin) > 0) {
             @autoreleasepool {
-                double angle; char name[32], extra;
+                double angle, from, ms; char name[32], extra;
                 NSData *payload = nil;
-                if (sscanf(line, "angle %lf %c", &angle, &extra) == 1 && isfinite(angle) && angle >= 0 && angle <= 180) {
-                    payload = hingePayload(angle);
-                } else if (sscanf(line, "orientation %31s %c", name, &extra) == 1) {
-                    payload = orientationPayload(name);
+                BOOL ok = NO;
+                if (sscanf(line, "sweep %lf %lf %lf %c", &from, &angle, &ms, &extra) == 3 && isfinite(from) && from >= 0 &&
+                    from <= 180 && isfinite(angle) && angle >= 0 && angle <= 180 && isfinite(ms) && ms >= 0 && ms <= 1500) {
+                    // a step a display frame, easing out
+                    int steps = MAX(1, (int)ceil(ms / 16.667));
+                    ok = YES;
+                    for (int i = 1; i <= steps && ok; i++) {
+                        double eased = 1 - pow(1 - (double)i / steps, 3);
+                        NSData *step = hingePayload(from + (angle - from) * eased);
+                        ok = sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, step.bytes, step.length, 0));
+                        if (i < steps) usleep((useconds_t)(ms * 1000 / steps));
+                    }
+                } else {
+                    if (sscanf(line, "angle %lf %c", &angle, &extra) == 1 && isfinite(angle) && angle >= 0 && angle <= 180) {
+                        payload = hingePayload(angle);
+                    } else if (sscanf(line, "orientation %31s %c", name, &extra) == 1) {
+                        payload = orientationPayload(name);
+                    }
+                    ok = payload && sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, payload.bytes, payload.length, 0));
                 }
-                BOOL ok = payload && sendEvent(hinge, vendor(NULL, mach_absolute_time(), 0xff61, 0x5b, 0, payload.bytes, payload.length, 0));
                 puts(ok ? "OK" : "ERROR"); fflush(stdout);
             }
         }

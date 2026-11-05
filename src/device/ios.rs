@@ -73,41 +73,74 @@ fn blank(frame: &Frame) -> bool {
     pixels.step_by(step).all(|p| p[0] < 8 && p[1] < 8 && p[2] < 8)
 }
 
-/// iPhone Duo's two screens, as t3code's: a fold shows the other one's latest frame at once, and streams it afresh
-/// (a stream started while its screen was dark stays dark when it lights up).
+/// iPhone Duo's two screens, as serve-sim's: each streamed all along, so a fold shows the other one's latest frame at
+/// once, and its own as soon as it lights (a stream follows its screen from dark to lit).
 struct Panels {
-    udid: String,
     cover: AtomicBool,
-    /// Each screen's latest frame: the cover's, the inner one's.
+    /// Each screen's latest lit frame: the cover's, the inner one's.
     last: Mutex<[Option<Arc<Frame>>; 2]>,
-    /// The live screen's stream.
-    stream: Mutex<Option<simdriver::FrameStream>>,
-    /// When the live screen was switched to: it can be dark a few seconds more (a fold's cover lights late).
+    /// Both screens' streams, for as long as the session.
+    streams: Mutex<Vec<simdriver::FrameStream>>,
+    /// When the live screen was switched to: it can be dark a few seconds more (a fold's screen lights late).
     shown_at: Mutex<std::time::Instant>,
     feed: Arc<Feed>,
     wake: Wake,
 }
 
 impl Panels {
+    fn open(udid: &str, cover: bool, feed: Arc<Feed>, wake: Wake) -> Arc<Panels> {
+        let panels = Arc::new(Panels {
+            cover: AtomicBool::new(cover),
+            last: Mutex::default(),
+            streams: Mutex::default(),
+            shown_at: Mutex::new(std::time::Instant::now()),
+            feed,
+            wake,
+        });
+        for cover in [true, false] {
+            let options = match cover {
+                true => simdriver::Options { screen_size: Some(duo::COVER), ..options(udid) },
+                // mounted sideways
+                false => simdriver::Options { screen_size: Some(duo::INNER), rotate_cw: true, ..options(udid) },
+            };
+            // weak: the streams' callbacks must not keep their own owner alive
+            let p = Arc::downgrade(&panels);
+            match simdriver::FrameStream::start(&options, move |f| {
+                if let Some(p) = p.upgrade() {
+                    p.frame(cover, frame(f, Some(duo::screen(cover))));
+                }
+            }) {
+                Ok(stream) => panels.streams.lock().expect("unshared").push(stream),
+                Err(e) => {
+                    panels.feed.fail(format!("The screen's video did not start: {e:#}"));
+                    (panels.wake)();
+                }
+            }
+        }
+        panels
+    }
+
     fn frame(&self, cover: bool, frame: Frame) {
-        // a screen still dark after the switch keeps its last lit frame, as t3code's viewer does
-        let lighting = self.shown_at.lock().is_ok_and(|at| at.elapsed() < LIGHTING) && blank(&frame);
+        let shown = self.cover.load(Ordering::Relaxed) == cover;
+        // a dark screen keeps its last lit frame: one folded away, or one just switched to and not lit yet, as t3code's
+        // viewer does
+        let lighting = !shown || self.shown_at.lock().is_ok_and(|at| at.elapsed() < LIGHTING);
         let frame = Arc::new(frame);
         if let Ok(mut last) = self.last.lock() {
             let slot = &mut last[usize::from(!cover)];
-            if lighting && slot.is_some() {
+            if slot.is_some() && lighting && blank(&frame) {
                 return;
             }
             *slot = Some(frame.clone());
         }
-        if self.cover.load(Ordering::Relaxed) == cover {
+        if shown {
             self.feed.put_shared(frame);
             (self.wake)();
         }
     }
 
-    /// Shows the cover (or the inner screen): its last frame now, then its stream.
-    fn show(self: &Arc<Self>, cover: bool) {
+    /// Shows the cover (or the inner screen): its last frame now, its own as they come.
+    fn show(&self, cover: bool) {
         self.cover.store(cover, Ordering::Relaxed);
         if let Ok(mut at) = self.shown_at.lock() {
             *at = std::time::Instant::now();
@@ -115,26 +148,6 @@ impl Panels {
         if let Some(frame) = self.last.lock().ok().and_then(|last| last[usize::from(!cover)].clone()) {
             self.feed.put_shared(frame);
             (self.wake)();
-        }
-        self.stream(cover);
-    }
-
-    /// Streams the cover (or the inner screen) afresh, in place of the stream there was.
-    fn stream(self: &Arc<Self>, cover: bool) {
-        let options = match cover {
-            true => simdriver::Options { screen_size: Some(duo::COVER), ..options(&self.udid) },
-            // mounted sideways
-            false => simdriver::Options { screen_size: Some(duo::INNER), rotate_cw: true, ..options(&self.udid) },
-        };
-        let p = self.clone();
-        let stream = simdriver::FrameStream::start(&options, move |f| p.frame(cover, frame(f, Some(duo::screen(cover)))));
-        if let Err(e) = &stream {
-            self.feed.fail(format!("The screen's video did not start: {e:#}"));
-            (self.wake)();
-        }
-        // the other screen's stops: its last frame stays as it was lit
-        if let Ok(mut s) = self.stream.lock() {
-            *s = stream.ok();
         }
     }
 }
@@ -161,16 +174,7 @@ impl Session {
         // streams of one screen leave one dark)
         let input = simdriver::Options { touch_target: duo::screen(last.0).into(), screen_size: Some(duo::TV_OUT), fps: 1, scale: 8, ..options(udid) };
         let driver = Arc::new(start(input, feed.clone(), wake.clone(), |_| {})?);
-        let panels = Arc::new(Panels {
-            udid: udid.into(),
-            cover: AtomicBool::new(last.0),
-            last: Mutex::default(),
-            stream: Mutex::default(),
-            shown_at: Mutex::new(std::time::Instant::now()),
-            feed: feed.clone(),
-            wake: wake.clone(),
-        });
-        panels.show(last.0);
+        let panels = Panels::open(udid, last.0, feed.clone(), wake.clone());
         let (p, d) = (panels.clone(), driver.clone());
         let duo = duo::Duo::open(udid, last, feed, wake, move |cover| {
             p.show(cover);
@@ -224,10 +228,10 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // its hinge first, then its screens' stream (whose frames hold on to them)
+        // its hinge first, then its screens' streams
         if let Some((duo, panels)) = self.duo.take() {
             drop(duo);
-            panels.stream.lock().map(|mut s| s.take()).ok();
+            panels.streams.lock().map(|mut s| s.clear()).ok();
         }
         self.driver().stop();
     }

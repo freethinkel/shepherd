@@ -7,7 +7,7 @@
 use super::{Feed, Fold, Hinge, Stand, Wake};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -142,18 +142,22 @@ struct Shared {
     /// The move to make next: one is made at a time, and only the latest waiting one (a pinch sends many).
     next: Mutex<Option<Hinge>>,
     moving: AtomicBool,
+    /// Moves made, and screen handovers SpringBoard has logged: a fold that hands over and isn't seen to is stuck.
+    moves: AtomicU64,
+    handovers: AtomicU64,
+    /// The angle the hinge was last set to (or found at), where the next sweep starts: SpringBoard's motion events
+    /// say only roughly where it is.
+    at: Mutex<f64>,
     log: Mutex<Option<Child>>,
     closed: AtomicBool,
 }
 
 impl Shared {
     /// SpringBoard settled a fold: show the screen it left live.
-    /// The hinge is at `angle` with the cover live, or not; `handed_over` when SpringBoard says a fold has just handed
-    /// over to that screen, which is lit only now: its stream starts afresh (one started dark stays dark).
-    fn settled(&self, cover: bool, angle: f64, handed_over: bool) {
+    /// The hinge is at `angle` with the cover live, or not.
+    fn settled(&self, cover: bool, angle: f64) {
         let was = self.feed.fold().map(|f| f.cover);
-        // a session closing must not start its stream again
-        if (was != Some(cover) || handed_over) && !self.closed.load(Ordering::Relaxed) {
+        if was != Some(cover) && !self.closed.load(Ordering::Relaxed) {
             (self.show)(cover);
         }
         let orientation = orientation(&self.udid, cover);
@@ -182,10 +186,12 @@ impl Shared {
                 *log = Some(child);
             }
             for line in lines.map_while(Result::ok) {
+                if line.contains("COMPLETED:") {
+                    self.handovers.fetch_add(1, Ordering::Relaxed);
+                }
                 let was = self.feed.fold().map_or((true, 0.), |f| (f.cover, f.angle));
-                let handed_over = line.contains("COMPLETED:");
-                if let Some(now) = settled(&line, was).filter(|now| *now != was || handed_over) {
-                    self.settled(now.0, now.1, handed_over);
+                if let Some(now) = settled(&line, was).filter(|now| *now != was) {
+                    self.settled(now.0, now.1);
                 }
             }
             std::thread::sleep(Duration::from_secs(1));
@@ -207,7 +213,7 @@ impl Shared {
     }
 
     /// Makes one move, and notes what came of it.
-    fn make(&self, hinge: Hinge) {
+    fn make(self: &Arc<Self>, hinge: Hinge) {
         // the screen the fold will leave live, shown now as serve-sim does: SpringBoard says so seconds later, once
         // the screen has gone dark and lit again
         let cover = match hinge {
@@ -215,17 +221,23 @@ impl Shared {
             Hinge::Stand(s) => Some(s == Stand::Tent),
             Hinge::Hold(_) => None,
         };
-        if let Some(cover) = cover.filter(|c| self.feed.fold().is_some_and(|f| f.cover != *c)) {
+        let handover = cover.filter(|c| self.feed.fold().is_some_and(|f| f.cover != *c));
+        if let Some(cover) = handover {
             (self.show)(cover);
             self.feed.change_fold(|f| f.cover = cover);
         }
-        let sent = self.send(&commands(hinge));
-        // the UI turns a moment after it's held otherwise, and says so nowhere SpringBoard's log does
-        std::thread::sleep(Duration::from_millis(700));
-        let cover = self.feed.fold().is_some_and(|f| f.cover);
-        let orientation = orientation(&self.udid, cover);
+        let (made, seen) = (self.moves.fetch_add(1, Ordering::Relaxed) + 1, self.handovers.load(Ordering::Relaxed));
+        let from = self.at.lock().map_or(0., |a| *a);
+        let sent = self.send(&commands(hinge, from));
+        let to = match hinge {
+            Hinge::Angle(a) => a.clamp(0., 180.),
+            Hinge::Stand(s) => stand_angle(s),
+            Hinge::Hold(_) => from,
+        };
+        if let (Ok(()), Ok(mut at)) = (&sent, self.at.lock()) {
+            *at = to;
+        }
         self.feed.change_fold(|f| {
-            f.orientation = orientation;
             match (&sent, hinge) {
                 (Err(e), _) => f.error = Some(format!("{e:#}")),
                 // SpringBoard logs a fold only when it hands over to the other screen (Book to Open doesn't): the angle
@@ -237,6 +249,28 @@ impl Shared {
             }
         });
         (self.wake)();
+        // SpringBoard now and then starts a handover too late to follow the hinge there, and waits for it to move
+        // again (mostly a first fold, soon after it boots): unless it's seen to hand over, or another move
+        // came, the hinge is moved a little and back
+        if let (Some(cover), Ok(())) = (handover, &sent) {
+            let shared = self.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(1000));
+                let stuck = shared.handovers.load(Ordering::Relaxed) == seen && shared.moves.load(Ordering::Relaxed) == made;
+                if stuck && !shared.closed.load(Ordering::Relaxed) {
+                    let _ = shared.send(&nudge(to, cover));
+                }
+            });
+        }
+        // the UI turns a moment after it's held otherwise, and says so nowhere SpringBoard's log does; read off the
+        // device by then, without holding up the next move
+        let (udid, feed, wake) = (self.udid.clone(), self.feed.clone(), self.wake.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            let orientation = orientation(&udid, feed.fold().is_some_and(|f| f.cover));
+            feed.change_fold(|f| f.orientation = orientation);
+            wake();
+        });
     }
 }
 
@@ -261,9 +295,11 @@ fn stand_at(angle: f64, cover: bool, orientation: &str) -> Option<Stand> {
     }
 }
 
-/// What the helper is told for `hinge`: how the phone is held, then how far it's open. Held upright first when it
-/// stood, so the fold lands in the screen's own frame.
-fn commands(hinge: Hinge) -> Vec<String> {
+/// What the helper is told for `hinge`, the hinge at `from`: how the phone is held, then the hinge swept open or shut,
+/// a fold across the whole of it in 0.4 s. Held upright first when it stood, so the fold lands in the screen's own
+/// frame. Swept, as serve-sim's: SpringBoard's fold follows the hinge, and a jump now and then leaves it stuck, every
+/// fold after ignored until the simulator restarts.
+fn commands(hinge: Hinge, from: f64) -> Vec<String> {
     let (held, angle) = match hinge {
         Hinge::Angle(a) => ("portrait", a.clamp(0., 180.)),
         Hinge::Stand(Stand::Laptop) => ("landscape-left", stand_angle(Stand::Laptop)),
@@ -278,7 +314,16 @@ fn commands(hinge: Hinge) -> Vec<String> {
             return vec![format!("orientation {held}")];
         }
     };
-    vec![format!("orientation {held}"), format!("angle {angle}")]
+    let ms = ((angle - from).abs() / 180. * 400.).round();
+    vec![format!("orientation {held}"), format!("sweep {from} {angle} {ms}")]
+}
+
+/// The hinge at `angle` moved a little and back, on the way to the screen it hands over to (shut, for the cover), or
+/// the other way at the end of its travel: further, and the way back would start a fold of its own.
+fn nudge(angle: f64, cover: bool) -> [String; 2] {
+    let way = if cover { -5. } else { 5. };
+    let to = if (0. ..=180.).contains(&(angle + way)) { angle + way } else { angle - way };
+    [format!("sweep {angle} {to} 60"), format!("sweep {to} {angle} 60")]
 }
 
 /// Where this boot last left the Duo `udid`'s hinge: whether the cover is live, and the angle.
@@ -311,12 +356,20 @@ impl Duo {
             helper: Mutex::default(),
             next: Mutex::default(),
             moving: AtomicBool::new(false),
+            moves: AtomicU64::new(0),
+            handovers: AtomicU64::new(0),
+            at: Mutex::new(angle),
             log: Mutex::default(),
             closed: AtomicBool::new(false),
         });
         std::thread::spawn({
             let shared = shared.clone();
             move || shared.follow()
+        });
+        // the helper started ahead of the first fold, which would wait a second on it
+        std::thread::spawn({
+            let shared = shared.clone();
+            move || shared.send(&[])
         });
         Duo(shared)
     }
@@ -393,8 +446,11 @@ mod tests {
 
     #[test]
     fn stands_are_held_then_folded() {
-        assert_eq!(commands(Hinge::Stand(Stand::Laptop)), ["orientation landscape-left", "angle 90"]);
-        assert_eq!(commands(Hinge::Angle(200.)), ["orientation portrait", "angle 180"]);
-        assert_eq!(commands(Hinge::Hold("portrait_upside_down")), ["orientation pud"]);
+        assert_eq!(commands(Hinge::Stand(Stand::Laptop), 180.), ["orientation landscape-left", "sweep 180 90 200"]);
+        assert_eq!(commands(Hinge::Angle(200.), 0.), ["orientation portrait", "sweep 0 180 400"]);
+        assert_eq!(commands(Hinge::Hold("portrait_upside_down"), 90.), ["orientation pud"]);
+        assert_eq!(nudge(180., false), ["sweep 180 175 60", "sweep 175 180 60"]);
+        assert_eq!(nudge(90., false), ["sweep 90 95 60", "sweep 95 90 60"]);
+        assert_eq!(nudge(0., true), ["sweep 0 5 60", "sweep 5 0 60"]);
     }
 }
