@@ -1076,30 +1076,64 @@ pub fn gitlab_diffs_patch(json: &str) -> Option<String> {
     for f in &files {
         let (old, new) = (f["old_path"].as_str()?, f["new_path"].as_str()?);
         let (added, deleted, renamed) = (f["new_file"].as_bool() == Some(true), f["deleted_file"].as_bool() == Some(true), f["renamed_file"].as_bool() == Some(true));
-        let diff = f["diff"].as_str().unwrap_or("");
-        out.push_str(&format!("diff --git a/{old} b/{new}\n"));
-        if added {
-            out.push_str("new file mode 100644\n");
-        }
-        if deleted {
-            out.push_str("deleted file mode 100644\n");
-        }
-        if renamed {
-            out.push_str(&format!("rename from {old}\nrename to {new}\n"));
-        }
-        if diff.is_empty() {
-            if !renamed {
-                out.push_str(&format!("Binary files a/{old} and b/{new} differ\n"));
-            }
-            continue;
-        }
-        out.push_str(&format!("--- {}\n+++ {}\n", if added { "/dev/null".into() } else { format!("a/{old}") }, if deleted { "/dev/null".into() } else { format!("b/{new}") }));
-        out.push_str(diff);
-        if !diff.ends_with('\n') {
-            out.push('\n');
-        }
+        push_file(&mut out, old, new, added, deleted, renamed, f["diff"].as_str().unwrap_or(""));
     }
     Some(out)
+}
+
+/// A PR's patch from GitHub's list of its files (`pulls/N/files` pages, one after another with `--paginate`), for a
+/// diff too big for `gh pr diff` (GitHub's stops at 20 000 lines). `None` without any.
+// ponytail: GitHub lists 3000 files at most, and leaves out the patch of a file too big itself: it shows as binary
+pub fn github_files_patch(json: &str) -> Option<String> {
+    let mut out = String::new();
+    for page in serde_json::Deserializer::from_str(json).into_iter::<Value>() {
+        for f in page.ok()?.as_array()? {
+            let new = f["filename"].as_str()?;
+            let old = f["previous_filename"].as_str().unwrap_or(new);
+            let status = f["status"].as_str().unwrap_or("");
+            push_file(&mut out, old, new, status == "added", status == "removed", status == "renamed", f["patch"].as_str().unwrap_or(""));
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// One file's diff in a patch, with git's headers put back around the host's hunks.
+fn push_file(out: &mut String, old: &str, new: &str, added: bool, deleted: bool, renamed: bool, diff: &str) {
+    out.push_str(&format!("diff --git a/{old} b/{new}\n"));
+    if added {
+        out.push_str("new file mode 100644\n");
+    }
+    if deleted {
+        out.push_str("deleted file mode 100644\n");
+    }
+    if renamed {
+        out.push_str(&format!("rename from {old}\nrename to {new}\n"));
+    }
+    if diff.is_empty() {
+        if !renamed {
+            out.push_str(&format!("Binary files a/{old} and b/{new} differ\n"));
+        }
+        return;
+    }
+    out.push_str(&format!("--- {}\n+++ {}\n", if added { "/dev/null".into() } else { format!("a/{old}") }, if deleted { "/dev/null".into() } else { format!("b/{new}") }));
+    out.push_str(diff);
+    if !diff.ends_with('\n') {
+        out.push('\n');
+    }
+}
+
+/// A PR's patch: `gh pr diff`, else, when GitHub finds it too big, the patch made from its list of files.
+fn github_patch(dir: &str, number: &str) -> Result<(String, String), std::io::Error> {
+    let (out, err) = run("gh", &["pr", "diff", number, "--color", "never"], dir)?;
+    if !(out.trim().is_empty() && err.contains("too_large")) {
+        return Ok((out, err));
+    }
+    let path = format!("repos/{{owner}}/{{repo}}/pulls/{number}/files?per_page=100");
+    let (files, files_err) = run("gh", &["api", "--paginate", &path], dir)?;
+    Ok(match github_files_patch(&files) {
+        Some(patch) => (patch, String::new()),
+        None => (String::new(), if files_err.trim().is_empty() { err } else { files_err }),
+    })
 }
 
 /// One commit's patch: git's here, where the branch has it (a merge against its first parent), else GitHub's.
@@ -1224,7 +1258,7 @@ pub fn read_diff(key: &str) -> Option<Result<std::sync::Arc<PrDiff>, String>> {
     let got = match commit {
         Some(sha) => commit_patch(dir, gitlab, sha),
         None if gitlab => gitlab_patch(dir, number),
-        None => run("gh", &["pr", "diff", number, "--color", "never"], dir),
+        None => github_patch(dir, number),
     };
     Some(got.map_err(|e| e.to_string()).and_then(|(mut patch, err)| {
         if patch.trim().is_empty() && !err.trim().is_empty() {
@@ -1768,6 +1802,20 @@ mod tests {
         assert_eq!(gitlab_diffs_patch(r#"{"message":"404 Not found"}"#), None, "an error isn't a diff");
         let changes = r#"{"changes":[{"old_path":"c.rs","new_path":"c.rs","diff":"@@ -1 +1 @@\n-a\n+b\n"}]}"#;
         assert_eq!(crate::changes::parse_patch(&gitlab_diffs_patch(changes).unwrap()).len(), 1);
+    }
+
+    #[test]
+    fn a_github_pr_diff_from_its_files() {
+        let pages = r#"[{"filename":"a.rs","status":"modified","patch":"@@ -1,2 +1,2 @@\n-x\n+y\n z"}]
+            [{"filename":"b.rs","status":"added","patch":"@@ -0,0 +1 @@\n+new"},
+             {"filename":"new.txt","previous_filename":"old.txt","status":"renamed"},
+             {"filename":"big.bin","status":"modified"}]"#;
+        let files = crate::changes::parse_patch(&github_files_patch(pages).unwrap());
+        let got: Vec<_> = files.iter().map(|f| (f.path.as_str(), f.additions, f.deletions)).collect();
+        assert!(got.contains(&("a.rs", 1, 1)) && got.contains(&("b.rs", 1, 0)), "{got:?}");
+        assert!(files.iter().any(|f| f.path == "new.txt" && f.old_path.as_deref() == Some("old.txt")), "a rename keeps both paths");
+        assert!(files.iter().any(|f| f.path == "big.bin"), "a file without its patch is still listed");
+        assert_eq!(github_files_patch(r#"{"message":"Not Found"}"#), None, "an error isn't a diff");
     }
 
     #[test]
