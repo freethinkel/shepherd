@@ -153,7 +153,11 @@ jobs:
         with:
           version: 0.16.0
       - run: echo "ZIG=zig" >> "$GITHUB_ENV"
+      # a cache of each target's own: under one key the cross build, done first, saved its build, and x86_64 restored
+      # that and built nearly all of it again, every run
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       # ghostty-vt-sys downloads Ghostty's source itself, and on Windows its native-tls refuses the CDN's chain
       # ("unable to find any user-specified roots"): curl fetches the tarball its GHOSTTY.lock pins, checked against
       # the lock's sha256, and the build takes the extracted tree
