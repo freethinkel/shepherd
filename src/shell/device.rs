@@ -735,10 +735,15 @@ impl Shell {
                 })),
             )
             .child(button("more", "icons/solar/menu-dots.svg", if menu_open { String::new() } else { "More device actions".into() }, true)
-                .when(menu_open, |el| el.bg(hover)).on_click(cx.listener({
+                .when(menu_open, |el| el.bg(hover))
+                .relative()
+                .child(super::widgets::anchor_probe(&self.anchors, format!("device-more-{key}")))
+                .on_click(cx.listener({
                 let k = k.clone();
                 move |this, e: &ClickEvent, _, cx| {
-                    this.devices.menu = Some(crate::ui::Popup::new((k.clone(), e.position())));
+                    // the menu hangs under the button, its right edge at the button's
+                    let at = this.anchors.borrow().get(format!("device-more-{k}").as_str()).map_or(e.position(), |b| b.bottom_right() + gpui::point(px(0.), px(4.)));
+                    this.devices.menu = Some(crate::ui::Popup::new((k.clone(), at)));
                     cx.notify();
                 }
             })))
