@@ -109,6 +109,45 @@ impl Default for Options {
     }
 }
 
+/// sdframe's arguments for `opts` on device `udid`.
+fn frame_args(opts: &Options, udid: &str) -> Vec<String> {
+    let mut args = vec![udid.into(), "--fps".into(), opts.fps.to_string(), "--scale".into(), opts.scale.to_string()];
+    if opts.rotate_cw {
+        args.extend(["--rotate-cw".into(), "1".into()]);
+    }
+    if let Some((w, h)) = opts.screen_size {
+        args.extend(["--screen-size".into(), format!("{w}x{h}")]);
+    }
+    args
+}
+
+/// A device's frames alone, no input: a foldable's other screen, streamed beside a [`Driver`] (which owns the
+/// device's input, and may run alongside). Frames stop if sdframe exits; it is not restarted.
+pub struct FrameStream {
+    helper: Supervised,
+    _pipeline: FramePipeline,
+}
+
+impl FrameStream {
+    pub fn start(opts: &Options, on_frame: impl Fn(Frame) + Send + 'static) -> Result<FrameStream, Error> {
+        let device = opts.device.resolve(&list_devices()?)?;
+        if device.state != "Booted" {
+            return Err(Error::NotBooted(device.udid));
+        }
+        let _ = crate::embedded::dir();
+        let bin = helper_dir(opts.helper_dir.as_deref()).join("sdframe");
+        let pipeline = FramePipeline::new(on_frame, |_| {});
+        let helper = Supervised::spawn_with_stderr(bin, frame_args(opts, &device.udid), pipeline.sink(), pipeline.stderr_sink(), |_, _| {})?;
+        Ok(FrameStream { helper, _pipeline: pipeline })
+    }
+}
+
+impl Drop for FrameStream {
+    fn drop(&mut self) {
+        self.helper.stop();
+    }
+}
+
 /// Keyboard modifiers held during a pointer press. Alt makes the drag a two-finger pinch
 /// around the press point; Alt+Shift moves both fingers together. Ctrl/Meta are unused.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -765,19 +804,7 @@ impl Driver {
                 crate::helper::HELPER_DIR_ENV
             )));
         }
-        let mut frame_args = vec![
-            device.udid.clone(),
-            "--fps".into(),
-            opts.fps.to_string(),
-            "--scale".into(),
-            opts.scale.to_string(),
-        ];
-        if opts.rotate_cw {
-            frame_args.extend(["--rotate-cw".into(), "1".into()]);
-        }
-        if let Some((w, h)) = opts.screen_size {
-            frame_args.extend(["--screen-size".into(), format!("{w}x{h}")]);
-        }
+        let frame_args = frame_args(&opts, &device.udid);
         let hid_args = vec![device.udid.clone(), "--target".into(), opts.touch_target.to_string()];
         Driver::start_with(
             device.udid,
@@ -1197,6 +1224,12 @@ impl Driver {
     /// `State::Stopped`. Idempotent; `Drop` calls it.
     pub fn stop(&self) {
         self.inner.stop();
+    }
+
+    /// Aims touches at another screen from now on (`Options::touch_target`'s), as a foldable hands over to it. A
+    /// restarted sdhid goes back to `Options::touch_target`.
+    pub fn set_touch_target(&self, target: u64) {
+        self.inner.hid.send_raw_line(&format!(r#"{{"t":"target","n":{target}}}"#));
     }
 
     /// Test seam: make sdhid act as if another client took the touch input.

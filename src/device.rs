@@ -204,8 +204,12 @@ impl Feed {
     }
 
     fn put(&self, frame: Frame) {
+        self.put_shared(Arc::new(frame));
+    }
+
+    fn put_shared(&self, frame: Arc<Frame>) {
         if let Ok(mut f) = self.frame.lock() {
-            *f = (f.0 + 1, Some(Arc::new(frame)));
+            *f = (f.0 + 1, Some(frame));
         }
         self.arrived.notify_all();
         if let Ok(mut e) = self.error.lock() {

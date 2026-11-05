@@ -3,6 +3,7 @@
 //! when started on another.
 use super::{Button, Check, Device, Feed, Frame, Hinge, Platform, Touch, Wake, duo};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(super) fn find() -> (Vec<Device>, Check) {
@@ -41,23 +42,19 @@ pub(super) fn screenshot(udid: &str, to: &Path) -> anyhow::Result<()> {
     crate::process::answer(out).map(drop)
 }
 
-/// Streams `udid` into `feed`. An iPhone Duo's `cover` (`Some(true)`) or inner screen (`Some(false)`), else its only one.
-fn start(udid: &str, cover: Option<bool>, feed: Arc<Feed>, wake: Wake) -> anyhow::Result<simdriver::Driver> {
-    let options = simdriver::Options {
-        device: simdriver::DeviceSelector::Udid(udid.into()),
-        screen_size: cover.filter(|c| *c).map(|_| duo::COVER),
-        touch_target: cover.map_or(0, |c| duo::screen(c).into()),
-        // the inner screen is mounted sideways
-        rotate_cw: cover == Some(false),
-        ..Default::default()
-    };
-    let screen = cover.map(duo::screen);
+fn options(udid: &str) -> simdriver::Options {
+    simdriver::Options { device: simdriver::DeviceSelector::Udid(udid.into()), ..Default::default() }
+}
+
+/// simdriver's frames are BGRA already, which is what GPUI draws.
+fn frame(f: simdriver::Frame, screen: Option<u8>) -> Frame {
+    Frame { width: f.width, height: f.height, pixels: f.data, rgb: false, screen }
+}
+
+/// Streams `options`' screen; each frame to `on_frame`.
+fn start(options: simdriver::Options, feed: Arc<Feed>, wake: Wake, on_frame: impl Fn(simdriver::Frame) + Send + Sync + 'static) -> anyhow::Result<simdriver::Driver> {
     Ok(simdriver::Driver::start(options, move |event| match event {
-        simdriver::Event::Frame(f) => {
-            // simdriver's frames are BGRA already, which is what GPUI draws
-            feed.put(Frame { width: f.width, height: f.height, pixels: f.data, rgb: false, screen });
-            wake();
-        }
+        simdriver::Event::Frame(f) => on_frame(f),
         simdriver::Event::State(simdriver::State::Restarting) => {
             feed.fail("The simulator restarted; reconnecting…".into());
             wake();
@@ -66,41 +63,115 @@ fn start(udid: &str, cover: Option<bool>, feed: Arc<Feed>, wake: Wake) -> anyhow
     })?)
 }
 
+/// iPhone Duo's two screens, as t3code's: a fold shows the other one's latest frame at once, and streams it afresh
+/// (a stream started while its screen was dark stays dark when it lights up).
+struct Panels {
+    udid: String,
+    cover: AtomicBool,
+    /// Each screen's latest frame: the cover's, the inner one's.
+    last: Mutex<[Option<Arc<Frame>>; 2]>,
+    /// The live screen's stream.
+    stream: Mutex<Option<simdriver::FrameStream>>,
+    feed: Arc<Feed>,
+    wake: Wake,
+}
+
+impl Panels {
+    fn frame(&self, cover: bool, frame: Frame) {
+        let frame = Arc::new(frame);
+        if let Ok(mut last) = self.last.lock() {
+            last[usize::from(!cover)] = Some(frame.clone());
+        }
+        if self.cover.load(Ordering::Relaxed) == cover {
+            self.feed.put_shared(frame);
+            (self.wake)();
+        }
+    }
+
+    /// Shows the cover (or the inner screen): its last frame now, then its stream.
+    fn show(self: &Arc<Self>, cover: bool) {
+        self.cover.store(cover, Ordering::Relaxed);
+        if let Some(frame) = self.last.lock().ok().and_then(|last| last[usize::from(!cover)].clone()) {
+            self.feed.put_shared(frame);
+            (self.wake)();
+        }
+        self.stream(cover);
+        // ponytail: a screen just lit can still swap its surface, which leaves a stream started on the old one dark;
+        // streamed again a moment later it isn't. A stream that's dark for good would need sdframe to follow the swap.
+        let p = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if p.cover.load(Ordering::Relaxed) == cover && p.stream.lock().is_ok_and(|s| s.is_some()) {
+                p.stream(cover);
+            }
+        });
+    }
+
+    /// Streams the cover (or the inner screen) afresh, in place of the stream there was.
+    fn stream(self: &Arc<Self>, cover: bool) {
+        let options = match cover {
+            true => simdriver::Options { screen_size: Some(duo::COVER), ..options(&self.udid) },
+            // mounted sideways
+            false => simdriver::Options { rotate_cw: true, ..options(&self.udid) },
+        };
+        let p = self.clone();
+        let stream = simdriver::FrameStream::start(&options, move |f| p.frame(cover, frame(f, Some(duo::screen(cover)))));
+        if let Err(e) = &stream {
+            self.feed.fail(format!("The screen's video did not start: {e:#}"));
+            (self.wake)();
+        }
+        // the other screen's stops: its last frame stays as it was lit
+        if let Ok(mut s) = self.stream.lock() {
+            *s = stream.ok();
+        }
+    }
+}
+
 pub struct Session {
-    /// An iPhone Duo's is started over on the other screen when the fold hands over to it.
-    driver: Arc<Mutex<simdriver::Driver>>,
-    duo: Option<duo::Duo>,
+    /// The device's input, and its only screen's frames; an iPhone Duo's frames are its `Panels`'.
+    driver: Arc<simdriver::Driver>,
+    /// An iPhone Duo's hinge, and its screens.
+    duo: Option<(duo::Duo, Arc<Panels>)>,
 }
 
 impl Session {
     pub(super) fn open(udid: &str, feed: Arc<Feed>, wake: Wake) -> anyhow::Result<Session> {
         if !duo::is_duo(udid) {
-            let driver = start(udid, None, feed, wake)?;
-            return Ok(Session { driver: Arc::new(Mutex::new(driver)), duo: None });
+            let (f, w) = (feed.clone(), wake.clone());
+            let driver = start(options(udid), feed, wake, move |fr| {
+                f.put(frame(fr, None));
+                w();
+            })?;
+            return Ok(Session { driver: Arc::new(driver), duo: None });
         }
         let last = duo::last_settled(udid);
-        let driver = Arc::new(Mutex::new(start(udid, Some(last.0), feed.clone(), wake.clone())?));
-        let show = {
-            let (udid, driver, feed, wake) = (udid.to_string(), driver.clone(), feed.clone(), wake.clone());
-            move |cover| match start(&udid, Some(cover), feed.clone(), wake.clone()) {
-                // starting one stops the old one, whose helpers let go of the device first
-                Ok(new) => drop(driver.lock().map(|mut d| std::mem::replace(&mut *d, new))),
-                Err(e) => {
-                    feed.fail(format!("The other screen's video did not start: {e:#}"));
-                    wake();
-                }
-            }
-        };
-        let duo = duo::Duo::open(udid, last, feed, wake, show);
-        Ok(Session { driver, duo: Some(duo) })
+        // the driver's own frames go unused: they're the TV-out's, which nothing shows and no other stream watches (two
+        // streams of one screen leave one dark)
+        let input = simdriver::Options { touch_target: duo::screen(last.0).into(), screen_size: Some(duo::TV_OUT), fps: 1, scale: 8, ..options(udid) };
+        let driver = Arc::new(start(input, feed.clone(), wake.clone(), |_| {})?);
+        let panels = Arc::new(Panels {
+            udid: udid.into(),
+            cover: AtomicBool::new(last.0),
+            last: Mutex::default(),
+            stream: Mutex::default(),
+            feed: feed.clone(),
+            wake: wake.clone(),
+        });
+        panels.show(last.0);
+        let (p, d) = (panels.clone(), driver.clone());
+        let duo = duo::Duo::open(udid, last, feed, wake, move |cover| {
+            p.show(cover);
+            d.set_touch_target(duo::screen(cover).into());
+        });
+        Ok(Session { driver, duo: Some((duo, panels)) })
     }
 
-    fn driver(&self) -> std::sync::MutexGuard<'_, simdriver::Driver> {
-        self.driver.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn driver(&self) -> &simdriver::Driver {
+        &self.driver
     }
 
     pub(super) fn hinge(&self, hinge: Hinge) {
-        if let Some(duo) = &self.duo {
+        if let Some((duo, _)) = &self.duo {
             duo.hinge(hinge);
         }
     }
@@ -140,8 +211,11 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // its hinge first: a fold that lands now must not start the stream again
-        self.duo.take();
+        // its hinge first, then its screens' stream (whose frames hold on to them)
+        if let Some((duo, panels)) = self.duo.take() {
+            drop(duo);
+            panels.stream.lock().map(|mut s| s.take()).ok();
+        }
         self.driver().stop();
     }
 }

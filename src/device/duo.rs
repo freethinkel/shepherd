@@ -1,8 +1,9 @@
 //! iPhone Duo's hinge (macOS): what Xcode's Device Hub does to it, done the way serve-sim does. A small program in the
 //! simulator (`duo-hid.m`, built on first use with the simulator SDK) registers the hinge and motion sensors and
 //! reports what Shepherd tells it. SpringBoard says what came of it in its log: which screen is live and the angle,
-//! as `COMPLETED: .cover:pri .inner:off | 0.0° …` once a fold has settled. That log is followed for as long as the
-//! session lives, so a fold made elsewhere (Xcode's own window) shows too.
+//! as `COMPLETED: .cover:pri .inner:off | 0.0° …` once a fold hands over to the other screen, and how open the hinge
+//! is (`CMMagicPoseEvent … hingeState:OpenFlat`) whenever it moves. That log is followed for as long as the session
+//! lives, so a fold made elsewhere (Xcode's own window) shows too.
 use super::{Feed, Fold, Hinge, Stand, Wake};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
@@ -13,13 +14,15 @@ use std::time::Duration;
 const SOURCE: &str = include_str!("duo-hid.m");
 /// The cover screen's pixels; the inner one is the largest, simdriver's own pick.
 pub(super) const COVER: (u32, u32) = (1398, 2034);
+/// The simulator's TV-out screen's, which shows nothing.
+pub(super) const TV_OUT: (u32, u32) = (720, 480);
 
 /// The cover's screen id (`simctl io enumerate`), else the inner one's: also the touch target that lands on it,
 /// CoreDevice's `DigitizerTarget.display<id>`.
 pub(super) fn screen(cover: bool) -> u8 {
     if cover { 1 } else { 3 }
 }
-const SETTLED: &str = r#"process == "SpringBoard" AND category == "DisplayContentMode" AND eventMessage BEGINSWITH "COMPLETED""#;
+const SETTLED: &str = r#"process == "SpringBoard" AND ((category == "DisplayContentMode" AND eventMessage BEGINSWITH "COMPLETED") OR eventMessage BEGINSWITH "Sending MagicPose event")"#;
 
 pub(super) fn is_duo(udid: &str) -> bool {
     simdriver::list_devices().is_ok_and(|all| all.iter().any(|d| d.udid == udid && d.device_type.ends_with(".iPhone-Duo")))
@@ -85,11 +88,22 @@ impl Drop for Helper {
     }
 }
 
-/// `COMPLETED: .cover:pri .inner:off | 0.0° …`: whether the cover is live, and the angle.
-fn settled(line: &str) -> Option<(bool, f64)> {
-    let rest = line.split("COMPLETED:").nth(1)?;
-    let cover = rest.split(".cover:").nth(1)?.split_whitespace().next()? == "pri";
-    let angle = rest.split("| ").nth(1)?.split('°').next()?.trim().parse().ok()?;
+/// `(cover, angle)` after SpringBoard's log line `line`, if it tells of the hinge: `COMPLETED: .cover:pri .inner:off |
+/// 0.0° …` says both; a motion event's `hingeState:` only how open it is, which is enough to tell Book from Open (no
+/// screen hands over between them, so nothing is COMPLETED).
+fn settled(line: &str, (cover, angle): (bool, f64)) -> Option<(bool, f64)> {
+    if let Some(rest) = line.split("COMPLETED:").nth(1) {
+        let cover = rest.split(".cover:").nth(1)?.split_whitespace().next()? == "pri";
+        let angle = rest.split("| ").nth(1)?.split('°').next()?.trim().parse().ok()?;
+        return Some((cover, angle));
+    }
+    let angle = match line.split("hingeState:").nth(1)?.split_whitespace().next()? {
+        "OpenFlat" => 180.,
+        "Closed" => 0.,
+        // part open: as far as it was, if it was
+        _ if angle > 0. && angle < 180. => angle,
+        _ => 90.,
+    };
     Some((cover, angle))
 }
 
@@ -164,8 +178,9 @@ impl Shared {
                 *log = Some(child);
             }
             for line in lines.map_while(Result::ok) {
-                if let Some((cover, angle)) = settled(&line) {
-                    self.settled(cover, angle);
+                let was = self.feed.fold().map_or((true, 0.), |f| (f.cover, f.angle));
+                if let Some(now) = settled(&line, was).filter(|now| *now != was) {
+                    self.settled(now.0, now.1);
                 }
             }
             std::thread::sleep(Duration::from_secs(1));
@@ -197,8 +212,10 @@ impl Shared {
             f.orientation = orientation;
             match (&sent, hinge) {
                 (Err(e), _) => f.error = Some(format!("{e:#}")),
-                (Ok(()), Hinge::Stand(s)) => f.stand = Some(s),
-                (Ok(()), Hinge::Angle(_)) => f.stand = None,
+                // SpringBoard logs a fold only when it hands over to the other screen (Book to Open doesn't): the angle
+                // the device took is its own
+                (Ok(()), Hinge::Stand(s)) => (f.stand, f.angle) = (Some(s), stand_angle(s)),
+                (Ok(()), Hinge::Angle(a)) => (f.stand, f.angle) = (None, a.clamp(0., 180.)),
                 // turned in the hand, it stays in its stand
                 (Ok(()), Hinge::Hold(_)) => {}
             }
@@ -253,9 +270,9 @@ pub(super) fn last_settled(udid: &str) -> (bool, f64) {
     let shown = crate::process::command("xcrun")
         .args(["simctl", "spawn", udid, "log", "show", "--last", "boot", "--style", "compact", "--predicate", SETTLED])
         .output();
-    let last = shown.ok().and_then(|o| String::from_utf8_lossy(&o.stdout).lines().rev().find_map(settled));
+    let text = shown.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
     // one never opened since it booted is shut
-    last.unwrap_or((true, 0.))
+    text.lines().fold((true, 0.), |was, line| settled(line, was).unwrap_or(was))
 }
 
 /// A Duo's hinge, for as long as its session.
@@ -338,10 +355,15 @@ mod tests {
     #[test]
     fn springboard_settles() {
         let line = "2026-11-05 13:14:15.163 Df SpringBoard[41966:44f05] [com.apple.SpringBoard:DisplayContentMode] COMPLETED:     .cover:pri .inner:off | 0.0° (0.00 fold:0.00): fullyClosed [device:Pu]";
-        assert_eq!(settled(line), Some((true, 0.)));
-        let line = "… COMPLETED:     .cover:aux .inner:pri | 180.0° (1.00 fold:1.00): openFlat [device:Pu]";
-        assert_eq!(settled(line), Some((false, 180.)));
-        assert_eq!(settled("STARTING: .cover:aux→pri .inner:pri→off | 0.0°"), None);
+        assert_eq!(settled(line, (false, 180.)), Some((true, 0.)));
+        let line = "… COMPLETED:     .cover:aux .inner:pri | 90.0° (0.50 fold:0.50): halfOpen [device:Pu]";
+        assert_eq!(settled(line, (true, 0.)), Some((false, 90.)));
+        assert_eq!(settled("STARTING: .cover:aux→pri .inner:pri→off | 0.0°", (true, 0.)), None);
+        // Book to Open hands no screen over: only the motion event says it's flat
+        let pose = "Sending MagicPose event to client: CMMagicPoseEvent deviceOrientation:Portrait hingeState:OpenFlat tabletopPose:Ambiguous";
+        assert_eq!(settled(pose, (false, 90.)), Some((false, 180.)));
+        assert_eq!(settled(&pose.replace("OpenFlat", "PartiallyOpen"), (false, 130.)), Some((false, 130.)));
+        assert_eq!(settled(&pose.replace("OpenFlat", "PartiallyOpen"), (false, 180.)), Some((false, 90.)));
     }
 
     #[test]

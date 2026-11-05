@@ -455,6 +455,10 @@ static BOOL startsGesture(NSDictionary *cmd) {
 
 static void handle(NSDictionary *cmd) {
   NSString *t = cmd[@"t"];
+  if ([t isEqualToString:@"target"]) { // {"t":"target","n":id}: touches go to that screen from now on
+    g_target = (uint64_t)num(cmd, @"n");
+    return;
+  }
   if ([t isEqualToString:@"_invalidate"]) { // test-only: simulate being displaced
     if (g_conn) xpc_connection_cancel(g_conn);
     markDisplaced();

@@ -35,7 +35,7 @@ pub use devices::{
     reset_permission, revoke_permission, set_appearance, set_content_size, set_location, shutdown,
     status_bar_clear, status_bar_override, terminate,
 };
-pub use driver::{Button, DragTiming, Driver, Event, Modifiers, Options, State};
+pub use driver::{Button, DragTiming, Driver, Event, FrameStream, Modifiers, Options, State};
 pub use error::Error;
 pub use gesture::ScrollPhase;
 pub use grid::Grid;
