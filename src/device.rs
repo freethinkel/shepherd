@@ -178,7 +178,7 @@ impl Frame {
             return self.pixels.clone();
         }
         let mut bgra = vec![255; self.pixels.len() / 3 * 4];
-        for (o, p) in bgra.chunks_exact_mut(4).zip(self.pixels.chunks_exact(3)) {
+        for (o, p) in bgra.as_chunks_mut::<4>().0.iter_mut().zip(self.pixels.as_chunks::<3>().0) {
             (o[0], o[1], o[2]) = (p[2], p[1], p[0]);
         }
         bgra

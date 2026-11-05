@@ -16,7 +16,10 @@ fn page_url(device: &Device) -> String {
     #[cfg(target_os = "macos")]
     return three::url(device);
     #[cfg(not(target_os = "macos"))]
-    String::new()
+    {
+        let _ = device;
+        String::new()
+    }
 }
 
 const PICKER: &str = device::KEY;
@@ -163,6 +166,8 @@ fn platform_status(theme: &Theme, platform: &'static str, check: Option<&device:
         )
         .child(
             div()
+                .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::MEDIUM).child(platform))
@@ -440,6 +445,7 @@ impl Shell {
     }
 
     /// The session and feed page `id`, a 3D view's, shows.
+    #[cfg(target_os = "macos")]
     pub(super) fn device_page_session(&self, id: &str) -> Option<(Rc<Session>, Arc<Feed>)> {
         let key = id.strip_prefix(PAGE_PREFIX)?;
         self.devices.screens.get(key).map(|s| (s.session.clone(), s.feed.clone()))
@@ -479,6 +485,9 @@ impl Shell {
         let Some(screen) = self.devices.screens.get_mut(key) else {
             return loading_view(theme, key, "Device", "", "This device is closed.".into(), false, true).into_any_element();
         };
+        // only a 3D view, macOS's, draws into the window itself
+        #[cfg(not(target_os = "macos"))]
+        let _ = &window;
         #[cfg(target_os = "macos")]
         if screen.three {
             let loading = (!screen.three_drawn).then(|| {
