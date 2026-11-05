@@ -87,6 +87,11 @@ impl Render for Shell {
             self.sidebar_cursor = None;
         }
         let overlaid = self.sidebar_cursor.is_some() || self.panel_focused() || self.settings.is_some() || self.command_panel.as_ref().is_some_and(|p| p.is_open()) || self.floating_open();
+        // herdr moving its focus (a split, an agent's pane) is where the keys go next, as a click is
+        if let Some(f) = shown.iter().find(|f| f.focused).filter(|f| self.herdr_focus.as_ref() != Some(&f.pane_id)) {
+            self.herdr_focus = Some(f.pane_id.clone());
+            self.last_pane = Some(f.pane_id.clone());
+        }
         for f in &shown {
             if !self.panes.contains_key(&f.pane_id) {
                 let id = f.pane_id.clone();
@@ -99,7 +104,9 @@ impl Render for Shell {
             }
             // an open panel keeps its input's focus; a panel run from the command panel opens before this render
             if f.focused && !overlaid && self.focused.as_deref() != Some(f.pane_id.as_str()) {
-                let handle = self.panes[&f.pane_id].read(cx).focus_handle(cx);
+                // back from a panel or a popup: the pane last typed in, which a click focused without telling herdr
+                let back = self.last_pane.as_ref().filter(|id| self.focused.is_none() && self.panes.contains_key(*id) && shown.iter().any(|s| &s.pane_id == *id));
+                let handle = self.panes[back.unwrap_or(&f.pane_id)].read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
                 self.focused = Some(f.pane_id.clone());
             }
