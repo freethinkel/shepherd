@@ -67,7 +67,7 @@ fn main() {
         if std::env::var_os("SHEPHERD_SETTINGS").is_some() {
             shepherd::shell::Shell::toggle_settings(cx);
         }
-        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions`: opens that panel once the first snapshot is likely in (screenshots).
+        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions|browser|usage`: opens that panel once the first snapshot is likely in (screenshots).
         if let Ok(which) = std::env::var("SHEPHERD_PANEL") {
             use shepherd::ui::command_panel::Kind;
             let kind = match which.as_str() {
@@ -82,6 +82,7 @@ fn main() {
                     let Some(window) = cx.windows().into_iter().find_map(|w| w.downcast::<shepherd::shell::Shell>()) else { return };
                     let _ = window.update(cx, |shell, window, cx| match which.as_str() {
                         "browser" => shell.open_blank_tab(window, cx),
+                        "usage" => shell.open_usage_menu(window, cx),
                         _ => shell.toggle_command_panel(kind, window, cx),
                     });
                 })

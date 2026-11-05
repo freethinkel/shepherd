@@ -373,7 +373,7 @@ impl Render for SettingsView {
                                 .child(action(&theme, SharedString::from(format!("usage-web-{}", agent.key())), "Open on the web").on_click(move |_: &ClickEvent, _, cx| cx.open_url(url))),
                         )
                         .child(div().px(px(8.)).pb(px(8.)).text_size(px(12.)).map(|el| match &usage {
-                            Some(Ok(limits)) if !limits.is_empty() => el.children(limits.iter().map(|l| crate::ui::statusbar::limit_row(&theme, l))),
+                            Some(Ok(limits)) if !limits.windows.is_empty() => el.children(limits.windows.iter().map(|l| crate::ui::statusbar::limit_row(&theme, agent, l))),
                             Some(Err(why)) => el.child(div().px(px(8.)).pb(px(4.)).text_color(theme.text_muted).child(format!("{why}."))),
                             _ => el.child(div().px(px(8.)).pb(px(4.)).text_color(theme.text_muted).child(format!("Sign in to {} to see its limits.", agent.label()))),
                         }))

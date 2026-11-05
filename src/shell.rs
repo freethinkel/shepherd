@@ -52,7 +52,7 @@ use window::*;
 pub(crate) use browser::open_link;
 use motion::*;
 use sync::sync_loop;
-pub(crate) use widgets::{menu_card, modal, row, status_dot, status_icon, tip};
+pub(crate) use widgets::{icon_button, menu_card, modal, row, status_dot, status_icon, tip};
 use widgets::*;
 pub(crate) use tab_bar::agent_favicon;
 
@@ -668,6 +668,13 @@ impl Shell {
             let repos = crate::worktree::repos(snapshot);
             view.update(cx, |v, cx| v.set_repos(repos, cx));
         }
+    }
+
+    /// The limits popup at the bar's right end, as a click on the limits opens it: `SHEPHERD_PANEL=usage` for a screenshot.
+    pub fn open_usage_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let size = window.viewport_size();
+        self.usage_menu = Some(crate::ui::Popup::new(gpui::point(size.width - px(12.), size.height - px(crate::ui::statusbar::HEIGHT + 4.))));
+        cx.notify();
     }
 
     /// Settings on its Usage page, opened if it is not up: the limits popup's way there.
