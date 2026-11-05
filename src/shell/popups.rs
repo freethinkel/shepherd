@@ -98,7 +98,7 @@ impl Shell {
             // under the `…` button, its left edge on the button's
             let at = gpui::point(px(sidebar_w - 8. - 24.), px(TRAFFIC_LIGHTS_CENTER + 12. + 4.));
             let settings = &SettingsGlobal::of(cx).settings;
-            let (show, compact, style) = (settings.workspace_show, settings.compact_workspaces, settings.sidebar_style);
+            let (show, compact, style, all_worktrees) = (settings.workspace_show, settings.compact_workspaces, settings.sidebar_style, settings.all_worktrees);
             let parts: [(&'static str, &'static str, &'static str, fn(&mut crate::settings::WorkspaceShow) -> &mut bool); 5] = [
                 ("show-icon", "icons/folder.svg", "Project icon", |s| &mut s.icon),
                 ("show-branch", "icons/git-branch.svg", "Branch", |s| &mut s.branch),
@@ -155,6 +155,19 @@ impl Shell {
                                 .child(crate::ui::switch(theme, compact, "compact-workspaces"))
                                 .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
                                     save_from_sidebar(cx, |s| s.compact_workspaces = !s.compact_workspaces)
+                                })),
+                        )
+                        .child(
+                            row(theme, false, "all-worktrees")
+                                .on_hover(cx.listener(|this, on: &bool, _, cx| hover_view_submenu(this, None, *on, cx)))
+                                .h(px(30.))
+                                .rounded(px(6.))
+                                .child(div().flex_1().child("All worktrees"))
+                                .child(crate::ui::switch(theme, all_worktrees, "all-worktrees"))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    save_from_sidebar(cx, |s| s.all_worktrees = !s.all_worktrees);
+                                    this.refresh_closed_worktrees(cx);
+                                    cx.notify();
                                 })),
                         ),
                 )),

@@ -18,6 +18,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                 }
             }
             (s.snapshot, s.error, s.connecting) = (Some(snapshot), None, None);
+            s.refresh_closed_worktrees(cx);
             cx.notify();
         });
         return;
@@ -114,6 +115,7 @@ pub(super) async fn sync_loop(this: gpui::WeakEntity<Shell>, rt: tokio::runtime:
                         s.snapshot = Some(snapshot);
                         s.track_turns(cx);
                         s.tell_settings_repos(cx);
+                        s.refresh_closed_worktrees(cx);
                         s.error = None;
                         s.connecting = None;
                     }

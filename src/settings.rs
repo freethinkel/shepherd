@@ -69,6 +69,8 @@ pub struct Settings {
     pub workspace_show: WorkspaceShow,
     /// Shorter workspace rows.
     pub compact_workspaces: bool,
+    /// Every worktree of a repo in its sidebar group, also those no workspace has open: a click opens one.
+    pub all_worktrees: bool,
     /// One-line agent rows, without the task under the name.
     pub compact_agents: bool,
     /// How agent status is drawn: color dots, herdr's symbols, or Zeron's (a pulsing glyph while an agent works).
@@ -393,6 +395,7 @@ impl Default for Settings {
             usage_agent: UsageAgent::default(),
             workspace_show: WorkspaceShow::default(),
             compact_workspaces: false,
+            all_worktrees: false,
             compact_agents: false,
             status_icons: crate::theme::StatusIcons::Dots,
             attention_agents: false,

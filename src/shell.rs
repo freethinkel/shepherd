@@ -223,6 +223,10 @@ pub struct Shell {
     /// Worktrees herdr is still creating, as (workspace the dialog was opened on, branch): herdr answers
     /// `worktree.create` only after git and plugin hooks finish, so the sidebar shows a placeholder until then.
     pending_worktrees: Vec<(String, String)>,
+    /// With All worktrees on: each repo's worktrees, by the top workspace of its first sidebar group.
+    closed_worktrees: HashMap<String, Vec<crate::model::WorktreeEntry>>,
+    /// The workspaces and checkouts `closed_worktrees` was asked for; it is asked again when they change.
+    closed_worktrees_for: Option<Vec<String>>,
     /// A tab's right-click menu: the tab and where it was clicked.
     tab_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// A pane's right-click menu: the pane and where it was clicked.
@@ -581,6 +585,8 @@ impl Shell {
                     merging: HashMap::new(),
                     merge_failure: None,
                     pending_worktrees: Vec::new(),
+                    closed_worktrees: HashMap::new(),
+                    closed_worktrees_for: None,
                     agents_scroll: gpui::ScrollHandle::new(),
                     sidebar_cursor: None,
                     reveal_cursor: Default::default(),
@@ -819,16 +825,7 @@ impl Shell {
                     });
                     match open_tab {
                         Some(tab) => this.select_tab(Some(tab)),
-                        None => {
-                            let (backend, repo, path) = (this.backend.clone(), repo.clone(), path.clone());
-                            this.ask(async move { backend.worktrees.open(repo, path).await }, cx, |shell, result, cx| {
-                                match result {
-                                    Ok(made) => shell.select_tab(made.tab_id),
-                                    Err(err) => crate::ui::toast::error(cx, format!("{err:#}")),
-                                }
-                                cx.notify();
-                            });
-                        }
+                        None => this.open_worktree(repo.clone(), path.clone(), cx),
                     }
                 }
                 PanelEvent::Dismiss => {}

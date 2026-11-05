@@ -376,6 +376,25 @@ pub(super) fn pending_worktree_row(theme: &Theme, branch: &str) -> Stateful<Div>
         .child(div().flex_1().min_w_0().truncate().child(branch.to_string()))
 }
 
+/// A worktree no workspace has open (All worktrees): faint, its branch (or folder) by a branch mark; a click opens it.
+pub(super) fn closed_worktree_row(theme: &Theme, e: &crate::model::WorktreeEntry) -> Stateful<Div> {
+    let name = e.branch.clone().unwrap_or_else(|| e.path.rsplit('/').find(|p| !p.is_empty()).unwrap_or(&e.path).to_string());
+    div()
+        .id(SharedString::from(format!("ws-closed-{}", e.path)))
+        .flex_shrink_0()
+        .pr(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .rounded(px(8.))
+        .text_size(px(13.))
+        .text_color(theme.text_faint)
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.hover))
+        .child(gpui::svg().path("icons/git-branch.svg").size(px(12.)).flex_none().text_color(theme.text_faint))
+        .child(div().flex_1().min_w_0().truncate().when(e.is_prunable, |el| el.line_through()).child(name))
+}
+
 /// Zeron's disclosure chevron: points right when folded, turns a quarter down as the group opens.
 pub(super) fn fold_chevron(theme: &Theme, id: &str, open: bool, full: f32, tween: Option<FoldMotion>) -> Stateful<Div> {
     let chevron = gpui::svg().path("icons/alt-arrow-right.svg").size(px(12.)).text_color(theme.text_muted.opacity(0.5));

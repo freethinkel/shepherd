@@ -180,7 +180,7 @@ fn add(checkout: &str, branch: &str, path: &Path) -> anyhow::Result<String> {
 }
 
 /// The worktrees of the repo `dir` is in; `open` names the workspace on a checkout.
-fn list(dir: &str, open: impl Fn(&str) -> Option<String>) -> anyhow::Result<Vec<WorktreeEntry>> {
+pub(crate) fn list(dir: &str, open: impl Fn(&str) -> Option<String>) -> anyhow::Result<Vec<WorktreeEntry>> {
     let listed = git(dir, &["worktree", "list", "--porcelain"])?;
     let entries = listed.split("\n\n").enumerate().filter_map(|(at, entry)| {
         let field = |key: &str| entry.lines().find_map(|l| l.strip_prefix(key));

@@ -20,6 +20,8 @@ mkdir -p "$dev/infra/kuzyo"
 worktree "$dev/pet/shepherd" "$dev/worktrees/shepherd/sidebar-polish" sidebar-polish
 worktree "$dev/pet/shepherd" "$dev/worktrees/shepherd/review-panel" review-panel
 worktree "$dev/pet/collie" "$dev/worktrees/collie/voice-local-models" voice-local-models
+# no workspace has it open: the sidebar shows it with All worktrees on
+worktree "$dev/pet/shepherd" "$dev/worktrees/shepherd/usage-rings" usage-rings
 
 # herdr's folder ($XDG_CONFIG_HOME/herdr) is the fixture's too: the socket there reads as the default session, and
 # nothing live is on it

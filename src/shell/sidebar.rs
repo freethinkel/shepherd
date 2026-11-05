@@ -410,14 +410,17 @@ impl Shell {
             true => reorder::draggable(el, &reorder, &w.workspace_id),
             false => el,
         };
+        let kid_pl = if SettingsGlobal::of(cx).settings.workspace_show.icon { 30. } else { 20. };
         groups.into_iter().map(|(w, kids)| {
             let pending = self.pending_in(&w, &kids, live);
-            if kids.is_empty() && pending.is_empty() {
+            // a swipe's preview is of another place, whose worktrees were not asked for
+            let closed = if live { self.closed_in(&w) } else { Vec::new() };
+            if kids.is_empty() && pending.is_empty() && closed.is_empty() {
                 return (w.workspace_id.clone(), draggable(ws_row(&w, false, None, None, cx), &w).into_any_element());
             }
             // A folded group opens while one of its worktrees is being created.
             let open = !self.folded.contains(&w.workspace_id) || !pending.is_empty();
-            let full = (kids.len() + pending.len()) as f32 * (kid_h + 2.);
+            let full = (kids.len() + pending.len() + closed.len()) as f32 * (kid_h + 2.);
             let tween = self.fold_motion.get(&w.workspace_id).copied().filter(|m| live && m.animating());
             let chevron = fold_chevron(theme, &w.workspace_id, open, full, tween).when(live, |el| {
                 el.on_click(cx.listener({
@@ -440,7 +443,15 @@ impl Shell {
                 .pt(px(2.))
                 .gap(px(2.))
                 .children(kids.iter().map(|k| ws_row(k, true, None, None, cx).into_any_element()).collect::<Vec<_>>())
-                .children(pending.iter().map(|b| pending_worktree_row(theme, b).h(px(kid_h)).into_any_element()));
+                .children(pending.iter().map(|b| pending_worktree_row(theme, b).h(px(kid_h)).into_any_element()))
+                .children(closed.into_iter().map(|e| {
+                    let (repo, path) = (w.workspace_id.clone(), e.path.clone());
+                    closed_worktree_row(theme, &e)
+                        .h(px(kid_h))
+                        .pl(px(kid_pl))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_worktree(repo.clone(), path.clone(), cx)))
+                        .into_any_element()
+                }));
             let body = fold_body(body, &w.workspace_id, open, full, tween);
             (w.workspace_id.clone(), div().flex().flex_col().flex_none().child(header).child(body).into_any_element())
         }).collect::<Vec<_>>()
@@ -1073,11 +1084,11 @@ impl Shell {
                 let Some(s) = self.snapshot.as_ref() else { return true };
                 let groups = crate::model::groups(s.workspace_tree());
                 let fold = matches!(key, "left" | "h");
-                if let Some((_, kids)) = groups.iter().find(|(w, kids)| w.workspace_id == *id && !kids.is_empty()) {
+                if let Some((w, kids)) = groups.iter().find(|(w, kids)| w.workspace_id == *id && !(kids.is_empty() && self.closed_in(w).is_empty())) {
                     // a header: fold or open it, as its chevron does
                     if self.folded.contains(id) != fold {
                         let kid_h = if SettingsGlobal::of(cx).settings.compact_workspaces { 26. } else { WS_TWO_LINES };
-                        let full = kids.len() as f32 * (kid_h + 2.);
+                        let full = (kids.len() + self.closed_in(w).len()) as f32 * (kid_h + 2.);
                         let id = id.clone();
                         self.toggle_fold(&id, full, cx);
                     }
