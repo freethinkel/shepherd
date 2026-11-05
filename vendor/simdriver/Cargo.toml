@@ -1,0 +1,43 @@
+# simdriver 0.2.4 from crates.io (MIT, see LICENSE), patched for foldables: `Options::screen_size` streams a screen
+# other than the largest (sdframe --screen-size, iPhone Duo's cover), `Options::touch_target` aims touches at it
+# (sdhid --target) and `Options::rotate_cw` turns frames a quarter (sdframe --rotate-cw, the Duo's inner screen, which
+# is mounted sideways). Tests and examples are left out. Cargo.toml's [patch.crates-io] points here.
+[package]
+edition = "2024"
+name = "simdriver"
+version = "0.2.4"
+build = "build.rs"
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Native iOS simulator frames, input, device controls, and accessibility for macOS"
+readme = "README.md"
+keywords = [
+    "ios",
+    "simulator",
+    "automation",
+    "macos",
+]
+categories = ["development-tools::testing"]
+license = "MIT"
+
+[lib]
+name = "simdriver"
+crate-type = [
+    "rlib",
+    "cdylib",
+    "staticlib",
+]
+path = "src/lib.rs"
+
+[dependencies.libc]
+version = "0.2"
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[dependencies.serde_json]
+version = "1"

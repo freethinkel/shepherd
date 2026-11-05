@@ -42,6 +42,12 @@ emojis = "0.9.0"
 unicode-width = "0.2"
 # the diffs' file icons (assets/file-icons), compiled in
 rust-embed = "=8.7.2"
+# Android emulators' screens and input, over the gRPC they serve (src/device/android.rs)
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+# the 3D device view's frames: it takes a simulator's BGRA as is, which `image`'s encoder would need converted first
+jpeg-encoder = "0.7.1"
 
 # The Dock, notifications' authorization, Secure Keyboard Entry and the trackpad's haptics.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -50,6 +56,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSGeometry", "NSString"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter"] }
 block2 = "0.6"
+# iOS Simulators' screens and input (src/device/ios.rs); its helpers build against Xcode's CoreSimulator
+simdriver = "0.2.4"
 
 # herdr's named pipes.
 [target.'cfg(windows)'.dependencies]
@@ -94,6 +102,16 @@ mesa-vulkan-drivers = "*"
 # gpui is slow unoptimized (Zeron and Collie do the same).
 [profile.dev.package."*"]
 opt-level = 2
+
+# the 3D device view encodes every frame: its checks in the hot loop make a dev build's frame 46 ms instead of 4
+[profile.dev.package.jpeg-encoder]
+opt-level = 3
+overflow-checks = false
+debug-assertions = false
+
+# simdriver with a foldable's other screen (iPhone Duo's cover): vendor/simdriver/Cargo.toml says what changed.
+[patch.crates-io]
+simdriver = { path = "vendor/simdriver" }
 
 # freethinkel/zui@notification-reply (on continuous-corners): three Metal drawables (with zui's two, a live window
 # resize blocks in next_drawable and stutters as it starts), Apple's continuous corners, and notification actions that

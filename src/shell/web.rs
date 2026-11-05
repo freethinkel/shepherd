@@ -35,6 +35,9 @@ pub(super) enum PageEvent {
     Clicked,
     /// What a poll of the annotation picker returned.
     Picked(String),
+    /// A device's 3D view has drawn the device: its page may show.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Ready,
 }
 
 pub(super) struct Page {
@@ -233,15 +236,21 @@ impl Shell {
     pub(super) fn panel_page(&self, window: &Window) -> Option<PageKey> {
         match self.panel()?.active.as_ref().filter(|_| self.right_panel_now(window) > 0.)? {
             crate::right_panel::Surface::Browser(id) => Some((id.clone(), None)),
+            crate::right_panel::Surface::Device(key) => self.device_page_key(key).map(|id| (id, None)),
             crate::right_panel::Surface::Diff(_) | crate::right_panel::Surface::PullRequest => None,
         }
+    }
+
+    /// The panel's pages' entries: browser tabs' and devices' 3D views'.
+    fn panel_entries(&self) -> impl Iterator<Item = WebEntry> + '_ {
+        self.browser.entries().chain(self.device_pages())
     }
 
     /// The page on screen and its entry: a sidebar page's, else the panel's. Never both: a sidebar page hides the panel.
     fn visible_entry(&self, window: &Window, cx: &App) -> Option<(PageKey, WebEntry)> {
         self.shown_page(cx).or_else(|| {
             let key = self.panel_page(window)?;
-            let entry = self.browser.entries().find(|e| e.id == key.0)?;
+            let entry = self.panel_entries().find(|e| e.id == key.0)?;
             Some((key, entry))
         })
     }
@@ -261,7 +270,7 @@ impl Shell {
     /// Entry `id`'s page, made if it isn't yet; false when it can't be, a toast saying why, or on Wayland, where a web
     /// view can't sit in Shepherd's window, with its URL in the browser.
     pub(super) fn ensure_page(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let entries = SettingsGlobal::of(cx).settings.web_entries.iter().cloned().chain(self.browser.entries());
+        let entries = SettingsGlobal::of(cx).settings.web_entries.iter().cloned().chain(self.panel_entries());
         let Some(entry) = entries.into_iter().find(|e| e.id == id) else { return false };
         let url = normalize(&entry.url);
         if !embeds_pages(window) {
@@ -372,12 +381,16 @@ impl Shell {
     fn make_page(&mut self, key: PageKey, entry_url: &str, url: &str, window: &Window, cx: &mut Context<Self>) -> wry::Result<Page> {
         let events = self.page_events(window, cx);
         let browser = browser::is_tab(&key.0);
+        #[cfg(target_os = "macos")]
+        let device = self.device_page_session(&key.0);
         self.pages.made += 1;
         let serial = self.pages.made;
         let send = move |event: PageEvent| {
             let _ = events.unbounded_send((key.clone(), serial, event));
         };
         let (title, loaded, opened, followed) = (send.clone(), send.clone(), send.clone(), send.clone());
+        #[cfg(target_os = "macos")]
+        let ready = send.clone();
         #[cfg(target_os = "macos")]
         let key_event = send;
         // a link to another site goes to the browser when the setting says so; anything else stays in the page
@@ -391,6 +404,12 @@ impl Shell {
         let builder = wry::WebViewBuilder::new_with_web_context(context);
         #[cfg(target_os = "macos")]
         let builder = wry::WebViewBuilder::new();
+        // a device's 3D view: its frames, model and input go over a scheme and IPC of its own
+        #[cfg(target_os = "macos")]
+        let builder = match device {
+            Some((session, feed)) => super::device::three::attach(builder, session, feed, self.rt.clone(), move || ready(PageEvent::Ready)),
+            None => builder,
+        };
         let view = builder
             .with_url(url)
             .with_devtools(true)
@@ -529,6 +548,7 @@ impl Shell {
             }
             // every 100 ms while picking: nothing below is for it
             PageEvent::Picked(result) => return self.annotation_polled(&key, &result, window, cx),
+            PageEvent::Ready => self.device_page_ready(&key.0),
         }
         if browser::is_tab(&key.0) {
             self.browser_loaded(&key, window, cx);
@@ -565,7 +585,7 @@ impl Shell {
         self.fetch_favicons(cx);
         self.sync_browser(window, cx);
         let mut entries = SettingsGlobal::of(cx).settings.web_entries.clone();
-        entries.extend(self.browser.entries());
+        entries.extend(self.panel_entries());
         // a page on a machine also goes when its entry no longer opens there
         let still_opened = |id: &String, machine: &Option<String>| {
             machine.is_none() || entries.iter().any(|e| &e.id == id && e.open_from == OpenFrom::Machine)
@@ -606,13 +626,15 @@ impl Shell {
         let mut takes = None;
         // a blank browser tab lists the ports in its page's place
         let ports = shown.as_ref().is_some_and(|k| self.shows_ports(k));
+        // a device's 3D view shows once its device is drawn: its loader stands in until then
+        let drawing = self.device_pages_drawing();
         for (key, page) in &mut self.pages.live {
             // WebKit's own word, which also ends a load that failed before it began (no Finished comes for one)
             #[cfg(target_os = "macos")]
             {
                 page.loading = host::loading(&page.view);
             }
-            let visible = shown.as_ref() == Some(key) && !covered && !ports;
+            let visible = shown.as_ref() == Some(key) && !covered && !ports && !drawing.contains(&key.0);
             if page.visible != visible {
                 page.visible = visible;
                 let _ = page.view.set_visible(visible);
@@ -695,12 +717,14 @@ impl Shell {
             }
             None => None,
         };
+        // a device's 3D view is see-through, over the panel's own background
+        let backdrop = (!key.0.starts_with(super::device::PAGE_PREFIX)).then_some(theme.terminal.background);
         div()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .relative()
-            .bg(theme.terminal.background)
+            .when_some(backdrop, |el, bg| el.bg(bg))
             .when_some(waiting, |el, waiting| el.flex().items_center().justify_center().child(waiting))
             .when_some(page, |el, (view, placed, host)| {
             el.child(

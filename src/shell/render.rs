@@ -24,6 +24,7 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.ws_menu, window);
         crate::ui::reap_popup(&mut self.web_menu, window);
         crate::ui::reap_popup(&mut self.right.plus, window);
+        crate::ui::reap_popup(&mut self.devices.menu, window);
         crate::ui::reap_popup(&mut self.pane_menu, window);
         crate::ui::reap_popup(&mut self.agent_menu, window);
         crate::ui::reap_popup(&mut self.project_menu, window);
@@ -349,6 +350,11 @@ impl Render for Shell {
         let has_remote = shown.key.is_some() && !matches!(shown.review, Some(crate::ui::review::Review::NoRemote));
         self.sync_diffs(&shown, window, cx);
         let kept_width = self.right_panel_grown().then(|| f32::from(window.viewport_size().width) - sidebar_w - self.right_panel_now(window));
+        let device_tab = match self.panel().and_then(|p| p.active.as_ref()) {
+            Some(crate::right_panel::Surface::Device(k)) if panel_drawn && self.right_panel_shown(window) && k != crate::device::KEY => Some(k.clone()),
+            _ => None,
+        };
+        self.devices.set_shown(device_tab.is_some());
         let right_panel = panel_drawn.then(|| self.render_right_panel(&theme, &shown, has_remote, window, cx));
         if !pull_request_shown {
             // a hidden panel's selection is not Cmd+C's to copy
@@ -389,6 +395,11 @@ impl Render for Shell {
                     return;
                 }
                 let key = e.keystroke.key.as_str();
+                // a device's screen with the keyboard: typing is the device's
+                if this.panel_focused() && this.device_key(e) {
+                    cx.stop_propagation();
+                    return;
+                }
                 let diff = match this.panel().and_then(|p| p.active.clone()) {
                     Some(crate::right_panel::Surface::Diff(id)) if this.panel_focused() => this.right.diffs.get(&id).cloned(),
                     _ => None,

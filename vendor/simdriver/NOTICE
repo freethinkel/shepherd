@@ -1,0 +1,11 @@
+simdriver
+Copyright (c) 2026 simdriver contributors
+
+This product includes software developed by Meta Platforms, Inc. and affiliates
+(facebook/idb, https://github.com/facebook/idb), licensed under the MIT License:
+
+  - crates/simdriver/helpers/private-headers/: the CoreSimulator and CoreSimDeviceIO private
+    framework headers from idb's PrivateHeaders directory (license text in
+    crates/simdriver/helpers/private-headers/LICENSE).
+  - The DTUHID transport shapes used by crates/simdriver/helpers/sdhid are modeled on
+    FBSimulatorControl.

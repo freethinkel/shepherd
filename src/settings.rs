@@ -119,6 +119,8 @@ pub struct Settings {
     pub web_links_outside: bool,
     /// Web links clicked in a terminal open in a browser tab beside it instead of in the system browser.
     pub web_links_inside: bool,
+    /// The Device tab's setup was gone through: it lists the devices straight away.
+    pub devices_set_up: bool,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
 }
@@ -418,6 +420,7 @@ impl Default for Settings {
             web_entries: Vec::new(),
             web_links_outside: false,
             web_links_inside: false,
+            devices_set_up: false,
             window: None,
         }
     }

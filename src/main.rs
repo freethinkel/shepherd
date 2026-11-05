@@ -68,10 +68,12 @@ fn main() {
             shepherd::shell::Shell::toggle_settings(cx);
         }
         // `SHEPHERD_PANEL=commands|agents|workspaces|sessions|browser|usage|review[:tab]`: opens that panel once the first snapshot is likely in (screenshots).
+        // `devices`, or a device's key (`device:ios:<udid>`), opens the right panel's Device tab on it.
         if let Ok(which) = std::env::var("SHEPHERD_PANEL") {
             // `review:timeline` opens the review panel on its Timeline tab, `review:menu` with its "…" menu open
             let review = which.strip_prefix("review").map(|tab| tab.trim_start_matches(':').to_string());
             use shepherd::ui::command_panel::Kind;
+            let device = which.starts_with("device").then(|| which.clone());
             let kind = match which.as_str() {
                 "agents" => Kind::Agents,
                 "workspaces" => Kind::Workspaces,
@@ -82,14 +84,15 @@ fn main() {
                 cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
                 cx.update(|cx| {
                     let Some(window) = cx.windows().into_iter().find_map(|w| w.downcast::<shepherd::shell::Shell>()) else { return };
-                    let _ = window.update(cx, |shell, window, cx| match (&review, which.as_str()) {
-                        (Some(tab), _) => {
+                    let _ = window.update(cx, |shell, window, cx| match (&device, &review, which.as_str()) {
+                        (Some(key), _, _) => shell.show_devices(key, cx),
+                        (None, Some(tab), _) => {
                             shell.toggle_review(window, cx);
                             shell.show_review_tab(tab, window, cx);
                         }
-                        (None, "browser") => shell.open_blank_tab(window, cx),
-                        (None, "usage") => shell.open_usage_menu(window, cx),
-                        (None, _) => shell.toggle_command_panel(kind, window, cx),
+                        (None, None, "browser") => shell.open_blank_tab(window, cx),
+                        (None, None, "usage") => shell.open_usage_menu(window, cx),
+                        (None, None, _) => shell.toggle_command_panel(kind, window, cx),
                     });
                 })
             })
