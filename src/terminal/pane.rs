@@ -705,6 +705,11 @@ impl PaneTerminal {
         }
     }
 
+    /// Pastes `text` as a paste from the clipboard would, without Enter: it waits in the app's prompt.
+    pub fn paste(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input(&paste_bytes(text, true), cx);
+    }
+
     fn input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         self.typed(cx);
         match &self.session {

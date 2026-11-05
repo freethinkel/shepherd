@@ -918,9 +918,9 @@ fn on_click_at(
 ) -> gpui::Stateful<gpui::Div> {
     let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default()));
     let painted = bounds.clone();
-    el.relative()
-        .child(gpui::canvas(move |b, _, _| painted.set(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
-        .on_click(move |_, window, cx| on_click(&bounds.get(), window, cx))
+    let el = el.relative().child(gpui::canvas(move |b, _, _| painted.set(b), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
+    // its popup's trigger: a press on it while it's open shuts it
+    crate::ui::trigger(el, move |_, window, cx| on_click(&bounds.get(), window, cx))
 }
 
 /// The bar's labels that open a popup.
@@ -943,7 +943,7 @@ pub fn bar(
     theme: &Theme,
     open: Option<Item>,
     review_open: bool,
-    on_branch: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_branch: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
     on_spent: impl Fn(&gpui::Bounds<gpui::Pixels>, &mut Window, &mut App) + 'static,
     on_usage: impl Fn(&gpui::Bounds<gpui::Pixels>, &mut Window, &mut App) + 'static,
     on_review: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -975,7 +975,8 @@ pub fn bar(
                 .child(div().min_w_0().truncate().child(g.branch))
                 .when(g.ahead > 0, |el| el.child(div().flex_none().child(format!("↑{}", g.ahead))))
                 .when(g.behind > 0, |el| el.child(div().flex_none().child(format!("↓{}", g.behind))))
-                .on_click(on_branch)
+                // the branches panel's trigger: a press on it while it's open shuts it
+                .map(|el| crate::ui::trigger(el, on_branch))
         }))
         // the PR or MR, else a branch's pipeline of its own
         .children(review.filter(|_| show.pull_request).and_then(|r| match r {

@@ -1,0 +1,23 @@
+{
+  "author": {"login": "freethinkel"},
+  "createdAt": "2026-10-16T07:40:00Z",
+  "state": "OPEN",
+  "mergedAt": null,
+  "mergedBy": null,
+  "closedAt": null,
+  "comments": [
+    {"author": {"login": "shepherd-bot"}, "body": "Does the log follow a job that is still running, or only a finished one?", "createdAt": "2026-10-16T08:10:00Z"},
+    {"author": {"login": "freethinkel"}, "body": "Both: while a job runs its log is read again every **5 seconds**, so it tails along.", "createdAt": "2026-10-16T08:14:00Z"}
+  ],
+  "reviews": [
+    {"author": {"login": "shepherd-bot"}, "state": "APPROVED", "body": "", "submittedAt": "2026-10-16T08:29:00Z"}
+  ],
+  "commits": [
+    {"oid": "2d6e8a1f00", "messageHeadline": "sidebar: fold worktree groups", "committedDate": "2026-10-16T07:30:00Z", "authors": [{"login": "freethinkel", "name": "Egor"}]},
+    {"oid": "9a0f4c8e00", "messageHeadline": "ui: check icons and spinner", "committedDate": "2026-10-16T07:35:00Z", "authors": [{"login": "freethinkel", "name": "Egor"}]},
+    {"oid": "07e9b1300f", "messageHeadline": "review: the branch's PR", "committedDate": "2026-10-16T07:50:00Z", "authors": [{"login": "freethinkel", "name": "Egor"}]},
+    {"oid": "c41d55e000", "messageHeadline": "review: checks by workflow", "committedDate": "2026-10-16T07:55:00Z", "authors": [{"login": "freethinkel", "name": "Egor"}]},
+    {"oid": "3b9e7d2000", "messageHeadline": "review: tail a failed job's log", "committedDate": "2026-10-16T08:20:00Z", "authors": [{"login": "freethinkel", "name": "Egor"}]},
+    {"oid": "8f2c1a0000", "messageHeadline": "review: retry failed jobs", "committedDate": "2026-10-16T08:25:00Z", "authors": [{"login": "freethinkel", "name": "Egor"}]}
+  ]
+}

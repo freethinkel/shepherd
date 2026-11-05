@@ -67,8 +67,10 @@ fn main() {
         if std::env::var_os("SHEPHERD_SETTINGS").is_some() {
             shepherd::shell::Shell::toggle_settings(cx);
         }
-        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions|browser|usage`: opens that panel once the first snapshot is likely in (screenshots).
+        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions|browser|usage|review[:tab]`: opens that panel once the first snapshot is likely in (screenshots).
         if let Ok(which) = std::env::var("SHEPHERD_PANEL") {
+            // `review:timeline` opens the review panel on its Timeline tab, `review:menu` with its "…" menu open
+            let review = which.strip_prefix("review").map(|tab| tab.trim_start_matches(':').to_string());
             use shepherd::ui::command_panel::Kind;
             let kind = match which.as_str() {
                 "agents" => Kind::Agents,
@@ -80,10 +82,14 @@ fn main() {
                 cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
                 cx.update(|cx| {
                     let Some(window) = cx.windows().into_iter().find_map(|w| w.downcast::<shepherd::shell::Shell>()) else { return };
-                    let _ = window.update(cx, |shell, window, cx| match which.as_str() {
-                        "browser" => shell.open_blank_tab(window, cx),
-                        "usage" => shell.open_usage_menu(window, cx),
-                        _ => shell.toggle_command_panel(kind, window, cx),
+                    let _ = window.update(cx, |shell, window, cx| match (&review, which.as_str()) {
+                        (Some(tab), _) => {
+                            shell.toggle_review(window, cx);
+                            shell.show_review_tab(tab, window, cx);
+                        }
+                        (None, "browser") => shell.open_blank_tab(window, cx),
+                        (None, "usage") => shell.open_usage_menu(window, cx),
+                        (None, _) => shell.toggle_command_panel(kind, window, cx),
                     });
                 })
             })

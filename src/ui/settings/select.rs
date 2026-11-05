@@ -34,8 +34,18 @@ impl SettingsView {
             .hover(move |s| s.bg(hover))
             .children(current.and_then(&leading))
             .child(div().flex_1().child(label))
-            .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(14.)).text_color(theme.text_muted))
-            .on_click(cx.listener(move |v, _: &ClickEvent, window, cx| {
+            .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(14.)).text_color(theme.text_muted));
+        let trigger = crate::ui::trigger(
+            trigger,
+            cx.listener(move |v, _: &gpui::MouseDownEvent, window, cx| {
+                // a press on this select's open list shuts it; on another's, this one opens
+                if v.open_select.as_ref().is_some_and(|m| m.value == id && m.is_open()) {
+                    if let Some(m) = v.open_select.as_mut() {
+                        m.close();
+                    }
+                    cx.notify();
+                    return;
+                }
                 v.open_select = Some(crate::ui::Popup::new(id));
                 // the list opens on the current option, all of them shown
                 v.select_cursor = current.unwrap_or(0);
@@ -49,7 +59,8 @@ impl SettingsView {
                     window.focus(&v.select_focus, cx);
                 }
                 cx.notify();
-            }));
+            }),
+        );
         let pick = std::rc::Rc::new(pick);
         let menu = self.open_select.as_ref().filter(|m| m.value == id).map(|menu| {
             let query = if searchable { self.select_search.read(cx).value().trim().to_lowercase() } else { String::new() };
@@ -92,8 +103,9 @@ impl SettingsView {
                 .flex()
                 .flex_col()
                 .track_focus(&self.select_focus)
-                .on_mouse_down_out(cx.listener(|v, _, _, cx| {
-                    if let Some(m) = v.open_select.as_mut() { m.close() }
+                // only this select's: another's trigger may have just opened its own in the same press
+                .on_mouse_down_out(cx.listener(move |v, _, _, cx| {
+                    if let Some(m) = v.open_select.as_mut().filter(|m| m.value == id) { m.close() }
                     cx.notify();
                 }))
                 // Up and Down (or Emacs's ctrl-p and ctrl-n, as in the command panel) move the highlight round the

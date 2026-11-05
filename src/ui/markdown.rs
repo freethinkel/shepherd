@@ -31,6 +31,8 @@ pub struct Look {
     pub image: Option<Rc<dyn Fn(&str) -> Option<PathBuf>>>,
     /// Follows a clicked link; `None` opens it in the browser.
     pub link: Option<Rc<dyn Fn(&str, &mut Window, &mut App)>>,
+    /// Opens a clicked image's file in a viewer, over a link around it; `None` leaves images to their links.
+    pub open_image: Option<Rc<dyn Fn(&std::path::Path, &mut Window, &mut App)>>,
 }
 
 /// `blocks`, keyed under `key` (their paragraphs' selection keys and element ids start with it). A view of them
@@ -248,13 +250,26 @@ fn picture(image: &InlineImage, alt: &str, key: &str, theme: &Theme, look: &Look
     let Some(path) = look.image.as_ref().and_then(|file| file(&image.source)) else {
         return div().text_color(theme.text_faint).child(alt).into_any_element();
     };
-    let shown = gpui::img(path).max_w_full().with_fallback({
+    let shown = gpui::img(path.clone()).max_w_full().with_fallback({
         let (alt, faint) = (alt.clone(), theme.text_faint);
         move || div().text_color(faint).child(alt.clone()).into_any_element()
     });
+    if let Some(open) = look.open_image.clone() {
+        // the wrapper holds the column's width, or the image's own width would stretch it past the column
+        return div()
+            .id(SharedString::from(key.to_string()))
+            .max_w_full()
+            .min_w_0()
+            .cursor_pointer()
+            .child(shown)
+            .on_click(move |_, window, cx| open(&path, window, cx))
+            .into_any_element();
+    }
     match (image.link.clone(), look.link.clone()) {
         (Some(url), Some(follow)) => div()
             .id(SharedString::from(key.to_string()))
+            .max_w_full()
+            .min_w_0()
             .cursor_pointer()
             .child(shown)
             .on_click(move |_, window, cx| follow(&url, window, cx))
@@ -344,7 +359,7 @@ fn text_in(
     let follow = look.link.clone();
     let text = InteractiveText::new(gpui::ElementId::Name(key), styled).on_click(ranges, move |ix, window, cx: &mut App| match &follow {
         Some(follow) => follow(&urls[ix], window, cx),
-        None => cx.open_url(&urls[ix]),
+        None => crate::ui::open_outside(&urls[ix], cx),
     });
     div().relative().cursor(CursorStyle::IBeam).child(underlay).child(text).into_any_element()
 }

@@ -257,6 +257,35 @@ impl<T> Popup<T> {
     pub fn closed_for(&self) -> Option<std::time::Duration> {
         self.closing.map(|c| c.elapsed())
     }
+
+    /// A press on its trigger: shuts the popup while it's open, else opens one on `value`. True when it opened.
+    pub fn toggle(popup: &mut Option<Self>, value: impl FnOnce() -> T) -> bool {
+        match popup {
+            Some(open) if open.is_open() => {
+                open.close();
+                false
+            }
+            _ => {
+                *popup = Some(Popup::new(value()));
+                true
+            }
+        }
+    }
+}
+
+/// `url` in the system's browser, on the loop's next turn. macOS hands the browser the focus at once, and the window
+/// losing it updates the shell then: inside a click's handler, which holds the shell, that update would panic.
+pub fn open_outside(url: &str, cx: &mut App) {
+    let url = url.to_string();
+    cx.spawn(async move |cx| cx.update(|cx| cx.open_url(&url))).detach();
+}
+
+/// Makes `el` the trigger of a menu, a select or a panel: its press goes to `on_press`, and to nothing under it.
+/// Caught in capture, before the open menus' press-outside (they're drawn over it, so later): its own menu is shut by
+/// `on_press` first, another one by its press-outside, so pressing a second trigger leaves one menu open. Not to the
+/// elements under it: it stops in the bubble phase, so no click follows and `on_press` is the one place that toggles.
+pub fn trigger<E: gpui::InteractiveElement>(el: E, on_press: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut App) + 'static) -> E {
+    el.capture_any_mouse_down(move |e, window, cx| on_press(e, window, cx)).on_any_mouse_down(|_, _, cx| cx.stop_propagation())
 }
 
 /// Scrolls the least that shows children `ixs` of `scroll`'s list at least `margin` from its top and bottom, so

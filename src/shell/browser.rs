@@ -63,13 +63,28 @@ impl gpui::Global for Links {}
 /// else to the system.
 pub(crate) fn open_link(url: &str, cx: &mut App) {
     let web = url.starts_with("http://") || url.starts_with("https://");
-    let shell = cx.try_global::<Links>().and_then(|l| l.0.upgrade()).filter(|_| web && SettingsGlobal::of(cx).settings.web_links_inside);
-    match shell {
-        Some(shell) => shell.update(cx, |s, cx| {
-            s.browser.pending = Some(url.to_string());
-            cx.notify();
-        }),
-        None => cx.open_url(url),
+    if web && SettingsGlobal::of(cx).settings.web_links_inside {
+        open_inside(url, cx);
+    } else {
+        crate::ui::open_outside(url, cx);
+    }
+}
+
+/// `url` in a browser tab in the right panel, whatever the setting for terminal links says: the review panel's PR
+/// pages go there. A tab of the workspace's that opened on it is shown again rather than made twice. Deferred: a
+/// shell's own menu calls this from inside an update of the shell, which a second one would panic on.
+pub(crate) fn open_inside(url: &str, cx: &mut App) {
+    match cx.try_global::<Links>().and_then(|l| l.0.upgrade()) {
+        Some(shell) => {
+            let url = url.to_string();
+            cx.defer(move |cx| {
+                shell.update(cx, |s, cx| {
+                    s.browser.pending = Some(url);
+                    cx.notify();
+                })
+            });
+        }
+        None => crate::ui::open_outside(url, cx),
     }
 }
 
@@ -132,8 +147,15 @@ impl Shell {
     pub(super) fn sync_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(url) = self.browser.pending.take() {
             match self.shown_tab() {
-                Some(tab) => self.new_browser_tab(tab.workspace_id, Some(url), false, window, cx),
-                None => cx.open_url(&url),
+                Some(tab) => match self.browser.tabs.iter().find(|t| t.workspace == tab.workspace_id && t.url == url) {
+                    Some(open) => {
+                        let surface = Surface::Browser(open.id.clone());
+                        self.right.panels.entry(tab.workspace_id).or_default().add(surface);
+                        cx.notify();
+                    }
+                    None => self.new_browser_tab(tab.workspace_id, Some(url), false, window, cx),
+                },
+                None => crate::ui::open_outside(&url, cx),
             }
         }
         let Some(s) = self.snapshot.as_ref().filter(|s| !s.workspaces.is_empty()) else { return };
@@ -300,7 +322,7 @@ impl Shell {
                     .child(gpui::svg().path("icons/solar/square-arrow-right-up.svg").size(px(16.)).text_color(theme.text_muted))
                     .on_click(move |_, _, cx| {
                         if let Some(url) = outside.as_deref().and_then(|v| v.url().ok()).filter(|u| u != BLANK) {
-                            cx.open_url(&url);
+                            crate::ui::open_outside(&url, cx);
                         }
                     }),
             )

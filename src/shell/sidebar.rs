@@ -489,13 +489,10 @@ impl Shell {
                     .font_weight(gpui::FontWeight::BOLD)
                     .cursor_pointer()
                     .child("!")
-                    .on_click(cx.listener({
+                    .map(|el| {
                         let id = id.clone();
-                        move |this, e: &ClickEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.open_merge_failure(id.clone(), e.position(), cx);
-                        }
-                    }))
+                        crate::ui::trigger(el, cx.listener(move |this, e: &MouseDownEvent, _, cx| this.open_merge_failure(id.clone(), e.position, cx)))
+                    })
                     .into_any_element(),
             ),
         }

@@ -703,6 +703,10 @@ pub struct ReviewComment {
     pub side: CommentSide,
     pub line: u32,
     pub body: String,
+    /// A PR's: it goes into the review on the host, not to the agent.
+    pub review: bool,
+    /// Already on the host, by this author: shown, not staged.
+    pub by: Option<String>,
 }
 
 impl ReviewComment {
@@ -1053,7 +1057,7 @@ fn line(bytes: Vec<u8>) -> String {
 /// `git diff`'s words whatever the user's config says. `bigFileThreshold` makes a bigger file a binary one, unread.
 const DIFF: [&str; 12] = ["-c", "core.quotePath=false", "-c", "core.bigFileThreshold=2m", "--no-optional-locks", "diff", "--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--find-renames", "--unified=3"];
 
-fn repo_root(dir: &str) -> Result<String, String> {
+pub fn repo_root(dir: &str) -> Result<String, String> {
     let cdup = line(run(dir, &["rev-parse", "--show-cdup"])?);
     Ok(if cdup.is_empty() { ".".to_string() } else { cdup })
 }
@@ -2070,7 +2074,7 @@ rename to new_name.rs
         );
     }
     fn comment(path: &str, side: CommentSide, line: u32, body: &str) -> ReviewComment {
-        ReviewComment { id: u64::from(line), path: path.into(), old_path: None, side, line, body: body.into() }
+        ReviewComment { id: u64::from(line), path: path.into(), old_path: None, side, line, body: body.into(), review: false, by: None }
     }
 
     #[test]

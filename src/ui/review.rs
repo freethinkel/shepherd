@@ -27,8 +27,14 @@ pub struct Request {
     pub title: String,
     pub author: String,
     pub body: String,
-    /// The branch it goes into.
+    /// The branch it goes into, and the one it comes from.
     pub base: String,
+    pub head: String,
+    /// When it last changed, unix seconds.
+    pub updated: Option<i64>,
+    pub labels: Vec<String>,
+    /// Files changed, lines added and removed (not in glab's REST answer).
+    pub diff: Option<Diff>,
     /// No conflicts with the base, as far as the host knows.
     pub mergeable: bool,
     /// The CLI's user may approve it: not their own GitHub PR, a GitLab MR its rules let them.
@@ -46,6 +52,13 @@ pub struct Request {
     /// How it merges unless told otherwise: squashed, its branch deleted after (GitLab's settings for it).
     pub squash: bool,
     pub remove_branch: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Diff {
+    pub files: u64,
+    pub additions: u64,
+    pub deletions: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -314,7 +327,8 @@ pub const ROOT: &str = "Pipeline";
 /// jobs, else the branch's own pipeline, in one GraphQL query; the CLI's user too.
 const GITLAB_QUERY: &str = "query($path: ID!, $branch: String!) { currentUser { username } project(fullPath: $path) { \
     mergeRequests(sourceBranches: [$branch], first: 1, sort: CREATED_DESC) { nodes { \
-    iid title state draft webUrl description targetBranch conflicts autoMergeEnabled squash forceRemoveSourceBranch \
+    iid title state draft webUrl description targetBranch sourceBranch updatedAt conflicts autoMergeEnabled squash forceRemoveSourceBranch \
+    labels { nodes { title } } diffStatsSummary { additions deletions fileCount } \
     author { username } approved approvedBy { nodes { username } } userPermissions { canApprove } \
     discussions(first: 100) { nodes { resolvable resolved } } \
     reviewers { nodes { username mergeRequestInteraction { reviewState } } } \
@@ -374,6 +388,12 @@ pub fn parse_gitlab_review(json: &str, base: &str, path: &str, now: i64) -> Opti
         author: mr["author"]["username"].as_str().unwrap_or("").into(),
         body: mr["description"].as_str().unwrap_or("").into(),
         base: mr["targetBranch"].as_str().unwrap_or("").into(),
+        head: mr["sourceBranch"].as_str().unwrap_or("").into(),
+        updated: mr["updatedAt"].as_str().and_then(unix_secs),
+        labels: mr["labels"]["nodes"].as_array().into_iter().flatten().filter_map(|l| l["title"].as_str()).map(String::from).collect(),
+        diff: mr["diffStatsSummary"].as_object().and_then(|d| {
+            Some(Diff { files: d.get("fileCount")?.as_u64()?, additions: d.get("additions")?.as_u64()?, deletions: d.get("deletions")?.as_u64()? })
+        }),
         mergeable: mr["conflicts"].as_bool() != Some(true),
         can_approve: mr["userPermissions"]["canApprove"].as_bool().unwrap_or(true),
         approved: !me.is_empty() && approvers.iter().any(|a| a == me),
@@ -504,6 +524,11 @@ fn request(v: &Value, json: &str, login: &str, body: &str, viewer: &str) -> Opti
         author: author.into(),
         body: v[body].as_str().unwrap_or("").into(),
         base: v["baseRefName"].as_str().or(v["target_branch"].as_str()).unwrap_or("").into(),
+        head: v["headRefName"].as_str().or(v["source_branch"].as_str()).unwrap_or("").into(),
+        updated: v["updatedAt"].as_str().or(v["updated_at"].as_str()).and_then(unix_secs),
+        // GitHub's are objects with a name, glab's REST answer plain strings
+        labels: v["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().or(l.as_str())).map(String::from).collect(),
+        diff: v["changedFiles"].as_u64().zip(v["additions"].as_u64()).zip(v["deletions"].as_u64()).map(|((files, additions), deletions)| Diff { files, additions, deletions }),
         mergeable: v["mergeable"].as_str() != Some("CONFLICTING") && v["has_conflicts"].as_bool() != Some(true),
         can_approve: !me(&v["author"]),
         approved: reviews.iter().any(|r| me(&r["author"]) && r["state"].as_str() == Some("APPROVED")),
@@ -782,7 +807,7 @@ fn missing(e: &std::io::Error, tool: &'static str) -> Review {
 }
 
 /// What `gh pr view` is asked for.
-const GITHUB_FIELDS: &str = "number,title,state,isDraft,url,author,body,statusCheckRollup,baseRefName,mergeable,latestReviews,reviewDecision,reviewRequests,autoMergeRequest";
+const GITHUB_FIELDS: &str = "number,title,state,isDraft,url,author,body,statusCheckRollup,baseRefName,mergeable,latestReviews,reviewDecision,reviewRequests,autoMergeRequest,headRefName,updatedAt,labels,additions,deletions,changedFiles";
 
 fn github(dir: &str, branch: &str, host: &str) -> Review {
     let (out, err) = match run("gh", &["pr", "view", branch, "--json", GITHUB_FIELDS], dir) {
@@ -857,12 +882,571 @@ fn gitlab_rest(dir: &str, branch: &str, host: &str) -> Review {
     Review::Found { request, checks: all.unwrap_or(own), pipeline: Some(pipeline) }
 }
 
+/// One thing that happened on a PR or MR, for the Timeline tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Event {
+    /// Unix seconds.
+    pub at: i64,
+    /// Who did it; empty when the host doesn't say.
+    pub who: String,
+    pub what: Happened,
+    /// What they wrote, markdown; empty for most.
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Happened {
+    Opened,
+    Commented,
+    Approved,
+    Changes,
+    /// A review without a verdict (GitHub's COMMENTED, DISMISSED).
+    Reviewed,
+    /// Commits pushed in a row by the same person: their short hash and first line.
+    Commits(Vec<(String, String)>),
+    Merged,
+    Closed,
+    /// Anything else GitLab notes by itself; its words are the body.
+    Note,
+}
+
+/// What `gh pr view --json` is asked for the timeline.
+const GITHUB_TIMELINE: &str = "author,createdAt,comments,reviews,commits,state,mergedAt,mergedBy,closedAt";
+
+/// [`GITHUB_TIMELINE`]'s answer, read: the PR's events, oldest first.
+pub fn parse_github_timeline(json: &str) -> Option<Vec<Event>> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let login = |who: &Value| who["login"].as_str().unwrap_or("").to_string();
+    let at = |t: &Value| t.as_str().and_then(unix_secs);
+    let mut out = Vec::new();
+    if let Some(t) = at(&v["createdAt"]) {
+        out.push(Event { at: t, who: login(&v["author"]), what: Happened::Opened, body: String::new() });
+    }
+    for c in v["comments"].as_array().into_iter().flatten() {
+        let Some(t) = at(&c["createdAt"]) else { continue };
+        out.push(Event { at: t, who: login(&c["author"]), what: Happened::Commented, body: c["body"].as_str().unwrap_or("").into() });
+    }
+    for r in v["reviews"].as_array().into_iter().flatten() {
+        let Some(t) = at(&r["submittedAt"]) else { continue };
+        let what = match r["state"].as_str() {
+            Some("APPROVED") => Happened::Approved,
+            Some("CHANGES_REQUESTED") => Happened::Changes,
+            _ => Happened::Reviewed,
+        };
+        out.push(Event { at: t, who: login(&r["author"]), what, body: r["body"].as_str().unwrap_or("").into() });
+    }
+    for c in v["commits"].as_array().into_iter().flatten() {
+        let Some(t) = at(&c["committedDate"]).or_else(|| at(&c["authoredDate"])) else { continue };
+        let author = &c["authors"][0];
+        let who = author["login"].as_str().filter(|l| !l.is_empty()).or(author["name"].as_str()).unwrap_or("");
+        let sha: String = c["oid"].as_str().unwrap_or("").chars().take(7).collect();
+        let line = c["messageHeadline"].as_str().unwrap_or("").to_string();
+        out.push(Event { at: t, who: who.into(), what: Happened::Commits(vec![(sha, line)]), body: String::new() });
+    }
+    if let Some(t) = at(&v["mergedAt"]) {
+        out.push(Event { at: t, who: login(&v["mergedBy"]), what: Happened::Merged, body: String::new() });
+    } else if v["state"].as_str() == Some("CLOSED")
+        && let Some(t) = at(&v["closedAt"])
+    {
+        out.push(Event { at: t, who: String::new(), what: Happened::Closed, body: String::new() });
+    }
+    Some(in_order(out))
+}
+
+/// `glab api projects/:id/merge_requests/<iid>` and its `/notes`, read: the MR's events, oldest first. GitLab notes
+/// commits, approvals, merges and the rest itself, as system notes.
+pub fn parse_gitlab_timeline(mr: &str, notes: &str) -> Option<Vec<Event>> {
+    let mr: Value = serde_json::from_str(mr).ok()?;
+    let notes: Value = serde_json::from_str(notes).ok()?;
+    let mut out = Vec::new();
+    if let Some(t) = mr["created_at"].as_str().and_then(unix_secs) {
+        out.push(Event { at: t, who: mr["author"]["username"].as_str().unwrap_or("").into(), what: Happened::Opened, body: String::new() });
+    }
+    for n in notes.as_array()? {
+        let Some(t) = n["created_at"].as_str().and_then(unix_secs) else { continue };
+        let who = n["author"]["username"].as_str().unwrap_or("").to_string();
+        let body = n["body"].as_str().unwrap_or("").trim().to_string();
+        if n["system"].as_bool() != Some(true) {
+            out.push(Event { at: t, who, what: Happened::Commented, body });
+            continue;
+        }
+        let first = body.lines().next().unwrap_or("");
+        let what = if first.starts_with("added ") && first.contains("commit") {
+            Happened::Commits(gitlab_commits(&body))
+        } else if first == "approved this merge request" {
+            Happened::Approved
+        } else if first == "requested changes" {
+            Happened::Changes
+        } else if first == "merged" {
+            Happened::Merged
+        } else if first == "closed" {
+            Happened::Closed
+        } else {
+            out.push(Event { at: t, who, what: Happened::Note, body: first.to_string() });
+            continue;
+        };
+        out.push(Event { at: t, who, what, body: String::new() });
+    }
+    Some(in_order(out))
+}
+
+/// A GitLab "added N commits" note's commits: `<li>abc12345 - Fix it</li>`.
+fn gitlab_commits(body: &str) -> Vec<(String, String)> {
+    body.split("<li>")
+        .skip(1)
+        .filter_map(|item| {
+            let item = item.split("</li>").next()?;
+            let (sha, line) = item.split_once(" - ")?;
+            let sha = sha.trim();
+            // "1 commit from branch …" lines aren't commits
+            (!sha.contains(' ') && !sha.is_empty()).then(|| (sha.chars().take(7).collect(), line.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Oldest first, commits pushed in a row by one person as one event.
+fn in_order(mut events: Vec<Event>) -> Vec<Event> {
+    events.sort_by_key(|e| e.at);
+    let mut out: Vec<Event> = Vec::new();
+    for e in events {
+        if let (Some(last), Happened::Commits(more)) = (out.last_mut(), &e.what)
+            && last.who == e.who
+            && let Happened::Commits(run) = &mut last.what
+        {
+            run.extend(more.iter().cloned());
+            last.at = e.at;
+            continue;
+        }
+        out.push(e);
+    }
+    out
+}
+
+/// A PR's or MR's timeline; `key` is the located repo directory, `gitlab` or not and its number, a line apart. A
+/// failure's line is the error.
+pub fn read_timeline(key: &str) -> Option<Result<Vec<Event>, String>> {
+    let mut parts = key.split('\n');
+    let (dir, gitlab, number) = (parts.next()?, parts.next()? == "true", parts.next()?);
+    let said = |(out, err): (String, String), parse: &dyn Fn(&str) -> Option<Vec<Event>>| {
+        parse(&out).ok_or_else(|| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the timeline").to_string())
+    };
+    Some(if gitlab {
+        let mr = run("glab", &["api", &format!("projects/:id/merge_requests/{number}")], dir).map_err(|e| e.to_string());
+        let notes = run("glab", &["api", &format!("projects/:id/merge_requests/{number}/notes?sort=asc&order_by=created_at&per_page=100")], dir).map_err(|e| e.to_string());
+        mr.and_then(|mr| notes.and_then(|notes| said(notes, &|n| parse_gitlab_timeline(&mr.0, n))))
+    } else {
+        run("gh", &["pr", "view", number, "--json", GITHUB_TIMELINE], dir).map_err(|e| e.to_string()).and_then(|o| said(o, &parse_github_timeline))
+    })
+}
+
+/// The most of a PR's diff the Code tab reads.
+const MAX_DIFF_BYTES: usize = 3 * 1024 * 1024;
+
+/// An MR's patch, made from GitLab's API (`/diffs`, else the older `/changes`) rather than `glab mr diff`, whose
+/// output and flags vary with its version; that is the last resort.
+fn gitlab_patch(dir: &str, number: &str) -> Result<(String, String), std::io::Error> {
+    let mut said = String::new();
+    for path in [format!("projects/:id/merge_requests/{number}/diffs?per_page=100"), format!("projects/:id/merge_requests/{number}/changes")] {
+        let (out, err) = run("glab", &["api", "--paginate", &path], dir)?;
+        if let Some(patch) = gitlab_diffs_patch(&out) {
+            return Ok((patch, String::new()));
+        }
+        said = if err.trim().is_empty() { out } else { err };
+    }
+    let (out, err) = run("glab", &["mr", "diff", number, "--raw"], dir)?;
+    Ok(if out.trim().is_empty() { (out, if err.trim().is_empty() { said } else { err }) } else { (out, err) })
+}
+
+/// GitLab's MR diffs as one patch: `/diffs` pages (arrays, one after another with `--paginate`) or `/changes` (an
+/// object with them under `changes`), each file with git's headers put back. `None` without any.
+pub fn gitlab_diffs_patch(json: &str) -> Option<String> {
+    let mut files = Vec::new();
+    for page in serde_json::Deserializer::from_str(json).into_iter::<Value>() {
+        let page = page.ok()?;
+        match &page {
+            Value::Array(list) => files.extend(list.iter().cloned()),
+            Value::Object(o) if o.contains_key("changes") => files.extend(page["changes"].as_array().into_iter().flatten().cloned()),
+            _ => return None,
+        }
+    }
+    if files.is_empty() && !json.trim_start().starts_with('[') {
+        return None;
+    }
+    let mut out = String::new();
+    for f in &files {
+        let (old, new) = (f["old_path"].as_str()?, f["new_path"].as_str()?);
+        let (added, deleted, renamed) = (f["new_file"].as_bool() == Some(true), f["deleted_file"].as_bool() == Some(true), f["renamed_file"].as_bool() == Some(true));
+        let diff = f["diff"].as_str().unwrap_or("");
+        out.push_str(&format!("diff --git a/{old} b/{new}\n"));
+        if added {
+            out.push_str("new file mode 100644\n");
+        }
+        if deleted {
+            out.push_str("deleted file mode 100644\n");
+        }
+        if renamed {
+            out.push_str(&format!("rename from {old}\nrename to {new}\n"));
+        }
+        if diff.is_empty() {
+            if !renamed {
+                out.push_str(&format!("Binary files a/{old} and b/{new} differ\n"));
+            }
+            continue;
+        }
+        out.push_str(&format!("--- {}\n+++ {}\n", if added { "/dev/null".into() } else { format!("a/{old}") }, if deleted { "/dev/null".into() } else { format!("b/{new}") }));
+        out.push_str(diff);
+        if !diff.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    Some(out)
+}
+
+/// One commit's patch: git's here, where the branch has it (a merge against its first parent), else GitHub's.
+fn commit_patch(dir: &str, gitlab: bool, sha: &str) -> Result<(String, String), std::io::Error> {
+    let local = crate::herdr::git(dir, &["show", "--format=", "--no-color", "--diff-merges=first-parent", sha]).ok().filter(|o| o.status.success());
+    if let Some(out) = local {
+        return Ok((String::from_utf8_lossy(&out.stdout).into_owned(), String::new()));
+    }
+    if gitlab {
+        return Ok((String::new(), format!("{} isn't here: fetch the branch to see it", &sha[..sha.len().min(7)])));
+    }
+    run("gh", &["api", &format!("repos/{{owner}}/{{repo}}/commits/{sha}"), "-H", "Accept: application/vnd.github.diff"], dir)
+}
+
+/// A PR's diff for the Code tab: the patch (the Changes view parses it again, as it does a checkout's), its files, and
+/// whether it was cut at [`MAX_DIFF_BYTES`].
+#[derive(Debug, Default, PartialEq)]
+pub struct PrDiff {
+    /// From the checkout's directory, which may be deep in the repo, to its root: the patch's paths are the root's.
+    pub root: String,
+    pub patch: String,
+    pub files: Vec<crate::changes::FileDiff>,
+    pub cut: bool,
+}
+
+/// A PR's or MR's commits, newest first: the full hash and the first line; `key` as [`read_timeline`]'s.
+pub fn read_commits(key: &str) -> Option<Result<Vec<(String, String)>, String>> {
+    let mut parts = key.split('\n');
+    let (dir, gitlab, number) = (parts.next()?, parts.next()? == "true", parts.next()?);
+    let got = if gitlab {
+        run("glab", &["api", &format!("projects/:id/merge_requests/{number}/commits?per_page=100")], dir)
+    } else {
+        run("gh", &["pr", "view", number, "--json", "commits"], dir)
+    };
+    Some(got.map_err(|e| e.to_string()).and_then(|(out, err)| {
+        parse_commits(&out, gitlab).ok_or_else(|| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the commits").to_string())
+    }))
+}
+
+/// `gh pr view --json commits` (oldest first) or GitLab's MR commits (newest first), read newest first.
+pub fn parse_commits(json: &str, gitlab: bool) -> Option<Vec<(String, String)>> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let list = if gitlab { v.as_array()? } else { v["commits"].as_array()? };
+    let mut out: Vec<(String, String)> = list
+        .iter()
+        .filter_map(|c| {
+            let sha = c["oid"].as_str().or(c["id"].as_str())?;
+            let line = c["messageHeadline"].as_str().or(c["title"].as_str()).unwrap_or("");
+            Some((sha.to_string(), line.to_string()))
+        })
+        .collect();
+    if !gitlab {
+        out.reverse();
+    }
+    Some(out)
+}
+
+/// One of an MR's pipelines, for the Pipeline tab's picker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PastPipeline {
+    pub iid: String,
+    pub state: CheckState,
+    pub sha: String,
+    /// Unix seconds it was created.
+    pub at: Option<i64>,
+    pub url: String,
+}
+
+/// An MR's pipelines, newest first; `key` is the PR's, `dir\ngitlab\nnumber`.
+pub fn read_pipelines(key: &str) -> Option<Result<Vec<PastPipeline>, String>> {
+    let mut parts = key.split('\n');
+    let (dir, _, number) = (parts.next()?, parts.next()?, parts.next()?);
+    let got = run("glab", &["api", &format!("projects/:id/merge_requests/{number}/pipelines?per_page=50")], dir);
+    Some(got.map_err(|e| e.to_string()).and_then(|(out, err)| {
+        parse_pipelines(&out).ok_or_else(|| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the pipelines").to_string())
+    }))
+}
+
+/// GitLab's MR pipelines (newest first), read.
+pub fn parse_pipelines(json: &str) -> Option<Vec<PastPipeline>> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let list = v.as_array()?.iter().filter_map(|p| {
+        Some(PastPipeline {
+            iid: p["iid"].as_u64()?.to_string(),
+            state: check_state(p["status"].as_str()?),
+            sha: p["sha"].as_str().unwrap_or("").into(),
+            at: p["created_at"].as_str().and_then(unix_secs),
+            url: p["web_url"].as_str()?.into(),
+        })
+    });
+    Some(list.collect())
+}
+
+/// A pipeline's jobs and its child pipelines', by its iid; `key` is `dir\niid`.
+pub fn read_pipeline_jobs(key: &str) -> Option<Result<Vec<Check>, String>> {
+    let (dir, iid) = key.split_once('\n')?;
+    let Some((host, path)) = origin_of(dir) else { return Some(Err("This repo has no origin to ask about.".into())) };
+    let (query, path_arg, iid_arg) = (format!("query={GITLAB_JOBS}"), format!("path={path}"), format!("iid={iid}"));
+    let got = run("glab", &["api", "graphql", "--hostname", &host, "-f", &query, "-f", &path_arg, "-f", &iid_arg], dir);
+    Some(got.map_err(|e| e.to_string()).and_then(|(out, err)| {
+        parse_gitlab_jobs(&out, &format!("https://{host}"), &path, now())
+            .ok_or_else(|| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the pipeline").to_string())
+    }))
+}
+
+/// What a file's diff says, as a key: a file viewed stays so until its diff changes.
+pub fn fingerprint(f: &crate::changes::FileDiff) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for line in f.hunks.iter().flat_map(|h| &h.lines) {
+        (line.kind as u8, &line.text).hash(&mut h);
+    }
+    format!("{}\t{:016x}", f.path, h.finish())
+}
+
+/// A PR's or MR's diff as the host has it; `key` as [`read_timeline`]'s, with a commit after it for that commit's own
+/// diff (from git here, else from GitHub).
+pub fn read_diff(key: &str) -> Option<Result<std::sync::Arc<PrDiff>, String>> {
+    let mut parts = key.split('\n');
+    let (dir, gitlab, number) = (parts.next()?, parts.next()? == "true", parts.next()?);
+    let commit = parts.next().filter(|c| !c.is_empty());
+    let got = match commit {
+        Some(sha) => commit_patch(dir, gitlab, sha),
+        None if gitlab => gitlab_patch(dir, number),
+        None => run("gh", &["pr", "diff", number, "--color", "never"], dir),
+    };
+    Some(got.map_err(|e| e.to_string()).and_then(|(mut patch, err)| {
+        if patch.trim().is_empty() && !err.trim().is_empty() {
+            // glab's first line can be a bare "ERROR": what it says comes after
+            let said: Vec<&str> = err.lines().map(str::trim).filter(|l| !l.is_empty()).take(3).collect();
+            return Err(if said.is_empty() { "Couldn't read the diff".into() } else { said.join(" ") });
+        }
+        let cut = patch.len() > MAX_DIFF_BYTES;
+        if cut {
+            let end = patch[..patch.floor_char_boundary(MAX_DIFF_BYTES)].rfind('\n').unwrap_or(0);
+            patch.truncate(end);
+        }
+        let files = crate::changes::parse_patch(&patch);
+        let root = crate::changes::repo_root(dir).unwrap_or_default();
+        Ok(std::sync::Arc::new(PrDiff { root, patch, files, cut }))
+    }))
+}
+
+/// The comments on a PR's or MR's lines as the host has them, oldest first, each a [`crate::changes::ReviewComment`]
+/// with its author in `by`; `key` as [`read_timeline`]'s.
+// ponytail: the first 100 of them, and a GitLab note outdated by a later push shows on its old line numbers
+pub fn read_line_comments(key: &str) -> Option<Result<Vec<crate::changes::ReviewComment>, String>> {
+    let mut parts = key.split('\n');
+    let (dir, gitlab, number) = (parts.next()?, parts.next()? == "true", parts.next()?);
+    let got = if gitlab {
+        run("glab", &["api", &format!("projects/:id/merge_requests/{number}/discussions?per_page=100")], dir)
+    } else {
+        run("gh", &["api", &format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments?per_page=100")], dir)
+    };
+    Some(got.map_err(|e| e.to_string()).and_then(|(out, err)| {
+        let parsed = if gitlab { parse_gitlab_line_comments(&out) } else { parse_github_line_comments(&out) };
+        parsed.ok_or_else(|| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the comments").to_string())
+    }))
+}
+
+/// A host comment's id as a card's: apart from the ones staged here, which count up from 1.
+fn posted_id(id: u64) -> u64 {
+    id | 1 << 63
+}
+
+/// `gh api repos/…/pulls/<n>/comments`, read: the comments on lines the diff still has (an outdated one's `line` is
+/// null), on their side.
+pub fn parse_github_line_comments(json: &str) -> Option<Vec<crate::changes::ReviewComment>> {
+    use crate::changes::{CommentSide, ReviewComment};
+    let list: Vec<Value> = serde_json::from_str(json).ok()?;
+    Some(
+        list.iter()
+            .filter_map(|c| {
+                Some(ReviewComment {
+                    id: posted_id(c["id"].as_u64()?),
+                    path: c["path"].as_str()?.to_string(),
+                    old_path: None,
+                    side: if c["side"].as_str() == Some("LEFT") { CommentSide::Old } else { CommentSide::New },
+                    line: c["line"].as_u64()? as u32,
+                    body: c["body"].as_str().unwrap_or_default().to_string(),
+                    review: true,
+                    by: Some(c["user"]["login"].as_str().unwrap_or_default().to_string()),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// `glab api projects/:id/merge_requests/<n>/discussions`, read: the notes placed on a diff line, on the new side when
+/// the line has a new number.
+pub fn parse_gitlab_line_comments(json: &str) -> Option<Vec<crate::changes::ReviewComment>> {
+    use crate::changes::{CommentSide, ReviewComment};
+    let list: Vec<Value> = serde_json::from_str(json).ok()?;
+    let notes = list.iter().flat_map(|d| d["notes"].as_array().into_iter().flatten());
+    Some(
+        notes
+            .filter(|n| n["system"].as_bool() != Some(true) && n["position"]["position_type"].as_str() == Some("text"))
+            .filter_map(|n| {
+                let p = &n["position"];
+                let (side, line) = match (p["new_line"].as_u64(), p["old_line"].as_u64()) {
+                    (Some(line), _) => (CommentSide::New, line),
+                    (None, Some(line)) => (CommentSide::Old, line),
+                    (None, None) => return None,
+                };
+                let path = p["new_path"].as_str().or(p["old_path"].as_str())?.to_string();
+                let old_path = p["old_path"].as_str().filter(|o| *o != path).map(str::to_string);
+                Some(ReviewComment {
+                    id: posted_id(n["id"].as_u64()?),
+                    path,
+                    old_path,
+                    side,
+                    line: line as u32,
+                    body: n["body"].as_str().unwrap_or_default().to_string(),
+                    review: true,
+                    by: Some(n["author"]["username"].as_str().unwrap_or_default().to_string()),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// How a review is sent: with a verdict, or as comments only. GitLab has no "request changes".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewEvent {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+/// A comment of a review, with both of its line's numbers (GitLab places a note on an unchanged line by both).
+pub struct ReviewNote {
+    pub comment: crate::changes::ReviewComment,
+    pub old_no: Option<u32>,
+    pub new_no: Option<u32>,
+}
+
+/// GitHub's `POST /pulls/{n}/reviews` body: the verdict, the summary and the comments, each on its line's side.
+pub fn github_review(verdict: ReviewEvent, body: &str, notes: &[ReviewNote]) -> Value {
+    let event = match verdict {
+        ReviewEvent::Comment => "COMMENT",
+        ReviewEvent::Approve => "APPROVE",
+        ReviewEvent::RequestChanges => "REQUEST_CHANGES",
+    };
+    let comments: Vec<Value> = notes
+        .iter()
+        .map(|n| {
+            let side = if n.comment.side == crate::changes::CommentSide::Old { "LEFT" } else { "RIGHT" };
+            serde_json::json!({ "path": n.comment.path, "line": n.comment.line, "side": side, "body": n.comment.body })
+        })
+        .collect();
+    let mut review = serde_json::json!({ "event": event, "comments": comments });
+    if !body.trim().is_empty() {
+        review["body"] = body.trim().into();
+    }
+    review
+}
+
+/// A GitLab draft note's body: the note on its line, placed against the MR's `diff_refs` (base, start, head).
+pub fn gitlab_draft(note: &ReviewNote, refs: &Value) -> Value {
+    let c = &note.comment;
+    let mut position = serde_json::json!({
+        "position_type": "text",
+        "base_sha": refs["base_sha"],
+        "start_sha": refs["start_sha"],
+        "head_sha": refs["head_sha"],
+        "old_path": c.old_path.as_deref().unwrap_or(&c.path),
+        "new_path": c.path,
+    });
+    if let Some(n) = note.old_no {
+        position["old_line"] = n.into();
+    }
+    if let Some(n) = note.new_no {
+        position["new_line"] = n.into();
+    }
+    serde_json::json!({ "note": c.body, "position": position })
+}
+
+/// Sends a review of the PR or MR at `url` (checked out in `dir`): GitHub takes it in one request; on GitLab each
+/// comment is a draft note, then they're published together, the summary is a note and an approval is its own call.
+/// An error leaves nothing on the host; `Ok(Some(why))` is a GitLab summary or approval that failed after the comments
+/// went out, so they aren't sent again.
+pub fn submit_review(dir: &str, url: &str, gitlab: bool, number: u64, verdict: ReviewEvent, body: &str, notes: &[ReviewNote]) -> Result<Option<String>, String> {
+    let input = |payload: &Value| -> Result<std::path::PathBuf, String> {
+        let path = std::env::temp_dir().join(format!("shepherd-review-{}-{number}.json", std::process::id()));
+        std::fs::write(&path, payload.to_string()).map_err(|e| e.to_string())?;
+        Ok(path)
+    };
+    let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    if !gitlab {
+        let host = host(url).ok_or("no host in the PR's link")?;
+        let repo = url.split_once("/pull/").and_then(|(project, _)| repo_path(project)).ok_or("no repo in the PR's link")?;
+        let file = input(&github_review(verdict, body, notes))?;
+        let done = act(dir, &args(&["gh", "api", "-X", "POST", "--hostname", &host, &format!("repos/{repo}/pulls/{number}/reviews"), "--input", &file.to_string_lossy()]));
+        let _ = std::fs::remove_file(file);
+        return done.map(|_| None);
+    }
+    let mr = format!("projects/:id/merge_requests/{number}");
+    if !notes.is_empty() {
+        let (out, err) = run("glab", &["api", &mr], dir).map_err(|e| e.to_string())?;
+        let refs = serde_json::from_str::<Value>(&out).ok().map(|v| v["diff_refs"].clone()).filter(|r| r.is_object());
+        let refs = refs.ok_or_else(|| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the MR").to_string())?;
+        // the drafts made so far go again if a later one fails: a retry would post them twice
+        let mut made: Vec<u64> = Vec::new();
+        let undo = |made: &[u64], why: String| {
+            for id in made {
+                let _ = act(dir, &args(&["glab", "api", "-X", "DELETE", &format!("{mr}/draft_notes/{id}")]));
+            }
+            why
+        };
+        for note in notes {
+            let file = input(&gitlab_draft(note, &refs)).map_err(|why| undo(&made, why))?;
+            let posted = run("glab", &["api", "-X", "POST", &format!("{mr}/draft_notes"), "-H", "Content-Type: application/json", "--input", &file.to_string_lossy()], dir);
+            let _ = std::fs::remove_file(file);
+            let id = posted.as_ref().ok().and_then(|(out, _)| serde_json::from_str::<Value>(out).ok()?["id"].as_u64());
+            match id {
+                Some(id) => made.push(id),
+                None => {
+                    let why = posted.map_or_else(|e| e.to_string(), |(_, err)| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't add a comment").to_string());
+                    return Err(undo(&made, why));
+                }
+            }
+        }
+        act(dir, &args(&["glab", "api", "-X", "POST", &format!("{mr}/draft_notes/bulk_publish")])).map_err(|why| undo(&made, why))?;
+    }
+    // something already on the host makes a later failure a partial send, not an error to retry
+    let mut wrote = !notes.is_empty();
+    let partial = |wrote: bool, why: String| if wrote { Ok(Some(why)) } else { Err(why) };
+    if !body.trim().is_empty() {
+        if let Err(why) = act(dir, &args(&["glab", "api", "-X", "POST", &format!("{mr}/notes"), "-f", &format!("body={}", body.trim())])) {
+            return partial(wrote, why);
+        }
+        wrote = true;
+    }
+    if verdict == ReviewEvent::Approve
+        && let Err(why) = approve(dir, true, number)
+    {
+        return partial(wrote, why);
+    }
+    Ok(None)
+}
+
 pub use zeron_markdown::{Block, InlineRun};
 
 /// `text` as Zeron's markdown blocks (pulldown-cmark), for a panel without HTML: comments (GitHub's templates are
 /// full of them) and tags (`<details>`, `<br>`) dropped; a task's `[x]` as a check box.
 pub fn markdown(text: &str) -> Vec<Block> {
-    let mut blocks: Vec<Block> = zeron_markdown::parse_full(&strip_comments(text)).blocks.iter().map(|b| b.block.clone()).collect();
+    let mut blocks: Vec<Block> = zeron_markdown::parse_full(&img_tags(&strip_comments(text))).blocks.iter().map(|b| b.block.clone()).collect();
     blocks.iter_mut().for_each(tidy);
     blocks.retain(|b| !matches!(b, Block::Paragraph { runs } if runs_text(runs).trim().is_empty() && !has_image(runs)));
     blocks
@@ -910,6 +1494,114 @@ fn strip_comments(text: &str) -> String {
         rest = rest[start..].find("-->").map_or("", |end| &rest[start + end + 3..]);
     }
     out + rest
+}
+
+/// `<img src="…" alt="…">` (what GitHub writes for a dropped screenshot) as markdown's `![alt](src)`: the tags go
+/// otherwise, the image with them.
+fn img_tags(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<img ").or_else(|| rest.find("<IMG ")) {
+        let Some(end) = rest[start..].find('>') else { break };
+        let tag = &rest[start..start + end + 1];
+        out.push_str(&rest[..start]);
+        let attr = |name: &str| {
+            let at = tag.find(&format!("{name}="))? + name.len() + 1;
+            let quote = tag[at..].chars().next().filter(|c| *c == '"' || *c == '\'')?;
+            let value = &tag[at + 1..];
+            Some(value[..value.find(quote)?].to_string())
+        };
+        match attr("src") {
+            Some(src) => out.push_str(&format!("![{}]({})", attr("alt").unwrap_or_default().replace(['[', ']'], ""), src.replace(' ', "%20"))),
+            None => out.push_str(tag),
+        }
+        rest = &rest[start + end + 1..];
+    }
+    out + rest
+}
+
+/// The images' sources in `blocks`, each once, in document order.
+pub fn image_sources(blocks: &[Block], out: &mut Vec<String>) {
+    let runs = |runs: &[InlineRun], out: &mut Vec<String>| {
+        for image in runs.iter().filter_map(|r| r.style.image.as_ref()) {
+            if !out.contains(&image.source) {
+                out.push(image.source.clone());
+            }
+        }
+    };
+    for block in blocks {
+        match block {
+            Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r, out),
+            Block::BlockQuote { children } => image_sources(children, out),
+            Block::List { items, .. } => items.iter().for_each(|item| image_sources(item, out)),
+            Block::Table { header, rows, .. } => header.iter().chain(rows.iter().flatten()).for_each(|cell| runs(cell, out)),
+            _ => {}
+        }
+    }
+}
+
+/// An image in a PR's description or comments, fetched into a file here: `None` when it couldn't be.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrImage(pub Option<std::path::PathBuf>);
+
+/// The most of an image the panel fetches.
+const MAX_IMAGE_BYTES: u64 = 16 << 20;
+
+/// Fetches an image of a PR's text; `key` is the located repo directory, `gitlab` or not, the PR's page and the
+/// image's source, a line apart. A GitLab upload (`/uploads/…`) is under the project's page; one on the PR's own host
+/// goes with the CLI's token, as a private repo's attachments need.
+pub fn read_image(key: &str) -> Option<PrImage> {
+    let mut parts = key.splitn(4, '\n');
+    let (dir, gitlab, page, source) = (parts.next()?, parts.next()? == "true", parts.next()?, parts.next()?);
+    let url = if source.starts_with("https://") || source.starts_with("http://") {
+        source.to_string()
+    } else if gitlab && source.starts_with("/uploads/") {
+        let project = page.split_once("/-/").map_or(page, |(p, _)| p);
+        format!("{project}{source}")
+    } else {
+        return Some(PrImage(None));
+    };
+    let pr_host = host(page);
+    let token = (host(&url) == pr_host).then(|| pr_host.as_deref().and_then(|h| cli_token(dir, gitlab, h))).flatten();
+    Some(PrImage(fetch_image(&url, gitlab, token.as_deref())))
+}
+
+/// The CLI's token for `host`, asked once per run.
+fn cli_token(dir: &str, gitlab: bool, host: &str) -> Option<String> {
+    static SEEN: std::sync::Mutex<Option<std::collections::HashMap<String, Option<String>>>> = std::sync::Mutex::new(None);
+    if let Some(token) = SEEN.lock().unwrap().get_or_insert_default().get(host) {
+        return token.clone();
+    }
+    let out = if gitlab { run("glab", &["config", "get", "token", "--host", host], dir) } else { run("gh", &["auth", "token", "--hostname", host], dir) };
+    let token = out.ok().map(|(out, _)| out.trim().to_string()).filter(|t| !t.is_empty() && !t.contains(' '));
+    SEEN.lock().unwrap().get_or_insert_default().insert(host.to_string(), token.clone());
+    token
+}
+
+fn fetch_image(url: &str, gitlab: bool, token: Option<&str>) -> Option<std::path::PathBuf> {
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(15))).build().into();
+    let mut request = agent.get(url);
+    if let Some(token) = token {
+        request = if gitlab { request.header("PRIVATE-TOKEN", token) } else { request.header("Authorization", format!("token {token}")) };
+    }
+    let mut response = request.call().ok()?;
+    let kind = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+    if !kind.starts_with("image/") {
+        return None;
+    }
+    let bytes = response.body_mut().with_config().limit(MAX_IMAGE_BYTES).read_to_vec().ok()?;
+    let ext = ["svg", "png", "gif", "webp", "jpeg"].into_iter().find(|e| kind.contains(e)).unwrap_or("png");
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        h.finish()
+    };
+    let folder = crate::settings::cache_dir().join("files").join(format!("{hash:016x}"));
+    std::fs::create_dir_all(&folder).ok()?;
+    let path = folder.join(format!("image.{ext}"));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
 }
 
 /// `s` without its HTML tags (`<br>`, `</details>`); a `<` not opening one stays.
@@ -961,6 +1653,7 @@ mod tests {
     fn a_github_pr_and_its_checks() {
         let json = r#"{"number":7,"title":"Fix it","state":"OPEN","isDraft":false,"url":"https://github.com/a/b/pull/7",
             "author":{"login":"egor"},"body":"Hi","baseRefName":"main","mergeable":"CONFLICTING","reviewDecision":"APPROVED",
+            "headRefName":"fix","updatedAt":"2026-10-12T23:00:00Z","labels":[{"name":"bug"}],"additions":1200,"deletions":3,"changedFiles":4,
             "latestReviews":[{"author":{"login":"anna"},"state":"APPROVED"}],
             "statusCheckRollup":[
               {"__typename":"CheckRun","name":"lint","workflowName":"CI","status":"COMPLETED","conclusion":"FAILURE",
@@ -972,6 +1665,8 @@ mod tests {
         let (request, checks) = parse_github(json, "anna", now).unwrap();
         assert_eq!((request.base.as_str(), request.mergeable, request.can_approve, request.approved, request.accepted), ("main", false, true, true, true));
         assert!(!parse_github(json, "egor", now).unwrap().0.can_approve, "not one's own");
+        assert_eq!((request.head.as_str(), request.updated, request.labels.as_slice()), ("fix", unix_secs("2026-10-12T23:00:00Z"), ["bug".to_string()].as_slice()));
+        assert_eq!(request.diff, Some(Diff { files: 4, additions: 1200, deletions: 3 }));
         assert_eq!((request.title.as_str(), request.author.as_str(), request.pr.state, request.pr.number), ("Fix it", "egor", "open", 7));
         let lint = Check {
             name: "lint".into(),
@@ -1002,9 +1697,11 @@ mod tests {
     #[test]
     fn a_gitlab_mr_and_its_pipeline() {
         let mr = r#"{"iid":93,"title":"SMS gates","state":"opened","draft":true,"web_url":"https://gl/mr/93",
-            "author":{"username":"vlad"},"description":"Body","target_branch":"dev","has_conflicts":false}"#;
+            "author":{"username":"vlad"},"description":"Body","target_branch":"dev","has_conflicts":false,
+            "source_branch":"sms","labels":["backend"],"updated_at":"2026-10-12T23:00:00.000Z"}"#;
         let mut request = parse_gitlab_mr(mr, "").unwrap();
         assert_eq!((request.base.as_str(), request.mergeable), ("dev", true));
+        assert_eq!((request.head.as_str(), request.labels.as_slice(), request.diff), ("sms", ["backend".to_string()].as_slice(), None), "glab's REST labels are strings");
         gitlab_approvals(r#"{"approved":true,"user_has_approved":true,"user_can_approve":false}"#, &mut request);
         assert_eq!((request.can_approve, request.approved, request.accepted), (false, true, true));
         assert_eq!((request.pr.state, request.pr.gitlab, request.author.as_str(), request.body.as_str()), ("draft", true, "vlad", "Body"));
@@ -1033,7 +1730,8 @@ mod tests {
     fn a_gitlab_review_in_one_query() {
         let json = r#"{"data":{"currentUser":{"username":"egor"},"project":{"mergeRequests":{"nodes":[{
             "iid":"402","title":"Hide maps","state":"opened","draft":false,"webUrl":"https://gl/g/p/-/merge_requests/402",
-            "description":"Body","targetBranch":"develop","conflicts":false,"autoMergeEnabled":true,"squash":true,
+            "description":"Body","targetBranch":"develop","sourceBranch":"maps","conflicts":false,
+            "labels":{"nodes":[{"title":"web"}]},"diffStatsSummary":{"additions":10,"deletions":2,"fileCount":3},"autoMergeEnabled":true,"squash":true,
             "forceRemoveSourceBranch":true,"author":{"username":"egor"},"approved":true,
             "approvedBy":{"nodes":[{"username":"dima"}]},"userPermissions":{"canApprove":true},
             "discussions":{"nodes":[{"resolvable":true,"resolved":false},{"resolvable":true,"resolved":true},{"resolvable":false,"resolved":false}]},
@@ -1047,6 +1745,7 @@ mod tests {
         let r = request.unwrap();
         assert_eq!((r.pr.number, r.pr.state, r.base.as_str(), r.mergeable, r.approved, r.accepted), (402, "open", "develop", true, false, true));
         assert_eq!((r.unresolved, r.auto_merge, r.squash, r.remove_branch), (Some(1), true, true, true));
+        assert_eq!((r.head.as_str(), r.labels.as_slice(), r.diff), ("maps", ["web".to_string()].as_slice(), Some(Diff { files: 3, additions: 10, deletions: 2 })));
         let said: Vec<_> = r.reviewers.iter().map(|rv| (rv.name.as_str(), rv.verdict)).collect();
         assert_eq!(said, [("vlad", Verdict::Changes), ("anna", Verdict::Pending), ("dima", Verdict::Approved)], "an approver who wasn't asked counts too");
         assert_eq!(pipeline, Some(("https://gl/g/p/-/pipelines/7".into(), CheckState::Running)));
@@ -1058,11 +1757,101 @@ mod tests {
     }
 
     #[test]
+    fn a_gitlab_mr_diff_from_its_api() {
+        let pages = r#"[{"old_path":"a.rs","new_path":"a.rs","new_file":false,"renamed_file":false,"deleted_file":false,"diff":"@@ -1,2 +1,2 @@\n-x\n+y\n z\n"}]
+            [{"old_path":"b.rs","new_path":"b.rs","new_file":true,"renamed_file":false,"deleted_file":false,"diff":"@@ -0,0 +1 @@\n+new\n"},
+             {"old_path":"old.txt","new_path":"new.txt","new_file":false,"renamed_file":true,"deleted_file":false,"diff":""}]"#;
+        let files = crate::changes::parse_patch(&gitlab_diffs_patch(pages).unwrap());
+        let got: Vec<_> = files.iter().map(|f| (f.path.as_str(), f.additions, f.deletions)).collect();
+        assert!(got.contains(&("a.rs", 1, 1)) && got.contains(&("b.rs", 1, 0)), "{got:?}");
+        assert!(files.iter().any(|f| f.path == "new.txt" && f.old_path.as_deref() == Some("old.txt")), "a rename keeps both paths");
+        assert_eq!(gitlab_diffs_patch(r#"{"message":"404 Not found"}"#), None, "an error isn't a diff");
+        let changes = r#"{"changes":[{"old_path":"c.rs","new_path":"c.rs","diff":"@@ -1 +1 @@\n-a\n+b\n"}]}"#;
+        assert_eq!(crate::changes::parse_patch(&gitlab_diffs_patch(changes).unwrap()).len(), 1);
+    }
+
+    #[test]
+    fn commits_newest_first() {
+        let gh = r#"{"commits":[{"oid":"aaa","messageHeadline":"One"},{"oid":"bbb","messageHeadline":"Two"}]}"#;
+        assert_eq!(parse_commits(gh, false).unwrap(), [("bbb".to_string(), "Two".to_string()), ("aaa".to_string(), "One".to_string())]);
+        let gl = r#"[{"id":"ccc","title":"Three"},{"id":"ddd","title":"Four"}]"#;
+        assert_eq!(parse_commits(gl, true).unwrap()[0].0, "ccc", "GitLab's come newest first already");
+    }
+
+    #[test]
+    fn img_tags_become_images() {
+        let body = "Before\n\n<img width=\"600\" alt=\"The panel\" src=\"https://github.com/user-attachments/assets/abc\" />\n\nafter";
+        let mut sources = Vec::new();
+        image_sources(&markdown(body), &mut sources);
+        assert_eq!(sources, ["https://github.com/user-attachments/assets/abc"]);
+        assert_eq!(img_tags("<img src='a.png'> and <b>bold</b>"), "![](a.png) and <b>bold</b>");
+    }
+
+    #[test]
+    fn a_github_timeline() {
+        let json = r#"{"author":{"login":"egor"},"createdAt":"2026-10-12T10:00:00Z","state":"MERGED",
+            "mergedAt":"2026-10-12T15:00:00Z","mergedBy":{"login":"anna"},"closedAt":"2026-10-12T15:00:00Z",
+            "comments":[{"author":{"login":"anna"},"body":"Looks good","createdAt":"2026-10-12T12:00:00Z"}],
+            "reviews":[{"author":{"login":"anna"},"state":"APPROVED","body":"","submittedAt":"2026-10-12T14:00:00Z"}],
+            "commits":[
+              {"oid":"aaaaaaaaaa","messageHeadline":"One","committedDate":"2026-10-12T10:30:00Z","authors":[{"login":"egor","name":"Egor"}]},
+              {"oid":"bbbbbbbbbb","messageHeadline":"Two","committedDate":"2026-10-12T11:00:00Z","authors":[{"login":"egor","name":"Egor"}]},
+              {"oid":"cccccccccc","messageHeadline":"Three","committedDate":"2026-10-12T13:00:00Z","authors":[{"login":"","name":"Egor K"}]}]}"#;
+        let events = parse_github_timeline(json).unwrap();
+        let got: Vec<_> = events.iter().map(|e| (e.who.as_str(), e.what.clone())).collect();
+        assert_eq!(
+            got,
+            [
+                ("egor", Happened::Opened),
+                ("egor", Happened::Commits(vec![("aaaaaaa".into(), "One".into()), ("bbbbbbb".into(), "Two".into())])),
+                ("anna", Happened::Commented),
+                ("Egor K", Happened::Commits(vec![("ccccccc".into(), "Three".into())])),
+                ("anna", Happened::Approved),
+                ("anna", Happened::Merged),
+            ],
+            "oldest first, commits in a row by one person together"
+        );
+        assert_eq!(events[2].body, "Looks good");
+    }
+
+    #[test]
+    fn a_gitlab_timeline() {
+        let mr = r#"{"created_at":"2026-10-12T10:00:00.000Z","author":{"username":"vlad"}}"#;
+        let notes = r#"[
+            {"body":"added 2 commits\n\n<ul><li>1234567890 - First</li><li>abcdef1234 - Second</li></ul>\n\n[Compare with previous version](x)","author":{"username":"vlad"},"created_at":"2026-10-12T11:00:00Z","system":true},
+            {"body":"Why this?","author":{"username":"egor"},"created_at":"2026-10-12T12:00:00Z","system":false},
+            {"body":"approved this merge request","author":{"username":"egor"},"created_at":"2026-10-12T13:00:00Z","system":true},
+            {"body":"changed the description","author":{"username":"vlad"},"created_at":"2026-10-12T14:00:00Z","system":true}]"#;
+        let events = parse_gitlab_timeline(mr, notes).unwrap();
+        let got: Vec<_> = events.iter().map(|e| (e.who.as_str(), e.what.clone(), e.body.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("vlad", Happened::Opened, ""),
+                ("vlad", Happened::Commits(vec![("1234567".into(), "First".into()), ("abcdef1".into(), "Second".into())]), ""),
+                ("egor", Happened::Commented, "Why this?"),
+                ("egor", Happened::Approved, ""),
+                ("vlad", Happened::Note, "changed the description"),
+            ]
+        );
+    }
+
+    #[test]
     fn logs_as_a_terminal_shows_them() {
         let gitlab = "section_start:1:step\r\u{1b}[0K\u{1b}[32;1mRunning\u{1b}[0;m\nold\rnew\n\n";
         assert_eq!(tail_log(gitlab, false, 5), "Running\nnew");
         let github = "build\tRun tests\t2026-10-12T23:09:53.1234567Z ok 1\nbuild\tRun tests\t2026-10-12T23:09:54.0Z ok 2";
         assert_eq!(tail_log(github, true, 1), "ok 2");
+    }
+
+    #[test]
+    fn an_mrs_pipelines_newest_first() {
+        let json = r#"[{"id":2,"iid":12,"sha":"a2cc560e","status":"running","created_at":"2026-10-19T14:16:20.412Z","web_url":"https://gl/g/p/-/pipelines/2"},
+            {"id":1,"iid":11,"sha":"28a615af","status":"failed","created_at":"2026-10-19T13:57:18.949Z","web_url":"https://gl/g/p/-/pipelines/1"},
+            {"id":0,"status":"failed"}]"#;
+        let got = parse_pipelines(json).unwrap();
+        assert_eq!(got.iter().map(|p| (p.iid.as_str(), p.state, p.sha.as_str())).collect::<Vec<_>>(), [("12", CheckState::Running, "a2cc560e"), ("11", CheckState::Failed, "28a615af")]);
+        assert!(got[0].at > got[1].at && got[1].url.ends_with("/1"));
     }
 
     #[test]
@@ -1129,5 +1918,42 @@ mod tests {
         assert!(matches!(&blocks[4], Block::Paragraph { runs } if runs_text(runs) == "a < b"));
         assert_eq!(markdown(""), []);
         assert_eq!(markdown("<!-- only a hint -->"), []);
+    }
+
+    #[test]
+    fn a_review_puts_each_comment_on_its_side_and_line() {
+        use crate::changes::{CommentSide, ReviewComment};
+        let note = |side, line, old_no, new_no| ReviewNote {
+            comment: ReviewComment { id: 1, path: "src/new.rs".into(), old_path: Some("src/old.rs".into()), side, line, body: "why?".into(), review: true, by: None },
+            old_no,
+            new_no,
+        };
+        let notes = [note(CommentSide::Old, 7, Some(7), None), note(CommentSide::New, 9, Some(8), Some(9))];
+        let gh = github_review(ReviewEvent::RequestChanges, "  ", &notes);
+        assert_eq!(gh["event"], "REQUEST_CHANGES");
+        assert!(gh.get("body").is_none(), "an empty summary is left out");
+        assert_eq!((gh["comments"][0]["side"].as_str(), gh["comments"][0]["line"].as_u64()), (Some("LEFT"), Some(7)));
+        assert_eq!((gh["comments"][1]["side"].as_str(), gh["comments"][1]["path"].as_str()), (Some("RIGHT"), Some("src/new.rs")));
+        let refs = serde_json::json!({ "base_sha": "b", "start_sha": "s", "head_sha": "h" });
+        let deleted = gitlab_draft(&notes[0], &refs)["position"].clone();
+        assert_eq!((deleted["old_path"].as_str(), deleted["old_line"].as_u64(), deleted.get("new_line")), (Some("src/old.rs"), Some(7), None));
+        let unchanged = gitlab_draft(&notes[1], &refs)["position"].clone();
+        assert_eq!((unchanged["old_line"].as_u64(), unchanged["new_line"].as_u64(), unchanged["head_sha"].as_str()), (Some(8), Some(9), Some("h")));
+    }
+
+    #[test]
+    fn the_hosts_line_comments_land_on_their_lines() {
+        use crate::changes::CommentSide;
+        let gh = r#"[{"id":7,"path":"a.rs","line":10,"side":"RIGHT","body":"why?","user":{"login":"anna"}},
+                     {"id":8,"path":"a.rs","line":null,"side":"RIGHT","body":"outdated","user":{"login":"anna"}},
+                     {"id":9,"path":"a.rs","line":3,"side":"LEFT","body":"gone","user":{"login":"egor"}}]"#;
+        let got = parse_github_line_comments(gh).unwrap();
+        assert_eq!(got.iter().map(|c| (c.side, c.line, c.by.as_deref())).collect::<Vec<_>>(), [(CommentSide::New, 10, Some("anna")), (CommentSide::Old, 3, Some("egor"))]);
+        assert!(got[0].id > u32::MAX as u64, "apart from the ones staged here");
+        let gl = r#"[{"notes":[{"id":1,"system":true,"body":"added 1 commit"}]},
+                     {"notes":[{"id":2,"body":"here","author":{"username":"anna"},"position":{"position_type":"text","old_path":"b.rs","new_path":"c.rs","old_line":4,"new_line":null}},
+                               {"id":3,"body":"and here","author":{"username":"egor"},"position":{"position_type":"text","old_path":"c.rs","new_path":"c.rs","old_line":5,"new_line":6}}]}]"#;
+        let got = parse_gitlab_line_comments(gl).unwrap();
+        assert_eq!(got.iter().map(|c| (c.side, c.line, c.path.as_str(), c.old_path.as_deref())).collect::<Vec<_>>(), [(CommentSide::Old, 4, "c.rs", Some("b.rs")), (CommentSide::New, 6, "c.rs", None)]);
     }
 }

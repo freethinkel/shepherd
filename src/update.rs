@@ -147,7 +147,7 @@ pub fn check(cx: &mut App, quiet: bool) {
 /// Downloads `release`, swaps the app for it and relaunches; off macOS, opens its page.
 pub fn install(release: Release, cx: &mut App) {
     if notifies() {
-        return cx.open_url(&release.url);
+        return crate::ui::open_outside(&release.url, cx);
     }
     let Some(app) = app_bundle() else { return };
     if Updates::of(cx).busy() {

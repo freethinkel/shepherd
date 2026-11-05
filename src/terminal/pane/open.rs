@@ -43,26 +43,7 @@ pub struct Reader {
     copied: bool,
 }
 
-/// The images' sources in `blocks`, each once, in document order.
-pub(super) fn image_sources(blocks: &[crate::ui::review::Block], out: &mut Vec<String>) {
-    use crate::ui::review::Block;
-    let runs = |runs: &[crate::ui::review::InlineRun], out: &mut Vec<String>| {
-        for image in runs.iter().filter_map(|r| r.style.image.as_ref()) {
-            if !out.contains(&image.source) {
-                out.push(image.source.clone());
-            }
-        }
-    };
-    for block in blocks {
-        match block {
-            Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r, out),
-            Block::BlockQuote { children } => image_sources(children, out),
-            Block::List { items, .. } => items.iter().for_each(|item| image_sources(item, out)),
-            Block::Table { header, rows, .. } => header.iter().chain(rows.iter().flatten()).for_each(|cell| runs(cell, out)),
-            _ => {}
-        }
-    }
-}
+pub(super) use crate::ui::review::image_sources;
 
 /// A web image, downloaded into the cache under the extension its type has (a badge's URL often has none).
 pub(super) async fn download(url: &str) -> Option<PathBuf> {
@@ -496,7 +477,7 @@ impl PaneTerminal {
     /// opens it (another Markdown file in the reader, `#L12` at its line); a bare `#anchor` goes nowhere.
     pub(super) fn follow_link(&mut self, url: &str, cx: &mut Context<Self>) {
         if url.contains("://") || url.starts_with("mailto:") {
-            return cx.open_url(url);
+            return crate::ui::open_outside(url, cx);
         }
         let (path, anchor) = url.split_once('#').unwrap_or((url, ""));
         let Some(dir) = self.reader.as_ref().and_then(|r| r.value.file.path.parent().map(Path::to_path_buf)).filter(|_| !path.is_empty()) else {
@@ -689,6 +670,7 @@ impl PaneTerminal {
             link: Some(std::rc::Rc::new(move |url: &str, _: &mut Window, cx: &mut App| {
                 let _ = pane.update(cx, |pane, cx| pane.follow_link(url, cx));
             })),
+            open_image: None,
         };
         let card = dialog_card("markdown-reader", &frame, theme)
             .on_mouse_down_out(cx.listener(|pane, _, _, cx| pane.close_reader(cx)))

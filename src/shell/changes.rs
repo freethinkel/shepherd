@@ -2,6 +2,8 @@
 //! The patch, its rows and the capture are `crate::changes`; this is the entity and what it draws, with Zeron's fold
 //! tween, sticky headers, syntax runs and comment cards. Its watch stream is a poll here, while the tab is shown. A
 //! comment goes from the panel's footer to the shown pane's agent, there being no composer to stage it on.
+//! The review panel's Code tab is this view too, over a PR's patch ([`PrView`]): nothing is watched, files carry a
+//! Viewed box, and a comment goes to the agent or into the review.
 use super::review::ShownReview;
 use super::*;
 use crate::changes::*;
@@ -26,6 +28,8 @@ const SPLIT_CODE_PADDING_LEFT: f32 = 6.0;
 /// Breathing room after the widest source line when scrolled fully right.
 const CODE_PADDING_RIGHT: f32 = 24.0;
 const COMMENT_ADDER_SIZE: f32 = 16.0;
+/// Up to this many files, a PR's open unfolded (a viewed one stays shut).
+const SMALL_PR: usize = 3;
 /// Between a capture's end and the next, while the tab is shown in a window in use.
 const POLL: Duration = Duration::from_secs(2);
 /// Between looks at whether a running turn has changed anything yet.
@@ -261,6 +265,21 @@ pub(super) enum ChangesEvent {
     Preview { dir: String, root: String, path: String },
     /// Cmd+Enter in a comment's field: the comments go to the agent.
     Send,
+    /// A PR's file's Viewed box.
+    Viewed { path: String },
+}
+
+/// What the Changes view shows of a PR: the host's patch, never watched. Given every render of the review panel.
+pub(super) struct PrView {
+    /// The PR's link: its comments are kept under it.
+    pub url: String,
+    pub diff: Arc<crate::ui::review::PrDiff>,
+    /// Paths of the files marked viewed.
+    pub viewed: std::collections::HashSet<String>,
+    /// False over one commit's diff: its line numbers aren't the PR's, so nothing there is commented on.
+    pub commentable: bool,
+    /// The comments already on the PR's lines, the host's: shown under them, never staged or sent.
+    pub posted: Vec<ReviewComment>,
 }
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
@@ -319,6 +338,8 @@ pub(super) struct Changes {
     pub(super) back: Option<gpui::FocusHandle>,
     /// A card just closed: the next render gives the keyboard `back`.
     refocus: bool,
+    /// Over a PR's patch instead of the checkout's.
+    pr: Option<PrView>,
 }
 
 impl Changes {
@@ -361,7 +382,97 @@ impl Changes {
             keys: false,
             back: None,
             refocus: false,
+            pr: None,
         }
+    }
+
+    /// A view over a PR's patch (the review panel's), not over a checkout's.
+    pub(super) fn for_pr(cx: &mut Context<Self>) -> Self {
+        Self { pr: Some(PrView { url: String::new(), diff: Default::default(), viewed: Default::default(), commentable: false, posted: Vec::new() }), ..Self::new(cx) }
+    }
+
+    /// Called every render of the review panel's Code tab: `dir` is the checkout (for a file's menu), `view` the PR's
+    /// patch. A new patch is captured as a checkout's would be; the rest only changes what's drawn.
+    pub(super) fn show_pr(&mut self, dir: &str, view: PrView, cx: &mut Context<Self>) {
+        let fresh = self.pr.as_ref().is_none_or(|pr| !Arc::ptr_eq(&pr.diff, &view.diff));
+        if self.pr.as_ref().is_some_and(|pr| pr.url != view.url) {
+            // a draft belongs to its PR
+            self.draft = None;
+        }
+        if !view.commentable && self.draft.is_some() {
+            // a card on the PR's lines doesn't sit over one commit's: it's staged as it is
+            self.commit_draft(cx);
+        }
+        if self.dir.as_deref() != Some(dir) {
+            self.dir = Some(dir.to_string());
+        }
+        let diff = view.diff.clone();
+        let redraw = self.pr.as_ref().is_some_and(|pr| pr.posted != view.posted || pr.commentable != view.commentable);
+        self.pr = Some(view);
+        if redraw {
+            self.sync_comment_rows(cx);
+        }
+        if fresh {
+            let checksum = format!("{:016x}", hash64(&[&diff.patch]));
+            if self.diff.as_ref().is_some_and(|d| d.checksum != checksum) {
+                // another PR, commit or push: folds and the scroll don't carry over by path
+                self.forget_diff(cx);
+            }
+            self.captured(Ok(CheckoutDiff { root: diff.root.clone(), base: String::new(), head: None, patch: diff.patch.clone(), truncated: diff.cut, checksum }), cx);
+        }
+    }
+
+    /// Folds a file shut, or opens it: a PR's file marked viewed shuts.
+    pub(super) fn fold_file(&mut self, path: &str, collapsed: bool, cx: &mut Context<Self>) {
+        let Some(ix) = self.parsed.as_ref().and_then(|p| p.files.iter().position(|f| f.path == path)) else { return };
+        if self.folds.get(path).is_some_and(|fold| fold.collapsed) != collapsed {
+            self.toggle_fold(ix, cx);
+        }
+    }
+
+    /// Over the PR at `url`.
+    pub(super) fn shows_pr(&self, url: &str) -> bool {
+        self.pr.as_ref().is_some_and(|pr| pr.url == url)
+    }
+
+    /// What its comments are kept under: the PR's link, else the checkout.
+    fn comments_key(&self) -> Option<String> {
+        match &self.pr {
+            Some(pr) => Some(pr.url.clone()),
+            None => self.dir.clone(),
+        }
+    }
+
+    /// The comments waiting, the open card's among them as it was before the edit.
+    pub(super) fn waiting_comments(&self) -> Vec<ReviewComment> {
+        self.comments_key().and_then(|key| self.comments.get(&key)).cloned().unwrap_or_default()
+    }
+
+    /// Drops the comments `ids`: sent.
+    pub(super) fn drop_comments(&mut self, ids: &[u64], cx: &mut Context<Self>) {
+        if let Some(comments) = self.comments_key().and_then(|key| self.comments.get_mut(&key)) {
+            comments.retain(|comment| !ids.contains(&comment.id));
+        }
+        self.sync_comment_rows(cx);
+        cx.notify();
+    }
+
+    /// The files parsed: a PR's, for its toolbar.
+    pub(super) fn files(&self) -> Option<Arc<Vec<FileDiff>>> {
+        self.parsed.as_ref().map(|p| p.files.clone())
+    }
+
+    /// Lines take a comment: not over a PR's single commit.
+    fn commentable(&self) -> bool {
+        self.pr.as_ref().is_none_or(|pr| pr.commentable)
+    }
+
+    pub(super) fn is_split(&self) -> bool {
+        self.mode.is_split()
+    }
+
+    pub(super) fn wraps(&self) -> bool {
+        self.wrap_lines
     }
 
     /// The surface-tab title: the scope's label.
@@ -460,7 +571,8 @@ impl Changes {
     }
 
     fn discard_request(&self) -> Option<(String, String)> {
-        let diff = self.diff.as_ref().filter(|d| self.scope == DiffScope::WorkingTree && !d.truncated && !d.patch.trim().is_empty())?;
+        // a PR's patch isn't the checkout's: nothing of it to discard
+        let diff = self.diff.as_ref().filter(|d| self.pr.is_none() && self.scope == DiffScope::WorkingTree && !d.truncated && !d.patch.trim().is_empty())?;
         Some((self.dir.clone()?, diff.checksum.clone()))
     }
 
@@ -564,10 +676,13 @@ impl Changes {
         self.highlights.clear();
         let staged = self.staged_comments();
         let draft = self.draft_anchor();
-        // a file first seen comes shut, unless a comment waits in it: the footer counts those, the list has to show them
+        // a file first seen comes shut, unless a comment waits in it: the footer counts those, the list has to show them;
+        // a small PR's open, but for the ones viewed
+        let small = files.len() <= SMALL_PR;
         for file in &files {
             let commented = staged.iter().any(|c| c.path == file.path) || draft.as_ref().is_some_and(|(path, ..)| *path == file.path);
-            self.folds.entry(file.path.clone()).or_insert(FileFold { collapsed: !commented, ..FileFold::default() });
+            let unread = self.pr.as_ref().is_some_and(|pr| small && !pr.viewed.contains(&file.path));
+            self.folds.entry(file.path.clone()).or_insert(FileFold { collapsed: !commented && !unread, ..FileFold::default() });
         }
         let (rows, ranges) = flatten_rows(
             &files,
@@ -773,13 +888,13 @@ impl Changes {
         !parsed.files.is_empty() && parsed.files.iter().all(|file| self.folds.get(&file.path).is_some_and(|fold| fold.collapsed))
     }
 
-    fn fold_all_label(&self) -> &'static str {
+    pub(super) fn fold_all_label(&self) -> &'static str {
         if self.all_collapsed() { "Expand all files" } else { "Collapse all files" }
     }
 
     /// Collapse every file section, or expand them all when everything is already shut. Steady-state writes: no per-row
     /// tween arming, the whole list just snaps.
-    fn toggle_collapse_all(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_collapse_all(&mut self, cx: &mut Context<Self>) {
         let Some(parsed) = &self.parsed else { return };
         let collapse = !self.all_collapsed();
         for file in parsed.files.clone().iter() {
@@ -791,7 +906,7 @@ impl Changes {
     }
 
     /// Swap unified ⇄ split. The parse is untouched, only the flattening changes.
-    fn toggle_mode(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_mode(&mut self, cx: &mut Context<Self>) {
         self.mode = self.mode.toggled();
         self.reset_horizontal_scroll();
         let split = self.mode.is_split();
@@ -801,7 +916,7 @@ impl Changes {
         self.reflatten(cx);
     }
 
-    fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
         self.wrap_lines = !self.wrap_lines;
         self.reset_horizontal_scroll();
         let wrap = self.wrap_lines;
@@ -851,8 +966,13 @@ impl Changes {
     /// The comments of the checkout shown, the one being edited left to its draft.
     fn staged_comments(&self) -> Vec<ReviewComment> {
         let editing = self.draft.as_ref().and_then(|draft| draft.editing_id);
-        let shown = self.dir.as_ref().and_then(|dir| self.comments.get(dir));
-        shown.into_iter().flatten().filter(|comment| Some(comment.id) != editing).cloned().collect()
+        let shown = self.comments_key().and_then(|key| self.comments.get(&key));
+        // a PR's own comments first, as they came before ours; none over one commit, whose lines are numbered apart
+        if !self.commentable() {
+            return Vec::new();
+        }
+        let posted = self.pr.as_ref().map(|pr| pr.posted.as_slice()).unwrap_or_default();
+        posted.iter().chain(shown.into_iter().flatten().filter(|comment| Some(comment.id) != editing)).cloned().collect()
     }
 
     fn comments_for(&self, path: &str) -> Vec<ReviewComment> {
@@ -861,7 +981,7 @@ impl Changes {
 
     /// The comments waiting to be sent from the checkout shown.
     pub(super) fn comment_count(&self) -> usize {
-        self.dir.as_ref().and_then(|dir| self.comments.get(dir)).map_or(0, Vec::len)
+        self.comments_key().and_then(|key| self.comments.get(&key)).map_or(0, Vec::len)
     }
 
     /// The parsed diff's pre-rename path for `path`, when the file moved.
@@ -931,7 +1051,7 @@ impl Changes {
             if let InputEvent::PressEnter { secondary, .. } = event {
                 this.commit_draft(cx);
                 // Cmd+Enter (Ctrl+Enter off macOS): the field takes it, so the send goes by way of the shell
-                if *secondary {
+                if *secondary && this.pr.is_none() {
                     cx.emit(ChangesEvent::Send);
                 }
             }
@@ -950,7 +1070,7 @@ impl Changes {
     }
 
     fn edit_comment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = self.dir.as_ref().and_then(|dir| self.comments.get(dir));
+        let shown = self.comments_key().and_then(|key| self.comments.get(&key));
         let Some(comment) = shown.and_then(|comments| comments.iter().find(|comment| comment.id == id)).cloned() else { return };
         self.open_draft(comment.path.clone(), comment.side, comment.line, Some(comment.body), window, cx);
         if let Some(draft) = self.draft.as_mut() {
@@ -967,17 +1087,24 @@ impl Changes {
         cx.notify();
     }
 
+    /// Stages the open card: a new one on a PR goes into the review, as Enter has it; an edited one keeps where it was.
     pub(super) fn commit_draft(&mut self, cx: &mut Context<Self>) {
+        self.commit_draft_to(None, cx);
+    }
+
+    /// `review` is the button's choice, `None` for Enter or a card closed by opening another.
+    fn commit_draft_to(&mut self, review: Option<bool>, cx: &mut Context<Self>) {
         let Some(draft) = self.draft.take() else { return };
         self.refocus = true;
         let body = draft.input.read(cx).value().trim().to_string();
-        if let (false, Some(dir)) = (body.is_empty(), self.dir.clone()) {
-            let comments = self.comments.entry(dir).or_default();
+        if let (false, Some(key)) = (body.is_empty(), self.comments_key()) {
+            let comments = self.comments.entry(key).or_default();
             match draft.editing_id.and_then(|id| comments.iter_mut().find(|comment| comment.id == id)) {
-                Some(comment) => comment.body = body,
+                Some(comment) => (comment.body, comment.review) = (body, review.unwrap_or(comment.review)),
                 None => {
                     self.made_comments += 1;
-                    comments.push(ReviewComment { id: self.made_comments, path: draft.path, old_path: draft.old_path, side: draft.side, line: draft.line, body });
+                    let review = review.unwrap_or(self.pr.is_some());
+                    comments.push(ReviewComment { id: self.made_comments, path: draft.path, old_path: draft.old_path, side: draft.side, line: draft.line, body, review, by: None });
                 }
             }
         }
@@ -986,7 +1113,7 @@ impl Changes {
     }
 
     fn remove_comment(&mut self, id: u64, cx: &mut Context<Self>) {
-        if let Some(comments) = self.dir.as_ref().and_then(|dir| self.comments.get_mut(dir)) {
+        if let Some(comments) = self.comments_key().and_then(|key| self.comments.get_mut(&key)) {
             comments.retain(|comment| comment.id != id);
         }
         self.sync_comment_rows(cx);
@@ -995,7 +1122,7 @@ impl Changes {
 
     /// What to send, once: the prompt and which comments it holds.
     fn take_prompt(&mut self) -> Option<(String, String, Vec<u64>)> {
-        let dir = self.dir.clone().filter(|_| !self.sending)?;
+        let dir = self.comments_key().filter(|_| !self.sending)?;
         let comments = self.comments.get(&dir).filter(|comments| !comments.is_empty())?;
         let ids = comments.iter().map(|comment| comment.id).collect();
         let prompt = comments_prompt(comments);
@@ -1120,7 +1247,8 @@ impl Changes {
             .ok();
         });
         let fetch_file = file.clone();
-        let fetch_task = self.diff.clone().zip(self.dir.clone()).map(|(diff, dir)| {
+        // a PR's sources aren't here: its excerpt colors stay
+        let fetch_task = self.diff.clone().zip(self.dir.clone()).filter(|_| self.pr.is_none()).map(|(diff, dir)| {
             cx.spawn(async move |this, cx| {
                 let highlights = cx
                     .background_spawn(async move {
@@ -1183,7 +1311,7 @@ impl Changes {
                 let row = diff_line_row(line, highlight.as_deref(), &theme, gutter_px, code_width, code_scroll.slot("unified"));
                 let Some((side, line_no)) = line_anchor(line) else { return row };
                 let path = file_diff.path.clone();
-                let hovered = self.hovering(&path, (side, line_no));
+                let hovered = self.commentable() && self.hovering(&path, (side, line_no));
                 let (move_path, leave_path) = (path.clone(), path.clone());
                 div()
                     .id(("diff-line", ix))
@@ -1231,7 +1359,7 @@ impl Changes {
                         let (side, line_no) = anchor;
                         let (move_path, leave_path) = (path.clone(), path.clone());
                         cell.id(("split-new", ix))
-                            .when(self.hovering(&path, anchor), |el| el.relative().child(positioned_adder(split_adder_left(gutter_px), render_comment_adder(&path, side, line_no, &theme, cx))))
+                            .when(self.commentable() && self.hovering(&path, anchor), |el| el.relative().child(positioned_adder(split_adder_left(gutter_px), render_comment_adder(&path, side, line_no, &theme, cx))))
                             .on_mouse_move(cx.listener(move |this, _, _, cx| this.set_hover(&move_path, Some(anchor), cx)))
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 if !*hovered {
@@ -1245,8 +1373,8 @@ impl Changes {
                 };
                 split_row(left, right, self.wrap_lines, &theme).into_any_element()
             }
-            DiffRow::CommentCard { card, .. } => self.comments_for(&file_diff.path).get(card as usize).map(|comment| render_comment_card(comment, &theme, cx)).unwrap_or_else(empty),
-            DiffRow::CommentDraft { .. } => self.draft.as_ref().filter(|draft| draft.path == file_diff.path).map(|draft| render_comment_draft(draft, &theme, cx)).unwrap_or_else(empty),
+            DiffRow::CommentCard { card, .. } => self.comments_for(&file_diff.path).get(card as usize).map(|comment| render_comment_card(comment, self.pr.is_some(), &theme, cx)).unwrap_or_else(empty),
+            DiffRow::CommentDraft { .. } => self.draft.as_ref().filter(|draft| draft.path == file_diff.path).map(|draft| render_comment_draft(draft, self.pr.is_some(), &theme, cx)).unwrap_or_else(empty),
             DiffRow::BodyPad { .. } => div().w_full().h(px(BODY_BOTTOM_PAD)).into_any_element(),
             DiffRow::FoldingBody { file } => {
                 let fold = self.folds.get(&file_diff.path).copied().unwrap_or_default();
@@ -1321,10 +1449,22 @@ impl Changes {
             .when(file.binary, |el| el.child(div().flex_none().text_size(px(10.0)).text_color(theme.text_faint).child("BIN")))
             .when(adds > 0 || !file.binary, |el| el.child(count_label(format!("+{adds}"), theme.diff_add, theme)))
             .when(dels > 0 || !file.binary, |el| el.child(count_label(format!("−{dels}"), theme.diff_del, theme)))
+            // not over one commit: Viewed is the PR's file's
+            .children(self.pr.as_ref().filter(|pr| pr.commentable).map(|pr| {
+                let seen = pr.viewed.contains(&file.path);
+                let path = file.path.clone();
+                viewed_box(SharedString::from(format!("{}-viewed-{ix}", presentation.key_prefix())), seen, theme)
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(ChangesEvent::Viewed { path: path.clone() });
+                    }))
+            }))
             .into_any_element()
     }
 
-    fn render_sticky_file_header(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The file header held at the top while its rows scroll, and how far down from the top the rows are cut off
+    /// under it.
+    fn render_sticky_file_header(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<(AnyElement, f32)> {
         let scroll_top = self.list.logical_scroll_top();
         let sticky = sticky_file_header(&self.row_ranges, scroll_top.item_ix, f32::from(scroll_top.offset_in_item))?;
         let files = self.parsed.as_ref()?.files.clone();
@@ -1336,12 +1476,25 @@ impl Changes {
         });
         let top_offset = sticky_header_push_offset(next_header_y);
         let header = self.render_file_header(sticky.file_ix, file, &fold, FileHeaderPresentation::Sticky, theme, cx);
-        // opaque: rows scroll under it
-        Some(div().absolute().top(px(top_offset)).left_0().w_full().bg(theme.surface).child(header).into_any_element())
+        // Not painted over the rows, which are cut off above its bottom instead: the window is see-through, and no
+        // opaque fill matches the blurred desktop behind the rest of the list. Its band is out of the list's
+        // hitbox then, so a wheel over it is passed on.
+        let header = div()
+            .id("sticky-file-hdr-band")
+            .absolute()
+            .top(px(top_offset))
+            .left_0()
+            .w_full()
+            .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _, cx| {
+                this.list.scroll_by(-e.delta.pixel_delta(px(20.)).y);
+                cx.notify();
+            }))
+            .child(header);
+        Some((header.into_any_element(), (FILE_HEADER_HEIGHT + top_offset).max(0.)))
     }
 
     /// A latched toggle holds the wash and the full text tone, so the pane says which layout it is in without a label.
-    fn header_toggle(id: &'static str, icon: &'static str, label: &'static str, active: bool, theme: &Theme) -> Stateful<Div> {
+    pub(super) fn header_toggle(id: &'static str, icon: &'static str, label: &'static str, active: bool, theme: &Theme) -> Stateful<Div> {
         let hover = theme.wash(0.14);
         div()
             .id(id)
@@ -1604,7 +1757,7 @@ impl Changes {
     }
 
     fn render_header_strip(&self, theme: &Theme) -> Option<AnyElement> {
-        let parsed = self.parsed.as_ref()?;
+        let parsed = self.parsed.as_ref().filter(|_| self.pr.is_none())?;
         Some(
             div()
                 .flex_none()
@@ -1771,7 +1924,7 @@ fn meta_line_row(text: &str, theme: &Theme, pad_left: f32) -> AnyElement {
 }
 
 /// The paint-only syntax runs for one diff line.
-fn line_runs(line: &DiffLine, highlights: Option<&DiffHighlights>, theme: &Theme) -> Vec<gpui::TextRun> {
+pub(super) fn line_runs(line: &DiffLine, highlights: Option<&DiffHighlights>, theme: &Theme) -> Vec<gpui::TextRun> {
     let spans = highlights.map(|h| h.spans(line)).unwrap_or(&[]);
     let mono = font(theme.font_terminal.clone());
     let plain_color = theme.text.opacity(0.92);
@@ -1877,6 +2030,33 @@ fn render_comment_adder(path: &str, side: CommentSide, line: u32, theme: &Theme,
         .into_any_element()
 }
 
+/// A PR's file's "Viewed" box, as GitHub's.
+fn viewed_box(id: SharedString, seen: bool, theme: &Theme) -> Stateful<Div> {
+    let accent = theme.accent;
+    div()
+        .id(id)
+        .flex_none()
+        .ml(px(4.0))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .text_size(px(12.0))
+        .text_color(theme.text_faint)
+        .cursor_pointer()
+        .child(
+            div()
+                .size(px(14.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
+                .border_1()
+                .map(|el| if seen { el.bg(accent).border_color(accent) } else { el.border_color(theme.border_strong) })
+                .when(seen, |el| el.child(gpui::svg().path("icons/check.svg").size(px(10.0)).text_color(gpui::white()))),
+        )
+        .child("Viewed")
+}
+
 fn comment_bar(color: Hsla) -> Div {
     // A bar, not a border: it must match ACCENT_BAR_WIDTH exactly or the card's edge steps in and out of the column.
     div().w(px(ACCENT_BAR_WIDTH)).h_full().flex_none().bg(color)
@@ -1910,13 +2090,22 @@ fn comment_card_action(id: String, icon: &'static str, label: &'static str, grou
         .child(gpui::svg().path(icon).size(px(12.0)).text_color(theme.text_muted))
 }
 
-fn render_comment_card(comment: &ReviewComment, theme: &Theme, cx: &mut Context<Changes>) -> AnyElement {
+/// A staged comment; a PR's says where it goes.
+fn render_comment_card(comment: &ReviewComment, pr: bool, theme: &Theme, cx: &mut Context<Changes>) -> AnyElement {
     let group: SharedString = format!("cmt-card-{}", comment.id).into();
     let id = comment.id;
     let edit = comment_card_action(format!("cmt-edit-{id}"), "icons/solar/pen.svg", "Edit comment", group.clone(), theme)
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.edit_comment(id, window, cx)));
     let remove = comment_card_action(format!("cmt-remove-{id}"), "icons/close-circle.svg", "Remove comment", group.clone(), theme)
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.remove_comment(id, cx)));
+    let head = match &comment.by {
+        // the host's: who wrote it, nothing to edit
+        Some(by) => comment_head(comment.location(), theme).child(div().flex_none().text_size(px(11.0)).text_color(theme.text_muted).child(by.clone())),
+        None => comment_head(comment.location(), theme)
+            .when(pr, |el| el.child(div().flex_none().text_size(px(11.0)).text_color(theme.text_faint).child(if comment.review { "In review" } else { "For the agent" })))
+            .child(edit)
+            .child(remove),
+    };
     div()
         .group(group)
         .h(px(card_height(&comment.body)))
@@ -1934,7 +2123,7 @@ fn render_comment_card(comment: &ReviewComment, theme: &Theme, cx: &mut Context<
                 .flex_col()
                 .px(px(16.0))
                 .py(px(CARD_PAD_V / 2.0))
-                .child(comment_head(comment.location(), theme).child(edit).child(remove))
+                .child(head)
                 // Height is analytic, so an over-long body clips inside the card rather than past the fold height.
                 .child(div().flex_1().min_h_0().overflow_hidden().text_size(px(12.0)).line_height(px(CARD_LINE_HEIGHT)).text_color(theme.text_muted).child(comment.body.clone())),
         )
@@ -1942,7 +2131,8 @@ fn render_comment_card(comment: &ReviewComment, theme: &Theme, cx: &mut Context<
 }
 
 /// Fixed height, so an open draft never fights the fold tween.
-fn render_comment_draft(draft: &CommentDraft, theme: &Theme, cx: &mut Context<Changes>) -> AnyElement {
+/// A PR's card goes to the agent or into the review; a checkout's is a comment for the agent.
+fn render_comment_draft(draft: &CommentDraft, pr: bool, theme: &Theme, cx: &mut Context<Changes>) -> AnyElement {
     // Mirrors `ReviewComment::cite_path` for the not-yet-staged note.
     let cite = match draft.side {
         CommentSide::Old => draft.old_path.as_deref().unwrap_or(&draft.path),
@@ -1999,7 +2189,11 @@ fn render_comment_draft(draft: &CommentDraft, theme: &Theme, cx: &mut Context<Ch
                         .justify_end()
                         .gap(px(6.0))
                         .child(action("cmt-cancel", "Cancel", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_draft(cx))))
-                        .child(action("cmt-commit", if draft.editing_id.is_some() { "Save" } else { "Comment" }, true).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.commit_draft(cx)))),
+                        .when(pr, |el| {
+                            el.child(action("cmt-agent", "Add to agent", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.commit_draft_to(Some(false), cx))))
+                                .child(action("cmt-review", "Add to review", true).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.commit_draft_to(Some(true), cx))))
+                        })
+                        .when(!pr, |el| el.child(action("cmt-commit", if draft.editing_id.is_some() { "Save" } else { "Comment" }, true).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.commit_draft(cx))))),
                 ),
         )
         .into_any_element()
@@ -2087,7 +2281,8 @@ impl Render for Changes {
         let notice = |text: SharedString, warn: bool| {
             div().flex_1().flex().items_center().justify_center().px(px(16.0)).text_size(px(12.0)).text_color(if warn { theme.warning.opacity(0.85) } else { theme.text_faint }).child(text).into_any_element()
         };
-        let toolbar = self.render_header_controls(&theme, cx);
+        // a PR's bar is the review panel's
+        let toolbar = self.pr.is_none().then(|| self.render_header_controls(&theme, cx));
         let content = match (&self.dir, &self.diff, &self.error) {
             (None, _, _) => notice("The focused pane isn't in a git repo.".into(), false),
             (_, None, Some(error)) => notice(error.clone(), true),
@@ -2095,7 +2290,8 @@ impl Render for Changes {
             (_, Some(diff), _) if diff.patch.trim().is_empty() => notice(clean_message(self.scope, self.base_ref.as_deref()).into(), false),
             _ if self.parsed.is_none() => div().flex_1().flex().items_center().justify_center().child(crate::ui::loader::spinner(2.5, window)).into_any_element(),
             _ => {
-                let sticky_header = self.render_sticky_file_header(&theme, cx);
+                let (sticky_header, cut) = self.render_sticky_file_header(&theme, cx).unzip();
+                let cut = cut.unwrap_or(0.);
                 div()
                     .flex_1()
                     .min_h_0()
@@ -2108,7 +2304,18 @@ impl Render for Changes {
                             .flex_1()
                             .min_h_0()
                             .overflow_hidden()
-                            .child(list(self.list.clone(), cx.processor(Self::render_row)).size_full().with_sizing_behavior(gpui::ListSizingBehavior::Auto))
+                            // the rows, cut off under the sticky header; the list keeps its full height, so its scroll stays put
+                            .child(
+                                div().absolute().left_0().right_0().top(px(cut)).bottom_0().overflow_hidden().child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .right_0()
+                                        .top(px(-cut))
+                                        .bottom_0()
+                                        .child(list(self.list.clone(), cx.processor(Self::render_row)).size_full().with_sizing_behavior(gpui::ListSizingBehavior::Auto)),
+                                ),
+                            )
                             .when_some(sticky_header, |el, header| el.child(header))
                             .child(crate::ui::scrollbar("changes-scrollbar", &self.list, &theme)),
                     )
@@ -2140,7 +2347,7 @@ impl Render for Changes {
             .size_full()
             .flex()
             .flex_col()
-            .child(toolbar)
+            .children(toolbar)
             .when_some(banner, |el, message| {
                 el.child(div().flex_none().px(px(12.0)).py(px(4.0)).border_b_1().border_color(theme.border).text_size(px(11.0)).text_color(theme.warning).child(message))
             })
@@ -2168,6 +2375,7 @@ impl Shell {
             ChangesEvent::Open { dir, root, path } => this.edit_diff_file(dir, root, path, cx),
             ChangesEvent::Preview { dir, root, path } => this.preview_diff_file(dir, root, path, window, cx),
             ChangesEvent::Send => this.send_diff_comments(&tab, window, cx),
+            ChangesEvent::Viewed { .. } => {}
         })
         .detach();
         self.right.diffs.insert(key, changes);
@@ -2175,7 +2383,7 @@ impl Shell {
     }
 
     /// A diff's file in the user's editor, Neovim opening in a pane beside the tab's focused one.
-    fn edit_diff_file(&mut self, dir: &str, root: &str, path: &str, cx: &mut Context<Self>) {
+    pub(super) fn edit_diff_file(&mut self, dir: &str, root: &str, path: &str, cx: &mut Context<Self>) {
         let (Some(snapshot), Some(tab)) = (self.snapshot.as_ref(), self.shown_tab()) else { return };
         let Some(pane) = snapshot.pane_frames(&tab.tab_id).into_iter().find(|f| f.focused).map(|f| f.pane_id) else { return };
         let (machine, full) = crate::changes::file_location(dir, root, path);
@@ -2219,7 +2427,7 @@ impl Shell {
     }
 
     /// A diff's image in the panes' image dialog. It's a pane's and takes its keys there, so the keyboard goes along.
-    fn preview_diff_file(&mut self, dir: &str, root: &str, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn preview_diff_file(&mut self, dir: &str, root: &str, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pane) = self.active_pane(window, cx).and_then(|id| self.panes.get(&id)).cloned() else { return };
         let (machine, full) = crate::changes::file_location(dir, root, path);
         self.release_panel();

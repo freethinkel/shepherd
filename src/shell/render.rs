@@ -36,6 +36,8 @@ impl Render for Shell {
         crate::ui::reap_popup(&mut self.merge_delete, window);
         crate::ui::reap_popup(&mut self.merge_failure, window);
         crate::ui::reap_popup(&mut self.merge_confirm, window);
+        crate::ui::reap_popup(&mut self.review_menu, window);
+        crate::ui::reap_popup(&mut self.review_commit_menu, window);
         crate::ui::reap_popup(&mut self.right.discard, window);
         crate::ui::reap_popup(&mut self.right.agents, window);
         crate::ui::reap_popup(&mut self.session_dialog, window);
@@ -306,19 +308,19 @@ impl Render for Shell {
         let shown = if show_bar || panel_drawn { self.shown_review(snapshot.as_ref(), window, cx) } else { Default::default() };
         let statusbar = show_bar.then(|| {
             let pane = self.active_pane(window, cx);
-            let on_branch = cx.listener(|this, _: &ClickEvent, window, cx| {
+            let on_branch = cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.toggle_command_panel(crate::ui::command_panel::Kind::Branches, window, cx)
             });
             // Popups sit on the label's edge, just above the bar.
             let on_spent = cx.listener(|this, label: &Bounds<Pixels>, window, cx| {
                 let at = gpui::point(label.left(), window.viewport_size().height - px(crate::ui::statusbar::HEIGHT + 4.));
-                this.spent_menu = Some(crate::ui::Popup::new(at));
+                crate::ui::Popup::toggle(&mut this.spent_menu, || at);
                 cx.notify();
             });
             let on_usage = cx.listener(|this, label: &Bounds<Pixels>, window, cx| {
                 // anchored at its right edge: the limits sit at the bar's right end
                 let at = gpui::point(label.right(), window.viewport_size().height - px(crate::ui::statusbar::HEIGHT + 4.));
-                this.usage_menu = Some(crate::ui::Popup::new(at));
+                crate::ui::Popup::toggle(&mut this.usage_menu, || at);
                 cx.notify();
             });
             use crate::ui::statusbar::Item;
@@ -487,6 +489,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ReloadPage, w, cx| this.reload_shown_page(w, cx)))
             .on_action(cx.listener(|this, _: &FocusAddress, w, cx| this.focus_address(w, cx)))
             .on_action(cx.listener(|this, _: &CopyPageUrl, w, cx| this.copy_page_url(w, cx)))
+            .on_action(cx.listener(|this, _: &CopyPrNumber, w, cx| this.copy_review(false, w, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.toggle_settings_here(window, cx)))
             .on_action(cx.listener(|this, _: &CommandPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Commands, w, cx)))
             .on_action(cx.listener(|this, _: &ChangeTheme, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Themes, w, cx)))

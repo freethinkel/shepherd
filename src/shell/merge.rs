@@ -192,13 +192,18 @@ impl Shell {
         });
     }
 
+    /// A row's `!`: shuts its own popover, else opens it, over another row's.
     pub(super) fn open_merge_failure(&mut self, id: String, at: gpui::Point<Pixels>, cx: &mut Context<Self>) {
-        self.merge_failure = Some(crate::ui::Popup::new((id, at)));
+        match self.merge_failure.as_mut().filter(|p| p.is_open() && p.value.0 == id) {
+            Some(p) => p.close(),
+            None => self.merge_failure = Some(crate::ui::Popup::new((id, at))),
+        }
         cx.notify();
     }
 
-    fn close_merge_failure(&mut self, cx: &mut Context<Self>) {
-        if let Some(p) = self.merge_failure.as_mut() {
+    /// Shuts the popover of the row `id`: another row's `!` may have just opened its own in the same press.
+    fn close_merge_failure(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(p) = self.merge_failure.as_mut().filter(|p| p.value.0 == id) {
             p.close();
         }
         cx.notify();
@@ -326,7 +331,10 @@ impl Shell {
             .w(px(300.))
             .p(px(14.))
             .text_color(theme.text)
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_merge_failure(cx)))
+            .on_mouse_down_out(cx.listener({
+                let id = id.clone();
+                move |this, _, _, cx| this.close_merge_failure(&id, cx)
+            }))
             .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(div().mt(px(4.)).text_color(theme.text_muted).child(format!("{} → {}", m.branch, m.base)))
             .child(
@@ -354,12 +362,12 @@ impl Shell {
                         let id = id.clone();
                         move |this, _: &ClickEvent, _, cx| {
                             this.merging.remove(&id);
-                            this.close_merge_failure(cx);
+                            this.close_merge_failure(&id, cx);
                         }
                     })))
                     .child(solid_button("merge-failure-force", "Force delete", theme.danger, gpui::white()).on_click(cx.listener(
                         move |this, _: &ClickEvent, _, cx| {
-                            this.close_merge_failure(cx);
+                            this.close_merge_failure(&id, cx);
                             this.force_merge_delete(id.clone(), cx);
                         },
                     ))),

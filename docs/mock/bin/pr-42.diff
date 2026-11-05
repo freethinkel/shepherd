@@ -1,0 +1,49 @@
+diff --git a/src/ui/review.rs b/src/ui/review.rs
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/ui/review.rs
++++ b/src/ui/review.rs
+@@ -140,9 +140,21 @@ impl Check {
+     }
+ }
+ 
++/// The calls that retry a page's failed jobs: one per run on GitHub, one per job on GitLab.
++pub fn retry_failed(checks: &[Check], gitlab: bool) -> Vec<Vec<String>> {
++    let failed = checks.iter().filter(|c| c.state == CheckState::Failed);
++    if gitlab {
++        return failed.filter_map(|c| c.command(true, Action::Retry)).collect();
++    }
++    let mut runs: Vec<String> = failed.filter_map(|c| c.run.clone()).collect();
++    runs.dedup();
++    runs.into_iter().map(|run| ["gh", "run", "rerun", &run, "--failed"].map(String::from).to_vec()).collect()
++}
++
+ /// Runs one CLI call in `dir`.
+ pub fn act(dir: &str, args: &[String]) -> Result<(), String> {
+-    let out = cli(&args[0], &args[1..], dir).map_err(|e| e.to_string())?;
++    let rest: Vec<&str> = args[1..].iter().map(String::as_str).collect();
++    let out = cli(&args[0], &rest, dir).map_err(|e| e.to_string())?;
+     if out.status.success() {
+         return Ok(());
+     }
+diff --git a/src/shell/review.rs b/src/shell/review.rs
+index 2b3c4d5..6e7f809 100644
+--- a/src/shell/review.rs
++++ b/src/shell/review.rs
+@@ -12,6 +12,8 @@ use crate::ui::statusbar::{branch_of, cached, fetching, pane_dir, refetch};
+ const REVIEW_TTL: Duration = Duration::from_secs(120);
+ /// How often while one of its checks runs or waits to.
+ pub(super) const REVIEW_POLL: Duration = Duration::from_secs(10);
++/// How long after a retry before asking again: the host takes a moment to queue it.
++const SETTLE: Duration = Duration::from_secs(3);
+ 
+ /// The shown pane's branch and its review, for the panel and the status bar.
+ #[derive(Default)]
+diff --git a/assets/icons/restart.svg b/assets/icons/restart.svg
+new file mode 100644
+index 0000000..a1b2c3d
+--- /dev/null
++++ b/assets/icons/restart.svg
+@@ -0,0 +1,3 @@
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
++  <path fill="none" stroke="currentColor" stroke-width="1.5" d="M4 12a8 8 0 1 0 2.3-5.7M4 4v4h4"/>
++</svg>
