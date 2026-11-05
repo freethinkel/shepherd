@@ -12,8 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const SOURCE: &str = include_str!("duo-hid.m");
-/// The cover screen's pixels; the inner one is the largest, simdriver's own pick.
+/// The screens' pixels: the cover's, and the inner one's, which is the largest. Each stream names its own: one left to
+/// pick the largest watches the main display's port, and stays dark when started as a fold hands over.
 pub(super) const COVER: (u32, u32) = (1398, 2034);
+pub(super) const INNER: (u32, u32) = (2007, 2853);
 /// The simulator's TV-out screen's, which shows nothing.
 pub(super) const TV_OUT: (u32, u32) = (720, 480);
 
@@ -146,10 +148,12 @@ struct Shared {
 
 impl Shared {
     /// SpringBoard settled a fold: show the screen it left live.
-    fn settled(&self, cover: bool, angle: f64) {
+    /// The hinge is at `angle` with the cover live, or not; `handed_over` when SpringBoard says a fold has just handed
+    /// over to that screen, which is lit only now: its stream starts afresh (one started dark stays dark).
+    fn settled(&self, cover: bool, angle: f64, handed_over: bool) {
         let was = self.feed.fold().map(|f| f.cover);
         // a session closing must not start its stream again
-        if was != Some(cover) && !self.closed.load(Ordering::Relaxed) {
+        if (was != Some(cover) || handed_over) && !self.closed.load(Ordering::Relaxed) {
             (self.show)(cover);
         }
         let orientation = orientation(&self.udid, cover);
@@ -179,8 +183,9 @@ impl Shared {
             }
             for line in lines.map_while(Result::ok) {
                 let was = self.feed.fold().map_or((true, 0.), |f| (f.cover, f.angle));
-                if let Some(now) = settled(&line, was).filter(|now| *now != was) {
-                    self.settled(now.0, now.1);
+                let handed_over = line.contains("COMPLETED:");
+                if let Some(now) = settled(&line, was).filter(|now| *now != was || handed_over) {
+                    self.settled(now.0, now.1, handed_over);
                 }
             }
             std::thread::sleep(Duration::from_secs(1));
@@ -203,6 +208,17 @@ impl Shared {
 
     /// Makes one move, and notes what came of it.
     fn make(&self, hinge: Hinge) {
+        // the screen the fold will leave live, shown now as serve-sim does: SpringBoard says so seconds later, once
+        // the screen has gone dark and lit again
+        let cover = match hinge {
+            Hinge::Angle(a) => Some(a <= 54.),
+            Hinge::Stand(s) => Some(s == Stand::Tent),
+            Hinge::Hold(_) => None,
+        };
+        if let Some(cover) = cover.filter(|c| self.feed.fold().is_some_and(|f| f.cover != *c)) {
+            (self.show)(cover);
+            self.feed.change_fold(|f| f.cover = cover);
+        }
         let sent = self.send(&commands(hinge));
         // the UI turns a moment after it's held otherwise, and says so nowhere SpringBoard's log does
         std::thread::sleep(Duration::from_millis(700));

@@ -63,6 +63,16 @@ fn start(options: simdriver::Options, feed: Arc<Feed>, wake: Wake, on_frame: imp
     })?)
 }
 
+/// How long a screen switched to may stay dark: a closed Duo's cover lights some seconds after the fold.
+const LIGHTING: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// All but black: a screen not lit yet. Sampled, a few dozen pixels across it.
+fn blank(frame: &Frame) -> bool {
+    let pixels = frame.pixels.chunks_exact(4);
+    let step = (pixels.len() / 64).max(1);
+    pixels.step_by(step).all(|p| p[0] < 8 && p[1] < 8 && p[2] < 8)
+}
+
 /// iPhone Duo's two screens, as t3code's: a fold shows the other one's latest frame at once, and streams it afresh
 /// (a stream started while its screen was dark stays dark when it lights up).
 struct Panels {
@@ -72,15 +82,23 @@ struct Panels {
     last: Mutex<[Option<Arc<Frame>>; 2]>,
     /// The live screen's stream.
     stream: Mutex<Option<simdriver::FrameStream>>,
+    /// When the live screen was switched to: it can be dark a few seconds more (a fold's cover lights late).
+    shown_at: Mutex<std::time::Instant>,
     feed: Arc<Feed>,
     wake: Wake,
 }
 
 impl Panels {
     fn frame(&self, cover: bool, frame: Frame) {
+        // a screen still dark after the switch keeps its last lit frame, as t3code's viewer does
+        let lighting = self.shown_at.lock().is_ok_and(|at| at.elapsed() < LIGHTING) && blank(&frame);
         let frame = Arc::new(frame);
         if let Ok(mut last) = self.last.lock() {
-            last[usize::from(!cover)] = Some(frame.clone());
+            let slot = &mut last[usize::from(!cover)];
+            if lighting && slot.is_some() {
+                return;
+            }
+            *slot = Some(frame.clone());
         }
         if self.cover.load(Ordering::Relaxed) == cover {
             self.feed.put_shared(frame);
@@ -91,20 +109,14 @@ impl Panels {
     /// Shows the cover (or the inner screen): its last frame now, then its stream.
     fn show(self: &Arc<Self>, cover: bool) {
         self.cover.store(cover, Ordering::Relaxed);
+        if let Ok(mut at) = self.shown_at.lock() {
+            *at = std::time::Instant::now();
+        }
         if let Some(frame) = self.last.lock().ok().and_then(|last| last[usize::from(!cover)].clone()) {
             self.feed.put_shared(frame);
             (self.wake)();
         }
         self.stream(cover);
-        // ponytail: a screen just lit can still swap its surface, which leaves a stream started on the old one dark;
-        // streamed again a moment later it isn't. A stream that's dark for good would need sdframe to follow the swap.
-        let p = self.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            if p.cover.load(Ordering::Relaxed) == cover && p.stream.lock().is_ok_and(|s| s.is_some()) {
-                p.stream(cover);
-            }
-        });
     }
 
     /// Streams the cover (or the inner screen) afresh, in place of the stream there was.
@@ -112,7 +124,7 @@ impl Panels {
         let options = match cover {
             true => simdriver::Options { screen_size: Some(duo::COVER), ..options(&self.udid) },
             // mounted sideways
-            false => simdriver::Options { rotate_cw: true, ..options(&self.udid) },
+            false => simdriver::Options { screen_size: Some(duo::INNER), rotate_cw: true, ..options(&self.udid) },
         };
         let p = self.clone();
         let stream = simdriver::FrameStream::start(&options, move |f| p.frame(cover, frame(f, Some(duo::screen(cover)))));
@@ -154,6 +166,7 @@ impl Session {
             cover: AtomicBool::new(last.0),
             last: Mutex::default(),
             stream: Mutex::default(),
+            shown_at: Mutex::new(std::time::Instant::now()),
             feed: feed.clone(),
             wake: wake.clone(),
         });
@@ -222,6 +235,13 @@ impl Drop for Session {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dark_screens_read_blank() {
+        let frame = |px: [u8; 4]| super::Frame { width: 10, height: 10, pixels: px.repeat(100), rgb: false, screen: Some(1) };
+        assert!(super::blank(&frame([0, 0, 0, 255])));
+        assert!(!super::blank(&frame([200, 200, 200, 255])));
+    }
+
     #[test]
     fn runtime_versions_read_as_xcode_shows_them() {
         assert_eq!(super::version("iOS-27-0"), "iOS 27.0");
