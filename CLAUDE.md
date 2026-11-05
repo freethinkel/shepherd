@@ -6,8 +6,8 @@ Before opening a PR, and in its description:
 
 - **Screenshots, before and after.** Capture the app on `main` (before) and on the branch (after), showing what the
   change touches, and attach both to the PR. `docs/mock/shot.sh <out.png>` shoots the window from the mock fixture on
-  macOS (`make linux-shot` on Linux, below), and `SHEPHERD_PANEL=commands|agents|workspaces|sessions` opens a panel
-  for the shot. If a change has nothing to see (an internal refactor, a backend fix), say so instead.
+  macOS (`make linux-shot` on Linux, below), and `SHEPHERD_PANEL=commands|agents|workspaces|sessions|browser` opens a
+  panel for the shot (`browser`, a blank browser tab in the right panel). If a change has nothing to see (an internal refactor, a backend fix), say so instead.
   GitHub's API can't attach images: push them to the orphan branch `pr-assets` under `pr-<number>/` and link them as
   `https://raw.githubusercontent.com/freethinkel/shepherd/pr-assets/pr-<number>/<name>.png`.
 - **What changed and why.** Explain in plain words what the user sees or can do now and what was wrong or missing

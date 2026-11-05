@@ -2,7 +2,7 @@
 use super::*;
 
 /// An unfocused pane of a split shows at this opacity.
-const INACTIVE_PANE: f32 = 0.6;
+const INACTIVE_PANE: f32 = 0.8;
 /// The room between two panes in the comfortable pane style; half of it at the grid's edges.
 const PANE_GAP: f32 = 8.;
 /// The highlighted active pane's ring.
@@ -152,8 +152,15 @@ impl Render for Shell {
             (s.pane_style == crate::settings::PaneStyle::Comfortable, s.highlight_active_pane)
         };
         let radius = px(if comfortable { crate::terminal::pane::CARD_RADIUS } else { 0. });
-        // the pane the keys go to, else herdr's focused one: a click focuses a pane here without telling herdr
-        let active = self.active_pane(window, cx);
+        // the pane the keys go to, else the last one they went to (the keys are in a panel), else herdr's focused one:
+        // a click focuses a pane here without telling herdr
+        let focused = self.panes.iter().find(|(_, p)| p.read(cx).focus_handle(cx).is_focused(window)).map(|(id, _)| id.clone());
+        if focused.is_some() {
+            self.last_pane = focused.clone();
+        }
+        let active = focused
+            .or_else(|| self.last_pane.clone().filter(|id| frames.iter().any(|f| &f.pane_id == id)))
+            .or_else(|| self.active_pane(window, cx));
         let pane_drop = self.pane_drop_overlay(&frames, &shown_tab_id, &theme, window, cx);
         let edges: Vec<f32> = splits.iter().map(|s| crate::model::split_edge(&frames, s)).collect();
         let floating = self.render_floating(&theme, window, cx);

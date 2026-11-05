@@ -604,13 +604,15 @@ impl Shell {
         let popup = self.popup_open() || self.browser.editing() || self.note_focused(window, cx);
         // the page that takes the keyboard takes it after the others let go: `focus_parent` would take it back
         let mut takes = None;
+        // a blank browser tab lists the ports in its page's place
+        let ports = shown.as_ref().is_some_and(|k| self.shows_ports(k));
         for (key, page) in &mut self.pages.live {
             // WebKit's own word, which also ends a load that failed before it began (no Finished comes for one)
             #[cfg(target_os = "macos")]
             {
                 page.loading = host::loading(&page.view);
             }
-            let visible = shown.as_ref() == Some(key) && !covered;
+            let visible = shown.as_ref() == Some(key) && !covered && !ports;
             if page.visible != visible {
                 page.visible = visible;
                 let _ = page.view.set_visible(visible);

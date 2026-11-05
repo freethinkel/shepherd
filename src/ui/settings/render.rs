@@ -208,8 +208,8 @@ impl Render for SettingsView {
                         AppearanceMode::System => div()
                             .size_full()
                             .flex()
-                            .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&light)))
-                            .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&dark))),
+                            .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&light).rounded_l(px(5.))))
+                            .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&dark).rounded_r(px(5.)))),
                         AppearanceMode::Light => miniature(&light),
                         AppearanceMode::Dark => miniature(&dark),
                     };
@@ -365,16 +365,17 @@ impl Render for SettingsView {
                         UsageAgent::Codex => ("From Codex's ChatGPT sign-in.", "https://chatgpt.com/codex/settings/usage"),
                     };
                     // ponytail: no loading state; the first second after opening reads as not signed in
-                    let limits = crate::ui::statusbar::usage_of(agent, cx).filter(|l| !l.is_empty());
+                    let usage = crate::ui::statusbar::usage_of(agent, cx);
                     card(&theme)
                         .child(
                             card_row(&theme, true)
                                 .child(row_text(&theme, agent.label(), source))
                                 .child(action(&theme, SharedString::from(format!("usage-web-{}", agent.key())), "Open on the web").on_click(move |_: &ClickEvent, _, cx| cx.open_url(url))),
                         )
-                        .child(div().px(px(8.)).pb(px(8.)).text_size(px(12.)).map(|el| match &limits {
-                            Some(limits) => el.children(limits.iter().map(|l| crate::ui::statusbar::limit_row(&theme, l))),
-                            None => el.child(div().px(px(8.)).pb(px(4.)).text_color(theme.text_muted).child(format!("Sign in to {} to see its limits.", agent.label()))),
+                        .child(div().px(px(8.)).pb(px(8.)).text_size(px(12.)).map(|el| match &usage {
+                            Some(Ok(limits)) if !limits.is_empty() => el.children(limits.iter().map(|l| crate::ui::statusbar::limit_row(&theme, l))),
+                            Some(Err(why)) => el.child(div().px(px(8.)).pb(px(4.)).text_color(theme.text_muted).child(format!("{why}."))),
+                            _ => el.child(div().px(px(8.)).pb(px(4.)).text_color(theme.text_muted).child(format!("Sign in to {} to see its limits.", agent.label()))),
                         }))
                 });
                 div()

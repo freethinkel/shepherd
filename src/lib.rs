@@ -14,6 +14,7 @@ pub mod herdr;
 pub mod mock;
 pub mod model;
 pub mod notify;
+pub mod ports;
 pub mod process;
 pub mod rex;
 pub mod right_panel;

@@ -80,7 +80,10 @@ fn main() {
                 cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
                 cx.update(|cx| {
                     let Some(window) = cx.windows().into_iter().find_map(|w| w.downcast::<shepherd::shell::Shell>()) else { return };
-                    let _ = window.update(cx, |shell, window, cx| shell.toggle_command_panel(kind, window, cx));
+                    let _ = window.update(cx, |shell, window, cx| match which.as_str() {
+                        "browser" => shell.open_blank_tab(window, cx),
+                        _ => shell.toggle_command_panel(kind, window, cx),
+                    });
                 })
             })
             .detach();

@@ -30,6 +30,7 @@ mod merge;
 mod motion;
 mod pane_drag;
 mod popups;
+mod ports;
 mod render;
 mod reorder;
 mod review;
@@ -166,6 +167,8 @@ pub struct Shell {
     view_menu: Option<crate::ui::Popup<()>>,
     /// The done agent's pane herdr was last told you looked at, so it is told once, not every frame.
     marked_seen: Option<String>,
+    /// The pane that last had the keyboard: it stays the lit one while the keys are in a panel.
+    last_pane: Option<String>,
     /// An agent's pane to give the keyboard once it is shown, over herdr's focused pane of its tab.
     focus_next: Option<String>,
     /// The `…` menu's submenu that is out: the pointer went over its row.
@@ -515,6 +518,7 @@ impl Shell {
                     view_menu: None,
                     focus_next: None,
                     marked_seen: None,
+                    last_pane: None,
                     view_submenu: None,
                     view_submenu_bounds: Default::default(),
                     view_submenu_switch: None,

@@ -110,7 +110,7 @@ pub(super) fn toggle_row(
 }
 
 /// A card of the Color scheme row: a preview of the look, its icon and name under it (Zeron's option card).
-pub(super) fn option_card(theme: &Theme, icon: &'static str, label: &'static str, selected: bool, preview: impl IntoElement) -> Div {
+pub(super) fn option_card(theme: &Theme, icon: &'static str, label: &'static str, selected: bool, preview: Div) -> Div {
     let tone = if selected { theme.accent } else { theme.text_muted };
     div()
         .flex_1()
@@ -128,7 +128,8 @@ pub(super) fn option_card(theme: &Theme, icon: &'static str, label: &'static str
                 .overflow_hidden()
                 .border_1()
                 .border_color(if selected { theme.accent } else { theme.border })
-                .child(preview),
+                // overflow_hidden clips square: the fill rounds itself, inside the 1 px border
+                .child(preview.rounded(px(5.))),
         )
         .child(
             div()
@@ -184,9 +185,10 @@ pub(super) fn palette_preview(theme: &Theme) -> Div {
         .border_1()
         .border_color(theme.border)
         .flex()
-        .child(div().w_1_3().h_full().bg(theme.surface))
+        // the ends round themselves: overflow_hidden clips square
+        .child(div().w_1_3().h_full().rounded_l(px(4.)).bg(theme.surface))
         .child(div().w_1_3().h_full().bg(theme.terminal.background))
-        .child(div().w_1_3().h_full().bg(theme.accent))
+        .child(div().w_1_3().h_full().rounded_r(px(4.)).bg(theme.accent))
 }
 
 /// One option of a row of choices: outlined, filled when selected.

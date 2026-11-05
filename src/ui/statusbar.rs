@@ -339,8 +339,11 @@ fn usage_color(used: f64, theme: &Theme) -> gpui::Hsla {
     if used >= 90. { theme.danger } else if used >= 70. { theme.warning } else { theme.accent }
 }
 
-/// `agent`'s limits as the bar polls them: cached, asked again every [`USAGE_TTL`].
-pub fn usage_of(agent: UsageAgent, cx: &mut App) -> Option<Vec<Limit>> {
+/// An agent's limits, or in a few words why there are none to show (`Rate limited`, `Not signed in`).
+pub type Usage = Result<Vec<Limit>, &'static str>;
+
+/// `agent`'s limits as the bar polls them: cached, asked again every [`USAGE_TTL`]; `None` until first read.
+pub fn usage_of(agent: UsageAgent, cx: &mut App) -> Option<Usage> {
     cached(agent.key(), USAGE_TTL, read_usage, cx)
 }
 
@@ -368,12 +371,13 @@ pub fn limit_row(theme: &Theme, limit: &Limit) -> gpui::Div {
 /// The limits popup's card: each window of the status bar's agent, and a way to Usage settings.
 pub fn usage_card(theme: &Theme, on_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &mut App) -> gpui::Stateful<gpui::Div> {
     let agent = crate::settings::SettingsGlobal::of(cx).settings.usage_agent;
-    let limits = usage_of(agent, cx).unwrap_or_default();
+    let usage = usage_of(agent, cx);
     let hover = theme.hover;
     crate::shell::menu_card(theme, "usage-menu", 240.)
         .text_size(px(12.))
         .text_color(theme.text)
-        .children(limits.iter().map(|l| limit_row(theme, l)))
+        .children(usage.as_ref().and_then(|u| u.as_ref().ok()).into_iter().flatten().map(|l| limit_row(theme, l)))
+        .children(usage.and_then(Result::err).map(|why| div().px(px(8.)).py(px(6.)).text_color(theme.text_muted).child(why)))
         .child(
             div()
                 .id("usage-open")
@@ -390,31 +394,70 @@ pub fn usage_card(theme: &Theme, on_settings: impl Fn(&ClickEvent, &mut Window, 
         )
 }
 
-/// `key` is a [`UsageAgent::key`]; `None` when that agent is not signed in or its endpoint fails.
-fn read_usage(key: &str) -> Option<Vec<Limit>> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into();
-    if key == UsageAgent::Codex.key() {
-        // ponytail: Codex CLI refreshes this token when it runs; one left stale long enough just hides the limits
-        let home = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from).or_else(|| Some(std::env::home_dir()?.join(".codex")))?;
-        let auth: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("auth.json")).ok()?).ok()?;
-        let mut response = agent
-            .get("https://chatgpt.com/backend-api/wham/usage")
-            .header("Authorization", &format!("Bearer {}", auth["tokens"]["access_token"].as_str()?))
-            .header("ChatGPT-Account-Id", auth["tokens"]["account_id"].as_str()?)
-            .call()
-            .ok()?;
-        return parse_codex_usage(&response.body_mut().read_to_string().ok()?);
+/// `key` is a [`UsageAgent::key`]. Always an answer, a failure too: the bar shows why rather than nothing.
+fn read_usage(key: &str) -> Option<Usage> {
+    Some(match key == UsageAgent::Codex.key() {
+        true => read_codex_usage(),
+        false => read_claude_usage(),
+    })
+}
+
+/// A failed usage request in a few words.
+fn why_failed(e: ureq::Error) -> &'static str {
+    match e {
+        ureq::Error::StatusCode(401 | 403) => "Sign-in expired",
+        ureq::Error::StatusCode(429) => "Rate limited",
+        ureq::Error::StatusCode(_) => "Usage unavailable",
+        _ => "Offline",
     }
-    // The endpoint Claude Code itself reads, with the token Claude Code keeps (and refreshes).
-    let creds: serde_json::Value = serde_json::from_slice(&claude_credentials()?).ok()?;
-    let token = creds["claudeAiOauth"]["accessToken"].as_str()?;
-    let mut response = agent
+}
+
+fn usage_agent() -> ureq::Agent {
+    ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into()
+}
+
+fn read_codex_usage() -> Usage {
+    // ponytail: Codex CLI refreshes this token when it runs; one left stale long enough reads as an expired sign-in
+    let home = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from).or_else(|| Some(std::env::home_dir()?.join(".codex")));
+    let auth = home.and_then(|h| std::fs::read_to_string(h.join("auth.json")).ok()).and_then(|a| serde_json::from_str::<serde_json::Value>(&a).ok());
+    let Some(auth) = auth else { return Err("Not signed in") };
+    let tokens = &auth["tokens"];
+    let (Some(token), Some(account)) = (tokens["access_token"].as_str(), tokens["account_id"].as_str()) else {
+        // signed in with an OpenAI API key: billed by the token, no plan
+        return Err(if auth["OPENAI_API_KEY"].is_string() { "API key, no plan limits" } else { "Not signed in" });
+    };
+    let mut response = usage_agent()
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("ChatGPT-Account-Id", account)
+        .call()
+        .map_err(why_failed)?;
+    response.body_mut().read_to_string().ok().and_then(|b| parse_codex_usage(&b)).ok_or("Usage unavailable")
+}
+
+/// The endpoint Claude Code itself reads, with the token Claude Code keeps (and refreshes).
+fn read_claude_usage() -> Usage {
+    let creds = claude_credentials().and_then(|c| serde_json::from_slice::<serde_json::Value>(&c).ok());
+    let Some(token) = creds.as_ref().and_then(|c| c["claudeAiOauth"]["accessToken"].as_str()) else {
+        return Err(if claude_uses_api_key() { "API key, no plan limits" } else { "Not signed in" });
+    };
+    let mut response = usage_agent()
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", &format!("Bearer {token}"))
         .header("anthropic-beta", "oauth-2025-04-20")
+        // as Claude Code asks: other clients are rate limited far sooner (429)
+        .header("User-Agent", "claude-code/2.0.0")
         .call()
-        .ok()?;
-    parse_claude_usage(&response.body_mut().read_to_string().ok()?)
+        .map_err(why_failed)?;
+    response.body_mut().read_to_string().ok().and_then(|b| parse_claude_usage(&b)).ok_or("Usage unavailable")
+}
+
+/// Claude Code signed in with a Console API key, billed by the token: its `.claude.json` keeps the key.
+fn claude_uses_api_key() -> bool {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
+    let file = dir.map(|d| d.join(".claude.json")).or_else(|| Some(std::env::home_dir()?.join(".claude.json")));
+    let config = file.and_then(|f| std::fs::read_to_string(f).ok()).and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
+    std::env::var_os("ANTHROPIC_API_KEY").is_some() || config.is_some_and(|c| c["primaryApiKey"].is_string() && c["oauthAccount"].is_null())
 }
 
 /// Claude Code's sign-in, as it keeps it: in the login keychain on macOS, as the dotfiles' statusbar reads it;
@@ -799,7 +842,7 @@ pub fn bar(
     let pane = snapshot.zip(pane_id).and_then(|(s, id)| s.panes.iter().find(|p| p.pane_id == id));
     let dir = pane_dir(snapshot, pane_id);
     let git = dir.as_deref().filter(|_| show.branch).and_then(|d| cached(d, GIT_TTL, read_git, cx));
-    let usage = show.usage.then(|| usage_of(crate::settings::SettingsGlobal::of(cx).settings.usage_agent, cx)).flatten().filter(|l| !l.is_empty());
+    let usage = show.usage.then(|| usage_of(crate::settings::SettingsGlobal::of(cx).settings.usage_agent, cx)).flatten();
     let home = std::env::home_dir();
     let muted = theme.text_muted.opacity(0.7);
     div()
@@ -854,12 +897,17 @@ pub fn bar(
                 .child(format!("{} tok", short_count(s.total())))
         }))
         .child(div().flex_1())
-        .children(usage.map(|limits| {
-            // the dotfiles' statusbar: the ring fills with the first (shortest) window, colored by the worst one
-            let color = usage_color(limits.iter().map(|l| l.used).fold(0., f64::max), theme);
-            on_click_at(link(div().id("statusbar-usage").flex_none().flex().items_center().gap(px(6.)).px(px(8.)), theme, open == Some(Item::Usage)), on_usage)
-                .child(donut(limits[0].used, theme.text.opacity(0.2), color))
-                .child(format!("{}%", limits[0].used.round()))
+        .children(usage.map(|usage| {
+            let item = on_click_at(link(div().id("statusbar-usage").flex_none().flex().items_center().gap(px(6.)).px(px(8.)), theme, open == Some(Item::Usage)), on_usage);
+            match usage.as_deref() {
+                // the dotfiles' statusbar: the ring fills with the first (shortest) window, colored by the worst one
+                Ok([first, ..]) => {
+                    let color = usage_color(usage.iter().flatten().map(|l| l.used).fold(0., f64::max), theme);
+                    item.child(donut(first.used, theme.text.opacity(0.2), color)).child(format!("{}%", first.used.round()))
+                }
+                Ok([]) => item.child("Usage unavailable"),
+                Err(why) => item.child(*why),
+            }
         }))
         .into_any_element()
 }
