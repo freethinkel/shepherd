@@ -103,8 +103,9 @@ impl SettingsView {
                 .flex()
                 .flex_col()
                 .track_focus(&self.select_focus)
-                .on_mouse_down_out(cx.listener(|v, _, _, cx| {
-                    if let Some(m) = v.open_select.as_mut() { m.close() }
+                // only this select's: another's trigger may have just opened its own in the same press
+                .on_mouse_down_out(cx.listener(move |v, _, _, cx| {
+                    if let Some(m) = v.open_select.as_mut().filter(|m| m.value == id) { m.close() }
                     cx.notify();
                 }))
                 // Up and Down (or Emacs's ctrl-p and ctrl-n, as in the command panel) move the highlight round the

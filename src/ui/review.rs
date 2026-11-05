@@ -1118,6 +1118,8 @@ fn commit_patch(dir: &str, gitlab: bool, sha: &str) -> Result<(String, String), 
 /// whether it was cut at [`MAX_DIFF_BYTES`].
 #[derive(Debug, Default, PartialEq)]
 pub struct PrDiff {
+    /// From the checkout's directory, which may be deep in the repo, to its root: the patch's paths are the root's.
+    pub root: String,
     pub patch: String,
     pub files: Vec<crate::changes::FileDiff>,
     pub cut: bool,
@@ -1236,7 +1238,8 @@ pub fn read_diff(key: &str) -> Option<Result<std::sync::Arc<PrDiff>, String>> {
             patch.truncate(end);
         }
         let files = crate::changes::parse_patch(&patch);
-        Ok(std::sync::Arc::new(PrDiff { patch, files, cut }))
+        let root = crate::changes::repo_root(dir).unwrap_or_default();
+        Ok(std::sync::Arc::new(PrDiff { root, patch, files, cut }))
     }))
 }
 
@@ -1376,7 +1379,9 @@ pub fn gitlab_draft(note: &ReviewNote, refs: &Value) -> Value {
 
 /// Sends a review of the PR or MR at `url` (checked out in `dir`): GitHub takes it in one request; on GitLab each
 /// comment is a draft note, then they're published together, the summary is a note and an approval is its own call.
-pub fn submit_review(dir: &str, url: &str, gitlab: bool, number: u64, verdict: ReviewEvent, body: &str, notes: &[ReviewNote]) -> Result<(), String> {
+/// An error leaves nothing on the host; `Ok(Some(why))` is a GitLab summary or approval that failed after the comments
+/// went out, so they aren't sent again.
+pub fn submit_review(dir: &str, url: &str, gitlab: bool, number: u64, verdict: ReviewEvent, body: &str, notes: &[ReviewNote]) -> Result<Option<String>, String> {
     let input = |payload: &Value| -> Result<std::path::PathBuf, String> {
         let path = std::env::temp_dir().join(format!("shepherd-review-{}-{number}.json", std::process::id()));
         std::fs::write(&path, payload.to_string()).map_err(|e| e.to_string())?;
@@ -1389,28 +1394,51 @@ pub fn submit_review(dir: &str, url: &str, gitlab: bool, number: u64, verdict: R
         let file = input(&github_review(verdict, body, notes))?;
         let done = act(dir, &args(&["gh", "api", "-X", "POST", "--hostname", &host, &format!("repos/{repo}/pulls/{number}/reviews"), "--input", &file.to_string_lossy()]));
         let _ = std::fs::remove_file(file);
-        return done;
+        return done.map(|_| None);
     }
     let mr = format!("projects/:id/merge_requests/{number}");
     if !notes.is_empty() {
         let (out, err) = run("glab", &["api", &mr], dir).map_err(|e| e.to_string())?;
         let refs = serde_json::from_str::<Value>(&out).ok().map(|v| v["diff_refs"].clone()).filter(|r| r.is_object());
         let refs = refs.ok_or_else(|| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't read the MR").to_string())?;
+        // the drafts made so far go again if a later one fails: a retry would post them twice
+        let mut made: Vec<u64> = Vec::new();
+        let undo = |made: &[u64], why: String| {
+            for id in made {
+                let _ = act(dir, &args(&["glab", "api", "-X", "DELETE", &format!("{mr}/draft_notes/{id}")]));
+            }
+            why
+        };
         for note in notes {
-            let file = input(&gitlab_draft(note, &refs))?;
-            let done = act(dir, &args(&["glab", "api", "-X", "POST", &format!("{mr}/draft_notes"), "-H", "Content-Type: application/json", "--input", &file.to_string_lossy()]));
+            let file = input(&gitlab_draft(note, &refs)).map_err(|why| undo(&made, why))?;
+            let posted = run("glab", &["api", "-X", "POST", &format!("{mr}/draft_notes"), "-H", "Content-Type: application/json", "--input", &file.to_string_lossy()], dir);
             let _ = std::fs::remove_file(file);
-            done?;
+            let id = posted.as_ref().ok().and_then(|(out, _)| serde_json::from_str::<Value>(out).ok()?["id"].as_u64());
+            match id {
+                Some(id) => made.push(id),
+                None => {
+                    let why = posted.map_or_else(|e| e.to_string(), |(_, err)| err.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Couldn't add a comment").to_string());
+                    return Err(undo(&made, why));
+                }
+            }
         }
-        act(dir, &args(&["glab", "api", "-X", "POST", &format!("{mr}/draft_notes/bulk_publish")]))?;
+        act(dir, &args(&["glab", "api", "-X", "POST", &format!("{mr}/draft_notes/bulk_publish")])).map_err(|why| undo(&made, why))?;
     }
+    // something already on the host makes a later failure a partial send, not an error to retry
+    let mut wrote = !notes.is_empty();
+    let partial = |wrote: bool, why: String| if wrote { Ok(Some(why)) } else { Err(why) };
     if !body.trim().is_empty() {
-        act(dir, &args(&["glab", "api", "-X", "POST", &format!("{mr}/notes"), "-f", &format!("body={}", body.trim())]))?;
+        if let Err(why) = act(dir, &args(&["glab", "api", "-X", "POST", &format!("{mr}/notes"), "-f", &format!("body={}", body.trim())])) {
+            return partial(wrote, why);
+        }
+        wrote = true;
     }
-    if verdict == ReviewEvent::Approve {
-        approve(dir, true, number)?;
+    if verdict == ReviewEvent::Approve
+        && let Err(why) = approve(dir, true, number)
+    {
+        return partial(wrote, why);
     }
-    Ok(())
+    Ok(None)
 }
 
 pub use zeron_markdown::{Block, InlineRun};

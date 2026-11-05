@@ -1057,7 +1057,7 @@ fn line(bytes: Vec<u8>) -> String {
 /// `git diff`'s words whatever the user's config says. `bigFileThreshold` makes a bigger file a binary one, unread.
 const DIFF: [&str; 12] = ["-c", "core.quotePath=false", "-c", "core.bigFileThreshold=2m", "--no-optional-locks", "diff", "--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--find-renames", "--unified=3"];
 
-fn repo_root(dir: &str) -> Result<String, String> {
+pub fn repo_root(dir: &str) -> Result<String, String> {
     let cdup = line(run(dir, &["rev-parse", "--show-cdup"])?);
     Ok(if cdup.is_empty() { ".".to_string() } else { cdup })
 }

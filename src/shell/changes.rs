@@ -399,18 +399,26 @@ impl Changes {
             // a draft belongs to its PR
             self.draft = None;
         }
+        if !view.commentable && self.draft.is_some() {
+            // a card on the PR's lines doesn't sit over one commit's: it's staged as it is
+            self.commit_draft(cx);
+        }
         if self.dir.as_deref() != Some(dir) {
             self.dir = Some(dir.to_string());
         }
         let diff = view.diff.clone();
-        let reposted = self.pr.as_ref().is_some_and(|pr| pr.posted != view.posted);
+        let redraw = self.pr.as_ref().is_some_and(|pr| pr.posted != view.posted || pr.commentable != view.commentable);
         self.pr = Some(view);
-        if reposted {
+        if redraw {
             self.sync_comment_rows(cx);
         }
         if fresh {
             let checksum = format!("{:016x}", hash64(&[&diff.patch]));
-            self.captured(Ok(CheckoutDiff { root: String::new(), base: String::new(), head: None, patch: diff.patch.clone(), truncated: diff.cut, checksum }), cx);
+            if self.diff.as_ref().is_some_and(|d| d.checksum != checksum) {
+                // another PR, commit or push: folds and the scroll don't carry over by path
+                self.forget_diff(cx);
+            }
+            self.captured(Ok(CheckoutDiff { root: diff.root.clone(), base: String::new(), head: None, patch: diff.patch.clone(), truncated: diff.cut, checksum }), cx);
         }
     }
 
@@ -563,7 +571,8 @@ impl Changes {
     }
 
     fn discard_request(&self) -> Option<(String, String)> {
-        let diff = self.diff.as_ref().filter(|d| self.scope == DiffScope::WorkingTree && !d.truncated && !d.patch.trim().is_empty())?;
+        // a PR's patch isn't the checkout's: nothing of it to discard
+        let diff = self.diff.as_ref().filter(|d| self.pr.is_none() && self.scope == DiffScope::WorkingTree && !d.truncated && !d.patch.trim().is_empty())?;
         Some((self.dir.clone()?, diff.checksum.clone()))
     }
 
@@ -958,8 +967,11 @@ impl Changes {
     fn staged_comments(&self) -> Vec<ReviewComment> {
         let editing = self.draft.as_ref().and_then(|draft| draft.editing_id);
         let shown = self.comments_key().and_then(|key| self.comments.get(&key));
-        // a PR's own comments first, as they came before ours (not over one commit: its lines are numbered apart)
-        let posted = self.pr.as_ref().filter(|pr| pr.commentable).map(|pr| pr.posted.as_slice()).unwrap_or_default();
+        // a PR's own comments first, as they came before ours; none over one commit, whose lines are numbered apart
+        if !self.commentable() {
+            return Vec::new();
+        }
+        let posted = self.pr.as_ref().map(|pr| pr.posted.as_slice()).unwrap_or_default();
         posted.iter().chain(shown.into_iter().flatten().filter(|comment| Some(comment.id) != editing)).cloned().collect()
     }
 
@@ -1075,21 +1087,23 @@ impl Changes {
         cx.notify();
     }
 
-    /// Stages the open card: a PR's goes into the review, as Enter has it, unless "Add to agent" says otherwise.
+    /// Stages the open card: a new one on a PR goes into the review, as Enter has it; an edited one keeps where it was.
     pub(super) fn commit_draft(&mut self, cx: &mut Context<Self>) {
-        self.commit_draft_to(self.pr.is_some(), cx);
+        self.commit_draft_to(None, cx);
     }
 
-    fn commit_draft_to(&mut self, review: bool, cx: &mut Context<Self>) {
+    /// `review` is the button's choice, `None` for Enter or a card closed by opening another.
+    fn commit_draft_to(&mut self, review: Option<bool>, cx: &mut Context<Self>) {
         let Some(draft) = self.draft.take() else { return };
         self.refocus = true;
         let body = draft.input.read(cx).value().trim().to_string();
         if let (false, Some(key)) = (body.is_empty(), self.comments_key()) {
             let comments = self.comments.entry(key).or_default();
             match draft.editing_id.and_then(|id| comments.iter_mut().find(|comment| comment.id == id)) {
-                Some(comment) => (comment.body, comment.review) = (body, review),
+                Some(comment) => (comment.body, comment.review) = (body, review.unwrap_or(comment.review)),
                 None => {
                     self.made_comments += 1;
+                    let review = review.unwrap_or(self.pr.is_some());
                     comments.push(ReviewComment { id: self.made_comments, path: draft.path, old_path: draft.old_path, side: draft.side, line: draft.line, body, review, by: None });
                 }
             }
@@ -1435,7 +1449,8 @@ impl Changes {
             .when(file.binary, |el| el.child(div().flex_none().text_size(px(10.0)).text_color(theme.text_faint).child("BIN")))
             .when(adds > 0 || !file.binary, |el| el.child(count_label(format!("+{adds}"), theme.diff_add, theme)))
             .when(dels > 0 || !file.binary, |el| el.child(count_label(format!("−{dels}"), theme.diff_del, theme)))
-            .children(self.pr.as_ref().map(|pr| {
+            // not over one commit: Viewed is the PR's file's
+            .children(self.pr.as_ref().filter(|pr| pr.commentable).map(|pr| {
                 let seen = pr.viewed.contains(&file.path);
                 let path = file.path.clone();
                 viewed_box(SharedString::from(format!("{}-viewed-{ix}", presentation.key_prefix())), seen, theme)
@@ -2175,8 +2190,8 @@ fn render_comment_draft(draft: &CommentDraft, pr: bool, theme: &Theme, cx: &mut 
                         .gap(px(6.0))
                         .child(action("cmt-cancel", "Cancel", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.cancel_draft(cx))))
                         .when(pr, |el| {
-                            el.child(action("cmt-agent", "Add to agent", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.commit_draft_to(false, cx))))
-                                .child(action("cmt-review", "Add to review", true).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.commit_draft_to(true, cx))))
+                            el.child(action("cmt-agent", "Add to agent", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.commit_draft_to(Some(false), cx))))
+                                .child(action("cmt-review", "Add to review", true).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.commit_draft_to(Some(true), cx))))
                         })
                         .when(!pr, |el| el.child(action("cmt-commit", if draft.editing_id.is_some() { "Save" } else { "Comment" }, true).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.commit_draft(cx))))),
                 ),

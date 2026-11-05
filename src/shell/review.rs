@@ -128,16 +128,16 @@ impl Shell {
     /// Runs `job` (CLI calls) off the main thread under `busy` (a spinner on its button); a failure's line goes to a
     /// toast. The review at `key` is asked again once the host has had a moment.
     pub(super) fn review_act(&mut self, busy: String, key: String, job: impl FnOnce() -> Result<(), String> + Send + 'static, cx: &mut Context<Self>) {
-        self.review_act_then(busy, key, job, |_, _| {}, cx);
+        self.review_act_then(busy, key, job, |_, _, _| {}, cx);
     }
 
-    /// [`Self::review_act`], and `then` once the job has gone through.
-    fn review_act_then(
+    /// [`Self::review_act`], and `then` with what the job gave once it has gone through.
+    fn review_act_then<T: Send + 'static>(
         &mut self,
         busy: String,
         key: String,
-        job: impl FnOnce() -> Result<(), String> + Send + 'static,
-        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        job: impl FnOnce() -> Result<T, String> + Send + 'static,
+        then: impl FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) {
         if !self.review_acting.insert(busy.clone()) {
@@ -154,8 +154,8 @@ impl Shell {
             }
             let _ = this.update(cx, |s, cx| {
                 s.review_acting.remove(&busy);
-                if done.is_ok() {
-                    then(s, cx);
+                if let Ok(done) = done {
+                    then(s, done, cx);
                 }
                 refetch::<Review>(&key, cx);
                 cx.notify();
@@ -555,19 +555,30 @@ impl Shell {
 
     /// The comments for the agent go to it, and leave once sent.
     fn send_pr_comments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.review_acting.contains("send") {
+            return;
+        }
+        // a card still open is a comment too
+        if let Some(code) = &self.review_code {
+            code.update(cx, |c, cx| c.commit_draft(cx));
+        }
         let (agent_comments, _) = self.pr_comments(cx);
         let Some(code) = self.review_code.clone().filter(|_| !agent_comments.is_empty()) else { return };
         let Some(agent) = self.review_agent(window, cx) else { return crate::ui::toast::error(cx, "No agent here to send the comments to") };
+        self.review_acting.insert("send".into());
         let name = agent.agent.clone().unwrap_or_default();
         let (backend, pane) = (self.backend.clone(), agent.pane_id);
         let prompt = crate::changes::comments_prompt(&agent_comments);
         let ids: Vec<u64> = agent_comments.iter().map(|c| c.id).collect();
-        self.ask(async move { backend.mux.send(pane, Some(prompt)).await }, cx, move |_, result, cx| match result {
-            Ok(_) => {
-                crate::ui::toast::info(cx, format!("Sent to {name}"), None);
-                code.update(cx, |c, cx| c.drop_comments(&ids, cx));
+        self.ask(async move { backend.mux.send(pane, Some(prompt)).await }, cx, move |this, result, cx| {
+            this.review_acting.remove("send");
+            match result {
+                Ok(_) => {
+                    crate::ui::toast::info(cx, format!("Sent to {name}"), None);
+                    code.update(cx, |c, cx| c.drop_comments(&ids, cx));
+                }
+                Err(e) => crate::ui::toast::error(cx, format!("Not sent to {name}: {e:#}")),
             }
-            Err(e) => crate::ui::toast::error(cx, format!("Not sent to {name}: {e:#}")),
         });
     }
 
@@ -576,7 +587,13 @@ impl Shell {
         use crate::changes::{CommentSide, LineKind};
         let (_, comments) = self.pr_comments(cx);
         let (Some(code), Some(r)) = (self.review_code.clone(), self.review_request.clone()) else { return };
-        let files = code.read(cx).files().unwrap_or_default();
+        let (url, gitlab, number) = (r.pr.url.clone(), r.pr.gitlab, r.pr.number);
+        let pr_key = format!("{dir}\n{gitlab}\n{number}");
+        // the whole PR's diff, not the commit the Code tab may be showing: the comments are on the PR's lines
+        let Some(Ok(diff)) = cached(&format!("{pr_key}\n"), REVIEW_TTL, crate::ui::review::read_diff, cx) else {
+            return crate::ui::toast::error(cx, "The PR's diff isn't loaded yet");
+        };
+        let files = &diff.files;
         // both of a line's numbers: GitLab places a note on an unchanged line by both
         let numbers = |c: &crate::changes::ReviewComment| {
             let lines = files.iter().filter(|f| f.path == c.path).flat_map(|f| f.hunks.iter().flat_map(|h| &h.lines));
@@ -595,20 +612,21 @@ impl Shell {
             .collect();
         let body = self.review_submit.as_ref().map(|input| input.read(cx).value().to_string()).unwrap_or_default();
         let ids: Vec<u64> = comments.iter().map(|c| c.id).collect();
-        let (url, gitlab, number) = (r.pr.url.clone(), r.pr.gitlab, r.pr.number);
-        let pr_key = format!("{dir}\n{gitlab}\n{number}");
         let job = move || crate::ui::review::submit_review(&dir, &url, gitlab, number, event, &body, &notes);
         self.review_act_then(
             "submit".into(),
             key,
             job,
-            move |this, cx| {
+            move |this, failed: Option<String>, cx| {
                 this.review_submit = None;
                 code.update(cx, |c, cx| c.drop_comments(&ids, cx));
                 // they're the host's now: asked for again, they come back under their lines
                 refetch::<LineComments>(&pr_key, cx);
                 refetch::<Timeline>(&pr_key, cx);
-                crate::ui::toast::info(cx, "Review sent", None);
+                match failed {
+                    Some(why) => crate::ui::toast::error(cx, format!("Review sent, but not all of it: {why}")),
+                    None => crate::ui::toast::info(cx, "Review sent", None),
+                }
             },
             cx,
         );

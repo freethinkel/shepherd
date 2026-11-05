@@ -242,14 +242,12 @@ pub fn open_outside(url: &str, cx: &mut App) {
     cx.spawn(async move |cx| cx.update(|cx| cx.open_url(&url))).detach();
 }
 
-/// Makes `el` the trigger of a menu, a select or a panel: its press goes to `on_press` and no further. Caught in
-/// capture, before the open menu's press-outside, which would shut the menu for the click to open it again; and no
-/// click follows, so `on_press` is the one place that toggles.
+/// Makes `el` the trigger of a menu, a select or a panel: its press goes to `on_press`, and to nothing under it.
+/// Caught in capture, before the open menus' press-outside (they're drawn over it, so later): its own menu is shut by
+/// `on_press` first, another one by its press-outside, so pressing a second trigger leaves one menu open. Not to the
+/// elements under it: it stops in the bubble phase, so no click follows and `on_press` is the one place that toggles.
 pub fn trigger<E: gpui::InteractiveElement>(el: E, on_press: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut App) + 'static) -> E {
-    el.capture_any_mouse_down(move |e, window, cx| {
-        cx.stop_propagation();
-        on_press(e, window, cx);
-    })
+    el.capture_any_mouse_down(move |e, window, cx| on_press(e, window, cx)).on_any_mouse_down(|_, _, cx| cx.stop_propagation())
 }
 
 /// Scrolls the least that shows children `ixs` of `scroll`'s list at least `margin` from its top and bottom, so
