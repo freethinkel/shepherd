@@ -30,6 +30,7 @@ mod merge;
 mod motion;
 mod pane_drag;
 mod popups;
+mod ports;
 mod render;
 mod reorder;
 mod review;
@@ -51,7 +52,7 @@ use window::*;
 pub(crate) use browser::open_link;
 use motion::*;
 use sync::sync_loop;
-pub(crate) use widgets::{menu_card, modal, row, status_dot, status_icon, tip};
+pub(crate) use widgets::{icon_button, menu_card, modal, row, status_dot, status_icon, tip};
 use widgets::*;
 pub(crate) use tab_bar::agent_favicon;
 
@@ -191,6 +192,10 @@ pub struct Shell {
     view_menu: Option<crate::ui::Popup<()>>,
     /// The done agent's pane herdr was last told you looked at, so it is told once, not every frame.
     marked_seen: Option<String>,
+    /// The pane that last had the keyboard: it stays the lit one while the keys are in a panel.
+    last_pane: Option<String>,
+    /// herdr's focused pane of the shown tab as last seen: when it moves, that pane becomes [`Self::last_pane`].
+    herdr_focus: Option<String>,
     /// An agent's pane to give the keyboard once it is shown, over herdr's focused pane of its tab.
     focus_next: Option<String>,
     /// The `…` menu's submenu that is out: the pointer went over its row.
@@ -553,6 +558,8 @@ impl Shell {
                     view_menu: None,
                     focus_next: None,
                     marked_seen: None,
+                    last_pane: None,
+                    herdr_focus: None,
                     view_submenu: None,
                     view_submenu_bounds: Default::default(),
                     view_submenu_switch: None,
@@ -702,6 +709,13 @@ impl Shell {
             let repos = crate::worktree::repos(snapshot);
             view.update(cx, |v, cx| v.set_repos(repos, cx));
         }
+    }
+
+    /// The limits popup at the bar's right end, as a click on the limits opens it: `SHEPHERD_PANEL=usage` for a screenshot.
+    pub fn open_usage_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let size = window.viewport_size();
+        self.usage_menu = Some(crate::ui::Popup::new(gpui::point(size.width - px(12.), size.height - px(crate::ui::statusbar::HEIGHT + 4.))));
+        cx.notify();
     }
 
     /// Settings on its Usage page, opened if it is not up: the limits popup's way there.

@@ -87,10 +87,15 @@ pub struct Settings {
     pub dock_badge: bool,
     /// A finished selection in a pane goes to the clipboard and clears, as in herdr.
     pub copy_on_select: bool,
-    /// A jump of the cursor leaves a short trail behind it, as Ghostty's cursor_smear shader draws.
-    pub animated_cursor: bool,
-    /// Which of Rex's cursor shaders draws that trail.
+    /// The old switch for the cursor's trail: read once, as `cursor_effect` None when off, never written.
+    #[serde(rename = "animated_cursor", skip_serializing)]
+    legacy_animated_cursor: bool,
+    /// Which of Rex's cursor shaders draws the trail a jump of the cursor leaves; None, no trail.
     pub cursor_effect: CursorEffect,
+    /// How a tab's panes sit together: Rex's pane style.
+    pub pane_style: PaneStyle,
+    /// The focused pane of a split is ringed in the accent color.
+    pub highlight_active_pane: bool,
     /// macOS Secure Keyboard Entry while a Shepherd window is in front: other apps cannot read the keys typed.
     pub secure_input: bool,
     /// The window lets the desktop show through: blurred on macOS, and elsewhere as the compositor does it. On by
@@ -114,6 +119,18 @@ pub struct Settings {
     pub web_links_inside: bool,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
+}
+
+/// How a tab's panes sit together (Rex's). An unknown (future) value reads as compact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaneStyle {
+    /// Rounded cards apart from each other.
+    Comfortable,
+    /// Edge to edge, a hairline between them.
+    #[default]
+    #[serde(other)]
+    Compact,
 }
 
 /// How the sidebar lists the work. An unknown (future) value reads as herdr's.
@@ -175,6 +192,8 @@ pub enum CursorEffect {
     Gradient,
     /// Blaze in ice blue.
     Frozen,
+    /// No trail.
+    None,
     /// Ghostty's cursor_smear: a quad whose leading corners land first.
     #[default]
     #[serde(other)]
@@ -182,7 +201,8 @@ pub enum CursorEffect {
 }
 
 impl CursorEffect {
-    pub const ALL: [CursorEffect; 9] = [
+    pub const ALL: [CursorEffect; 10] = [
+        CursorEffect::None,
         CursorEffect::Warp,
         CursorEffect::Sweep,
         CursorEffect::Comet,
@@ -205,6 +225,7 @@ impl CursorEffect {
             CursorEffect::Rainbow => "Rainbow",
             CursorEffect::Gradient => "Gradient",
             CursorEffect::Frozen => "Frozen",
+            CursorEffect::None => "None",
         }
     }
 }
@@ -381,7 +402,9 @@ impl Default for Settings {
             notify_sound: true,
             dock_badge: true,
             copy_on_select: true,
-            animated_cursor: true,
+            legacy_animated_cursor: true,
+            pane_style: PaneStyle::default(),
+            highlight_active_pane: false,
             cursor_effect: CursorEffect::default(),
             secure_input: false,
             translucent_window: cfg!(target_os = "macos"),
@@ -458,6 +481,9 @@ impl Settings {
                 settings.line_height = step_line_height(settings.line_height, 0.0);
                 settings.sidebar_width = settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
                 settings.right_panel_width = settings.right_panel_width.max(RIGHT_PANEL_MIN);
+                if !std::mem::replace(&mut settings.legacy_animated_cursor, true) {
+                    settings.cursor_effect = CursorEffect::None;
+                }
                 if let Some(family) = settings.theme_family.take() {
                     settings.adopt_family(&family);
                 }
@@ -606,6 +632,23 @@ mod tests {
         assert_eq!(s.font_family, "Geist Mono");
         assert_eq!(s.font_size, 13.0);
         assert_eq!(s.theme_dark, "ayu-dark");
+    }
+
+    #[test]
+    fn the_old_animated_cursor_switch_off_reads_as_no_shader() {
+        let (_d, path) = tmp();
+        let effect = |json: &str| {
+            std::fs::write(&path, json).unwrap();
+            Settings::load(&path).0.cursor_effect
+        };
+        assert_eq!(effect("{}"), CursorEffect::Warp);
+        assert_eq!(effect(r#"{"animated_cursor": false, "cursor_effect": "comet"}"#), CursorEffect::None);
+        assert_eq!(effect(r#"{"animated_cursor": true, "cursor_effect": "comet"}"#), CursorEffect::Comet);
+        // saved again, the switch is gone and the choice stays
+        let s = Settings { cursor_effect: CursorEffect::None, ..Default::default() };
+        s.save(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("animated_cursor"));
+        assert_eq!(Settings::load(&path).0, s);
     }
 
     #[test]

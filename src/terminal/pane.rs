@@ -57,6 +57,9 @@ pub struct GridSnapshot {
 /// terminal follows the drag without a SIGWINCH per pixel; the drag's end re-measures them all.
 pub struct GridHold(pub bool);
 
+/// A pane's corners in the comfortable pane style.
+pub const CARD_RADIUS: f32 = 8.;
+
 /// herdr draws a resized grid within a millisecond, and a shell, vim or Claude Code redraws in ~5–15 ms
 /// (`client_shell::input_paths::resize_latency`): two frames at 60 Hz keeps up with a drag.
 const HELD_RESIZE: std::time::Duration = std::time::Duration::from_millis(33);
@@ -1227,6 +1230,8 @@ impl Render for PaneTerminal {
             .relative()
             .size_full()
             .bg(theme.terminal.background)
+            // ponytail: only the fill is rounded; a cell's own background in a corner still squares it
+            .when(crate::settings::SettingsGlobal::of(cx).settings.pane_style == crate::settings::PaneStyle::Comfortable, |el| el.rounded(px(CARD_RADIUS)))
             .key_context("Terminal")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))

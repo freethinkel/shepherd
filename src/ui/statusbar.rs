@@ -96,6 +96,11 @@ pub(crate) fn cached<T: Clone + PartialEq + Send + 'static>(key: &str, ttl: Dura
     value
 }
 
+/// When `key` was last looked up, if it was.
+fn fetched_at<T: 'static>(key: &str, cx: &mut App) -> Option<Instant> {
+    cx.default_global::<Cache<T>>().0.get(key).and_then(|e| e.fetched)
+}
+
 /// Asks `key` again on the next render, as the review panel's refresh does.
 pub(crate) fn refetch<T: 'static>(key: &str, cx: &mut App) {
     if let Some(entry) = cx.default_global::<Cache<T>>().0.get_mut(key) {
@@ -262,21 +267,62 @@ pub fn refresh_changes(dir: &str, cx: &mut App) {
     }
 }
 
-/// One window of an agent's plan limits: its name (`5-hour`, `Weekly`), percent used, and when it resets (unix seconds).
+/// One window of an agent's plan limits: its name (`Session`, `Weekly`, a model's), percent used, when it resets
+/// (unix seconds), and how long it is (seconds).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Limit {
     pub label: String,
     pub used: f64,
     pub resets: Option<i64>,
+    pub window: i64,
 }
 
-/// The body of Claude's `api/oauth/usage`.
+impl Limit {
+    /// The share of the window gone by at `now`: as much as an even pace would have used.
+    pub fn pace(&self, now: i64) -> Option<f64> {
+        let left = self.resets? - now;
+        (self.window > 0).then(|| (1. - left as f64 / self.window as f64).clamp(0., 1.))
+    }
+}
+
+const FIVE_HOURS: i64 = 5 * 3600;
+const WEEK: i64 = 7 * 86_400;
+
+/// The body of Claude's `api/oauth/usage`: its `limits` (session, weekly, and a model's own weekly one), else the
+/// older `five_hour` and `seven_day`.
 pub fn parse_claude_usage(json: &str) -> Option<Vec<Limit>> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let limit = |window: &str, label: &str| {
-        Some(Limit { label: label.into(), used: v[window]["utilization"].as_f64()?, resets: v[window]["resets_at"].as_str().and_then(unix_secs) })
+    let listed: Vec<Limit> = v["limits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| {
+            let (label, window) = match l["kind"].as_str()? {
+                "session" => ("Session", FIVE_HOURS),
+                "weekly_all" => ("Weekly", WEEK),
+                // ponytail: scoped by model only; a surface's scope is skipped until one shows up
+                _ => (l["scope"]["model"]["display_name"].as_str()?, WEEK),
+            };
+            Some(Limit { label: label.into(), used: l["percent"].as_f64()?, resets: l["resets_at"].as_str().and_then(unix_secs), window })
+        })
+        .collect();
+    if !listed.is_empty() {
+        return Some(listed);
+    }
+    let limit = |key: &str, label: &str, window| {
+        Some(Limit { label: label.into(), used: v[key]["utilization"].as_f64()?, resets: v[key]["resets_at"].as_str().and_then(unix_secs), window })
     };
-    Some(vec![limit("five_hour", "5-hour")?, limit("seven_day", "Weekly")?])
+    Some(vec![limit("five_hour", "Session", FIVE_HOURS)?, limit("seven_day", "Weekly", WEEK)?])
+}
+
+/// A plan by its kind and tier: (`max`, `default_claude_max_5x`) as `Max 5x`, `plus` as `Plus`.
+pub fn plan_name(kind: &str, tier: &str) -> String {
+    let mut name: String = kind.chars().take(1).flat_map(char::to_uppercase).chain(kind.chars().skip(1)).collect();
+    let times = tier.rsplit('_').next().filter(|t| t.len() > 1 && t.ends_with('x') && t[..t.len() - 1].bytes().all(|b| b.is_ascii_digit()));
+    if let Some(t) = times {
+        name += &format!(" {t}");
+    }
+    name
 }
 
 /// The body of ChatGPT's `backend-api/wham/usage`, what Codex's `/status` reads. Which windows there are depends on
@@ -287,17 +333,18 @@ pub fn parse_codex_usage(json: &str) -> Option<Vec<Limit>> {
         .into_iter()
         .filter_map(|w| {
             let w = &v["rate_limit"][w];
-            Some(Limit { label: window_label(w["limit_window_seconds"].as_i64()?), used: w["used_percent"].as_f64()?, resets: w["reset_at"].as_i64() })
+            let window = w["limit_window_seconds"].as_i64()?;
+            Some(Limit { label: window_label(window), used: w["used_percent"].as_f64()?, resets: w["reset_at"].as_i64(), window })
         })
         .collect();
     (!limits.is_empty()).then_some(limits)
 }
 
-/// A window's length as its name: `5-hour`, `Weekly`, `30-day`.
+/// A window's length as its name: `Session` (5-hour), `Weekly`, `30-day`.
 pub fn window_label(secs: i64) -> String {
     match secs {
         604_800 => "Weekly".into(),
-        s if s < 86_400 => format!("{}-hour", s / 3600),
+        s if s < 86_400 => "Session".into(),
         s => format!("{}-day", s / 86_400),
     }
 }
@@ -339,82 +386,178 @@ fn usage_color(used: f64, theme: &Theme) -> gpui::Hsla {
     if used >= 90. { theme.danger } else if used >= 70. { theme.warning } else { theme.accent }
 }
 
-/// `agent`'s limits as the bar polls them: cached, asked again every [`USAGE_TTL`].
-pub fn usage_of(agent: UsageAgent, cx: &mut App) -> Option<Vec<Limit>> {
+/// An agent's plan (`Max 5x`) and its limits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Limits {
+    pub plan: Option<String>,
+    pub windows: Vec<Limit>,
+}
+
+/// An agent's limits, or in a few words why there are none to show (`Rate limited`, `Not signed in`).
+pub type Usage = Result<Limits, &'static str>;
+
+/// `agent`'s limits as the bar polls them: cached, asked again every [`USAGE_TTL`]; `None` until first read.
+pub fn usage_of(agent: UsageAgent, cx: &mut App) -> Option<Usage> {
     cached(agent.key(), USAGE_TTL, read_usage, cx)
 }
 
-/// A limit's row: its ring, its name over when it resets, and the percent used.
-pub fn limit_row(theme: &Theme, limit: &Limit) -> gpui::Div {
+/// A limit's row: a ring of what's used around the agent's mark, its name over when it resets, and the percent used.
+pub fn limit_row(theme: &Theme, agent: UsageAgent, limit: &Limit) -> gpui::Div {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let mark = crate::ui::command_panel::agent_icon(agent.key());
     div()
         .h(px(40.))
         .px(px(8.))
         .flex()
         .items_center()
         .gap(px(10.))
-        .child(div().size(px(16.)).flex().items_center().justify_center().child(donut(limit.used, theme.text.opacity(0.2), usage_color(limit.used, theme))))
+        .child(
+            div()
+                .relative()
+                .size(px(26.))
+                .flex_none()
+                .child(donut(limit.used, theme.text.opacity(0.12), usage_color(limit.used, theme), 26., limit.pace(now).map(|p| (p, theme.text))))
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(gpui::svg().path(mark).size(px(12.)).text_color(crate::ui::command_panel::icon_ink(mark, theme.text))),
+                ),
+        )
         .child(
             div()
                 .flex_1()
                 .flex()
                 .flex_col()
-                .child(format!("{} limit", limit.label))
+                .child(div().text_size(px(12.)).child(limit.label.clone()))
                 .child(div().text_size(px(11.)).text_color(theme.text_faint).child(limit.resets.map(|r| resets_in(r - now)).unwrap_or_default())),
         )
-        .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!("{}%", limit.used.round())))
+        .child(div().text_size(px(12.)).font_weight(gpui::FontWeight::MEDIUM).child(format!("{}% used", limit.used.round())))
 }
 
-/// The limits popup's card: each window of the status bar's agent, and a way to Usage settings.
+/// The limits popup's card: the status bar's agent and plan, each window, when they're asked again, and a way to
+/// Usage settings.
 pub fn usage_card(theme: &Theme, on_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &mut App) -> gpui::Stateful<gpui::Div> {
     let agent = crate::settings::SettingsGlobal::of(cx).settings.usage_agent;
-    let limits = usage_of(agent, cx).unwrap_or_default();
-    let hover = theme.hover;
+    let usage = usage_of(agent, cx);
+    let next = match (fetching::<Usage>(agent.key(), cx), fetched_at::<Usage>(agent.key(), cx)) {
+        (false, Some(at)) => format!("Next update in {}m", USAGE_TTL.saturating_sub(at.elapsed()).as_secs().div_ceil(60).max(1)),
+        _ => "Updating…".into(),
+    };
+    let plan = usage.as_ref().and_then(|u| u.as_ref().ok()).and_then(|l| l.plan.clone());
     crate::shell::menu_card(theme, "usage-menu", 240.)
         .text_size(px(12.))
         .text_color(theme.text)
-        .children(limits.iter().map(|l| limit_row(theme, l)))
         .child(
             div()
-                .id("usage-open")
-                .h(px(28.))
                 .px(px(8.))
+                .pt(px(6.))
+                .pb(px(2.))
+                .flex()
+                .justify_between()
+                .text_size(px(11.))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_faint)
+                .child(agent.label())
+                .children(plan),
+        )
+        .children(usage.as_ref().and_then(|u| u.as_ref().ok()).into_iter().flat_map(|l| &l.windows).map(|l| limit_row(theme, agent, l)))
+        .children(usage.and_then(Result::err).map(|why| div().px(px(8.)).py(px(6.)).text_color(theme.text_muted).child(why)))
+        .child(
+            div()
+                .mt(px(4.))
+                .pt(px(4.))
+                .pl(px(8.))
+                .border_t_1()
+                .border_color(theme.border)
                 .flex()
                 .items_center()
-                .rounded(px(6.))
+                .justify_between()
                 .text_color(theme.text_faint)
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover))
-                .child("Usage settings")
-                .on_click(on_settings),
+                .child(next)
+                .child(
+                    crate::shell::icon_button(theme, "usage-open", "")
+                        .tooltip(crate::shell::tip("Usage settings", None))
+                        .child(gpui::svg().path("icons/more-horizontal.svg").size(px(14.)).text_color(theme.text_faint))
+                        .on_click(on_settings),
+                ),
         )
 }
 
-/// `key` is a [`UsageAgent::key`]; `None` when that agent is not signed in or its endpoint fails.
-fn read_usage(key: &str) -> Option<Vec<Limit>> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into();
-    if key == UsageAgent::Codex.key() {
-        // ponytail: Codex CLI refreshes this token when it runs; one left stale long enough just hides the limits
-        let home = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from).or_else(|| Some(std::env::home_dir()?.join(".codex")))?;
-        let auth: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("auth.json")).ok()?).ok()?;
-        let mut response = agent
-            .get("https://chatgpt.com/backend-api/wham/usage")
-            .header("Authorization", &format!("Bearer {}", auth["tokens"]["access_token"].as_str()?))
-            .header("ChatGPT-Account-Id", auth["tokens"]["account_id"].as_str()?)
-            .call()
-            .ok()?;
-        return parse_codex_usage(&response.body_mut().read_to_string().ok()?);
+/// `key` is a [`UsageAgent::key`]. Always an answer, a failure too: the bar shows why rather than nothing.
+fn read_usage(key: &str) -> Option<Usage> {
+    Some(match key == UsageAgent::Codex.key() {
+        true => read_codex_usage(),
+        false => read_claude_usage(),
+    })
+}
+
+/// A failed usage request in a few words.
+fn why_failed(e: ureq::Error) -> &'static str {
+    match e {
+        ureq::Error::StatusCode(401 | 403) => "Sign-in expired",
+        ureq::Error::StatusCode(429) => "Rate limited",
+        ureq::Error::StatusCode(_) => "Usage unavailable",
+        _ => "Offline",
     }
-    // The endpoint Claude Code itself reads, with the token Claude Code keeps (and refreshes).
-    let creds: serde_json::Value = serde_json::from_slice(&claude_credentials()?).ok()?;
-    let token = creds["claudeAiOauth"]["accessToken"].as_str()?;
-    let mut response = agent
+}
+
+fn usage_agent() -> ureq::Agent {
+    ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into()
+}
+
+fn read_codex_usage() -> Usage {
+    // ponytail: Codex CLI refreshes this token when it runs; one left stale long enough reads as an expired sign-in
+    let home = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from).or_else(|| Some(std::env::home_dir()?.join(".codex")));
+    let auth = home.and_then(|h| std::fs::read_to_string(h.join("auth.json")).ok()).and_then(|a| serde_json::from_str::<serde_json::Value>(&a).ok());
+    let Some(auth) = auth else { return Err("Not signed in") };
+    let tokens = &auth["tokens"];
+    let (Some(token), Some(account)) = (tokens["access_token"].as_str(), tokens["account_id"].as_str()) else {
+        // signed in with an OpenAI API key: billed by the token, no plan
+        return Err(if auth["OPENAI_API_KEY"].is_string() { "API key, no plan limits" } else { "Not signed in" });
+    };
+    let mut response = usage_agent()
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("ChatGPT-Account-Id", account)
+        .call()
+        .map_err(why_failed)?;
+    let body = response.body_mut().read_to_string().ok().unwrap_or_default();
+    let plan = serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|v| Some(plan_name(v["plan_type"].as_str()?, "")));
+    Ok(Limits { plan, windows: parse_codex_usage(&body).ok_or("Usage unavailable")? })
+}
+
+/// The endpoint Claude Code itself reads, with the token Claude Code keeps (and refreshes).
+fn read_claude_usage() -> Usage {
+    let creds = claude_credentials().and_then(|c| serde_json::from_slice::<serde_json::Value>(&c).ok());
+    let Some(token) = creds.as_ref().and_then(|c| c["claudeAiOauth"]["accessToken"].as_str()) else {
+        return Err(if claude_uses_api_key() { "API key, no plan limits" } else { "Not signed in" });
+    };
+    let mut response = usage_agent()
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", &format!("Bearer {token}"))
         .header("anthropic-beta", "oauth-2025-04-20")
+        // as Claude Code asks: other clients are rate limited far sooner (429)
+        .header("User-Agent", "claude-code/2.0.0")
         .call()
-        .ok()?;
-    parse_claude_usage(&response.body_mut().read_to_string().ok()?)
+        .map_err(why_failed)?;
+    let oauth = creds.as_ref().map(|c| &c["claudeAiOauth"]);
+    let plan = oauth.and_then(|o| Some(plan_name(o["subscriptionType"].as_str()?, o["rateLimitTier"].as_str().unwrap_or_default())));
+    let windows = response.body_mut().read_to_string().ok().and_then(|b| parse_claude_usage(&b)).ok_or("Usage unavailable")?;
+    Ok(Limits { plan, windows })
+}
+
+/// Claude Code signed in with a Console API key, billed by the token: its `.claude.json` keeps the key.
+fn claude_uses_api_key() -> bool {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
+    let file = dir.map(|d| d.join(".claude.json")).or_else(|| Some(std::env::home_dir()?.join(".claude.json")));
+    let config = file.and_then(|f| std::fs::read_to_string(f).ok()).and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
+    std::env::var_os("ANTHROPIC_API_KEY").is_some() || config.is_some_and(|c| c["primaryApiKey"].is_string() && c["oauthAccount"].is_null())
 }
 
 /// Claude Code's sign-in, as it keeps it: in the login keychain on macOS, as the dotfiles' statusbar reads it;
@@ -708,14 +851,15 @@ fn label(theme: &Theme, icon: &'static str) -> gpui::Div {
         .child(gpui::svg().path(icon).size(px(12.)).flex_none().text_color(theme.text_muted.opacity(0.7)))
 }
 
-/// A 12 px progress ring: `used` percent of a turn from 12 o'clock, clockwise, over a full faint track.
-fn donut(used: f64, track: gpui::Hsla, color: gpui::Hsla) -> impl IntoElement {
+/// A `size` px progress ring: `used` percent of a turn from 12 o'clock, clockwise, over a full faint track, and a
+/// tick across it at `pace` (a share of the turn, in its color): where an even pace would be.
+fn donut(used: f64, track: gpui::Hsla, color: gpui::Hsla, size: f32, pace: Option<(f64, gpui::Hsla)>) -> impl IntoElement {
     let fraction = (used / 100.).clamp(0., 1.) as f32;
     gpui::canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
             let d = f32::from(bounds.size.width.min(bounds.size.height));
-            let (width, center) = ((d / 6.).max(2.), bounds.center());
+            let (width, center) = ((d / 11.).max(2.), bounds.center());
             let r = (d - width) / 2.;
             let ring = |turn: f32| {
                 let mut path = gpui::PathBuilder::stroke(px(width));
@@ -745,9 +889,19 @@ fn donut(used: f64, track: gpui::Hsla, color: gpui::Hsla) -> impl IntoElement {
                     window.paint_quad(gpui::fill(dot, color).corner_radii(px(width / 2.)));
                 }
             }
+            if let Some((share, ink)) = pace {
+                let a = share as f32 * std::f32::consts::TAU;
+                let at = |r: f32| gpui::point(center.x + px(r * a.sin()), center.y - px(r * a.cos()));
+                let mut tick = gpui::PathBuilder::stroke(px(1.5));
+                tick.move_to(at(r - width));
+                tick.line_to(at(r + width));
+                if let Ok(path) = tick.build() {
+                    window.paint_path(path, ink);
+                }
+            }
         },
     )
-    .size(px(12.))
+    .size(px(size))
     .flex_none()
 }
 
@@ -799,7 +953,7 @@ pub fn bar(
     let pane = snapshot.zip(pane_id).and_then(|(s, id)| s.panes.iter().find(|p| p.pane_id == id));
     let dir = pane_dir(snapshot, pane_id);
     let git = dir.as_deref().filter(|_| show.branch).and_then(|d| cached(d, GIT_TTL, read_git, cx));
-    let usage = show.usage.then(|| usage_of(crate::settings::SettingsGlobal::of(cx).settings.usage_agent, cx)).flatten().filter(|l| !l.is_empty());
+    let usage = show.usage.then(|| usage_of(crate::settings::SettingsGlobal::of(cx).settings.usage_agent, cx)).flatten();
     let home = std::env::home_dir();
     let muted = theme.text_muted.opacity(0.7);
     div()
@@ -855,12 +1009,17 @@ pub fn bar(
                 .child(format!("{} tok", short_count(s.total())))
         }))
         .child(div().flex_1())
-        .children(usage.map(|limits| {
-            // the dotfiles' statusbar: the ring fills with the first (shortest) window, colored by the worst one
-            let color = usage_color(limits.iter().map(|l| l.used).fold(0., f64::max), theme);
-            on_click_at(link(div().id("statusbar-usage").flex_none().flex().items_center().gap(px(6.)).px(px(8.)), theme, open == Some(Item::Usage)), on_usage)
-                .child(donut(limits[0].used, theme.text.opacity(0.2), color))
-                .child(format!("{}%", limits[0].used.round()))
+        .children(usage.map(|usage| {
+            let item = on_click_at(link(div().id("statusbar-usage").flex_none().flex().items_center().gap(px(6.)).px(px(8.)), theme, open == Some(Item::Usage)), on_usage);
+            match usage.as_ref().map(|l| l.windows.as_slice()) {
+                // the dotfiles' statusbar: the ring fills with the first (shortest) window, colored by the worst one
+                Ok([first, ..]) => {
+                    let color = usage_color(usage.iter().flat_map(|l| &l.windows).map(|l| l.used).fold(0., f64::max), theme);
+                    item.child(donut(first.used, theme.text.opacity(0.2), color, 12., None)).child(format!("{}%", first.used.round()))
+                }
+                Ok([]) => item.child("Usage unavailable"),
+                Err(why) => item.child(*why),
+            }
         }))
         .into_any_element()
 }
@@ -893,8 +1052,14 @@ mod tests {
     fn parses_claude_usage() {
         let body = r#"{"five_hour":{"utilization":42.0,"resets_at":"2026-10-11T15:00:00.000Z"},"seven_day":{"utilization":18,"resets_at":null}}"#;
         let five_hour_resets = Some(1_791_730_800);
-        let limit = |label: &str, used, resets| Limit { label: label.into(), used, resets };
-        assert_eq!(parse_claude_usage(body), Some(vec![limit("5-hour", 42.0, five_hour_resets), limit("Weekly", 18.0, None)]));
+        let limit = |label: &str, used, resets, window| Limit { label: label.into(), used, resets, window };
+        assert_eq!(parse_claude_usage(body), Some(vec![limit("Session", 42.0, five_hour_resets, FIVE_HOURS), limit("Weekly", 18.0, None, WEEK)]));
+        let listed = r#"{"limits":[{"kind":"session","percent":20,"resets_at":"2026-10-11T15:00:00.000Z"},{"kind":"weekly_all","percent":58,"resets_at":null},{"kind":"weekly_scoped","percent":3,"resets_at":null,"scope":{"model":{"display_name":"Fable"}}},{"kind":"weekly_scoped","percent":1,"scope":{"surface":{}}}]}"#;
+        assert_eq!(parse_claude_usage(listed), Some(vec![limit("Session", 20.0, five_hour_resets, FIVE_HOURS), limit("Weekly", 58.0, None, WEEK), limit("Fable", 3.0, None, WEEK)]));
+        // 19m left of 5h: 94 % of the window gone by; no reset time, no pace
+        assert_eq!(limit("Session", 20.0, Some(1_000), FIVE_HOURS).pace(1_000 - 19 * 60).map(|p| (p * 100.).round()), Some(94.));
+        assert_eq!(limit("Weekly", 1.0, None, WEEK).pace(0), None);
+        assert_eq!((plan_name("max", "default_claude_max_5x"), plan_name("pro", "default_claude_pro"), plan_name("plus", "")), ("Max 5x".into(), "Pro".into(), "Plus".into()));
         assert_eq!(unix_secs("2026-10-11T18:00:00.5+03:00"), five_hour_resets);
         assert_eq!(parse_claude_usage(r#"{"five_hour":{"utilization":null},"seven_day":{"utilization":1}}"#), None);
         assert_eq!(parse_claude_usage(r#"{"error":{"type":"authentication_error"}}"#), None);
@@ -903,10 +1068,10 @@ mod tests {
     #[test]
     fn parses_codex_usage() {
         let free = r#"{"plan_type":"free","rate_limit":{"allowed":true,"primary_window":{"used_percent":0,"limit_window_seconds":2592000,"reset_after_seconds":2590751,"reset_at":1794569896},"secondary_window":null}}"#;
-        assert_eq!(parse_codex_usage(free), Some(vec![Limit { label: "30-day".into(), used: 0.0, resets: Some(1_794_569_896) }]));
+        assert_eq!(parse_codex_usage(free), Some(vec![Limit { label: "30-day".into(), used: 0.0, resets: Some(1_794_569_896), window: 2_592_000 }]));
         let plus = r#"{"rate_limit":{"primary_window":{"used_percent":12.5,"limit_window_seconds":18000,"reset_at":10},"secondary_window":{"used_percent":3,"limit_window_seconds":604800,"reset_at":20}}}"#;
         let labels: Vec<_> = parse_codex_usage(plus).unwrap().into_iter().map(|l| (l.label, l.used)).collect();
-        assert_eq!(labels, [("5-hour".to_string(), 12.5), ("Weekly".to_string(), 3.0)]);
+        assert_eq!(labels, [("Session".to_string(), 12.5), ("Weekly".to_string(), 3.0)]);
         assert_eq!(parse_codex_usage(r#"{"detail":"Unauthorized"}"#), None);
     }
 

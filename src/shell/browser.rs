@@ -9,7 +9,7 @@ use crate::settings::WebEntry;
 /// Browser tabs' ids start with this, so they never meet a web entry's.
 const PREFIX: &str = "browser-";
 /// An empty tab's page.
-const BLANK: &str = "about:blank";
+pub(super) const BLANK: &str = "about:blank";
 
 pub(super) struct BrowserTab {
     pub(super) id: String,
@@ -26,6 +26,8 @@ pub(super) struct Browser {
     address: Option<Address>,
     /// A link clicked in a terminal, opened by the next render, which has the window.
     pending: Option<String>,
+    /// A blank tab's list of ports has its next look set: it reads again while shown.
+    pub(super) ports_tick: bool,
 }
 
 struct Address {

@@ -1,4 +1,4 @@
-//! A strip of tabs, the tab bar's and the right panel's: Zeron's terminal-panel tabs (28 px, 8 px radius, a wash under
+//! A strip of tabs, the tab bar's and the right panel's: Zeron's terminal-panel tabs (28 px, pills, a wash under
 //! the active one), each with its favicon, sized to its label. A new tab grows in and a closed one stays mounted while
 //! it shrinks out (the `Popup` recipe); a switch, a reorder and a drop take effect at once, as a tab sliding made it
 //! hard to follow which one was which. What a tab shows and does is its owner's.
@@ -438,7 +438,7 @@ fn face(theme: &Theme, t: &Tab, width: f32, selected: bool, window: &mut Window)
         .gap(px(INNER_GAP))
         .pl(px(PAD_L))
         .pr(px(PAD_R))
-        .rounded(px(8.))
+        .rounded_full()
         .font_family(theme.font_ui.clone())
         .text_size(px(FONT_SIZE))
         .text_color(if selected { theme.text } else { theme.text_muted })
@@ -506,7 +506,7 @@ pub(super) fn tab_element(
                 .size(px(SLOT))
                 .flex_none()
                 .relative()
-                .rounded(px(6.))
+                .rounded_full()
                 .hover(|s| s.bg(theme.hover))
                 .child(dot_slot(theme, t).absolute().inset_0().group_hover(group.clone(), |s| s.opacity(0.)))
                 .child(
@@ -545,7 +545,7 @@ pub(super) fn tab_element(
         .opacity(k)
         .when(selected && !holding, |el| el.bg(theme.selected))
         .when(holding, |el| el.border_1().border_color(theme.border).bg(theme.wash(0.04)))
-        .rounded(px(8.))
+        .rounded_full()
         .cursor_pointer()
         // off the titlebar's drag strip: a press here drags the tab, not the window; the wheel still scrolls the row
         .block_mouse_except_scroll()
@@ -560,7 +560,7 @@ pub(super) fn tab_element(
 pub(super) fn new_tab_button(theme: &Theme, id: &'static str) -> Stateful<Div> {
     icon_button(theme, id, "+")
         .size(px(TAB_H))
-        .rounded(px(8.))
+        .rounded_full()
         .text_size(px(19.))
         .block_mouse_except_scroll()
         .when(cfg!(windows), |el| el.occlude()) // as the tabs, off the drag strip

@@ -1,5 +1,6 @@
 //! Settings' window: the section list beside the shown section's page.
 use super::*;
+use crate::settings::PaneStyle;
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -162,17 +163,26 @@ impl Render for SettingsView {
                                 ),
                         )
                         .child(
-                            toggle_row(&theme, false, "animated-cursor", "Animated cursor", "A jump of the cursor leaves a short trail behind it.", settings.animated_cursor).on_click(cx.listener(
-                                |_, _: &ClickEvent, _, cx| update(cx, |s| s.animated_cursor = !s.animated_cursor),
+                            card_row(&theme, false)
+                                .child(row_text(&theme, "Cursor shader", "The trail a jump of the cursor leaves: Rex's Warp, Comet, Blaze and the rest."))
+                                .child(self.cursor_effect_select(&theme, settings.cursor_effect, cx)),
+                        )
+                        .child(
+                            card_row(&theme, false).child(row_text(&theme, "Pane style", "Rounded cards apart from each other, or edge to edge.")).child(
+                                crate::ui::segmented(
+                                    &theme,
+                                    "pane-style",
+                                    &[(PaneStyle::Comfortable, "Comfortable", Some("icons/lucide-layout-grid.svg")), (PaneStyle::Compact, "Compact", Some("icons/lucide-grid-2x2.svg"))],
+                                    settings.pane_style,
+                                    |style, cx| update(cx, |s| s.pane_style = style),
+                                ),
+                            ),
+                        )
+                        .child(
+                            toggle_row(&theme, false, "highlight-active-pane", "Highlight active pane", "The focused pane of a split is ringed in the accent color.", settings.highlight_active_pane).on_click(cx.listener(
+                                |_, _: &ClickEvent, _, cx| update(cx, |s| s.highlight_active_pane = !s.highlight_active_pane),
                             )),
                         )
-                        .when(settings.animated_cursor, |el| {
-                            el.child(
-                                card_row(&theme, false)
-                                    .child(row_text(&theme, "Cursor trail", "Rex's cursor shaders: Warp, Comet, Blaze and the rest."))
-                                    .child(self.cursor_effect_select(&theme, settings.cursor_effect, cx)),
-                            )
-                        })
                         .child(
                             card_row(&theme, false)
                                 .child(row_text(&theme, "Editor", if crate::terminal::pane::is_nvim(settings.editor.as_deref()) {
@@ -198,8 +208,8 @@ impl Render for SettingsView {
                         AppearanceMode::System => div()
                             .size_full()
                             .flex()
-                            .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&light)))
-                            .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&dark))),
+                            .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&light).rounded_l(px(5.))))
+                            .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&dark).rounded_r(px(5.)))),
                         AppearanceMode::Light => miniature(&light),
                         AppearanceMode::Dark => miniature(&dark),
                     };
@@ -355,16 +365,17 @@ impl Render for SettingsView {
                         UsageAgent::Codex => ("From Codex's ChatGPT sign-in.", "https://chatgpt.com/codex/settings/usage"),
                     };
                     // ponytail: no loading state; the first second after opening reads as not signed in
-                    let limits = crate::ui::statusbar::usage_of(agent, cx).filter(|l| !l.is_empty());
+                    let usage = crate::ui::statusbar::usage_of(agent, cx);
                     card(&theme)
                         .child(
                             card_row(&theme, true)
                                 .child(row_text(&theme, agent.label(), source))
                                 .child(action(&theme, SharedString::from(format!("usage-web-{}", agent.key())), "Open on the web").on_click(move |_: &ClickEvent, _, cx| crate::ui::open_outside(url, cx))),
                         )
-                        .child(div().px(px(8.)).pb(px(8.)).text_size(px(12.)).map(|el| match &limits {
-                            Some(limits) => el.children(limits.iter().map(|l| crate::ui::statusbar::limit_row(&theme, l))),
-                            None => el.child(div().px(px(8.)).pb(px(4.)).text_color(theme.text_muted).child(format!("Sign in to {} to see its limits.", agent.label()))),
+                        .child(div().px(px(8.)).pb(px(8.)).text_size(px(12.)).map(|el| match &usage {
+                            Some(Ok(limits)) if !limits.windows.is_empty() => el.children(limits.windows.iter().map(|l| crate::ui::statusbar::limit_row(&theme, agent, l))),
+                            Some(Err(why)) => el.child(div().px(px(8.)).pb(px(4.)).text_color(theme.text_muted).child(format!("{why}."))),
+                            _ => el.child(div().px(px(8.)).pb(px(4.)).text_color(theme.text_muted).child(format!("Sign in to {} to see its limits.", agent.label()))),
                         }))
                 });
                 div()

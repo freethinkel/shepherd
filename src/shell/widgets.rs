@@ -61,7 +61,7 @@ fn glyph_rows(tint: Hsla, theme: &Theme) -> [Hsla; 3] {
 }
 
 /// A small square text button (`+`).
-pub(super) fn icon_button(theme: &Theme, id: &'static str, glyph: &'static str) -> Stateful<Div> {
+pub(crate) fn icon_button(theme: &Theme, id: &'static str, glyph: &'static str) -> Stateful<Div> {
     let hover = theme.hover;
     div()
         .id(id)

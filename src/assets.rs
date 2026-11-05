@@ -148,6 +148,8 @@ impl gpui::AssetSource for Assets {
             "lucide-circle-dashed",
             "lucide-folder-git-2",
             "lucide-folder-plus",
+            "lucide-grid-2x2",
+            "lucide-layout-grid",
             "lucide-list-filter",
             "lucide-message-circle-question",
             "lucide-search",

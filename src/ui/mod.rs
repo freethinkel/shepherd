@@ -92,6 +92,44 @@ pub fn sidebar_glyph(open: f32, right: bool, size: f32, color: gpui::Hsla) -> gp
     gpui::div().relative().flex_none().size(px(size)).child(frame).child(panel)
 }
 
+/// A segmented control: the options side by side on a rounded well, each with its icon if any, the picked one on a
+/// lighter tile.
+/// `pick` gets the option clicked.
+pub fn segmented<T: Copy + PartialEq + 'static>(
+    theme: &Theme,
+    id: &'static str,
+    options: &[(T, &'static str, Option<&'static str>)],
+    current: T,
+    pick: impl Fn(T, &mut App) + Clone + 'static,
+) -> gpui::Div {
+    use gpui::prelude::FluentBuilder;
+    use gpui::{InteractiveElement, ParentElement, StatefulInteractiveElement, Styled, div};
+    let lit = theme.text;
+    // a well sunk below what it sits on, the picked tile raised out of it
+    let (well, tile) = match theme.appearance {
+        crate::theme::Appearance::Dark => (gpui::black().opacity(0.1), theme.wash(0.1)),
+        crate::theme::Appearance::Light => (gpui::black().opacity(0.06), gpui::white()),
+    };
+    div().flex().items_center().gap(px(2.)).p(px(3.)).rounded(px(9.)).bg(well).children(options.iter().map(|&(value, label, icon)| {
+        let on = value == current;
+        let tone = if on { theme.text } else { theme.text_muted };
+        let pick = pick.clone();
+        div()
+            .id(ElementId::Name(format!("{id}-{label}").into()))
+            .h(px(28.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded(px(6.))
+            .text_color(tone)
+            .map(|el| if on { el.bg(tile) } else { el.cursor_pointer().hover(move |s| s.text_color(lit)) })
+            .when_some(icon, |el, icon| el.child(gpui::svg().path(icon).size(px(14.)).flex_none().text_color(tone)))
+            .child(label)
+            .on_click(move |_, _, cx| pick(value, cx))
+    }))
+}
+
 /// Zeron's pill switch (`settings::widgets::toggle_switch`, frost tones left out): the on/off marks sit beneath a
 /// thumb that slides over 180 ms. The caller owns the click; `key` keeps the slide across frames.
 pub fn switch(theme: &Theme, on: bool, key: impl Into<gpui::SharedString>) -> SwitchVisual {
