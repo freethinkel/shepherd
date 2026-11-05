@@ -48,7 +48,7 @@ fn options(udid: &str) -> simdriver::Options {
 
 /// simdriver's frames are BGRA already, which is what GPUI draws.
 fn frame(f: simdriver::Frame, screen: Option<u8>) -> Frame {
-    Frame { width: f.width, height: f.height, pixels: f.data, rgb: false, screen }
+    Frame::new(f.width, f.height, f.data, false, screen)
 }
 
 /// Streams `options`' screen; each frame to `on_frame`, and `on_back` once it's live again after a restart.
@@ -321,7 +321,7 @@ impl Drop for Session {
 mod tests {
     #[test]
     fn dark_screens_read_blank() {
-        let frame = |px: [u8; 4]| super::Frame { width: 10, height: 10, pixels: px.repeat(100), rgb: false, screen: Some(1) };
+        let frame = |px: [u8; 4]| super::Frame::new(10, 10, px.repeat(100), false, Some(1));
         assert!(super::blank(&frame([0, 0, 0, 255])));
         assert!(!super::blank(&frame([200, 200, 200, 255])));
     }
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn a_screen_switched_to_keeps_its_last_frame_only_until_it_lights() {
         use super::*;
-        let frame = |v: u8| Frame { width: 10, height: 10, pixels: [v, v, v, 255].repeat(100), rgb: false, screen: Some(1) };
+        let frame = |v: u8| Frame::new(10, 10, [v, v, v, 255].repeat(100), false, Some(1));
         let feed = Arc::new(Feed::default());
         let panels = Panels {
             cover: AtomicBool::new(true),

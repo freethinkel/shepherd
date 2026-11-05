@@ -10,6 +10,8 @@ mod duo;
 #[cfg(target_os = "macos")]
 mod ios;
 pub mod models;
+#[cfg(target_os = "macos")]
+pub mod surface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Platform {
@@ -146,12 +148,31 @@ pub struct Frame {
     /// iPhone Duo's screen it's from: 1 the cover, 3 the inner one, which is mounted a quarter turn from the phone and
     /// comes turned clockwise, as the phone is held (open like a book); touches on it turn back (`device_point`).
     pub screen: Option<u8>,
+    /// The same pixels in an IOSurface, which the window draws without a copy; `None` when Core Video gave none, and
+    /// the frame is drawn as an image.
+    #[cfg(target_os = "macos")]
+    pub surface: Option<surface::Surface>,
 }
 
-// Converting happens where a frame is shown, for the latest only: converting each as it arrives falls behind a fast
-// stream, which then queues up seconds of frames.
 impl Frame {
-    /// Its pixels in BGRA, as GPUI draws them.
+    /// A frame as it came, its surface made here, on the stream's thread.
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>, rgb: bool, screen: Option<u8>) -> Frame {
+        #[cfg(target_os = "macos")]
+        let surface = surface::Surface::new(width, height, &pixels, rgb);
+        Frame {
+            width,
+            height,
+            pixels,
+            rgb,
+            screen,
+            #[cfg(target_os = "macos")]
+            surface,
+        }
+    }
+
+    /// Its pixels in BGRA, as GPUI draws an image: for a frame with no surface (Linux's). Converting happens where a
+    /// frame is shown, for the latest only: converting each as it arrives falls behind a fast stream, which then
+    /// queues up seconds of frames.
     pub fn bgra(&self) -> Vec<u8> {
         if !self.rgb {
             return self.pixels.clone();
@@ -414,14 +435,14 @@ mod tests {
 
     #[test]
     fn emulator_frames_turn_bgra() {
-        let f = Frame { width: 1, height: 2, pixels: vec![1, 2, 3, 4, 5, 6], rgb: true, screen: None };
+        let f = Frame::new(1, 2, vec![1, 2, 3, 4, 5, 6], true, None);
         assert_eq!(f.bgra(), [3, 2, 1, 255, 6, 5, 4, 255]);
         assert!(f.jpeg().is_ok_and(|j| j.starts_with(&[0xff, 0xd8])));
     }
 
     #[test]
     fn duo_inner_touches_turn_back() {
-        let f = Frame { width: 3, height: 2, pixels: vec![0; 24], rgb: false, screen: Some(3) };
+        let f = Frame::new(3, 2, vec![0; 24], false, Some(3));
         // turned clockwise, the shown top-left was the screen's bottom-left, and the top-right its top-left
         assert_eq!(f.device_point(0., 0.), (0., 1.));
         assert_eq!(f.device_point(1., 0.), (0., 0.));
@@ -431,7 +452,7 @@ mod tests {
     fn a_feed_hands_out_only_newer_frames() {
         let feed = Feed::default();
         assert!(feed.newer(0).is_none());
-        feed.put(Frame { width: 1, height: 1, pixels: vec![0; 4], rgb: false, screen: None });
+        feed.put(Frame::new(1, 1, vec![0; 4], false, None));
         assert_eq!(feed.newer(0).map(|(n, _)| n), Some(1));
         assert!(feed.newer(1).is_none());
         assert!(feed.wait_newer(1, std::time::Duration::from_millis(10)).is_none());

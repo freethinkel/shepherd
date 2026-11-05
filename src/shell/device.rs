@@ -492,21 +492,28 @@ impl Shell {
             // the rail keeps its strip: the page sits above what GPUI draws there
             return self.device_stage(key, theme, div().flex_1().min_w_0().h_full().pr(px(56.)).flex().child(area), None, cx);
         }
-        if let Some((n, frame)) = screen.feed.newer(screen.seen)
-            && let Some(buffer) = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra())
-        {
+        if let Some((n, frame)) = screen.feed.newer(screen.seen) {
             screen.seen = n;
-            screen.shown = Some(frame.clone());
-            if let Some(old) = screen.image.replace(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))) {
+            #[cfg(target_os = "macos")]
+            let surfaced = frame.surface.is_some();
+            #[cfg(not(target_os = "macos"))]
+            let surfaced = false;
+            // a frame with a surface is drawn from it; one without, as an image made here
+            if !surfaced
+                && let Some(buffer) = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra())
+                && let Some(old) = screen.image.replace(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+            {
                 self.retired_images.push(old);
             }
+            screen.shown = Some(frame);
         }
         let error = screen.feed.error();
         let (name, description) = (screen.device.name.clone(), screen.device.version.clone());
-        let Some(image) = screen.image.clone() else {
+        let Some(frame) = screen.shown.clone() else {
             let (message, failed) = error.map_or(("Connecting video…".to_string(), false), |e| (e, true));
             return loading_view(theme, key, &name, &description, message, true, failed).into_any_element();
         };
+        let image = screen.image.clone();
         let bounds = screen.bounds.clone();
         // the screen's own corners: an iPhone's are rounder than a Pixel's
         let round = if screen.device.platform == Platform::Ios { 0.13 } else { 0.07 };
@@ -514,8 +521,7 @@ impl Shell {
         let screen_canvas = gpui::canvas(
             |_, _, _| (),
             move |area, _, window, _| {
-                let size = image.size(0);
-                let (w, h) = (size.width.0 as f32, size.height.0 as f32);
+                let (w, h) = (frame.width as f32, frame.height as f32);
                 if w == 0. || h == 0. {
                     return;
                 }
@@ -524,7 +530,15 @@ impl Shell {
                 let origin = area.origin + gpui::point((area.size.width - fitted.width) / 2., (area.size.height - fitted.height) / 2.);
                 let fitted = Bounds::new(origin, fitted);
                 painted.set(fitted);
-                let _ = window.paint_image(fitted, gpui::Corners::all(fitted.size.width.min(fitted.size.height) * round), image, 0, false);
+                let corners = gpui::Corners::all(fitted.size.width.min(fitted.size.height) * round);
+                #[cfg(target_os = "macos")]
+                if let Some(surface) = &frame.surface {
+                    window.paint_surface(fitted, corners, surface.buffer());
+                    return;
+                }
+                if let Some(image) = image.clone() {
+                    let _ = window.paint_image(fitted, corners, image, 0, false);
+                }
             },
         )
         .size_full();

@@ -324,7 +324,7 @@ impl Client {
             }
             let Some(format) = image.format else { continue };
             if image.image.len() == (format.width * format.height * 3) as usize {
-                feed.put(Frame { width: format.width, height: format.height, pixels: image.image, rgb: true, screen: None });
+                feed.put(Frame::new(format.width, format.height, image.image, true, None));
                 wake();
             }
         }
