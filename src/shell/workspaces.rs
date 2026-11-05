@@ -77,9 +77,8 @@ impl Shell {
         });
     }
 
-    /// With All worktrees on, asks for each repo's worktrees when the workspaces or their checkouts change, so the
-    /// ones no workspace has open show in the repo's group.
-    // ponytail: asked again only when the workspaces change; one added from a terminal shows once they do
+    /// With All worktrees on, asks for each repo's worktrees when the workspaces or their checkouts change (and every
+    /// 15 s, from the window's timer), so the ones no workspace has open show in the repo's group.
     pub(super) fn refresh_closed_worktrees(&mut self, cx: &mut Context<Self>) {
         let on = SettingsGlobal::of(cx).settings.all_worktrees;
         let Some(snapshot) = self.snapshot.as_ref().filter(|_| on) else {

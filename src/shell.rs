@@ -652,6 +652,20 @@ impl Shell {
                     }
                 })
                 .detach();
+                // With All worktrees on, a worktree added or removed outside (git in a terminal) shows without
+                // waiting for the workspaces to change.
+                // ponytail: one worktree.list a repo every 15 s, window in front or not
+                cx.spawn(async move |this, cx| loop {
+                    cx.background_executor().timer(Duration::from_secs(15)).await;
+                    let alive = this.update(cx, |s, cx| {
+                        s.closed_worktrees_for = None;
+                        s.refresh_closed_worktrees(cx);
+                    });
+                    if alive.is_err() {
+                        return; // window closed
+                    }
+                })
+                .detach();
                 cx.spawn(async move |this, cx| loop {
                     cx.background_executor().timer(review::REVIEW_POLL).await;
                     if this.update(cx, |s, cx| s.poll_review(cx)).is_err() {
