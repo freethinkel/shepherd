@@ -95,12 +95,14 @@ impl Shell {
                 button("thread-filter", filter)
                     .tooltip(tip(tip_text, None))
                     .when(self.project_menu.as_ref().is_some_and(|m| m.is_open()), |el| el.bg(theme.hover))
+                    .relative()
+                    .child(super::widgets::anchor_probe(&self.anchors, "thread-filter"))
                     // capture, like the sidebar's `…`: a press on the open menu's trigger closes it
                     .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
                         match this.project_menu.as_mut() {
                             Some(menu) if menu.is_open() => menu.close(),
-                            _ => this.project_menu = Some(crate::ui::Popup::new(e.position)),
+                            _ => this.project_menu = Some(crate::ui::Popup::new(super::widgets::under(&this.anchors, "thread-filter", e.position))),
                         }
                         cx.notify();
                     })),

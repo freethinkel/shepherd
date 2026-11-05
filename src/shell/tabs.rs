@@ -560,7 +560,6 @@ pub(super) fn tab_element(
 pub(super) fn new_tab_button(theme: &Theme, id: &'static str) -> Stateful<Div> {
     icon_button(theme, id, "+")
         .size(px(TAB_H))
-        .rounded_full()
         .text_size(px(19.))
         .block_mouse_except_scroll()
         .when(cfg!(windows), |el| el.occlude()) // as the tabs, off the drag strip

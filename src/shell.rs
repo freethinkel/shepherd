@@ -170,8 +170,8 @@ pub struct Shell {
     /// An earlier pipeline the Pipeline tab shows, by the MR's page: its iid; else the latest.
     review_pipeline: Option<(String, String)>,
     review_pipeline_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
-    /// Where the review panel's menu buttons were drawn last, by name: their menus open under them.
-    review_anchors: Rc<std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
+    /// Where menu buttons were drawn last, by name: their menus open under them.
+    anchors: widgets::Anchors,
     /// The review panel's body: a list, so a scroll lays out only what shows, and what it was built for (the PR and
     /// tab), to start again at the top when that changes.
     review_list: gpui::ListState,
@@ -552,7 +552,7 @@ impl Shell {
                     review_commit_more: false,
                     review_pipeline: None,
                     review_pipeline_menu: None,
-                    review_anchors: Default::default(),
+                    anchors: Default::default(),
                     review_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(512.)),
                     review_list_for: String::new(),
                     review_menu: None,

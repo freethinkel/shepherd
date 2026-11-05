@@ -70,7 +70,7 @@ impl Shell {
     pub fn show_review_tab(&mut self, name: &str, window: &Window, cx: &mut Context<Self>) {
         if name == "menu" {
             let size = window.viewport_size();
-            let at = self.review_anchors.borrow().get("menu").map_or(gpui::point(size.width - px(16.), px(112.)), |b| b.bottom_right() + gpui::point(px(0.), px(4.)));
+            let at = self.anchors.borrow().get("review-menu").map_or(gpui::point(size.width - px(16.), px(112.)), |b| b.bottom_right() + gpui::point(px(0.), px(4.)));
             self.review_menu = Some(crate::ui::Popup::new(at));
         } else if let Some(tab) = Tab::of_name(name) {
             self.review_tab = tab;
@@ -363,7 +363,7 @@ impl Shell {
                         let menu_button = crate::ui::trigger(
                             titlebar_button(theme, "review-menu", "icons/more-horizontal.svg"),
                             cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
-                                let at = this.review_anchors.borrow().get("menu").map_or(e.position, |b| b.bottom_right() + gpui::point(px(0.), px(4.)));
+                                let at = this.anchors.borrow().get("review-menu").map_or(e.position, |b| b.bottom_right() + gpui::point(px(0.), px(4.)));
                                 crate::ui::Popup::toggle(&mut this.review_menu, || at);
                                 cx.notify();
                             }),
@@ -371,7 +371,7 @@ impl Shell {
                         .relative()
                             .when(menu_open, |el| el.bg(theme.hover))
                             .tooltip(tip("More", None))
-                            .child(anchor_probe(&self.review_anchors, "menu"))
+                            .child(super::widgets::anchor_probe(&self.anchors, "review-menu"))
                             .into_any_element();
                         top = Some(div().flex_none().flex().flex_col().child(request_head(theme, r, menu_button)).child(tabs).into_any_element());
                         menu = self.review_menu.as_ref().map(|m| (m.value, r.clone()));
@@ -805,11 +805,11 @@ impl Shell {
             .child(div().min_w_0().truncate().child(line(picked)))
             .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(12.)).flex_none().text_color(theme.text_faint))
             .relative()
-            .child(anchor_probe(&self.review_anchors, "pipelines"));
+            .child(super::widgets::anchor_probe(&self.anchors, "pipelines"));
         let picker = crate::ui::trigger(
             picker,
             cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
-                let at = this.review_anchors.borrow().get("pipelines").map_or(e.position, |b| b.bottom_left() + gpui::point(px(0.), px(4.)));
+                let at = super::widgets::under(&this.anchors, "pipelines", e.position);
                 crate::ui::Popup::toggle(&mut this.review_pipeline_menu, || at);
                 cx.notify();
             }),
@@ -896,12 +896,12 @@ impl Shell {
             .child(div().min_w_0().truncate().child(picked.unwrap_or_else(|| if commit.is_some() { "One commit".into() } else { "All commits".into() })))
             .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(12.)).flex_none().text_color(theme.text_faint))
             .relative()
-            .child(anchor_probe(&self.review_anchors, "commits"));
+            .child(super::widgets::anchor_probe(&self.anchors, "commits"));
         let picker = crate::ui::trigger(
             picker,
             cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
                 // the list hangs under the picker, at its left edge
-                let at = this.review_anchors.borrow().get("commits").map_or(e.position, |b| b.bottom_left() + gpui::point(px(0.), px(4.)));
+                let at = super::widgets::under(&this.anchors, "commits", e.position);
                 if crate::ui::Popup::toggle(&mut this.review_commit_menu, || at) {
                     this.review_commit_more = false;
                 }
@@ -1727,11 +1727,6 @@ fn branch_chip(id: &'static str, name: &str, theme: &Theme) -> Stateful<Div> {
         })
 }
 
-/// Records where the element it's in was laid out, under `name`: a menu opens from there.
-fn anchor_probe(anchors: &Rc<std::cell::RefCell<HashMap<&'static str, gpui::Bounds<Pixels>>>>, name: &'static str) -> impl IntoElement {
-    let anchors = anchors.clone();
-    canvas(move |bounds, _, _| anchors.borrow_mut().insert(name, bounds), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
-}
 
 /// How CI went, as the tabs' line says it: its state and a few words.
 fn ci_line(checks: &[Check], pipeline: Option<CheckState>, gitlab: bool) -> Option<(CheckState, String)> {

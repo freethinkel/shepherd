@@ -482,9 +482,9 @@ impl Shell {
             .when(!empty, |el| {
                 el.child(
                     crate::ui::trigger(
-                        new_tab_button(theme, "right-surface-add"),
+                        new_tab_button(theme, "right-surface-add").relative().child(super::widgets::anchor_probe(&self.anchors, "right-surface-add")),
                         cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                            let at = gpui::point(e.position.x - px(8.), px(TITLEBAR_HEIGHT - 2.));
+                            let at = super::widgets::under(&this.anchors, "right-surface-add", e.position);
                             crate::ui::Popup::toggle(&mut this.right.plus, || at);
                             cx.notify();
                         }),

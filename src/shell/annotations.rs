@@ -356,12 +356,14 @@ impl Shell {
                                         .size(px(20.))
                                         .child(gpui::svg().path("icons/more-horizontal.svg").size(px(14.)).text_color(theme.text_faint))
                                         .when(self.annotation_agents_menu.as_ref().is_some_and(|m| m.is_open()), |el| el.bg(theme.hover))
+                                        .relative()
+                                        .child(super::widgets::anchor_probe(&self.anchors, "annotation-agents-view"))
                                         // capture, like the sidebar's `…`: a press on the open menu's trigger closes it
                                         .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, _, cx| {
                                             cx.stop_propagation();
                                             match this.annotation_agents_menu.as_mut() {
                                                 Some(menu) if menu.is_open() => menu.close(),
-                                                _ => this.annotation_agents_menu = Some(crate::ui::Popup::new(e.position)),
+                                                _ => this.annotation_agents_menu = Some(crate::ui::Popup::new(super::widgets::over(&this.anchors, "annotation-agents-view", e.position))),
                                             }
                                             cx.notify();
                                         })),

@@ -60,6 +60,25 @@ fn glyph_rows(tint: Hsla, theme: &Theme) -> [Hsla; 3] {
     [light, tint, deep]
 }
 
+/// Where buttons were laid out last, by name: their menus open from there, not at the press.
+pub(super) type Anchors = Rc<std::cell::RefCell<HashMap<SharedString, Bounds<Pixels>>>>;
+
+/// Records where the element it's in (`relative`) was laid out, under `name`.
+pub(super) fn anchor_probe(anchors: &Anchors, name: impl Into<SharedString>) -> impl IntoElement {
+    let (anchors, name) = (anchors.clone(), name.into());
+    gpui::canvas(move |bounds, _, _| anchors.borrow_mut().insert(name, bounds), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
+}
+
+/// A menu's point under button `name`, on its left edge; `press` until the button has been laid out.
+pub(super) fn under(anchors: &Anchors, name: &str, press: gpui::Point<Pixels>) -> gpui::Point<Pixels> {
+    anchors.borrow().get(name).map_or(press, |b| b.bottom_left() + gpui::point(px(0.), px(4.)))
+}
+
+/// A bottom-right-anchored menu's point over button `name`, on its right edge; `press` until it's been laid out.
+pub(super) fn over(anchors: &Anchors, name: &str, press: gpui::Point<Pixels>) -> gpui::Point<Pixels> {
+    anchors.borrow().get(name).map_or(press, |b| b.top_right() - gpui::point(px(0.), px(4.)))
+}
+
 /// A small square text button (`+`).
 pub(crate) fn icon_button(theme: &Theme, id: &'static str, glyph: &'static str) -> Stateful<Div> {
     let hover = theme.hover;

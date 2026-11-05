@@ -500,9 +500,14 @@ impl Shell {
                     .font_weight(gpui::FontWeight::BOLD)
                     .cursor_pointer()
                     .child("!")
+                    .relative()
+                    .child(super::widgets::anchor_probe(&self.anchors, format!("ws-merge-failed-{id}")))
                     .map(|el| {
                         let id = id.clone();
-                        crate::ui::trigger(el, cx.listener(move |this, e: &MouseDownEvent, _, cx| this.open_merge_failure(id.clone(), e.position, cx)))
+                        crate::ui::trigger(el, cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            let at = super::widgets::under(&this.anchors, &format!("ws-merge-failed-{id}"), e.position);
+                            this.open_merge_failure(id.clone(), at, cx)
+                        }))
                     })
                     .into_any_element(),
             ),
@@ -670,12 +675,14 @@ impl Shell {
                                 .my(px(-4.))
                                 .child(gpui::svg().path("icons/more-horizontal.svg").size(px(14.)).text_color(theme.text_faint))
                                 .when(self.agents_menu.as_ref().is_some_and(|m| m.is_open()), |el| el.bg(theme.hover))
+                                .relative()
+                                .child(super::widgets::anchor_probe(&self.anchors, "agents-view"))
                                 // capture, like the sidebar's `…`: a press on the open menu's trigger closes it
                                 .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, _, cx| {
                                     cx.stop_propagation();
                                     match this.agents_menu.as_mut() {
                                         Some(menu) if menu.is_open() => menu.close(),
-                                        _ => this.agents_menu = Some(crate::ui::Popup::new(e.position)),
+                                        _ => this.agents_menu = Some(crate::ui::Popup::new(super::widgets::under(&this.anchors, "agents-view", e.position))),
                                     }
                                     cx.notify();
                                 })),

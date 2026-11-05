@@ -316,6 +316,8 @@ pub(super) struct Changes {
     branches_for: Option<String>,
     branches_task: Option<Task<()>>,
     scope_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
+    /// Where the scope and ref triggers were laid out last: their menus open under them.
+    anchors: super::widgets::Anchors,
     /// A file header's right-click menu: which file, and where.
     file_menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
     /// The scope menu's, for its Esc.
@@ -368,6 +370,7 @@ impl Changes {
             branches_for: None,
             branches_task: None,
             scope_menu: None,
+            anchors: Default::default(),
             file_menu: None,
             scope_focus: cx.focus_handle(),
             ref_menu: None,
@@ -1519,6 +1522,8 @@ impl Changes {
         let hover = theme.wash(0.14);
         let scope_trigger = div()
             .id("changes-scope-trigger")
+            .relative()
+            .child(super::widgets::anchor_probe(&self.anchors, "scope"))
             .h(px(CONTROL_SIZE))
             .px(px(8.0))
             .flex_none()
@@ -1537,7 +1542,7 @@ impl Changes {
                 match this.scope_menu.as_mut() {
                     Some(menu) if menu.is_open() => menu.close(),
                     _ => {
-                        this.scope_menu = Some(crate::ui::Popup::new(menu_at(e.position)));
+                        this.scope_menu = Some(crate::ui::Popup::new(super::widgets::under(&this.anchors, "scope", e.position)));
                         window.focus(&this.scope_focus, cx);
                     }
                 }
@@ -1681,6 +1686,8 @@ impl Changes {
         let hover = theme.wash(0.12);
         let mut trigger = div()
             .id("changes-ref-trigger")
+            .relative()
+            .child(super::widgets::anchor_probe(&self.anchors, "ref"))
             .h(px(CONTROL_SIZE))
             .px(px(6.0))
             // Shrinkable, like the branch label beside it: both sides truncate instead of plowing over the buttons.
@@ -1697,7 +1704,7 @@ impl Changes {
                 cx.stop_propagation();
                 match this.ref_menu.as_mut() {
                     Some(menu) if menu.is_open() => this.close_ref_menu(cx),
-                    _ => this.open_ref_menu(menu_at(e.position), window, cx),
+                    _ => this.open_ref_menu(super::widgets::under(&this.anchors, "ref", e.position), window, cx),
                 }
             }))
             .child(div().min_w_0().truncate().font_family(theme.font_terminal.clone()).text_size(px(11.5)).text_color(theme.text).child(base))
@@ -1779,11 +1786,6 @@ impl Changes {
                 .into_any_element(),
         )
     }
-}
-
-/// Where a toolbar's menu opens: under the toolbar, at the press.
-fn menu_at(press: gpui::Point<Pixels>) -> gpui::Point<Pixels> {
-    gpui::point(press.x - px(8.), px(TITLEBAR_HEIGHT + HEADER_HEIGHT - 4.))
 }
 
 fn count_label(text: String, color: Hsla, theme: &Theme) -> Div {
@@ -2526,6 +2528,8 @@ impl Shell {
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .when(open, |el| el.bg(hover))
+                .relative()
+                .child(super::widgets::anchor_probe(&self.anchors, "changes-agent"))
                 .tooltip(tip("Who gets the comments", None))
                 .on_click(|_, _, cx| cx.stop_propagation())
                 // capture, like the sidebar's `…`: a press on the open menu's trigger closes it
@@ -2533,7 +2537,7 @@ impl Shell {
                     cx.stop_propagation();
                     match this.right.agents.as_mut() {
                         Some(menu) if menu.is_open() => menu.close(),
-                        _ => this.right.agents = Some(crate::ui::Popup::new((picker_id.clone(), e.position))),
+                        _ => this.right.agents = Some(crate::ui::Popup::new((picker_id.clone(), super::widgets::over(&this.anchors, "changes-agent", e.position)))),
                     }
                     cx.notify();
                 }))
