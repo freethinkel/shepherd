@@ -165,17 +165,23 @@ pub struct Shell {
     /// The Code tab's commit picker, where it was clicked, and whether it lists every commit.
     review_commit_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     review_commit_more: bool,
+    /// An earlier pipeline the Pipeline tab shows, by the MR's page: its iid; else the latest.
+    review_pipeline: Option<(String, String)>,
+    review_pipeline_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// Where the review panel's menu buttons were drawn last, by name: their menus open under them.
     review_anchors: Rc<std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
-    /// The review panel's body, for its scrollbar.
-    review_scroll: gpui::ScrollHandle,
+    /// The review panel's body: a list, so a scroll lays out only what shows, and what it was built for (the PR and
+    /// tab), to start again at the top when that changes.
+    review_list: gpui::ListState,
+    review_list_for: String,
     /// The review panel's "…" menu, where it was clicked.
     review_menu: Option<crate::ui::Popup<gpui::Point<Pixels>>>,
     /// The review panel's tab under a PR's head.
     review_tab: review::Tab,
-    /// The files a click on the review panel's Code tab flipped (unfolded, or folded on a small PR), by the PR's page
-    /// and the path, a line apart.
-    review_files: std::collections::HashSet<String>,
+    /// The review panel's Code tab: the diffs' view, over the PR's patch. Made when the tab first shows.
+    review_code: Option<Entity<changes::Changes>>,
+    /// The review's summary, while its "Submit review" card is open.
+    review_submit: Option<Entity<gpui_base::input::TextareaState>>,
     agent_sort: AgentSort,
     /// Saved in the settings when a drag ends.
     agents_height: Option<f32>,
@@ -532,11 +538,15 @@ impl Shell {
                     review_commit: None,
                     review_commit_menu: None,
                     review_commit_more: false,
+                    review_pipeline: None,
+                    review_pipeline_menu: None,
                     review_anchors: Default::default(),
-                    review_scroll: gpui::ScrollHandle::new(),
+                    review_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(512.)),
+                    review_list_for: String::new(),
                     review_menu: None,
                     review_tab: Default::default(),
-                    review_files: Default::default(),
+                    review_code: None,
+                    review_submit: None,
                     agent_sort: SettingsGlobal::of(cx).settings.agent_sort,
                     agents_height: SettingsGlobal::of(cx).settings.agents_height,
                     agents_drag: None,

@@ -360,7 +360,7 @@ impl Render for SettingsView {
                         .child(
                             card_row(&theme, true)
                                 .child(row_text(&theme, agent.label(), source))
-                                .child(action(&theme, SharedString::from(format!("usage-web-{}", agent.key())), "Open on the web").on_click(move |_: &ClickEvent, _, cx| cx.open_url(url))),
+                                .child(action(&theme, SharedString::from(format!("usage-web-{}", agent.key())), "Open on the web").on_click(move |_: &ClickEvent, _, cx| crate::ui::open_outside(url, cx))),
                         )
                         .child(div().px(px(8.)).pb(px(8.)).text_size(px(12.)).map(|el| match &limits {
                             Some(limits) => el.children(limits.iter().map(|l| crate::ui::statusbar::limit_row(&theme, l))),

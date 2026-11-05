@@ -703,6 +703,10 @@ pub struct ReviewComment {
     pub side: CommentSide,
     pub line: u32,
     pub body: String,
+    /// A PR's: it goes into the review on the host, not to the agent.
+    pub review: bool,
+    /// Already on the host, by this author: shown, not staged.
+    pub by: Option<String>,
 }
 
 impl ReviewComment {
@@ -2070,7 +2074,7 @@ rename to new_name.rs
         );
     }
     fn comment(path: &str, side: CommentSide, line: u32, body: &str) -> ReviewComment {
-        ReviewComment { id: u64::from(line), path: path.into(), old_path: None, side, line, body: body.into() }
+        ReviewComment { id: u64::from(line), path: path.into(), old_path: None, side, line, body: body.into(), review: false, by: None }
     }
 
     #[test]

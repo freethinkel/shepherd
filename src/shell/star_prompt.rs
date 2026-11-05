@@ -35,7 +35,7 @@ fn card(theme: &Theme, close: Rc<dyn Fn(&mut App)>) -> gpui::AnyElement {
     let star = {
         let close = close.clone();
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            cx.open_url(REPOSITORY);
+            crate::ui::open_outside(REPOSITORY, cx);
             close(cx);
         }
     };

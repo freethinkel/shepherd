@@ -265,13 +265,13 @@ impl Shell {
         let Some(entry) = entries.into_iter().find(|e| e.id == id) else { return false };
         let url = normalize(&entry.url);
         if !embeds_pages(window) {
-            cx.open_url(&url);
+            crate::ui::open_outside(&url, cx);
             return false;
         }
         #[cfg(target_os = "linux")]
         if let Err(e) = self.gtk_ready(cx) {
             crate::ui::toast::error(cx, format!("Web pages need GTK ({e}): {url} opens in the browser"));
-            cx.open_url(&url);
+            crate::ui::open_outside(&url, cx);
             return false;
         }
         let key = self.page_key(&entry);
@@ -501,7 +501,7 @@ impl Shell {
         match event {
             PageEvent::Title(title) => page.title = Some(title).filter(|t| !t.is_empty()),
             PageEvent::Load(started) => page.loading = started,
-            PageEvent::Outside(url) => cx.open_url(&url),
+            PageEvent::Outside(url) => crate::ui::open_outside(&url, cx),
             // dispatched as if pressed in Shepherd; a menu or dialog it opens takes the keyboard in `sync_pages`
             PageEvent::Key(keystroke) => {
                 // GPUI's focus may be on what the page hides (a pane): the keystroke would start at the window's root,
@@ -888,7 +888,7 @@ impl Shell {
             .children(loaded.then(|| {
                 item("web-menu-unload", "Unload", Box::new(move |this, _, _| this.unload_page(&key)))
             }))
-            .child(item("web-menu-browser", "Open in Browser", Box::new(move |_, _, cx| cx.open_url(&url))))
+            .child(item("web-menu-browser", "Open in Browser", Box::new(move |_, _, cx| crate::ui::open_outside(&url, cx))))
             .child(item(
                 "web-menu-copy",
                 "Copy URL",

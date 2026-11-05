@@ -477,7 +477,7 @@ impl PaneTerminal {
     /// opens it (another Markdown file in the reader, `#L12` at its line); a bare `#anchor` goes nowhere.
     pub(super) fn follow_link(&mut self, url: &str, cx: &mut Context<Self>) {
         if url.contains("://") || url.starts_with("mailto:") {
-            return cx.open_url(url);
+            return crate::ui::open_outside(url, cx);
         }
         let (path, anchor) = url.split_once('#').unwrap_or((url, ""));
         let Some(dir) = self.reader.as_ref().and_then(|r| r.value.file.path.parent().map(Path::to_path_buf)).filter(|_| !path.is_empty()) else {

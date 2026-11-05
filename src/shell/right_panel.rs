@@ -469,14 +469,16 @@ impl Shell {
             .child(row.flex_1())
             .when(!empty, |el| {
                 el.child(
-                    new_tab_button(theme, "right-surface-add")
-                        .tooltip(tip("New tab", None))
-                        .when(plus_open, |el| el.bg(theme.hover))
-                        .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
-                            let at = gpui::point(e.position().x - px(8.), px(TITLEBAR_HEIGHT - 2.));
-                            this.right.plus = Some(crate::ui::Popup::new(at));
+                    crate::ui::trigger(
+                        new_tab_button(theme, "right-surface-add"),
+                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                            let at = gpui::point(e.position.x - px(8.), px(TITLEBAR_HEIGHT - 2.));
+                            crate::ui::Popup::toggle(&mut this.right.plus, || at);
                             cx.notify();
-                        })),
+                        }),
+                    )
+                    .tooltip(tip("New tab", None))
+                    .when(plus_open, |el| el.bg(theme.hover)),
                 )
             })
             .child(

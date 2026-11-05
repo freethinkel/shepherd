@@ -193,7 +193,7 @@ impl Shell {
     }
 
     pub(super) fn open_merge_failure(&mut self, id: String, at: gpui::Point<Pixels>, cx: &mut Context<Self>) {
-        self.merge_failure = Some(crate::ui::Popup::new((id, at)));
+        crate::ui::Popup::toggle(&mut self.merge_failure, || (id, at));
         cx.notify();
     }
 

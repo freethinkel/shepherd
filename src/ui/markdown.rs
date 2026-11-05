@@ -359,7 +359,7 @@ fn text_in(
     let follow = look.link.clone();
     let text = InteractiveText::new(gpui::ElementId::Name(key), styled).on_click(ranges, move |ix, window, cx: &mut App| match &follow {
         Some(follow) => follow(&urls[ix], window, cx),
-        None => cx.open_url(&urls[ix]),
+        None => crate::ui::open_outside(&urls[ix], cx),
     });
     div().relative().cursor(CursorStyle::IBeam).child(underlay).child(text).into_any_element()
 }

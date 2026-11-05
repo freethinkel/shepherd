@@ -64,19 +64,25 @@ pub(crate) fn open_link(url: &str, cx: &mut App) {
     if web && SettingsGlobal::of(cx).settings.web_links_inside {
         open_inside(url, cx);
     } else {
-        cx.open_url(url);
+        crate::ui::open_outside(url, cx);
     }
 }
 
 /// `url` in a browser tab in the right panel, whatever the setting for terminal links says: the review panel's PR
-/// pages go there. A tab of the workspace's that opened on it is shown again rather than made twice.
+/// pages go there. A tab of the workspace's that opened on it is shown again rather than made twice. Deferred: a
+/// shell's own menu calls this from inside an update of the shell, which a second one would panic on.
 pub(crate) fn open_inside(url: &str, cx: &mut App) {
     match cx.try_global::<Links>().and_then(|l| l.0.upgrade()) {
-        Some(shell) => shell.update(cx, |s, cx| {
-            s.browser.pending = Some(url.to_string());
-            cx.notify();
-        }),
-        None => cx.open_url(url),
+        Some(shell) => {
+            let url = url.to_string();
+            cx.defer(move |cx| {
+                shell.update(cx, |s, cx| {
+                    s.browser.pending = Some(url);
+                    cx.notify();
+                })
+            });
+        }
+        None => crate::ui::open_outside(url, cx),
     }
 }
 
@@ -147,7 +153,7 @@ impl Shell {
                     }
                     None => self.new_browser_tab(tab.workspace_id, Some(url), false, window, cx),
                 },
-                None => cx.open_url(&url),
+                None => crate::ui::open_outside(&url, cx),
             }
         }
         let Some(s) = self.snapshot.as_ref().filter(|s| !s.workspaces.is_empty()) else { return };
@@ -314,7 +320,7 @@ impl Shell {
                     .child(gpui::svg().path("icons/solar/square-arrow-right-up.svg").size(px(16.)).text_color(theme.text_muted))
                     .on_click(move |_, _, cx| {
                         if let Some(url) = outside.as_deref().and_then(|v| v.url().ok()).filter(|u| u != BLANK) {
-                            cx.open_url(&url);
+                            crate::ui::open_outside(&url, cx);
                         }
                     }),
             )

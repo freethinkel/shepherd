@@ -5,6 +5,8 @@ use gpui::AnyElement;
 use crate::ui::review::{Check, CheckState, Request, Review, act, check_icon, duration, markdown, read_review, retry_failed};
 use crate::ui::statusbar::{branch_of, cached, fetching, pane_dir, refetch};
 
+/// The space between the review body's sections.
+const SECTION: f32 = 16.;
 /// How often gh or glab are asked again about a branch, as the status bar asks about its PR.
 const REVIEW_TTL: Duration = Duration::from_secs(120);
 /// How often while one of its checks runs or waits to.
@@ -126,6 +128,18 @@ impl Shell {
     /// Runs `job` (CLI calls) off the main thread under `busy` (a spinner on its button); a failure's line goes to a
     /// toast. The review at `key` is asked again once the host has had a moment.
     pub(super) fn review_act(&mut self, busy: String, key: String, job: impl FnOnce() -> Result<(), String> + Send + 'static, cx: &mut Context<Self>) {
+        self.review_act_then(busy, key, job, |_, _| {}, cx);
+    }
+
+    /// [`Self::review_act`], and `then` once the job has gone through.
+    fn review_act_then(
+        &mut self,
+        busy: String,
+        key: String,
+        job: impl FnOnce() -> Result<(), String> + Send + 'static,
+        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         if !self.review_acting.insert(busy.clone()) {
             return;
         }
@@ -140,6 +154,9 @@ impl Shell {
             }
             let _ = this.update(cx, |s, cx| {
                 s.review_acting.remove(&busy);
+                if done.is_ok() {
+                    then(s, cx);
+                }
                 refetch::<Review>(&key, cx);
                 cx.notify();
             });
@@ -202,20 +219,39 @@ impl Shell {
         let mut menu: Option<(gpui::Point<Pixels>, Request)> = None;
         // the PR's head and its tabs, above the body that scrolls
         let mut top = None;
-        let body: Vec<AnyElement> = match (&key, review) {
-            (None, _) => vec![empty(theme, "No branch", "The focused pane isn't in a git repo.")],
-            (Some(_), None) => vec![loading(window)],
-            (Some(_), Some(Review::NoRemote)) => vec![empty(theme, "No remote", "This repo has no origin to ask about.")],
-            (Some(_), Some(Review::NoTool(tool))) => vec![empty(theme, format!("{tool} isn't installed"), format!("Install it to see the {noun} here: brew install {tool}"))],
+        // a body that scrolls itself (the Code tab's diff), in place of the list
+        let mut fill: Option<AnyElement> = None;
+        // each item with the space above it
+        let body: Vec<(f32, AnyElement)> = match (&key, review) {
+            (None, _) => vec![(0., empty(theme, "No branch", "The focused pane isn't in a git repo."))],
+            (Some(_), None) => vec![(0., loading(window))],
+            (Some(_), Some(Review::NoRemote)) => vec![(0., empty(theme, "No remote", "This repo has no origin to ask about."))],
+            (Some(_), Some(Review::NoTool(tool))) => vec![(0., empty(theme, format!("{tool} isn't installed"), format!("Install it to see the {noun} here: brew install {tool}")))],
             (Some(_), Some(Review::NoLogin(tool, host))) => {
-                vec![empty(theme, format!("{tool} isn't logged in"), format!("Run {tool} auth login --hostname {host} in a pane, then refresh."))]
+                vec![(0., empty(theme, format!("{tool} isn't logged in"), format!("Run {tool} auth login --hostname {host} in a pane, then refresh.")))]
             }
-            (Some(_), Some(Review::Failed(why))) => vec![empty(theme, format!("Couldn't load the {noun}"), why)],
+            (Some(_), Some(Review::Failed(why))) => vec![(0., empty(theme, format!("Couldn't load the {noun}"), why))],
             (Some(_), Some(Review::Found { request, checks, pipeline })) => {
                 let mut out = Vec::new();
                 let checks_title = if gitlab { "Pipeline" } else { "Checks" };
                 let ci = ci_line(&checks, pipeline.as_ref().map(|(_, s)| *s), gitlab);
-                let checks_el = (!checks.is_empty() || pipeline.is_some()).then(|| {
+                // the MR's pipelines, for the Pipeline tab's picker; an earlier one picked there is shown in the latest's place
+                let past = match (&request, &pr_key) {
+                    (Some(r), Some(k)) if r.pr.gitlab && self.review_tab == Tab::Checks => cached(k, REVIEW_TTL, crate::ui::review::read_pipelines, cx).and_then(Result::ok).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let url = request.as_ref().map(|r| r.pr.url.clone()).unwrap_or_default();
+                let picked = self.review_pipeline.as_ref().filter(|(u, _)| *u == url).and_then(|(_, iid)| past.iter().position(|p| p.iid == *iid)).filter(|i| *i > 0);
+                let (shown_checks, shown_pipeline) = match picked.map(|i| &past[i]) {
+                    Some(p) => {
+                        let ttl = if matches!(p.state, CheckState::Running | CheckState::Pending) { Duration::from_secs(5) } else { Duration::MAX };
+                        let jobs = cached(&format!("{dir}\n{}", p.iid), ttl, crate::ui::review::read_pipeline_jobs, cx).and_then(Result::ok).unwrap_or_default();
+                        (jobs, Some((p.url.clone(), p.state)))
+                    }
+                    None => (checks.clone(), pipeline.clone()),
+                };
+                let picker = (past.len() > 1).then(|| self.pipeline_picker(theme, &url, &past, picked.unwrap_or(0), window, cx));
+                let checks_el = (!shown_checks.is_empty() || shown_pipeline.is_some()).then(|| {
                     let this = cx.entity().downgrade();
                     let (dir, key) = (dir.clone(), key_or.clone());
                     let on_act: OnAct = Rc::new(move |busy, calls, cx| {
@@ -223,7 +259,7 @@ impl Shell {
                         let job = move || calls.iter().try_for_each(|c| act(&dir, c));
                         let _ = this.update(cx, |s, cx| s.review_act(busy, key.clone(), job, cx));
                     });
-                    let pages = crate::ui::review::pages(&checks);
+                    let pages = crate::ui::review::pages(&shown_checks);
                     let picked = self.review_page.as_ref().filter(|(k, _)| *k == key_or).and_then(|(_, name)| pages.iter().position(|(n, _)| n == name));
                     let page = picked.unwrap_or_else(|| crate::ui::review::default_page(&pages));
                     let this = cx.entity().downgrade();
@@ -240,7 +276,7 @@ impl Shell {
                     // the log asked for, read again while its job runs
                     let shown_log = self.review_log.as_ref().filter(|(k, _)| *k == key_or).map(|(_, job)| job.clone());
                     let log = shown_log.and_then(|job| {
-                        let c = checks.iter().find(|c| c.job.as_deref() == Some(job.as_str()))?;
+                        let c = shown_checks.iter().find(|c| c.job.as_deref() == Some(job.as_str()))?;
                         let log_key = format!("{}\n{gitlab}\n{job}\n{}", shown.dir.as_deref().unwrap_or_default(), c.repo.as_deref().unwrap_or_default());
                         let busy = matches!(c.state, CheckState::Running | CheckState::Pending);
                         let ttl = if busy { Duration::from_secs(5) } else { Duration::MAX };
@@ -258,10 +294,14 @@ impl Shell {
                         }
                     });
                     let paging = Paging { pages, page, on_page, offset, beside, width, log, on_log };
-                    let section = checks_section(theme, checks_title, &checks, pipeline.clone(), gitlab, &self.review_acting, on_act, paging, window);
+                    let section = checks_section(theme, checks_title, &shown_checks, shown_pipeline.clone(), gitlab, &self.review_acting, on_act, paging, window);
                     let key = key_or.clone();
                     div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
                         .on_scroll_wheel(cx.listener(move |this, e: &gpui::ScrollWheelEvent, _, cx| this.review_scroll(e, &key, &names, page, width, cx)))
+                        .children(picker)
                         .child(section)
                         .into_any_element()
                 });
@@ -320,36 +360,38 @@ impl Shell {
                         let tabs = tab_bar(theme, tab, checks_title, ci, &pick, window);
                         let menu_open = self.review_menu.as_ref().is_some_and(|m| m.is_open());
                         // the menu hangs under the button, its right edge at the button's
-                        let menu_button = titlebar_button(theme, "review-menu", "icons/more-horizontal.svg")
-                            .relative()
+                        let menu_button = crate::ui::trigger(
+                            titlebar_button(theme, "review-menu", "icons/more-horizontal.svg"),
+                            cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+                                let at = this.review_anchors.borrow().get("menu").map_or(e.position, |b| b.bottom_right() + gpui::point(px(0.), px(4.)));
+                                crate::ui::Popup::toggle(&mut this.review_menu, || at);
+                                cx.notify();
+                            }),
+                        )
+                        .relative()
                             .when(menu_open, |el| el.bg(theme.hover))
                             .tooltip(tip("More", None))
                             .child(anchor_probe(&self.review_anchors, "menu"))
-                            .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
-                                let at = this.review_anchors.borrow().get("menu").map_or(e.position(), |b| b.bottom_right() + gpui::point(px(0.), px(4.)));
-                                this.review_menu = Some(crate::ui::Popup::new(at));
-                                cx.notify();
-                            }))
                             .into_any_element();
                         top = Some(div().flex_none().flex().flex_col().child(request_head(theme, r, menu_button)).child(tabs).into_any_element());
                         menu = self.review_menu.as_ref().map(|m| (m.value, r.clone()));
                         let pr_key = pr_key.clone().unwrap_or_default();
                         match tab {
                             Tab::Summary => {
-                                out.push(summary(theme, r));
+                                out.push((SECTION, summary(theme, r)));
                                 if !r.body.trim().is_empty() {
                                     let toggle = cx.listener(|this, _: &ClickEvent, _, cx| {
                                         this.review_collapsed = !this.review_collapsed;
                                         cx.notify();
                                     });
                                     let look = pr_look(r, &dir, &[r.body.as_str()], cx);
-                                    out.push(description(theme, &r.body, self.review_collapsed, &look, toggle));
+                                    out.extend(description(theme, &r.body, self.review_collapsed, &look, toggle));
                                 }
                             }
-                            Tab::Timeline => out.push(match cached(&pr_key, REVIEW_TTL, crate::ui::review::read_timeline, cx) {
-                                None => loading(window),
-                                Some(Err(why)) => empty(theme, "Couldn't load the timeline", why),
-                                Some(Ok(events)) if events.is_empty() => empty(theme, "Nothing yet", "No comments, reviews or commits."),
+                            Tab::Timeline => out.extend(match cached(&pr_key, REVIEW_TTL, crate::ui::review::read_timeline, cx) {
+                                None => vec![(SECTION, loading(window))],
+                                Some(Err(why)) => vec![(SECTION, empty(theme, "Couldn't load the timeline", why))],
+                                Some(Ok(events)) if events.is_empty() => vec![(SECTION, empty(theme, "Nothing yet", "No comments, reviews or commits."))],
                                 Some(Ok(events)) => {
                                     let bodies: Vec<&str> = events.iter().map(|e| e.body.as_str()).collect();
                                     timeline(theme, &events, &pr_look(r, &dir, &bodies, cx))
@@ -360,71 +402,70 @@ impl Shell {
                                 let commits = cached(&pr_key, REVIEW_TTL, crate::ui::review::read_commits, cx).and_then(Result::ok).unwrap_or_default();
                                 let commit = self.review_commit.as_ref().filter(|(u, _)| *u == r.pr.url).map(|(_, c)| c.clone());
                                 let diff = cached(&diff_key, REVIEW_TTL, crate::ui::review::read_diff, cx);
-                                let files = diff.as_ref().and_then(|d| d.as_ref().ok()).map(|(f, _)| f.as_slice()).unwrap_or_default();
-                                // a small PR's files show unfolded, a viewed one folded; a click flips a file from that
+                                let files = diff.as_ref().and_then(|d| d.as_ref().ok()).map(|d| d.files.as_slice()).unwrap_or_default();
                                 let url = r.pr.url.clone();
                                 let viewed: Vec<bool> = match commit {
                                     Some(_) => vec![false; files.len()],
                                     None => {
                                         let seen = self.viewed(&url);
-                                        files.iter().map(|f| seen.contains(&crate::ui::review::fingerprint(&f.diff))).collect()
+                                        files.iter().map(|f| seen.contains(&crate::ui::review::fingerprint(f))).collect()
                                     }
                                 };
-                                let unfolded: Vec<bool> = (0..files.len()).map(|i| files.len() <= SMALL_PR && !viewed[i]).collect();
-                                let open: Vec<bool> = files.iter().enumerate().map(|(i, f)| unfolded[i] != self.review_files.contains(&format!("{url}\n{}", f.diff.path))).collect();
-                                let toolbar = self.code_toolbar(theme, r, &commits, commit.as_deref(), files, &viewed, &unfolded, &open, cx);
-                                out.push(toolbar);
-                                out.push(match diff {
+                                let code = self.review_code(window, cx);
+                                let toolbar = self.code_toolbar(theme, r, &commits, commit.as_deref(), files, &viewed, &code, cx);
+                                let content = match &diff {
                                     None => loading(window),
-                                    Some(Err(why)) => empty(theme, "Couldn't load the diff", why),
-                                    Some(Ok((files, _))) if files.is_empty() => empty(theme, "No changes", format!("This {} changes no files.", if commit.is_some() { "commit" } else { noun })),
-                                    Some(Ok((files, cut))) => {
-                                        let this = cx.entity().downgrade();
-                                        let on_file: Rc<dyn Fn(String, &mut App)> = Rc::new({
-                                            let (this, url) = (this.clone(), url.clone());
-                                            move |path, cx| {
-                                                let _ = this.update(cx, |s, cx| {
-                                                    let key = format!("{url}\n{path}");
-                                                    if !s.review_files.remove(&key) {
-                                                        s.review_files.insert(key);
-                                                    }
-                                                    cx.notify();
-                                                });
-                                            }
-                                        });
-                                        // marking a file viewed folds it; taking it back leaves it as it is
-                                        let on_view: Option<Rc<dyn Fn(usize, &mut App)>> = commit.is_none().then(|| {
-                                            let marks: Vec<(String, String)> = files.iter().map(|f| (crate::ui::review::fingerprint(&f.diff), f.diff.path.clone())).collect();
-                                            Rc::new(move |i: usize, cx: &mut App| {
-                                                let Some((mark, path)) = marks.get(i).cloned() else { return };
-                                                let url = url.clone();
-                                                let _ = this.update(cx, |s, cx| {
-                                                    let seen = s.viewed_mut(&url);
-                                                    if !seen.remove(&mark) {
-                                                        seen.insert(mark);
-                                                        s.review_files.remove(&format!("{url}\n{path}"));
-                                                    }
-                                                    s.save_viewed(cx);
-                                                    cx.notify();
-                                                });
-                                            }) as Rc<dyn Fn(usize, &mut App)>
-                                        });
-                                        code(theme, &files, &open, &viewed, cut, &r.pr, on_file, on_view)
+                                    Some(Err(why)) => empty(theme, "Couldn't load the diff", why.clone()),
+                                    Some(Ok(d)) if d.files.is_empty() => empty(theme, "No changes", format!("This {} changes no files.", if commit.is_some() { "commit" } else { noun })),
+                                    Some(Ok(d)) => {
+                                        let viewed = d.files.iter().zip(&viewed).filter(|(_, v)| **v).map(|(f, _)| f.path.clone()).collect();
+                                        // the comments already on its lines; over one commit they'd sit on the wrong ones
+                                        let posted = if commit.is_none() { cached(&pr_key, REVIEW_TTL, crate::ui::review::read_line_comments, cx).and_then(Result::ok).unwrap_or_default() } else { Vec::new() };
+                                        let view = super::changes::PrView { url, diff: d.clone(), viewed, commentable: commit.is_none(), posted };
+                                        code.update(cx, |c, cx| c.show_pr(&dir, view, cx));
+                                        div().flex_1().min_h_0().child(code.clone()).into_any_element()
                                     }
-                                });
+                                };
+                                // the diff scrolls itself, under its bar: not in the body's list
+                                fill = Some(
+                                    div()
+                                        .id("review-code")
+                                        .flex_1()
+                                        .min_h_0()
+                                        .flex()
+                                        .flex_col()
+                                        .capture_any_mouse_down(cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| this.keys_to_review(window, cx)))
+                                        .child(div().flex_none().px(px(12.)).py(px(8.)).child(toolbar))
+                                        .child(content)
+                                        .into_any_element(),
+                                );
                             }
-                            Tab::Checks => out.push(checks_el.unwrap_or_else(|| empty(theme, format!("No {}", checks_title.to_lowercase()), "Nothing has run on this branch yet."))),
+                            Tab::Checks => out.push((SECTION, checks_el.unwrap_or_else(|| empty(theme, format!("No {}", checks_title.to_lowercase()), "Nothing has run on this branch yet.")))),
                         }
                     }
                     None => {
-                        out.push(empty(theme, format!("No {noun}"), format!("{} has none yet.", branch.unwrap_or_default())));
-                        out.extend(checks_el);
+                        out.push((SECTION, empty(theme, format!("No {noun}"), format!("{} has none yet.", branch.unwrap_or_default()))));
+                        out.extend(checks_el.map(|el| (SECTION, el)));
                     }
                 }
                 out
             }
         };
 
+        let main = match fill {
+            Some(fill) => fill,
+            // the app's scrollbar over the body's right edge, as the settings page has it
+            None => div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                // one reset for the description's and the logs' selectable text, before either paints
+                .child(crate::ui::markdown::frame_reset())
+                .child(self.review_body(body, format!("{pr_key:?}\n{:?}\n{:?}\n{:?}", self.review_tab, self.review_commit, self.review_pipeline)))
+                .child(crate::ui::scrollbar("review-scrollbar", &self.review_list, theme))
+                .into_any_element(),
+        };
+        let notes = self.review_notes_bar(theme, &dir, &key_or, cx);
         div()
             .flex_1()
             .min_h_0()
@@ -433,31 +474,236 @@ impl Shell {
             .overflow_hidden()
             .child(header)
             .children(top)
-            .child(
-                // the app's scrollbar over the body's right edge, as the settings page has it
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        div()
-                            .id("review-body")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.review_scroll)
-                            .p(px(12.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(16.))
-                            // one reset for the description's and the logs' selectable text, before either paints
-                            .child(crate::ui::markdown::frame_reset())
-                            .children(body),
-                    )
-                    .child(crate::ui::scrollbar("review-scrollbar", &self.review_scroll, theme)),
-            )
+            .child(main)
+            .children(notes)
             .children(footer)
             .children(menu.and_then(|(at, r)| self.render_review_menu(theme, at, &r, pr_key.clone(), key.clone(), window, cx)))
             .into_any_element()
+    }
+
+    /// The body's items as a list, `for` naming what they show: a scroll lays out only the items in view, not a whole
+    /// timeline's markdown each frame. Built for something else, it starts at the top; items come and go at its end.
+    fn review_body(&mut self, body: Vec<(f32, AnyElement)>, built_for: String) -> gpui::List {
+        let (list, count) = (&self.review_list, body.len());
+        if built_for != self.review_list_for {
+            self.review_list_for = built_for;
+            list.reset(count);
+        } else if list.item_count() != count {
+            let had = list.item_count();
+            list.splice(count.min(had)..had, count.saturating_sub(had));
+        }
+        // ponytail: each item is built once per render and handed over once; a list asking for one twice in a frame
+        // (only an autoscroll does, nothing here asks for one) gets it empty
+        let items = std::cell::RefCell::new(body.into_iter().map(Some).collect::<Vec<_>>());
+        gpui::list(list.clone(), move |i, _, _| {
+            let Some((space, item)) = items.borrow_mut().get_mut(i).and_then(Option::take) else { return div().into_any_element() };
+            div().px(px(12.)).pt(px(if i == 0 { 12. } else { space })).when(i + 1 == count, |el| el.pb(px(12.))).child(item).into_any_element()
+        })
+        .size_full()
+    }
+
+    /// The Code tab's diff view, made the first time: the diffs' own, over the PR's patch.
+    fn review_code(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<super::changes::Changes> {
+        use super::changes::{Changes, ChangesEvent};
+        if let Some(code) = &self.review_code {
+            return code.clone();
+        }
+        let code = cx.new(Changes::for_pr);
+        code.update(cx, |c, _| c.back = Some(self.focus.clone()));
+        cx.subscribe_in(&code, window, |this, _, event: &ChangesEvent, window, cx| match event {
+            ChangesEvent::Viewed { path } => this.flip_viewed(path, cx),
+            ChangesEvent::Open { dir, root, path } => this.edit_diff_file(dir, root, path, cx),
+            ChangesEvent::Preview { dir, root, path } => this.preview_diff_file(dir, root, path, window, cx),
+            ChangesEvent::Discard { .. } | ChangesEvent::Send => {}
+        })
+        .detach();
+        self.review_code = Some(code.clone());
+        code
+    }
+
+    /// The Viewed box of the shown PR's file at `path`: marked, the file folds shut; taken back, it stays as it is.
+    fn flip_viewed(&mut self, path: &str, cx: &mut Context<Self>) {
+        let (Some(code), Some(url)) = (self.review_code.clone(), self.review_request.as_ref().map(|r| r.pr.url.clone())) else { return };
+        let Some(file) = code.read(cx).files().and_then(|files| files.iter().find(|f| f.path == path).cloned()) else { return };
+        let mark = crate::ui::review::fingerprint(&file);
+        let seen = self.viewed_mut(&url);
+        let now = seen.insert(mark.clone());
+        if !now {
+            seen.remove(&mark);
+        }
+        self.save_viewed(cx);
+        if now {
+            code.update(cx, |c, cx| c.fold_file(path, true, cx));
+        }
+        cx.notify();
+    }
+
+    /// A press in the diff or on the review's bar: the keyboard comes to the panel, so a comment's field keeps it (a
+    /// pane takes it back on the next render otherwise), as the diffs' tab has it.
+    fn keys_to_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.panel_focused() || !self.focus.is_focused(window) {
+            self.focus_panel(true, window, cx);
+        }
+    }
+
+    /// The comments waiting on the shown PR: the agent's and the review's.
+    fn pr_comments(&self, cx: &App) -> (Vec<crate::changes::ReviewComment>, Vec<crate::changes::ReviewComment>) {
+        let url = self.review_request.as_ref().map(|r| r.pr.url.as_str());
+        let code = self.review_code.as_ref().filter(|c| url.is_some_and(|url| c.read(cx).shows_pr(url)));
+        code.map(|c| c.read(cx).waiting_comments()).unwrap_or_default().into_iter().partition(|c| !c.review)
+    }
+
+    /// The comments for the agent go to it, and leave once sent.
+    fn send_pr_comments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (agent_comments, _) = self.pr_comments(cx);
+        let Some(code) = self.review_code.clone().filter(|_| !agent_comments.is_empty()) else { return };
+        let Some(agent) = self.review_agent(window, cx) else { return crate::ui::toast::error(cx, "No agent here to send the comments to") };
+        let name = agent.agent.clone().unwrap_or_default();
+        let (backend, pane) = (self.backend.clone(), agent.pane_id);
+        let prompt = crate::changes::comments_prompt(&agent_comments);
+        let ids: Vec<u64> = agent_comments.iter().map(|c| c.id).collect();
+        self.ask(async move { backend.mux.send(pane, Some(prompt)).await }, cx, move |_, result, cx| match result {
+            Ok(_) => {
+                crate::ui::toast::info(cx, format!("Sent to {name}"), None);
+                code.update(cx, |c, cx| c.drop_comments(&ids, cx));
+            }
+            Err(e) => crate::ui::toast::error(cx, format!("Not sent to {name}: {e:#}")),
+        });
+    }
+
+    /// Sends the review: its comments, the summary and `event`; they leave once the host has them.
+    fn submit_pr_review(&mut self, event: crate::ui::review::ReviewEvent, dir: String, key: String, cx: &mut Context<Self>) {
+        use crate::changes::{CommentSide, LineKind};
+        let (_, comments) = self.pr_comments(cx);
+        let (Some(code), Some(r)) = (self.review_code.clone(), self.review_request.clone()) else { return };
+        let files = code.read(cx).files().unwrap_or_default();
+        // both of a line's numbers: GitLab places a note on an unchanged line by both
+        let numbers = |c: &crate::changes::ReviewComment| {
+            let lines = files.iter().filter(|f| f.path == c.path).flat_map(|f| f.hunks.iter().flat_map(|h| &h.lines));
+            let found = lines.into_iter().find(|l| match c.side {
+                CommentSide::Old => l.kind != LineKind::Add && l.old_no == Some(c.line),
+                CommentSide::New => l.kind != LineKind::Del && l.new_no == Some(c.line),
+            });
+            found.map_or((None, None), |l| (l.old_no, l.new_no))
+        };
+        let notes: Vec<crate::ui::review::ReviewNote> = comments
+            .iter()
+            .map(|c| {
+                let (old_no, new_no) = numbers(c);
+                crate::ui::review::ReviewNote { comment: c.clone(), old_no, new_no }
+            })
+            .collect();
+        let body = self.review_submit.as_ref().map(|input| input.read(cx).value().to_string()).unwrap_or_default();
+        let ids: Vec<u64> = comments.iter().map(|c| c.id).collect();
+        let (url, gitlab, number) = (r.pr.url.clone(), r.pr.gitlab, r.pr.number);
+        let pr_key = format!("{dir}\n{gitlab}\n{number}");
+        let job = move || crate::ui::review::submit_review(&dir, &url, gitlab, number, event, &body, &notes);
+        self.review_act_then(
+            "submit".into(),
+            key,
+            job,
+            move |this, cx| {
+                this.review_submit = None;
+                code.update(cx, |c, cx| c.drop_comments(&ids, cx));
+                // they're the host's now: asked for again, they come back under their lines
+                refetch::<LineComments>(&pr_key, cx);
+                refetch::<Timeline>(&pr_key, cx);
+                crate::ui::toast::info(cx, "Review sent", None);
+            },
+            cx,
+        );
+    }
+
+    /// Over the footer while comments wait on the PR: how many go to the agent (and the send), how many are in the
+    /// review (and its submit, a card with the summary and the verdicts).
+    fn review_notes_bar(&mut self, theme: &Theme, dir: &str, key: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::ui::review::ReviewEvent;
+        let (agent_comments, review_comments) = self.pr_comments(cx);
+        if agent_comments.is_empty() && review_comments.is_empty() {
+            self.review_submit = None;
+            return None;
+        }
+        let r = self.review_request.clone()?;
+        let sending = self.review_acting.contains("submit");
+        let (hover, accent) = (theme.hover, theme.accent);
+        let button = |id: &'static str, label: &'static str, primary: bool| {
+            let hovered = accent.opacity(0.85);
+            div()
+                .id(id)
+                .flex_none()
+                .h(px(26.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .when(primary, |el| el.bg(accent).text_color(gpui::white()).hover(move |s| s.bg(hovered)))
+                .when(!primary, |el| el.border_1().border_color(theme.border).text_color(theme.text).hover(move |s| s.bg(hover)))
+                .child(label)
+        };
+        let count = |n: usize, what: &str| format!("{n} comment{} {what}", if n == 1 { "" } else { "s" });
+        let row = || div().flex().items_center().gap(px(8.)).child(div().flex_1());
+        let agent_row = (!agent_comments.is_empty()).then(|| {
+            row()
+                .child(div().flex_none().text_color(theme.text_muted).child(count(agent_comments.len(), "for the agent")))
+                .child(button("review-notes-send", "Send to agent", false).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.send_pr_comments(window, cx))))
+        });
+        let review_row = (!review_comments.is_empty() && self.review_submit.is_none()).then(|| {
+            row().child(div().flex_none().text_color(theme.text_muted).child(count(review_comments.len(), "in review"))).child(button("review-notes-submit", "Submit review", true).on_click(cx.listener(
+                |this, _: &ClickEvent, window, cx| {
+                    let theme = Theme::of(cx).clone();
+                    let input = cx.new(|cx| gpui_base::input::TextareaState::new(window, cx).placeholder("Leave a summary (optional)"));
+                    input.update(cx, |input, cx| {
+                        input.set_editor_style(crate::ui::input_style(&theme));
+                        input.focus(window, cx);
+                    });
+                    this.review_submit = Some(input);
+                    cx.notify();
+                },
+            )))
+        });
+        let submit = self.review_submit.clone().filter(|_| !review_comments.is_empty()).map(|input| {
+            let verdict = |id: &'static str, label: &'static str, event: ReviewEvent, primary: bool| {
+                let (dir, key) = (dir.to_string(), key.to_string());
+                button(id, if sending && primary { "Sending…" } else { label }, primary)
+                    .when(sending, |el| el.opacity(0.5))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.submit_pr_review(event, dir.clone(), key.clone(), cx)))
+            };
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(div().text_color(theme.text_muted).child(count(review_comments.len(), "in review")))
+                .child(div().h(px(54.)).px(px(8.)).py(px(6.)).rounded(px(6.)).border_1().border_color(theme.border).bg(theme.card).child(gpui_base::input::Textarea::new(&input)))
+                .child(
+                    row()
+                        .child(button("review-submit-cancel", "Cancel", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.review_submit = None;
+                            cx.notify();
+                        })))
+                        .when(r.can_approve && !r.pr.gitlab, |el| el.child(verdict("review-submit-changes", "Request changes", ReviewEvent::RequestChanges, false)))
+                        .when(r.can_approve, |el| el.child(verdict("review-submit-approve", "Approve", ReviewEvent::Approve, false)))
+                        .child(verdict("review-submit-comment", "Comment", ReviewEvent::Comment, true)),
+                )
+        });
+        Some(
+            div()
+                .id("review-notes")
+                .flex_none()
+                .px(px(12.))
+                .py(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .capture_any_mouse_down(cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| this.keys_to_review(window, cx)))
+                .border_t_1()
+                .border_color(theme.border)
+                .text_size(px(12.))
+                .children(agent_row)
+                .children(review_row)
+                .children(submit)
+                .into_any_element(),
+        )
     }
 
     /// The Code tab's diff's cache key: the PR's (`pr_key`), and the commit picked for it, if any.
@@ -474,6 +720,12 @@ impl Shell {
     fn refetch_pr(&self, pr_key: &str, cx: &mut App) {
         refetch::<Timeline>(pr_key, cx);
         refetch::<PrCommits>(pr_key, cx);
+        refetch::<Pipelines>(pr_key, cx);
+        if let Some((_, iid)) = &self.review_pipeline {
+            let dir = pr_key.split('\n').next().unwrap_or_default();
+            refetch::<PipelineJobs>(&format!("{dir}\n{iid}"), cx);
+        }
+        refetch::<LineComments>(pr_key, cx);
         refetch::<PrDiff>(&format!("{pr_key}\n"), cx);
         if let Some((_, sha)) = &self.review_commit {
             refetch::<PrDiff>(&format!("{pr_key}\n{sha}"), cx);
@@ -505,6 +757,92 @@ impl Shell {
         .detach();
     }
 
+    /// The Pipeline tab's picker of the MR's pipelines, `past` newest first, `picked` the one shown; its menu while
+    /// it's open.
+    fn pipeline_picker(&mut self, theme: &Theme, url: &str, past: &[crate::ui::review::PastPipeline], picked: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let (hover, text) = (theme.hover, theme.text);
+        let mono = theme.font_terminal.clone();
+        let line = |i: usize| {
+            let p = &past[i];
+            let when = p.at.map(ago_text).unwrap_or_default();
+            if i == 0 { format!("Latest · {when}") } else { format!("#{} · {when}", p.iid) }
+        };
+        let menu_open = self.review_pipeline_menu.as_ref().is_some_and(|m| m.is_open());
+        let picker = div()
+            .id("review-pipeline-picker")
+            .flex_none()
+            .max_w(px(260.))
+            .h(px(26.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded(px(6.))
+            .bg(theme.hover)
+            .cursor_pointer()
+            .text_size(px(12.))
+            .text_color(text)
+            .when(menu_open, |el| el.bg(theme.selected))
+            .child(crate::ui::review::check_icon(theme, past[picked].state, 12., window))
+            .child(div().min_w_0().truncate().child(line(picked)))
+            .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(12.)).flex_none().text_color(theme.text_faint))
+            .relative()
+            .child(anchor_probe(&self.review_anchors, "pipelines"));
+        let picker = crate::ui::trigger(
+            picker,
+            cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+                let at = this.review_anchors.borrow().get("pipelines").map_or(e.position, |b| b.bottom_left() + gpui::point(px(0.), px(4.)));
+                crate::ui::Popup::toggle(&mut this.review_pipeline_menu, || at);
+                cx.notify();
+            }),
+        );
+        let menu = self.review_pipeline_menu.as_ref().map(|menu| {
+            let rows = past.iter().enumerate().map(|(i, p)| {
+                let (url, iid) = (url.to_string(), p.iid.clone());
+                let short: String = p.sha.chars().take(7).collect();
+                div()
+                    .id(("review-pipeline", i))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .when(i == picked, |el| el.bg(theme.selected))
+                    .when(i != picked, |el| el.hover(move |s| s.bg(hover)))
+                    .child(crate::ui::review::check_icon(theme, p.state, 12., window))
+                    .child(div().flex_1().min_w_0().truncate().text_color(text).child(line(i)))
+                    .child(div().flex_none().font_family(mono.clone()).text_color(theme.text_faint).child(short))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.review_pipeline = (i > 0).then(|| (url.clone(), iid.clone()));
+                        if let Some(m) = this.review_pipeline_menu.as_mut() {
+                            m.close();
+                        }
+                        cx.notify();
+                    }))
+            });
+            let card = menu_card(theme, "review-pipeline-card", 260.)
+                .max_h(px(420.))
+                .overflow_y_scroll()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    if let Some(m) = this.review_pipeline_menu.as_mut() {
+                        m.close();
+                    }
+                    cx.notify();
+                }))
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .text_size(px(12.))
+                .children(rows);
+            let at = menu.value;
+            let card = crate::ui::menu_motion("review-pipeline-in", menu, card);
+            gpui::deferred(gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(card)).with_priority(1).into_any_element()
+        });
+        div().flex().items_center().child(picker).children(menu).into_any_element()
+    }
+
     /// The Code tab's bar: the commit picker, how many files there are and how many are viewed, what they add and
     /// remove, and a button folding or unfolding them all; the picker's menu while it's open.
     #[allow(clippy::too_many_arguments)]
@@ -514,10 +852,9 @@ impl Shell {
         r: &Request,
         commits: &[(String, String)],
         commit: Option<&str>,
-        files: &[crate::ui::review::PrFile],
+        files: &[crate::changes::FileDiff],
         viewed: &[bool],
-        unfolded: &[bool],
-        open: &[bool],
+        code: &Entity<super::changes::Changes>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (hover, text, muted) = (theme.hover, theme.text, theme.text_muted);
@@ -541,14 +878,18 @@ impl Shell {
             .child(div().min_w_0().truncate().child(picked.unwrap_or_else(|| if commit.is_some() { "One commit".into() } else { "All commits".into() })))
             .child(gpui::svg().path("icons/alt-arrow-down.svg").size(px(12.)).flex_none().text_color(theme.text_faint))
             .relative()
-            .child(anchor_probe(&self.review_anchors, "commits"))
-            .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
+            .child(anchor_probe(&self.review_anchors, "commits"));
+        let picker = crate::ui::trigger(
+            picker,
+            cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
                 // the list hangs under the picker, at its left edge
-                let at = this.review_anchors.borrow().get("commits").map_or(e.position(), |b| b.bottom_left() + gpui::point(px(0.), px(4.)));
-                this.review_commit_menu = Some(crate::ui::Popup::new(at));
-                this.review_commit_more = false;
+                let at = this.review_anchors.borrow().get("commits").map_or(e.position, |b| b.bottom_left() + gpui::point(px(0.), px(4.)));
+                if crate::ui::Popup::toggle(&mut this.review_commit_menu, || at) {
+                    this.review_commit_more = false;
+                }
                 cx.notify();
-            }));
+            }),
+        );
         let n = files.len();
         let seen = viewed.iter().filter(|v| **v).count();
         let count = match (n, commit) {
@@ -556,22 +897,26 @@ impl Shell {
             (n, Some(_)) => format!("{} file{}", thousands(n as u64), if n == 1 { "" } else { "s" }),
             (n, None) => format!("{} file{} · {seen} / {n} viewed", thousands(n as u64), if n == 1 { "" } else { "s" }),
         };
-        let (adds, dels) = files.iter().fold((0, 0), |(a, d), f| (a + f.diff.additions as u64, d + f.diff.deletions as u64));
-        let all_open = !open.is_empty() && open.iter().all(|o| *o);
-        let fold_all = (n > 0).then(|| {
-            let keys: Vec<(String, bool)> = files.iter().zip(unfolded).map(|(f, u)| (format!("{}\n{}", r.pr.url, f.diff.path), *u)).collect();
-            titlebar_button(theme, "review-fold-all", "icons/fold-vertical.svg")
-                .tooltip(tip(if all_open { "Collapse all files" } else { "Expand all files" }, None))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    for (key, unfolded) in &keys {
-                        if *unfolded == all_open {
-                            this.review_files.insert(key.clone());
-                        } else {
-                            this.review_files.remove(key);
-                        }
-                    }
-                    cx.notify();
-                }))
+        let (adds, dels) = files.iter().fold((0, 0), |(a, d), f| (a + f.additions as u64, d + f.deletions as u64));
+        // the diff's own toggles, as its tab has them
+        use super::changes::Changes;
+        let (split, wrap, fold_label) = {
+            let c = code.read(cx);
+            (c.is_split(), c.wraps(), c.fold_all_label())
+        };
+        let toggle = |id: &'static str, icon: &'static str, label: &'static str, on: bool, act: fn(&mut Changes, &mut Context<Changes>)| {
+            let code = code.clone();
+            Changes::header_toggle(id, icon, label, on, theme).on_click(move |_, _, cx| code.update(cx, act))
+        };
+        let toggles = (n > 0).then(|| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .child(toggle("review-split", "icons/split-columns.svg", "Split view", split, Changes::toggle_mode))
+                .child(toggle("review-wrap", "icons/wrap-text.svg", "Wrap long lines", wrap, Changes::toggle_wrap))
+                .child(toggle("review-fold-all", "icons/fold-vertical.svg", fold_label, false, Changes::toggle_collapse_all))
         });
         let menu = self.review_commit_menu.as_ref().map(|menu| {
             let more = self.review_commit_more;
@@ -652,7 +997,7 @@ impl Shell {
                 el.child(div().flex_none().font_family(mono.clone()).text_color(theme.success).child(format!("+{}", thousands(adds))))
                     .child(div().flex_none().font_family(mono.clone()).text_color(theme.danger).child(format!("-{}", thousands(dels))))
             })
-            .children(fold_all)
+            .children(toggles)
             .children(menu)
             .into_any_element()
     }
@@ -842,7 +1187,7 @@ impl Shell {
                 let url = url.clone();
                 Box::new(move |_, _, cx| super::browser::open_inside(&url, cx))
             }))
-            .child(item("review-menu-open-outside", "icons/solar/square-arrow-right-up.svg", format!("Open on {host}"), Some("In the default browser.".into()), false, Box::new(move |_, _, cx| cx.open_url(&url))))
+            .child(item("review-menu-open-outside", "icons/solar/square-arrow-right-up.svg", format!("Open on {host}"), Some("In the default browser.".into()), false, Box::new(move |_, _, cx| crate::ui::open_outside(&url, cx))))
             .child(item("review-menu-link", "icons/solar/link.svg", "Copy link".into(), None, false, copy(url2, "Copied the link")).children(keys("CopyPageUrl").map(|k| shortcut(theme, k))))
             .child(item("review-menu-number", "icons/solar/copy.svg", format!("Copy {noun} number"), None, false, copy(number, "Copied the number")).children(keys("CopyPrNumber").map(|k| shortcut(theme, k))))
             .child(item("review-menu-checkout", "icons/terminal.svg", "Copy checkout command".into(), None, false, copy(checkout, "Copied the checkout command")));
@@ -882,9 +1227,13 @@ type Listener = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 /// The Timeline tab's cache entry: a PR's events, or why they couldn't be read.
 type Timeline = Result<Vec<crate::ui::review::Event>, String>;
 /// The Code tab's: a PR's files and whether the diff was cut short, or why it couldn't be read.
-type PrDiff = Result<(Vec<crate::ui::review::PrFile>, bool), String>;
+type PrDiff = Result<std::sync::Arc<crate::ui::review::PrDiff>, String>;
+type LineComments = Result<Vec<crate::changes::ReviewComment>, String>;
 /// The Code tab's commit picker's: a PR's commits, newest first, or why they couldn't be read.
 type PrCommits = Result<Vec<(String, String)>, String>;
+/// The Pipeline tab's picker's: an MR's pipelines, newest first; and an earlier one's jobs, by `dir\niid`.
+type Pipelines = Result<Vec<crate::ui::review::PastPipeline>, String>;
+type PipelineJobs = Result<Vec<Check>, String>;
 
 /// Where files marked viewed are kept between runs.
 fn viewed_file() -> std::path::PathBuf {
@@ -916,7 +1265,7 @@ fn pr_look(r: &Request, dir: &str, bodies: &[&str], cx: &mut App) -> crate::ui::
         if url.starts_with("http://") || url.starts_with("https://") {
             super::browser::open_inside(url, cx);
         } else {
-            cx.open_url(url);
+            crate::ui::open_outside(url, cx);
         }
     });
     let mut sources = Vec::new();
@@ -962,39 +1311,26 @@ fn parsed(body: &str) -> Rc<Vec<crate::ui::review::Block>> {
 }
 
 /// The description under a heading that folds it away.
-fn description(theme: &Theme, body: &str, collapsed: bool, look: &crate::ui::markdown::Look, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
+/// The description's head, then its markdown a block an item, each with the space above it.
+fn description(theme: &Theme, body: &str, collapsed: bool, look: &crate::ui::markdown::Look, toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Vec<(f32, AnyElement)> {
     let text = theme.text;
-    div()
+    let head = div()
+        .id("review-description")
         .flex()
-        .flex_col()
-        .gap(px(10.))
-        .child(
-            div()
-                .id("review-description")
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .text_size(px(12.))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted)
-                .cursor_pointer()
-                .hover(move |s| s.text_color(text))
-                .child("Description")
-                .child(gpui::svg().path(if collapsed { "icons/alt-arrow-right.svg" } else { "icons/alt-arrow-down.svg" }).size(px(12.)).text_color(theme.text_faint))
-                .on_click(toggle),
-        )
-        .when(!collapsed, |el| {
-            el.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .text_size(px(13.))
-                    .text_color(theme.text)
-                    .children(crate::ui::markdown::render_with(&parsed(body), "review-md", theme, look)),
-            )
-        })
-        .into_any_element()
+        .items_center()
+        .gap(px(4.))
+        .text_size(px(12.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .cursor_pointer()
+        .hover(move |s| s.text_color(text))
+        .child("Description")
+        .child(gpui::svg().path(if collapsed { "icons/alt-arrow-right.svg" } else { "icons/alt-arrow-down.svg" }).size(px(12.)).text_color(theme.text_faint))
+        .on_click(toggle)
+        .into_any_element();
+    let blocks = if collapsed { Vec::new() } else { crate::ui::markdown::render_with(&parsed(body), "review-md", theme, look) };
+    let blocks = blocks.into_iter().enumerate().map(|(i, b)| (if i == 0 { 10. } else { 8. }, div().text_size(px(13.)).text_color(theme.text).child(b).into_any_element()));
+    std::iter::once((SECTION, head)).chain(blocks).collect()
 }
 
 impl Shell {
@@ -1496,7 +1832,8 @@ fn avatar(theme: &Theme, who: &str) -> Div {
 
 /// The Timeline tab: what happened on the PR, oldest first. A comment, or a review that says something, is a card with
 /// its text; the rest are one line each, a push with its commits under it.
-fn timeline(theme: &Theme, events: &[crate::ui::review::Event], look: &crate::ui::markdown::Look) -> AnyElement {
+/// The timeline's events, an item each with the space above it.
+fn timeline(theme: &Theme, events: &[crate::ui::review::Event], look: &crate::ui::markdown::Look) -> Vec<(f32, AnyElement)> {
     use crate::ui::review::Happened;
     let mono = theme.font_terminal.clone();
     let item = |i: usize, e: &crate::ui::review::Event| -> AnyElement {
@@ -1569,200 +1906,7 @@ fn timeline(theme: &Theme, events: &[crate::ui::review::Event], look: &crate::ui
             })
             .into_any_element()
     };
-    div().flex().flex_col().gap(px(14.)).children(events.iter().enumerate().map(|(i, e)| item(i, e))).into_any_element()
-}
-
-/// Up to this many files, the Code tab opens with every file's diff unfolded.
-const SMALL_PR: usize = 3;
-/// How many of a file's diff lines the Code tab draws; the rest are a link to the host.
-const MAX_FILE_LINES: usize = 400;
-
-/// The Code tab: the PR's files with what each adds and removes; a click on one unfolds its diff (`open` is which
-/// are), and `on_file` folds or unfolds one by its path.
-#[allow(clippy::too_many_arguments)]
-fn code(
-    theme: &Theme,
-    files: &[crate::ui::review::PrFile],
-    open: &[bool],
-    viewed: &[bool],
-    cut: bool,
-    pr: &crate::ui::statusbar::Pr,
-    on_file: Rc<dyn Fn(String, &mut App)>,
-    on_view: Option<Rc<dyn Fn(usize, &mut App)>>,
-) -> AnyElement {
-    use crate::changes::{FileStatus, LineKind};
-    let mono = theme.font_terminal.clone();
-    let (hover, accent) = (theme.hover, theme.accent);
-    let page = if pr.gitlab { format!("{}/diffs", pr.url) } else { format!("{}/files", pr.url) };
-    let open_page = |id: gpui::ElementId, label: String| {
-        let page = page.clone();
-        div().id(id).cursor_pointer().text_color(accent).hover(|s| s.underline()).child(label).on_click(move |_, _, cx| super::browser::open_inside(&page, cx))
-    };
-    let diff = |i: usize, file: &crate::ui::review::PrFile| -> AnyElement {
-        let (f, highlights) = (&file.diff, file.highlights.as_ref());
-        let gutter = (f.max_line.max(1).to_string().len() as f32) * 7. + 10.;
-        let number = |n: Option<u32>, color: Hsla| {
-            div().w(px(gutter)).flex_none().pr(px(6.)).flex().justify_end().text_color(color).child(n.map(|n| n.to_string()).unwrap_or_default())
-        };
-        let mut rows: Vec<AnyElement> = crate::changes::file_notices(f)
-            .into_iter()
-            .map(|n| div().px(px(10.)).py(px(4.)).text_color(theme.text_faint).child(n).into_any_element())
-            .collect();
-        let mut shown = 0;
-        let total: usize = f.hunks.iter().map(|h| h.lines.len()).sum();
-        'hunks: for h in &f.hunks {
-            rows.push(div().px(px(10.)).py(px(3.)).bg(theme.diff_hunk).text_color(theme.text_faint).truncate().child(h.header.clone()).into_any_element());
-            for l in &h.lines {
-                if shown == MAX_FILE_LINES {
-                    break 'hunks;
-                }
-                shown += 1;
-                let (marker, ink, bg) = match l.kind {
-                    LineKind::Add => ("+", theme.diff_add, Some(theme.diff_add.opacity(0.08))),
-                    LineKind::Del => ("-", theme.diff_del, Some(theme.diff_del.opacity(0.08))),
-                    _ => (" ", theme.text_faint, None),
-                };
-                rows.push(
-                    div()
-                        .flex()
-                        .items_start()
-                        .when_some(bg, |el, bg| el.bg(bg))
-                        .child(number(l.old_no, theme.text_faint.opacity(0.8)))
-                        .child(number(l.new_no, theme.text_faint.opacity(0.8)))
-                        .child(div().w(px(14.)).flex_none().text_color(ink).child(marker))
-                        .child(div().flex_1().min_w_0().pr(px(8.)).text_color(theme.text).map(|el| {
-                            if l.text.is_empty() {
-                                el.child(" ")
-                            } else {
-                                el.child(gpui::StyledText::new(l.text.clone()).with_runs(super::changes::line_runs(l, highlights, theme)))
-                            }
-                        }))
-                        .into_any_element(),
-                );
-            }
-        }
-        if shown < total {
-            rows.push(
-                div()
-                    .px(px(10.))
-                    .py(px(6.))
-                    .flex()
-                    .gap(px(6.))
-                    .text_color(theme.text_faint)
-                    .child(format!("{} more lines", thousands((total - shown) as u64)))
-                    .child(open_page(("review-code-more", i).into(), format!("Open on {} ↗", if pr.gitlab { "GitLab" } else { "GitHub" })))
-                    .into_any_element(),
-            );
-        }
-        div()
-            .ml(px(6.))
-            .mt(px(2.))
-            .mb(px(6.))
-            .rounded(px(6.))
-            .border_1()
-            .border_color(theme.border)
-            .overflow_hidden()
-            .font_family(mono.clone())
-            .text_size(px(11.5))
-            .line_height(px(17.))
-            .children(rows)
-            .into_any_element()
-    };
-    let rows = files.iter().enumerate().flat_map(|(i, file)| {
-        let f = &file.diff;
-        let unfolded = open.get(i).copied().unwrap_or(false);
-        let (folder, name) = match f.path.rsplit_once('/') {
-            Some((folder, name)) => (format!("{folder}/"), name.to_string()),
-            None => (String::new(), f.path.clone()),
-        };
-        let tint = match f.status {
-            FileStatus::Added => theme.success,
-            FileStatus::Deleted => theme.danger,
-            _ => theme.text,
-        };
-        let on_file = on_file.clone();
-        let path = f.path.clone();
-        let row = div()
-            .id(("review-file", i))
-            .h(px(26.))
-            .px(px(6.))
-            .mx(px(-6.))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .rounded(px(6.))
-            .cursor_pointer()
-            .hover(move |s| s.bg(hover))
-            .text_size(px(12.))
-            .child(gpui::svg().path(if unfolded { "icons/alt-arrow-down.svg" } else { "icons/alt-arrow-right.svg" }).size(px(12.)).flex_none().text_color(theme.text_faint))
-            .child(crate::ui::file_icons::icon(&f.path, theme.appearance).size(px(14.)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .when_some(f.old_path.clone(), |el, old| el.child(gpui::StyledText::new(format!("{old} → ")).with_highlights([(0..old.len() + 5, gpui::HighlightStyle { color: Some(theme.text_faint), ..Default::default() })])))
-                    .child(gpui::StyledText::new(format!("{folder}{name}")).with_highlights([
-                        (0..folder.len(), gpui::HighlightStyle { color: Some(theme.text_faint), ..Default::default() }),
-                        (folder.len()..folder.len() + name.len(), gpui::HighlightStyle { color: Some(tint), ..Default::default() }),
-                    ])),
-            )
-            .when(f.binary, |el| el.child(div().flex_none().text_color(theme.text_faint).child("binary")))
-            .when(!f.binary, |el| {
-                el.child(div().flex_none().font_family(mono.clone()).text_color(theme.success).child(format!("+{}", f.additions)))
-                    .child(div().flex_none().font_family(mono.clone()).text_color(theme.danger).child(format!("-{}", f.deletions)))
-            })
-            .children(on_view.clone().map(|on_view| {
-                let seen = viewed.get(i).copied().unwrap_or(false);
-                let accent = theme.accent;
-                div()
-                    .id(("review-viewed", i))
-                    .flex_none()
-                    .ml(px(4.))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .text_color(theme.text_faint)
-                    .child(
-                        div()
-                            .size(px(14.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .border_1()
-                            .map(|el| if seen { el.bg(accent).border_color(accent) } else { el.border_color(theme.border_strong) })
-                            .when(seen, |el| el.child(gpui::svg().path("icons/check.svg").size(px(10.)).text_color(gpui::white()))),
-                    )
-                    .child("Viewed")
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        on_view(i, cx);
-                    })
-            }))
-            .when(viewed.get(i).copied().unwrap_or(false), |el| el.opacity(0.6))
-            .on_click(move |_, _, cx| on_file(path.clone(), cx))
-            .into_any_element();
-        std::iter::once(row).chain(unfolded.then(|| diff(i, file)))
-    });
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(2.))
-        .children(rows.collect::<Vec<_>>())
-        .when(cut, |el| {
-            el.child(
-                div()
-                    .pt(px(6.))
-                    .flex()
-                    .gap(px(6.))
-                    .text_size(px(12.))
-                    .text_color(theme.text_faint)
-                    .child("The diff is too big to show whole.")
-                    .child(open_page("review-code-cut".into(), "See it all ↗".into())),
-            )
-        })
-        .into_any_element()
+    events.iter().enumerate().map(|(i, e)| (if i == 0 { SECTION } else { 14. }, item(i, e))).collect()
 }
 
 /// The Summary tab's properties: who reviews it and what they said, its labels, and (GitLab) its open threads.
