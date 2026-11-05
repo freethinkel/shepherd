@@ -1,0 +1,22 @@
+# Vendored from crates.io octorus-tree-sitter-vue3 0.1.0 (github.com/ushironoko/octorus), MIT.
+# Changed: its bundled copy of tree-sitter-html's scanner exported tree_sitter_html_external_scanner_*, which
+# clashed with tree-sitter-html at link time and broke HTML highlighting; those are renamed vue3_html_*.
+[package]
+name = "tree-sitter-vue3"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1.3"
+
+[dev-dependencies]
+tree-sitter = "=0.26.11"
+
+[build-dependencies]
+cc = "1.2.10"

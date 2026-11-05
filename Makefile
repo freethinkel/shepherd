@@ -28,10 +28,10 @@ run: ## Debug app, run from target/debug/Shepherd.app (cargo runner)
 	cargo run
 
 test: ## All tests
-	cargo test
+	cargo test --workspace
 
 lint: ## Clippy, warnings as errors
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
 linux: ## Linux tar.gz, .deb and .rpm for this Mac's architecture, built in Docker, in target/linux-dist
 	docker build -t shepherd-linux -f scripts/linux.Dockerfile scripts
@@ -49,11 +49,11 @@ OUT ?= target/shot-linux.png
 
 linux-test: ## All tests, on Linux in Docker
 	$(DEV_IMAGE)
-	$(DEV_RUN) shepherd-dev cargo test
+	$(DEV_RUN) shepherd-dev cargo test --workspace
 
 linux-lint: ## Clippy, warnings as errors, on Linux in Docker
 	$(DEV_IMAGE)
-	$(DEV_RUN) shepherd-dev cargo clippy --all-targets -- -D warnings
+	$(DEV_RUN) shepherd-dev cargo clippy --workspace --all-targets -- -D warnings
 
 linux-shot: ## The fixture's window on Linux in Docker, in OUT (target/shot-linux.png); PANEL=sessions opens a panel
 	$(DEV_IMAGE)

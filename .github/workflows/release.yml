@@ -167,9 +167,9 @@ jobs:
           tar -xzf "$tmp/ghostty.tar.gz" -C "$tmp"
           echo "GHOSTTY_SOURCE_DIR=$(cygpath -w "$tmp/$(field root)")" >> "$GITHUB_ENV"
       # the Windows side of cfg'd code: named pipes, paths, its window chrome
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
         if: ${{ !matrix.cross }}
-      - run: cargo test
+      - run: cargo test --workspace
         if: ${{ !matrix.cross }}
       # it tells of new releases (src/update.rs)
       - run: cargo build --release --target ${{ matrix.target }}
