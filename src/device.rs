@@ -35,6 +35,8 @@ pub struct Device {
     /// `iOS 27.0`, `API 36`.
     pub version: String,
     pub running: bool,
+    /// iPhone Duo, whose session follows its hinge and two screens.
+    pub duo: bool,
 }
 
 /// A Device tab's key starts with this; the bare prefix is the tab that lists them.
@@ -325,7 +327,7 @@ impl Session {
     pub fn open(device: &Device, rt: &tokio::runtime::Handle, feed: Arc<Feed>, wake: Wake) -> anyhow::Result<Session> {
         match device.platform {
             #[cfg(target_os = "macos")]
-            Platform::Ios => Ok(Session::Ios(ios::Session::open(&device.id, feed, wake)?)),
+            Platform::Ios => Ok(Session::Ios(ios::Session::open(device, feed, wake)?)),
             Platform::Android => Ok(Session::Android(android::Session::open(&device.id, rt, feed, wake)?)),
             #[allow(unreachable_patterns)]
             _ => anyhow::bail!("iOS Simulators need macOS"),
@@ -341,13 +343,14 @@ impl Session {
         }
     }
 
-    /// A trackpad's scroll over `x`, `y`, by `dx`, `dy` points; iOS only, Android scrolls by dragging.
-    pub fn scroll(&self, phase: gpui::TouchPhase, x: f64, y: f64, dx: f64, dy: f64) {
+    /// A trackpad's scroll (or a mouse `wheel`'s, which has no phases) over `x`, `y`, by `dx`, `dy` points; iOS only,
+    /// Android scrolls by dragging.
+    pub fn scroll(&self, phase: gpui::TouchPhase, x: f64, y: f64, dx: f64, dy: f64, wheel: bool) {
         #[cfg(target_os = "macos")]
         if let Session::Ios(s) = self {
-            s.scroll(phase, x, y, dx, dy);
+            s.scroll(phase, x, y, dx, dy, wheel);
         }
-        let _ = (phase, x, y, dx, dy);
+        let _ = (phase, x, y, dx, dy, wheel);
     }
 
     pub fn button(&self, button: Button) {
@@ -436,7 +439,7 @@ mod tests {
 
     #[test]
     fn keys_and_tab_keys() {
-        let d = Device { platform: Platform::Android, id: "Pixel_9".into(), name: "Pixel 9".into(), version: "API 36".into(), running: false };
+        let d = Device { platform: Platform::Android, id: "Pixel_9".into(), name: "Pixel 9".into(), version: "API 36".into(), running: false, duo: false };
         assert_eq!(d.key(), "device:android:Pixel_9");
         assert_eq!(w3c_key("left"), Some("ArrowLeft"));
         assert_eq!(w3c_key("a"), None);

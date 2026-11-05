@@ -26,8 +26,9 @@ pub(super) fn screen(cover: bool) -> u8 {
 }
 const SETTLED: &str = r#"process == "SpringBoard" AND ((category == "DisplayContentMode" AND eventMessage BEGINSWITH "COMPLETED") OR eventMessage BEGINSWITH "Sending MagicPose event")"#;
 
-pub(super) fn is_duo(udid: &str) -> bool {
-    simdriver::list_devices().is_ok_and(|all| all.iter().any(|d| d.udid == udid && d.device_type.ends_with(".iPhone-Duo")))
+/// Whether simulator device type `device_type` (simctl's identifier) is iPhone Duo.
+pub(super) fn is_duo(device_type: &str) -> bool {
+    device_type.ends_with(".iPhone-Duo")
 }
 
 /// The guest program, built for this Mac's simulators into the cache the first time.
@@ -201,6 +202,8 @@ impl Shared {
     /// Sends the helper `lines` in turn, starting it if it isn't running.
     fn send(&self, lines: &[String]) -> anyhow::Result<()> {
         let mut helper = self.helper.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+        // a move still on its way when the tab closed starts no helper the session no longer stops
+        anyhow::ensure!(!self.closed.load(Ordering::Relaxed), "The device was closed");
         if helper.is_none() {
             *helper = Some(Helper::start(&self.udid)?);
         }
@@ -237,9 +240,18 @@ impl Shared {
         if let (Ok(()), Ok(mut at)) = (&sent, self.at.lock()) {
             *at = to;
         }
+        if let (Some(cover), Err(_)) = (handover, &sent) {
+            // the hinge never moved: the screen shown ahead of it goes back
+            (self.show)(!cover);
+        }
         self.feed.change_fold(|f| {
             match (&sent, hinge) {
-                (Err(e), _) => f.error = Some(format!("{e:#}")),
+                (Err(e), _) => {
+                    f.error = Some(format!("{e:#}"));
+                    if let Some(cover) = handover {
+                        f.cover = !cover;
+                    }
+                }
                 // SpringBoard logs a fold only when it hands over to the other screen (Book to Open doesn't): the angle
                 // the device took is its own
                 (Ok(()), Hinge::Stand(s)) => (f.stand, f.angle) = (Some(s), stand_angle(s)),
@@ -326,23 +338,29 @@ fn nudge(angle: f64, cover: bool) -> [String; 2] {
     [format!("sweep {angle} {to} 60"), format!("sweep {to} {angle} 60")]
 }
 
-/// Where this boot last left the Duo `udid`'s hinge: whether the cover is live, and the angle.
-pub(super) fn last_settled(udid: &str) -> (bool, f64) {
+/// Where the Duo `udid`'s hinge was last left within `last` (`log show`'s: `1h`, `boot`): whether the cover is live,
+/// and the angle; `None` when it wasn't moved then.
+pub(super) fn last_settled(udid: &str, last: &str) -> Option<(bool, f64)> {
     let shown = crate::process::command("xcrun")
-        .args(["simctl", "spawn", udid, "log", "show", "--last", "boot", "--style", "compact", "--predicate", SETTLED])
+        .args(["simctl", "spawn", udid, "log", "show", "--last", last, "--style", "compact", "--predicate", SETTLED])
         .output();
     let text = shown.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
     // one never opened since it booted is shut
-    text.lines().fold((true, 0.), |was, line| settled(line, was).unwrap_or(was))
+    text.lines().fold(None, |was, line| settled(line, was.unwrap_or((true, 0.))).or(was))
 }
+
+/// The window of SpringBoard's log a tab opens with: the whole boot's takes 20 s on one booted for hours.
+pub(super) const RECENT: &str = "1h";
 
 /// A Duo's hinge, for as long as its session.
 pub(super) struct Duo(Arc<Shared>);
 
 impl Duo {
-    /// Follows the Duo `udid`'s hinge into `feed`, from `(cover, angle)` (`last_settled`); `show` switches the stream to
-    /// the cover (true) or the inner screen.
-    pub(super) fn open(udid: &str, (cover, angle): (bool, f64), feed: Arc<Feed>, wake: Wake, show: impl Fn(bool) + Send + Sync + 'static) -> Duo {
+    /// Follows the Duo `udid`'s hinge into `feed`, from `last` (`last_settled` over the `RECENT` log; `None` when it
+    /// says nothing, and the whole boot's is read behind it); `show` switches the stream to the cover (true) or the
+    /// inner screen.
+    pub(super) fn open(udid: &str, last: Option<(bool, f64)>, feed: Arc<Feed>, wake: Wake, show: impl Fn(bool) + Send + Sync + 'static) -> Duo {
+        let (cover, angle) = last.unwrap_or((true, 0.));
         let orientation = orientation(udid, cover);
         if let Ok(mut fold) = feed.fold.lock() {
             let stand = stand_at(angle, cover, orientation);
@@ -366,6 +384,22 @@ impl Duo {
             let shared = shared.clone();
             move || shared.follow()
         });
+        if last.is_none() {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let opened = shared.feed.fold();
+                let Some((cover, angle)) = last_settled(&shared.udid, "boot") else { return };
+                // a fold seen or made since knows better
+                if shared.feed.fold() != opened || shared.moves.load(Ordering::Relaxed) > 0 || shared.closed.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Ok(mut at) = shared.at.lock() {
+                    *at = angle;
+                }
+                shared.settled(cover, angle);
+                shared.feed.change_fold(|f| f.stand = stand_at(f.angle, f.cover, f.orientation));
+            });
+        }
         // the helper started ahead of the first fold, which would wait a second on it
         std::thread::spawn({
             let shared = shared.clone();
@@ -386,20 +420,22 @@ impl Duo {
         shared.feed.change_fold(|f| (f.busy, f.error) = (true, None));
         std::thread::spawn(move || {
             loop {
-                match shared.next.lock().ok().and_then(|mut n| n.take()) {
-                    Some(hinge) => shared.make(hinge),
-                    None => {
-                        shared.moving.store(false, Ordering::Release);
-                        // one asked for just now, after the take and before this
-                        let late = shared.next.lock().is_ok_and(|n| n.is_some());
-                        if !late || shared.moving.swap(true, Ordering::AcqRel) {
-                            break;
-                        }
-                    }
+                if let Some(hinge) = shared.next.lock().ok().and_then(|mut n| n.take()) {
+                    shared.make(hinge);
+                    continue;
                 }
+                // not busy before letting go: a mover that takes over after sets it busy again, and no one clears
+                // that but itself
+                shared.feed.change_fold(|f| f.busy = false);
+                (shared.wake)();
+                shared.moving.store(false, Ordering::Release);
+                // one asked for just now, after the take and before this
+                let late = shared.next.lock().is_ok_and(|n| n.is_some());
+                if !late || shared.moving.swap(true, Ordering::AcqRel) {
+                    break;
+                }
+                shared.feed.change_fold(|f| f.busy = true);
             }
-            shared.feed.change_fold(|f| f.busy = false);
-            (shared.wake)();
         });
     }
 }
@@ -411,9 +447,13 @@ impl Drop for Duo {
             let _ = log.kill();
             let _ = log.wait();
         }
-        if let Ok(mut helper) = self.0.helper.lock() {
-            helper.take();
-        }
+        // off this (the UI's) thread: a move or the first build of the helper can hold it for seconds
+        let shared = self.0.clone();
+        std::thread::spawn(move || {
+            if let Ok(mut helper) = shared.helper.lock() {
+                helper.take();
+            }
+        });
     }
 }
 

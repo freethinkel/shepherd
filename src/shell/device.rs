@@ -29,6 +29,8 @@ pub(super) struct Devices {
     /// The last look at the machine; `None` before the first.
     found: Option<Found>,
     finding: bool,
+    /// A look asked for while one was under way, which may have seen the machine as it was: one more after it.
+    find_again: bool,
     /// The device being started or opened, by key.
     pending: Option<Device>,
     error: Option<String>,
@@ -55,6 +57,8 @@ struct Screen {
     shown: Option<Arc<device::Frame>>,
     /// Shown in 3D, t3code's way, by a page of its own instead of flat.
     three: bool,
+    /// The hinge as the rail last drew it: in 3D the window redraws for nothing else.
+    drawn_fold: Option<device::Fold>,
     /// Its 3D page has drawn the device; its loader shows until then.
     three_drawn: bool,
     /// Where the screen was painted last, which the pointer is read against.
@@ -196,6 +200,7 @@ impl Shell {
 
     pub(super) fn find_devices(&mut self, cx: &mut Context<Self>) {
         if std::mem::replace(&mut self.devices.finding, true) {
+            self.devices.find_again = true;
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -203,6 +208,9 @@ impl Shell {
             let _ = this.update(cx, |s, cx| {
                 s.devices.found = Some(found);
                 s.devices.finding = false;
+                if std::mem::take(&mut s.devices.find_again) {
+                    s.find_devices(cx);
+                }
                 cx.notify();
             });
         })
@@ -220,7 +228,13 @@ impl Shell {
             use futures::StreamExt;
             while rx.next().await.is_some() {
                 while rx.try_recv().is_ok() {}
-                if shown.load(Ordering::Relaxed) && this.update(cx, |_, cx| cx.notify()).is_err() {
+                let redraw = |s: &mut Self, cx: &mut Context<Self>| {
+                    // a 3D view's page draws its frames, but its rail is the window's
+                    if shown.load(Ordering::Relaxed) || s.devices.screens.values().any(|sc| sc.three && sc.feed.fold() != sc.drawn_fold) {
+                        cx.notify();
+                    }
+                };
+                if this.update(cx, redraw).is_err() {
                     break;
                 }
             }
@@ -271,6 +285,7 @@ impl Shell {
                             image: None,
                             shown: None,
                             three: false,
+                            drawn_fold: None,
                             three_drawn: false,
                             bounds: Default::default(),
                             pressed: false,
@@ -432,11 +447,24 @@ impl Shell {
 
     /// Powers the device off and closes its tabs everywhere: it's gone.
     fn power_off_device(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.device_action(key, cx, device::power_off);
+        let Some(device) = self.devices.screens.get(key).map(|s| s.device.clone()) else { return };
+        // the list looks again once it's off: a look now would see it running still
+        cx.spawn(async move |this, cx| {
+            let off = cx.background_spawn(async move { device::power_off(&device) }).await;
+            let _ = this.update(cx, |s, cx| {
+                if let Err(e) = off {
+                    crate::ui::toast::error(cx, format!("{e:#}"));
+                }
+                s.find_devices(cx);
+            });
+        })
+        .detach();
+        if let Some(d) = self.devices.found.as_mut().and_then(|f| f.devices.iter_mut().find(|d| d.key() == key)) {
+            d.running = false;
+        }
         let surface = Surface::Device(key.to_string());
         self.right.panels.values_mut().for_each(|p| p.close(&surface));
         self.sync_devices();
-        self.find_devices(cx);
         cx.notify();
     }
 
@@ -457,7 +485,8 @@ impl Shell {
                 let (name, version) = (screen.device.name.clone(), screen.device.version.clone());
                 loading_view(theme, key, &name, &version, "Loading 3D view…".into(), false, false).absolute().inset_0()
             });
-            // its page draws the frames: the window needn't redraw for them
+            // its page draws the frames: the window needn't redraw for them, only for its rail's hinge
+            screen.drawn_fold = screen.feed.fold();
             self.devices.set_shown(false);
             let area = self.render_web_area(&(format!("{PAGE_PREFIX}{key}"), None), theme, window, cx).children(loading);
             // the rail keeps its strip: the page sits above what GPUI draws there
@@ -585,10 +614,12 @@ impl Shell {
                     let (x, y, inside) = wheel(e.position);
                     let b = size.get().size;
                     let d = e.delta.pixel_delta(px(20.));
-                    if inside || e.touch_phase != gpui::TouchPhase::Started {
+                    // a mouse wheel's turns are all Moved: each may start a scroll, so each must be over the screen
+                    let wheel = matches!(e.delta, gpui::ScrollDelta::Lines(_));
+                    if inside || (!wheel && e.touch_phase != gpui::TouchPhase::Started) {
                         let (dx, dy) = (f32::from(d.x) / f32::from(b.width).max(1.), f32::from(d.y) / f32::from(b.height).max(1.));
                         let (dx, dy) = delta(dx as f64, dy as f64);
-                        s.session.scroll(e.touch_phase, x, y, dx, dy);
+                        s.session.scroll(e.touch_phase, x, y, dx, dy, wheel);
                     }
                 }
             }));

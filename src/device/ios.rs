@@ -14,7 +14,7 @@ pub(super) fn find() -> (Vec<Device>, Check) {
     let devices: Vec<Device> = all
         .into_iter()
         .filter(|d| d.runtime.starts_with("iOS"))
-        .map(|d| Device { platform: Platform::Ios, version: version(&d.runtime), running: d.state == "Booted", id: d.udid, name: d.name })
+        .map(|d| Device { platform: Platform::Ios, version: version(&d.runtime), running: d.state == "Booted", duo: duo::is_duo(&d.device_type), id: d.udid, name: d.name })
         .collect();
     let check = match devices.is_empty() {
         true => Check { ready: false, message: "Xcode is installed, but no iOS Simulator is available. Install a runtime in Xcode Settings → Components.".into() },
@@ -51,14 +51,23 @@ fn frame(f: simdriver::Frame, screen: Option<u8>) -> Frame {
     Frame { width: f.width, height: f.height, pixels: f.data, rgb: false, screen }
 }
 
-/// Streams `options`' screen; each frame to `on_frame`.
-fn start(options: simdriver::Options, feed: Arc<Feed>, wake: Wake, on_frame: impl Fn(simdriver::Frame) + Send + Sync + 'static) -> anyhow::Result<simdriver::Driver> {
+/// Streams `options`' screen; each frame to `on_frame`, and `on_back` once it's live again after a restart.
+fn start(
+    options: simdriver::Options,
+    feed: Arc<Feed>,
+    wake: Wake,
+    on_frame: impl Fn(simdriver::Frame) + Send + Sync + 'static,
+    on_back: impl Fn() + Send + Sync + 'static,
+) -> anyhow::Result<simdriver::Driver> {
+    let restarting = AtomicBool::new(false);
     Ok(simdriver::Driver::start(options, move |event| match event {
         simdriver::Event::Frame(f) => on_frame(f),
         simdriver::Event::State(simdriver::State::Restarting) => {
+            restarting.store(true, Ordering::Relaxed);
             feed.fail("The simulator restarted; reconnecting…".into());
             wake();
         }
+        simdriver::Event::State(simdriver::State::Live) if restarting.swap(false, Ordering::Relaxed) => on_back(),
         _ => {}
     })?)
 }
@@ -67,6 +76,9 @@ fn start(options: simdriver::Options, feed: Arc<Feed>, wake: Wake, on_frame: imp
 const LIGHTING: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// All but black: a screen not lit yet. Sampled, a few dozen pixels across it.
+// ponytail: an app's own all-black screen reads blank too, so a hidden screen keeps an older frame of it, and a screen
+// just switched to shows it only after LIGHTING; telling them apart needs the display's power state, which simctl
+// doesn't give (both read On)
 fn blank(frame: &Frame) -> bool {
     let pixels = frame.pixels.chunks_exact(4);
     let step = (pixels.len() / 64).max(1);
@@ -81,22 +93,36 @@ struct Panels {
     last: Mutex<[Option<Arc<Frame>>; 2]>,
     /// Both screens' streams, for as long as the session.
     streams: Mutex<Vec<simdriver::FrameStream>>,
-    /// When the live screen was switched to: it can be dark a few seconds more (a fold's screen lights late).
-    shown_at: Mutex<std::time::Instant>,
+    /// When the live screen was switched to, until it lights: it can be dark a few seconds more (a fold's screen
+    /// lights late).
+    shown_at: Mutex<Option<std::time::Instant>>,
+    /// Why a screen's stream didn't start: said over the other one's frames, which would clear it.
+    broken: Mutex<Option<String>>,
+    udid: String,
     feed: Arc<Feed>,
     wake: Wake,
 }
 
 impl Panels {
-    fn open(udid: &str, cover: bool, feed: Arc<Feed>, wake: Wake) -> Arc<Panels> {
+    fn open(udid: &str, cover: bool, feed: Arc<Feed>, wake: Wake) -> anyhow::Result<Arc<Panels>> {
         let panels = Arc::new(Panels {
             cover: AtomicBool::new(cover),
             last: Mutex::default(),
             streams: Mutex::default(),
-            shown_at: Mutex::new(std::time::Instant::now()),
+            shown_at: Mutex::new(Some(std::time::Instant::now())),
+            broken: Mutex::default(),
+            udid: udid.into(),
             feed,
             wake,
         });
+        panels.stream()?;
+        Ok(panels)
+    }
+
+    /// Starts both screens' streams, anew after the simulator restarted: they aren't restarted with it.
+    fn stream(self: &Arc<Self>) -> anyhow::Result<()> {
+        let udid = &self.udid;
+        let mut streams = Vec::new();
         for cover in [true, false] {
             let options = match cover {
                 true => simdriver::Options { screen_size: Some(duo::COVER), ..options(udid) },
@@ -104,37 +130,58 @@ impl Panels {
                 false => simdriver::Options { screen_size: Some(duo::INNER), rotate_cw: true, ..options(udid) },
             };
             // weak: the streams' callbacks must not keep their own owner alive
-            let p = Arc::downgrade(&panels);
-            match simdriver::FrameStream::start(&options, move |f| {
+            let p = Arc::downgrade(self);
+            let started = simdriver::FrameStream::start(&options, move |f| {
                 if let Some(p) = p.upgrade() {
                     p.frame(cover, frame(f, Some(duo::screen(cover))));
                 }
-            }) {
-                Ok(stream) => panels.streams.lock().expect("unshared").push(stream),
-                Err(e) => {
-                    panels.feed.fail(format!("The screen's video did not start: {e:#}"));
-                    (panels.wake)();
-                }
-            }
+            });
+            streams.push(started.map_err(|e| anyhow::anyhow!("The {} screen's video did not start: {e:#}", if cover { "cover" } else { "inner" }))?);
         }
-        panels
+        if let Ok(mut old) = self.streams.lock() {
+            *old = streams;
+        }
+        Ok(())
+    }
+
+    /// Back after the simulator restarted: both streams anew, or why not, kept on screen.
+    fn restart(self: &Arc<Self>) {
+        let broken = self.stream().err().map(|e| format!("{e:#}"));
+        if let Some(why) = &broken {
+            self.feed.fail(why.clone());
+            (self.wake)();
+        }
+        if let Ok(mut b) = self.broken.lock() {
+            *b = broken;
+        }
     }
 
     fn frame(&self, cover: bool, frame: Frame) {
         let shown = self.cover.load(Ordering::Relaxed) == cover;
+        let dark = blank(&frame);
         // a dark screen keeps its last lit frame: one folded away, or one just switched to and not lit yet, as t3code's
         // viewer does
-        let lighting = !shown || self.shown_at.lock().is_ok_and(|at| at.elapsed() < LIGHTING);
+        let lighting = !shown
+            || self.shown_at.lock().is_ok_and(|mut at| {
+                if !dark {
+                    // lit: its own frames from now on, black or not
+                    at.take();
+                }
+                at.is_some_and(|at| at.elapsed() < LIGHTING)
+            });
         let frame = Arc::new(frame);
         if let Ok(mut last) = self.last.lock() {
             let slot = &mut last[usize::from(!cover)];
-            if slot.is_some() && lighting && blank(&frame) {
+            if slot.is_some() && lighting && dark {
                 return;
             }
             *slot = Some(frame.clone());
         }
         if shown {
             self.feed.put_shared(frame);
+            if let Some(why) = self.broken.lock().ok().and_then(|b| b.clone()) {
+                self.feed.fail(why);
+            }
             (self.wake)();
         }
     }
@@ -143,7 +190,7 @@ impl Panels {
     fn show(&self, cover: bool) {
         self.cover.store(cover, Ordering::Relaxed);
         if let Ok(mut at) = self.shown_at.lock() {
-            *at = std::time::Instant::now();
+            *at = Some(std::time::Instant::now());
         }
         if let Some(frame) = self.last.lock().ok().and_then(|last| last[usize::from(!cover)].clone()) {
             self.feed.put_shared(frame);
@@ -157,30 +204,52 @@ pub struct Session {
     driver: Arc<simdriver::Driver>,
     /// An iPhone Duo's hinge, and its screens.
     duo: Option<(duo::Duo, Arc<Panels>)>,
+    /// When a mouse wheel last scrolled: its finger is still down until simdriver lifts it, idle.
+    scrolled: Mutex<Option<std::time::Instant>>,
 }
 
+/// How long a wheel's finger stays down between its turns: under simdriver's idle lift (150 ms), so a turn never moves
+/// a finger already lifted.
+const WHEEL_HELD: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl Session {
-    pub(super) fn open(udid: &str, feed: Arc<Feed>, wake: Wake) -> anyhow::Result<Session> {
-        if !duo::is_duo(udid) {
+    pub(super) fn open(device: &Device, feed: Arc<Feed>, wake: Wake) -> anyhow::Result<Session> {
+        let udid = device.id.as_str();
+        if !device.duo {
             let (f, w) = (feed.clone(), wake.clone());
-            let driver = start(options(udid), feed, wake, move |fr| {
+            let on_frame = move |fr| {
                 f.put(frame(fr, None));
                 w();
-            })?;
-            return Ok(Session { driver: Arc::new(driver), duo: None });
+            };
+            let driver = start(options(udid), feed, wake, on_frame, || {})?;
+            return Ok(Session { driver: Arc::new(driver), duo: None, scrolled: Default::default() });
         }
-        let last = duo::last_settled(udid);
+        let last = duo::last_settled(udid, duo::RECENT);
+        let cover = last.is_none_or(|l| l.0);
+        // the panels, and the driver itself, once they're up: a restarted simulator restarts neither their streams
+        // nor the screen touches go to
+        let back = Arc::new(std::sync::OnceLock::<(std::sync::Weak<Panels>, std::sync::Weak<simdriver::Driver>)>::new());
+        let on_back = {
+            let back = back.clone();
+            move || {
+                let Some((p, d)) = back.get().and_then(|(p, d)| p.upgrade().zip(d.upgrade())) else { return };
+                d.set_touch_target(duo::screen(p.cover.load(Ordering::Relaxed)).into());
+                // off the driver's thread: starting a stream lists the devices
+                std::thread::spawn(move || p.restart());
+            }
+        };
         // the driver's own frames go unused: they're the TV-out's, which nothing shows and no other stream watches (two
         // streams of one screen leave one dark)
-        let input = simdriver::Options { touch_target: duo::screen(last.0).into(), screen_size: Some(duo::TV_OUT), fps: 1, scale: 8, ..options(udid) };
-        let driver = Arc::new(start(input, feed.clone(), wake.clone(), |_| {})?);
-        let panels = Panels::open(udid, last.0, feed.clone(), wake.clone());
+        let input = simdriver::Options { touch_target: duo::screen(cover).into(), screen_size: Some(duo::TV_OUT), fps: 1, scale: 8, ..options(udid) };
+        let driver = Arc::new(start(input, feed.clone(), wake.clone(), |_| {}, on_back)?);
+        let panels = Panels::open(udid, cover, feed.clone(), wake.clone())?;
+        let _ = back.set((Arc::downgrade(&panels), Arc::downgrade(&driver)));
         let (p, d) = (panels.clone(), driver.clone());
         let duo = duo::Duo::open(udid, last, feed, wake, move |cover| {
             p.show(cover);
             d.set_touch_target(duo::screen(cover).into());
         });
-        Ok(Session { driver, duo: Some((duo, panels)) })
+        Ok(Session { driver, duo: Some((duo, panels)), scrolled: Default::default() })
     }
 
     fn driver(&self) -> &simdriver::Driver {
@@ -202,7 +271,18 @@ impl Session {
         self.driver().pointer(phase, x, y, Default::default());
     }
 
-    pub(super) fn scroll(&self, phase: gpui::TouchPhase, x: f64, y: f64, dx: f64, dy: f64) {
+    pub(super) fn scroll(&self, phase: gpui::TouchPhase, x: f64, y: f64, dx: f64, dy: f64, wheel: bool) {
+        if wheel {
+            // a mouse wheel's turns come with no start or end: each puts a finger down unless one still is, and
+            // simdriver lifts it once the wheel stops
+            let now = std::time::Instant::now();
+            let held = self.scrolled.lock().ok().and_then(|mut at| at.replace(now)).is_some_and(|at| now - at < WHEEL_HELD);
+            if !held {
+                self.driver().scroll(simdriver::ScrollPhase::Began, x, y, 0., 0.);
+            }
+            self.driver().scroll(simdriver::ScrollPhase::Changed, x, y, dx, dy);
+            return;
+        }
         let phase = match phase {
             gpui::TouchPhase::Started => simdriver::ScrollPhase::Began,
             gpui::TouchPhase::Moved => simdriver::ScrollPhase::Changed,
@@ -244,6 +324,32 @@ mod tests {
         let frame = |px: [u8; 4]| super::Frame { width: 10, height: 10, pixels: px.repeat(100), rgb: false, screen: Some(1) };
         assert!(super::blank(&frame([0, 0, 0, 255])));
         assert!(!super::blank(&frame([200, 200, 200, 255])));
+    }
+
+    #[test]
+    fn a_screen_switched_to_keeps_its_last_frame_only_until_it_lights() {
+        use super::*;
+        let frame = |v: u8| Frame { width: 10, height: 10, pixels: [v, v, v, 255].repeat(100), rgb: false, screen: Some(1) };
+        let feed = Arc::new(Feed::default());
+        let panels = Panels {
+            cover: AtomicBool::new(true),
+            last: Mutex::default(),
+            streams: Mutex::default(),
+            shown_at: Mutex::default(),
+            broken: Mutex::default(),
+            udid: String::new(),
+            feed: feed.clone(),
+            wake: Arc::new(|| {}),
+        };
+        panels.frame(true, frame(200));
+        panels.show(true);
+        // dark, just switched to: the last lit frame stays
+        panels.frame(true, frame(0));
+        assert!(feed.newer(0).is_some_and(|(n, f)| n == 2 && !blank(&f)));
+        // lit: from now on black is its own
+        panels.frame(true, frame(200));
+        panels.frame(true, frame(0));
+        assert!(feed.newer(0).is_some_and(|(n, f)| n == 4 && blank(&f)));
     }
 
     #[test]

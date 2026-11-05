@@ -159,7 +159,7 @@ pub(super) fn find() -> (Vec<Device>, Check) {
             let c = config(id);
             let name = c.get("avd.ini.displayname").cloned().unwrap_or_else(|| id.replace('_', " "));
             let version = c.get("image.sysdir.1").and_then(|s| api_level(s)).unwrap_or_default();
-            Device { platform: Platform::Android, id: id.to_string(), name, version, running: live.contains_key(id) }
+            Device { platform: Platform::Android, id: id.to_string(), name, version, running: live.contains_key(id), duo: false }
         })
         .collect();
     let check = match devices.is_empty() {
