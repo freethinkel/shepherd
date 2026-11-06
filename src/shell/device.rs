@@ -38,6 +38,10 @@ pub(super) struct Devices {
     shown: Arc<AtomicBool>,
     /// Hands the sessions' threads a way to redraw the window.
     wake: Option<device::Wake>,
+    /// Each workspace's device as last written for agents (`device::agent::publish`).
+    published: String,
+    /// The screens are looked at for agents at them (`watch_agents`).
+    watching_agents: bool,
 }
 
 struct Screen {
@@ -71,6 +75,8 @@ struct Screen {
     held: Option<usize>,
     /// Reads the device off the window's thread, for the Tools panel and the overlay.
     probe: device::Probe,
+    /// An agent drove it lately, from this pane (empty when it ran outside herdr).
+    agent: Option<String>,
     /// The Tools panel beside the screen, while it's open.
     tools: Option<tools::Tools>,
     /// The frontmost app's elements outlined over the screen, while that's on.
@@ -311,6 +317,7 @@ impl Shell {
                             held: None,
                             tools: None,
                             overlay: None,
+                            agent: None,
                         };
                         s.devices.screens.insert(key.clone(), screen);
                         let (tools, overlay, text) = std::mem::take(&mut s.devices.open_with);
@@ -331,6 +338,7 @@ impl Shell {
                             .detach();
                         }
                         s.show_device_tab(&ws, &key, cx);
+                        s.watch_agents(cx);
                         // it's running now
                         s.find_devices(cx);
                     }
@@ -347,7 +355,35 @@ impl Shell {
         let panel = self.right.panels.entry(ws.to_string()).or_default();
         panel.add(Surface::Device(key.to_string()));
         panel.close(&Surface::Device(PICKER.into()));
+        self.sync_devices();
         cx.notify();
+    }
+
+    /// Once a second while devices are open: which of them an agent drives (`shepherd device` marks them).
+    fn watch_agents(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.devices.watching_agents, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let Ok(ids) = this.update(cx, |s, _| s.devices.screens.iter().map(|(k, sc)| (k.clone(), sc.device.id.clone())).collect::<Vec<_>>()) else { break };
+                if ids.is_empty() {
+                    let _ = this.update(cx, |s, _| s.devices.watching_agents = false);
+                    break;
+                }
+                let acted = cx.background_spawn(async move { ids.into_iter().map(|(k, id)| (k, device::agent::acted(&id))).collect::<Vec<_>>() }).await;
+                let _ = this.update(cx, |s, cx| {
+                    for (key, agent) in acted {
+                        if let Some(screen) = s.devices.screens.get_mut(&key).filter(|sc| sc.agent != agent) {
+                            screen.agent = agent;
+                            cx.notify();
+                        }
+                    }
+                });
+            }
+        })
+        .detach();
     }
 
     /// Screens no tab shows any more stop streaming; their last frame leaves the atlas.
@@ -359,6 +395,16 @@ impl Shell {
                 self.retired_images.push(image);
             }
         }
+        // each workspace's device, for its agents: the one shown, else its last device tab
+        let screens = &self.devices.screens;
+        let open: Vec<(String, &Device)> = panels
+            .iter()
+            .filter_map(|(ws, p)| {
+                let shown = p.active.iter().chain(p.tabs.iter().rev()).find_map(|s| screens.get(s.key()));
+                shown.map(|sc| (ws.clone(), &sc.device))
+            })
+            .collect();
+        device::agent::publish(&open, &mut self.devices.published);
     }
 
     /// Tab `key`'s title.
@@ -723,6 +769,25 @@ impl Shell {
     /// panel, when open, to the right of it all.
     fn device_stage(&mut self, key: &str, theme: &Theme, stage: impl IntoElement, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let tools = self.render_device_tools(key, theme, window, cx);
+        let agent = self.devices.screens.get(key).and_then(|s| s.agent.clone()).map(|pane| {
+            let label = if pane.is_empty() { "An agent is driving this device".to_string() } else { format!("An agent is driving this device · {pane}") };
+            div().absolute().top_0().left_0().right_0().flex().justify_center().p(px(8.)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded_full()
+                    .bg(theme.card)
+                    .border_1()
+                    .border_color(theme.accent.opacity(0.5))
+                    .px(px(10.))
+                    .py(px(4.))
+                    .text_size(px(12.))
+                    .text_color(theme.text)
+                    .child(gpui::svg().path("icons/solar/bot.svg").size(px(14.)).text_color(theme.accent))
+                    .child(label),
+            )
+        });
         let screen = div()
             .id(SharedString::from(format!("device-{key}")))
             .flex_1()
@@ -732,6 +797,7 @@ impl Shell {
             .flex()
             .child(stage)
             .child(self.render_device_rail(key, theme, cx))
+            .children(agent)
             .when_some(error, |el, e| {
                 el.child(
                     div().absolute().bottom_0().left_0().right_0().flex().justify_center().p(px(8.)).child(
@@ -1012,8 +1078,48 @@ impl Shell {
                 .child(platform_status(theme, "Android", found.android.as_ref()))
                 .child(div().text_size(px(12.)).text_color(theme.text_muted).child("You can use either platform. Fixing a missing platform does not block the other one."))
                 .child(div().flex().child(check))
+                .child(div().mt(px(4.)).text_size(px(13.)).font_weight(gpui::FontWeight::MEDIUM).child("Allow agent control"))
+                .child(self.agent_access(theme, cx))
+                .child(div().text_size(px(12.)).text_color(theme.text_muted).child("Leave this off to keep manual device controls without giving agents access."))
                 .child(div().mt(px(8.)).flex().justify_end().gap(px(8.)).child(cancel).child(done)),
         )
+    }
+
+    /// t3code's Agent access step: whether agents in the panes may drive the device open in their workspace, through
+    /// `shepherd-device` on the PATH. Off until the user turns it on.
+    fn agent_access(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let on = SettingsGlobal::of(cx).settings.devices_agent_access;
+        let shim = device::agent::shim();
+        let what = format!(
+            "Agents in the panes can see and drive the device open in their workspace with {}: its elements, taps, text and screenshots. Its tab shows when one does.",
+            shim.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
+        );
+        let toggle = div().id("device-agent-access").flex_none().cursor_pointer().child(crate::ui::switch(theme, on, "device-agent-access")).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+            save_from_sidebar(cx, |s| s.devices_agent_access = !on);
+            cx.spawn(async move |_, cx| {
+                if let Err(e) = cx.background_spawn(async move { device::agent::set_access(!on) }).await {
+                    cx.update(|cx| crate::ui::toast::error(cx, format!("Agent access: {e:#}")));
+                }
+            })
+            .detach();
+        }));
+        div()
+            .flex()
+            .items_start()
+            .gap(px(16.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .text_size(px(12.5))
+                    .text_color(theme.text_muted)
+                    .child(what)
+                    .when(on, |el| el.child(div().text_size(px(12.)).text_color(theme.text_faint).child(format!("Installed at {}", shim.display())))),
+            )
+            .child(toggle)
     }
 
     /// t3code's `DevicePanel` with nothing open: the devices by platform, each to open or start.
@@ -1126,7 +1232,8 @@ impl Shell {
                     })
                     .children(groups)
                     .children(notes)
-                    .child(div().flex().when(empty, |el| el.justify_center()).child(refresh)),
+                    .child(div().flex().when(empty, |el| el.justify_center()).child(refresh))
+                    .child(div().pt(px(16.)).border_t_1().border_color(theme.border).text_left().child(self.agent_access(theme, cx))),
             )
             .into_any_element()
     }

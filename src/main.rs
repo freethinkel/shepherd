@@ -7,6 +7,9 @@ fn main() {
     if args.first().is_some_and(|a| a == "hooks") {
         std::process::exit(shepherd::herdr::hooks::cli(&args[1..]));
     }
+    if args.first().is_some_and(|a| a == "device") {
+        std::process::exit(shepherd::device::agent::cli(&args[1..]));
+    }
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     let handle = rt.handle().clone();
     gpui_platform::application().with_assets(shepherd::assets::Assets).run(move |cx| {

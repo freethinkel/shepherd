@@ -235,7 +235,7 @@ fn phones() -> Vec<Device> {
 }
 
 /// A running emulator's adb serial, or a phone's own.
-fn serial(id: &str) -> anyhow::Result<String> {
+pub(super) fn serial(id: &str) -> anyhow::Result<String> {
     if let Some(r) = running().remove(id) {
         return Ok(r.serial);
     }

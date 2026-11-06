@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+pub mod agent;
 mod android;
 #[cfg(target_os = "macos")]
 mod duo;
@@ -13,6 +14,8 @@ mod ios;
 pub mod models;
 #[cfg(target_os = "macos")]
 mod scrcpy;
+#[cfg(target_os = "macos")]
+mod simdriver_cli;
 #[cfg(target_os = "macos")]
 pub mod surface;
 pub mod tools;

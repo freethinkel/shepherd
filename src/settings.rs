@@ -121,6 +121,8 @@ pub struct Settings {
     pub web_links_inside: bool,
     /// The Device tab's setup was gone through: it lists the devices straight away.
     pub devices_set_up: bool,
+    /// Agents in the panes may drive the device open in their workspace, through `shepherd-device` on the PATH.
+    pub devices_agent_access: bool,
     /// Where the window was last; `None` opens it centered.
     pub window: Option<WindowFrame>,
 }
@@ -421,6 +423,7 @@ impl Default for Settings {
             web_links_outside: false,
             web_links_inside: false,
             devices_set_up: false,
+            devices_agent_access: false,
             window: None,
         }
     }

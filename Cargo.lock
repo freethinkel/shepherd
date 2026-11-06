@@ -6666,6 +6666,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "simdriver",
+ "simdriver-agent",
  "tempfile",
  "tiny-skia",
  "tokio",
@@ -6724,6 +6725,18 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "simdriver-agent"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4edd69b9aceaf4f9d64ab63c18818781f6dbad6ea92b1856f8b1f82419e26896"
+dependencies = [
+ "png 0.18.1",
+ "serde",
+ "serde_json",
+ "simdriver",
 ]
 
 [[package]]
