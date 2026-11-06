@@ -392,6 +392,11 @@ impl Render for Shell {
             // the sidebar's cursor, or a diff with the keyboard in the panel: only with the keys at the root, not in a field
             .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
                 let m = &e.keystroke.modifiers;
+                // ⌘V (Ctrl+V off macOS) on a device's screen: the clipboard's text, typed into it
+                if m.secondary() && !m.alt && e.keystroke.key == "v" && this.focus.is_focused(window) && this.panel_focused() && this.device_paste(cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 if m.platform || m.control || m.alt || !this.focus.is_focused(window) {
                     return;
                 }

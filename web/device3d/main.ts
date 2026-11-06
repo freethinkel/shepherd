@@ -229,6 +229,12 @@ const KEYS: Record<string, string> = {
   PageUp: "pageup",
   PageDown: "pagedown",
 };
+// ⌘V: Shepherd sends WebKit `paste:`, and the clipboard's text goes to the device as typing
+addEventListener("paste", (e) => {
+  const text = e.clipboardData?.getData("text/plain");
+  if (text) post({ text });
+  e.preventDefault();
+});
 addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey) return;
   const key = KEYS[e.key];

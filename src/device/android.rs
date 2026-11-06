@@ -562,6 +562,31 @@ pub struct Session {
     feed: Arc<Feed>,
     wake: Wake,
     tasks: [tokio::task::JoinHandle<()>; 2],
+    /// A scroll's finger, while one is.
+    drag: Arc<Mutex<Option<Drag>>>,
+}
+
+/// A scroll as a finger's drag: where it is (0 to 1 across the screen), whether it's down yet, when it last moved.
+struct Drag {
+    x: f64,
+    y: f64,
+    down: bool,
+    at: Instant,
+}
+
+/// How long a mouse wheel rests before its finger is lifted; past Android's 40 ms, so the lift doesn't fling.
+const WHEEL_HELD: Duration = Duration::from_millis(150);
+
+/// A finger at `x`, `y`, from 0 to 1 across the screen, in the screen's pixels.
+fn finger(native: &Mutex<(u32, u32)>, phase: Touch, x: f64, y: f64) -> Input {
+    let native = native.lock().map_or((1080, 2400), |n| *n);
+    let point = TouchPoint {
+        x: (x.clamp(0., 1.) * native.0 as f64) as i32,
+        y: (y.clamp(0., 1.) * native.1 as f64) as i32,
+        identifier: 0,
+        pressure: if phase == Touch::Up { 0 } else { 1 },
+    };
+    Input::Touch(TouchEvent { touches: vec![point] })
 }
 
 impl Session {
@@ -600,7 +625,7 @@ impl Session {
                 };
             }
         });
-        Ok(Session { input, native, serial: live.serial, feed, wake, tasks: [stream, send] })
+        Ok(Session { input, native, serial: live.serial, feed, wake, tasks: [stream, send], drag: Default::default() })
     }
 
     /// Folds or unfolds a foldable (it takes no other angle, nor stands), off this thread.
@@ -626,14 +651,55 @@ impl Session {
     }
 
     pub(super) fn touch(&self, phase: Touch, x: f64, y: f64) {
-        let native = self.native.lock().map_or((1080, 2400), |n| *n);
-        let point = TouchPoint {
-            x: (x.clamp(0., 1.) * native.0 as f64) as i32,
-            y: (y.clamp(0., 1.) * native.1 as f64) as i32,
-            identifier: 0,
-            pressure: if phase == Touch::Up { 0 } else { 1 },
-        };
-        let _ = self.input.send(Input::Touch(TouchEvent { touches: vec![point] }));
+        let _ = self.input.send(finger(&self.native, phase, x, y));
+    }
+
+    /// A trackpad's scroll or a mouse wheel's, as a drag. The finger goes down on the first move, so fingers resting
+    /// on the trackpad neither tap nor long-press; a wheel's is lifted once the wheel rests.
+    pub(super) fn scroll(&self, phase: gpui::TouchPhase, x: f64, y: f64, dx: f64, dy: f64, wheel: bool) {
+        let Ok(mut drag) = self.drag.lock() else { return };
+        if phase == gpui::TouchPhase::Started || (wheel && drag.is_none()) {
+            *drag = Some(Drag { x, y, down: false, at: Instant::now() });
+            if wheel {
+                self.lift_when_idle();
+            }
+        }
+        // a trackpad's momentum, after its fingers left: Android flings on its own
+        let Some(d) = drag.as_mut() else { return };
+        match phase {
+            gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled if !wheel => {
+                if d.down {
+                    self.touch(Touch::Up, d.x, d.y);
+                }
+                *drag = None;
+            }
+            _ if dx != 0. || dy != 0. => {
+                if !d.down {
+                    self.touch(Touch::Down, d.x, d.y);
+                    d.down = true;
+                }
+                // ponytail: a finger at the screen's edge stops there; a long swipe scrolls on in the next one
+                (d.x, d.y, d.at) = ((d.x + dx).clamp(0., 1.), (d.y + dy).clamp(0., 1.), Instant::now());
+                self.touch(Touch::Move, d.x, d.y);
+            }
+            _ => {}
+        }
+    }
+
+    /// Lifts a mouse wheel's finger once the wheel has rested `WHEEL_HELD`.
+    fn lift_when_idle(&self) {
+        let (drag, input, native) = (self.drag.clone(), self.input.clone(), self.native.clone());
+        std::thread::spawn(move || loop {
+            std::thread::sleep(WHEEL_HELD / 3);
+            let Ok(mut held) = drag.lock() else { return };
+            match held.as_ref() {
+                Some(d) if d.at.elapsed() < WHEEL_HELD => continue,
+                Some(d) if d.down => drop(input.send(finger(&native, Touch::Up, d.x, d.y))),
+                _ => {}
+            }
+            *held = None;
+            return;
+        });
     }
 
     fn press(&self, key: &str, text: &str) {
@@ -669,6 +735,35 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrolls_drag_a_finger_put_down_on_the_first_move() {
+        use gpui::TouchPhase::*;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (input, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        let tasks = [rt.spawn(async {}), rt.spawn(async {})];
+        let native = Arc::new(Mutex::new((1000, 2000)));
+        let s = Session { input, native, serial: String::new(), feed: Default::default(), wake: Arc::new(|| {}), tasks, drag: Default::default() };
+        let mut touches = || std::iter::from_fn(|| sent.try_recv().ok()).map(|i| match i {
+            Input::Touch(t) => (t.touches[0].y, t.touches[0].pressure),
+            Input::Key(_) => panic!("a key"),
+        }).collect::<Vec<_>>();
+        // fingers resting on the trackpad: nothing, so no tap
+        s.scroll(Started, 0.5, 0.5, 0., 0., false);
+        assert_eq!(touches(), []);
+        s.scroll(Moved, 0.5, 0.5, 0., 0.1, false);
+        assert_eq!(touches(), [(1000, 1), (1200, 1)]);
+        s.scroll(Ended, 0.5, 0.5, 0., 0., false);
+        assert_eq!(touches(), [(1200, 0)]);
+        // momentum, after the fingers left
+        s.scroll(Moved, 0.5, 0.5, 0., 0.1, false);
+        assert_eq!(touches(), []);
+        // a wheel's finger lifts once it rests
+        s.scroll(Moved, 0.5, 0.5, 0., -0.1, true);
+        assert_eq!(touches(), [(1000, 1), (800, 1)]);
+        std::thread::sleep(WHEEL_HELD * 2);
+        assert_eq!(touches(), [(800, 0)]);
+    }
 
     #[test]
     fn hinge_sensor_reads() {

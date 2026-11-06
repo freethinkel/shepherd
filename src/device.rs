@@ -459,14 +459,17 @@ impl Session {
         }
     }
 
-    /// A trackpad's scroll (or a mouse `wheel`'s, which has no phases) over `x`, `y`, by `dx`, `dy` points; iOS only,
-    /// Android scrolls by dragging.
+    /// A trackpad's scroll (or a mouse `wheel`'s, which has no phases) over `x`, `y`, by `dx`, `dy`, from 0 to 1
+    /// across the screen.
     pub fn scroll(&self, phase: gpui::TouchPhase, x: f64, y: f64, dx: f64, dy: f64, wheel: bool) {
-        #[cfg(target_os = "macos")]
-        if let Session::Ios(s) = self {
-            s.scroll(phase, x, y, dx, dy, wheel);
+        match self {
+            #[cfg(target_os = "macos")]
+            Session::Ios(s) => s.scroll(phase, x, y, dx, dy, wheel),
+            Session::Android(s) => s.scroll(phase, x, y, dx, dy, wheel),
+            // ponytail: a USB phone doesn't scroll yet; the emulator's drag (android::Session::scroll) would do over
+            // scrcpy's touches too
+            Session::Phone(_) => {}
         }
-        let _ = (phase, x, y, dx, dy, wheel);
     }
 
     pub fn button(&self, button: Button) {

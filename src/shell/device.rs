@@ -368,6 +368,16 @@ impl Shell {
         }
     }
 
+    /// The clipboard's text typed into the device shown, as a paste would (simdriver pastes what isn't ASCII).
+    pub(super) fn device_paste(&self, cx: &mut Context<Self>) -> bool {
+        let Some(Surface::Device(key)) = self.panel().and_then(|p| p.active.clone()) else { return false };
+        let Some(screen) = self.devices.screens.get(&key) else { return false };
+        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()).filter(|t| !t.is_empty()) {
+            screen.session.text(&text);
+        }
+        true
+    }
+
     fn device_action(&mut self, key: &str, cx: &mut Context<Self>, run: impl FnOnce(&Device) -> anyhow::Result<()> + Send + 'static) {
         let Some(device) = self.devices.screens.get(key).map(|s| s.device.clone()) else { return };
         cx.spawn(async move |_, cx| {
