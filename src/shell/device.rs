@@ -8,19 +8,7 @@ use gpui::{AnyElement, Bounds, RenderImage};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(target_os = "macos")]
 pub(super) mod three;
-
-/// A 3D view's page address (macOS only: elsewhere no page is made).
-fn page_url(device: &Device) -> String {
-    #[cfg(target_os = "macos")]
-    return three::url(device);
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = device;
-        String::new()
-    }
-}
 
 const PICKER: &str = device::KEY;
 /// A 3D view's page id starts with this, then the device's key.
@@ -422,9 +410,10 @@ impl Shell {
     }
 
     /// The 3D views' pages, as entries of the panel's, as browser tabs are.
-    pub(super) fn device_pages(&self) -> impl Iterator<Item = crate::settings::WebEntry> + '_ {
-        let shown = self.devices.screens.iter().filter(|(_, s)| cfg!(target_os = "macos") && s.three);
-        shown.map(|(key, s)| crate::settings::WebEntry { id: format!("{PAGE_PREFIX}{key}"), url: page_url(&s.device), ..Default::default() })
+    pub(super) fn device_pages(&self, theme: &Theme) -> impl Iterator<Item = crate::settings::WebEntry> + '_ {
+        let shown = self.devices.screens.iter().filter(|(_, s)| s.three);
+        let backdrop = three::backdrop(theme);
+        shown.map(move |(key, s)| crate::settings::WebEntry { id: format!("{PAGE_PREFIX}{key}"), url: three::url(&s.device, &backdrop), ..Default::default() })
     }
 
     /// The 3D pages still drawing their device, kept out of sight.
@@ -445,7 +434,6 @@ impl Shell {
     }
 
     /// The session and feed page `id`, a 3D view's, shows.
-    #[cfg(target_os = "macos")]
     pub(super) fn device_page_session(&self, id: &str) -> Option<(Rc<Session>, Arc<Feed>)> {
         let key = id.strip_prefix(PAGE_PREFIX)?;
         self.devices.screens.get(key).map(|s| (s.session.clone(), s.feed.clone()))
@@ -485,10 +473,6 @@ impl Shell {
         let Some(screen) = self.devices.screens.get_mut(key) else {
             return loading_view(theme, key, "Device", "", "This device is closed.".into(), false, true).into_any_element();
         };
-        // only a 3D view, macOS's, draws into the window itself
-        #[cfg(not(target_os = "macos"))]
-        let _ = &window;
-        #[cfg(target_os = "macos")]
         if screen.three {
             let loading = (!screen.three_drawn).then(|| {
                 let (name, version) = (screen.device.name.clone(), screen.device.version.clone());
@@ -747,8 +731,7 @@ impl Shell {
                     cx.notify();
                 }
             })))
-            .when(cfg!(target_os = "macos"), |el| {
-                el.child(divider())
+            .child(divider())
                     .child(button("3d", "icons/solar/box.svg", "3D view".into(), true).when(three_d, |el| el.bg(hover)).on_click(cx.listener({
                         let k = k.clone();
                         move |this, _: &ClickEvent, _, cx| this.show_device_3d(&k, true, cx)
@@ -762,8 +745,7 @@ impl Shell {
                             let k = k.clone();
                             move |this, _: &ClickEvent, _, _| this.reset_device_3d(&k)
                         })))
-                    })
-            });
+                    });
         let folds = self.render_fold_pills(key, theme, cx);
         div().absolute().top_0().bottom_0().right(px(10.)).flex().flex_col().items_center().justify_center().gap(px(8.)).child(pill).children(folds)
     }
