@@ -1080,7 +1080,7 @@ impl Shell {
                                 .h(px(28.))
                                 .rounded(px(6.))
                                 .when(close, |el| el.text_color(theme.danger))
-                                .child(menu_mark(crate::ui::command_panel::action_icon(action), if close { theme.danger } else { theme.text_muted }))
+                                .child(crate::ui::icon(crate::ui::command_panel::action_icon(action), 14., if close { theme.danger } else { theme.text_muted }, theme.accent))
                                 .child(div().flex_1().child(label))
                                 .when_some(chord, |el, chord| el.child(div().text_size(px(11.)).text_color(theme.text_faint).child(chord)))
                                 .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {

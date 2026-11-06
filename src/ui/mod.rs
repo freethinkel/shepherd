@@ -16,6 +16,23 @@ use gpui::{App, ElementId, px};
 use gpui_base::input::InputEditorStyle;
 use gpui_base::{Scrollbar, ScrollbarHandle, ScrollbarStyles, ScrollbarThumbStyle};
 
+/// An icon in `ink`. The terminal's is two-tone: its frame in `ink`, the `>_` inside in `accent` (an svg takes one color,
+/// so the two are layered).
+pub fn icon(path: &'static str, size: f32, ink: gpui::Hsla, accent: gpui::Hsla) -> gpui::AnyElement {
+    use gpui::{IntoElement, ParentElement, Styled, div, svg};
+    if path != "icons/terminal.svg" {
+        return svg().path(path).size(px(size)).flex_none().text_color(ink).into_any_element();
+    }
+    let layer = |path: &'static str, color| svg().path(path).absolute().inset_0().size(px(size)).text_color(color);
+    div()
+        .relative()
+        .size(px(size))
+        .flex_none()
+        .child(layer("icons/terminal-frame.svg", ink))
+        .child(layer("icons/terminal-prompt.svg", accent))
+        .into_any_element()
+}
+
 /// gpui-base inputs are unstyled: colors from the theme, as Collie does.
 pub fn input_style(theme: &Theme) -> InputEditorStyle {
     InputEditorStyle {

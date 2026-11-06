@@ -652,10 +652,7 @@ impl Render for Panel {
                         }
                     }))
                     .on_click(cx.listener(move |panel, _, _, cx| panel.run(row, cx)))
-                    .child(gpui::svg().path(item.icon).size(px(16.)).flex_none().text_color(icon_ink(
-                        item.icon,
-                        if selected { theme.text } else { theme.text_muted },
-                    )))
+                    .child(crate::ui::icon(item.icon, 16., icon_ink(item.icon, if selected { theme.text } else { theme.text_muted }), theme.accent))
                     .child(div().flex_1().min_w_0().truncate().child(highlighted(&item.label, &self.query, &theme)))
                     .children(item.hint.clone().map(|hint| div().flex_none().max_w(px(160.)).truncate().text_size(px(12.)).text_color(theme.text_faint).child(hint)))
                     .children(item.status.map(|status| crate::shell::status_dot(status, &theme)))

@@ -1114,7 +1114,7 @@ impl Shell {
                 .flex()
                 .items_start()
                 .gap(px(8.))
-                .child(div().h(px(18.)).flex().items_center().child(menu_mark(icon, theme.text_muted)))
+                .child(div().h(px(18.)).flex().items_center().child(crate::ui::icon(icon, 14., theme.text_muted, theme.accent)))
                 .child(
                     div()
                         .flex()
