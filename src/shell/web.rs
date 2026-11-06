@@ -25,6 +25,8 @@ pub(super) enum PageEvent {
     Load(bool),
     /// A new window asked for: it loads in the page instead.
     Navigate(String),
+    /// A link ⌘-clicked (Ctrl off macOS) or middle-clicked, for a browser tab of its own.
+    NewTab(String),
     /// A link to another site, for the system browser.
     Outside(String),
     /// One of Shepherd's shortcuts, pressed in the page.
@@ -388,7 +390,7 @@ impl Shell {
         let send = move |event: PageEvent| {
             let _ = events.unbounded_send((key.clone(), serial, event));
         };
-        let (title, loaded, opened, followed) = (send.clone(), send.clone(), send.clone(), send.clone());
+        let (title, loaded, opened, followed, tabbed) = (send.clone(), send.clone(), send.clone(), send.clone(), send.clone());
         #[cfg(target_os = "macos")]
         let ready = send.clone();
         #[cfg(target_os = "macos")]
@@ -398,6 +400,8 @@ impl Shell {
         let (site, flag) = (url.to_string(), self.pages.links_outside.clone());
         let follows_outside: Rc<dyn Fn(&str) -> bool> = Rc::new(move |to| !browser && flag.get() && off_site(&site, to));
         let opens_outside = follows_outside.clone();
+        let tabs_outside = follows_outside.clone();
+        let tab = move |to: String| tabbed(if tabs_outside(&to) { PageEvent::Outside(to) } else { PageEvent::NewTab(to) });
         #[cfg(not(target_os = "macos"))]
         let context = self.pages.context.get_or_insert_with(|| wry::WebContext::new(Some(crate::settings::cache_dir().join("web"))));
         #[cfg(not(target_os = "macos"))]
@@ -408,8 +412,10 @@ impl Shell {
         #[cfg(target_os = "macos")]
         let builder = match device {
             Some((session, feed)) => super::device::three::attach(builder, session, feed, self.rt.clone(), move || ready(PageEvent::Ready)),
-            None => builder,
+            None => new_tabs(builder, tab),
         };
+        #[cfg(not(target_os = "macos"))]
+        let builder = new_tabs(builder, tab);
         let view = builder
             .with_url(url)
             .with_devtools(true)
@@ -546,6 +552,7 @@ impl Shell {
                     crate::ui::toast::error(cx, format!("{url}: {e}"));
                 }
             }
+            PageEvent::NewTab(url) => return self.open_behind(&key, url, window, cx),
             // every 100 ms while picking: nothing below is for it
             PageEvent::Picked(result) => return self.annotation_polled(&key, &result, window, cx),
             PageEvent::Ready => self.device_page_ready(&key.0),
@@ -1009,6 +1016,30 @@ impl Shell {
                 .child(div().mt(px(8.)).mx(px(8.)).h(px(1.)).bg(theme.border)),
         )
     }
+}
+
+/// Tells the page's IPC of a link ⌘-clicked (Ctrl off macOS) or middle-clicked that the page itself left alone, and
+/// keeps it from loading there.
+const NEW_TAB_SCRIPT: &str = r#"(() => {
+  const open = e => {
+    const asked = e.button === 1 || (e.button === 0 && (/Mac/.test(navigator.platform) ? e.metaKey : e.ctrlKey));
+    const a = asked && !e.defaultPrevented && e.target.closest?.('a[href]');
+    if (!a || !/^https?:/.test(a.href)) return;
+    e.preventDefault();
+    window.ipc.postMessage('tab:' + a.href);
+  };
+  addEventListener('click', open);
+  addEventListener('auxclick', open);
+})();"#;
+
+/// A page that sends the links asked for in a new tab to `tab`.
+fn new_tabs(builder: wry::WebViewBuilder<'_>, tab: impl Fn(String) + 'static) -> wry::WebViewBuilder<'_> {
+    builder.with_initialization_script(NEW_TAB_SCRIPT).with_ipc_handler(move |request| {
+        // any script on the page can post: only a web link opens
+        if let Some(url) = request.body().strip_prefix("tab:").filter(|u| u.starts_with("http://") || u.starts_with("https://")) {
+            tab(url.to_string());
+        }
+    })
 }
 
 /// How long a reload button's arrow takes to turn.
