@@ -9,7 +9,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const HELPERS: [(&str, &[u8]); 3] = [
+const HELPERS: [(&str, &[u8]); 4] = [
     (
         "sdframe",
         include_bytes!(concat!(env!("OUT_DIR"), "/helpers/sdframe")),
@@ -21,6 +21,11 @@ const HELPERS: [(&str, &[u8]); 3] = [
     (
         "sdax",
         include_bytes!(concat!(env!("OUT_DIR"), "/helpers/sdax")),
+    ),
+    // the simulator's, not the Mac's: it runs inside it
+    (
+        "sdaxsettings",
+        include_bytes!(concat!(env!("OUT_DIR"), "/helpers/sdaxsettings")),
     ),
 ];
 

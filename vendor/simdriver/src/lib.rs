@@ -30,7 +30,7 @@ mod tap;
 
 pub use ax::AxNode;
 pub use devices::{
-    App, Appearance, Device, DeviceSelector, boot, clear_app_data, clipboard_read, clipboard_write,
+    App, Appearance, Device, DeviceSelector, ax_settings, boot, clear_app_data, clipboard_read, clipboard_write,
     grant_permission, launch, list_apps, list_devices, open_url, push_notification, reset_keychain,
     reset_permission, revoke_permission, set_appearance, set_content_size, set_location, shutdown,
     status_bar_clear, status_bar_override, terminate,

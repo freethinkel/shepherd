@@ -37,4 +37,21 @@ fn main() {
         // Build under a temp name then rename so a running binary is never overwritten in place.
         std::fs::rename(&tmp, out.join(name)).unwrap();
     }
+
+    // sdaxsettings runs inside the simulator (`simctl spawn`), so it's built for it, both Macs' arches.
+    let sdk = Command::new("xcrun").args(["--sdk", "iphonesimulator", "--show-sdk-path"]).output().expect("failed to run xcrun");
+    assert!(sdk.status.success(), "no iOS Simulator SDK for sdaxsettings");
+    let tmp = out.join("sdaxsettings.tmp");
+    let status = Command::new("xcrun")
+        .args(["--sdk", "iphonesimulator", "clang", "-O2", "-arch", "arm64", "-arch", "x86_64", "-mios-simulator-version-min=15.0"])
+        .arg("-isysroot")
+        .arg(String::from_utf8_lossy(&sdk.stdout).trim())
+        .args(["-framework", "CoreFoundation"])
+        .arg(helpers.join("sdaxsettings/main.m"))
+        .arg("-o")
+        .arg(&tmp)
+        .status()
+        .expect("failed to run clang");
+    assert!(status.success(), "clang failed building sdaxsettings");
+    std::fs::rename(&tmp, out.join("sdaxsettings")).unwrap();
 }

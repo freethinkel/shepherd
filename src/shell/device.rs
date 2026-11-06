@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(super) mod three;
+mod tools;
 
 const PICKER: &str = device::KEY;
 /// A 3D view's page id starts with this, then the device's key.
@@ -29,6 +30,10 @@ pub(super) struct Devices {
     screens: HashMap<String, Screen>,
     /// The rail's `…` menu: of which device, and where.
     pub(super) menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
+    /// What `show_devices` opens with the device: its Tools panel, its overlay.
+    open_with: (bool, bool),
+    /// The Tools panel's open select.
+    pub(super) choice: Option<crate::ui::Popup<tools::Choice>>,
     /// A screen is on screen: frames of hidden ones wake nothing.
     shown: Arc<AtomicBool>,
     /// Hands the sessions' threads a way to redraw the window.
@@ -59,6 +64,12 @@ struct Screen {
     dark: Option<bool>,
     /// A screenshot being saved.
     capturing: bool,
+    /// Reads the device off the window's thread, for the Tools panel and the overlay.
+    probe: device::Probe,
+    /// The Tools panel beside the screen, while it's open.
+    tools: Option<tools::Tools>,
+    /// The frontmost app's elements outlined over the screen, while that's on.
+    overlay: Option<tools::Overlay>,
 }
 
 impl Devices {
@@ -164,12 +175,16 @@ fn platform_status(theme: &Theme, platform: &'static str, check: Option<&device:
 }
 
 impl Shell {
-    /// `SHEPHERD_PANEL=devices`, or a device's key: the Device tab, on that device once it's found (screenshots).
+    /// `SHEPHERD_PANEL=devices`, or a device's key: the Device tab, on that device once it's found (screenshots);
+    /// `:tools` after the key opens its Tools panel, `:overlay` its accessibility overlay too.
     pub fn show_devices(&mut self, key: &str, cx: &mut Context<Self>) {
         self.open_device_picker(cx);
         if key == PICKER {
             return;
         }
+        let (key, overlay) = key.strip_suffix(":overlay").map_or((key, false), |k| (k, true));
+        let (key, tools) = key.strip_suffix(":tools").map_or((key, overlay), |k| (k, true));
+        self.devices.open_with = (tools, overlay);
         let key = key.to_string();
         cx.spawn(async move |this, cx| {
             let found = cx.background_spawn(async { device::find() }).await;
@@ -272,6 +287,7 @@ impl Shell {
                         let device = Device { running: true, ..device };
                         let screen = Screen {
                             device,
+                            probe: session.probe(),
                             session: Rc::new(session),
                             feed,
                             seen: 0,
@@ -284,8 +300,17 @@ impl Shell {
                             pressed: false,
                             dark,
                             capturing: false,
+                            tools: None,
+                            overlay: None,
                         };
                         s.devices.screens.insert(key.clone(), screen);
+                        let (tools, overlay) = std::mem::take(&mut s.devices.open_with);
+                        if tools {
+                            s.toggle_device_tools(&key, cx);
+                        }
+                        if overlay {
+                            s.toggle_device_overlay(&key, cx);
+                        }
                         s.show_device_tab(&ws, &key, cx);
                         // it's running now
                         s.find_devices(cx);
@@ -350,11 +375,10 @@ impl Shell {
     }
 
     fn toggle_device_dark(&mut self, key: &str, cx: &mut Context<Self>) {
-        let Some(screen) = self.devices.screens.get_mut(key) else { return };
+        let Some(screen) = self.devices.screens.get(key) else { return };
         let dark = !screen.dark.unwrap_or(false);
-        screen.dark = Some(dark);
-        self.device_action(key, cx, move |d| device::set_dark(d, dark));
-        cx.notify();
+        // the Tools panel reads it back, when it's open
+        self.device_act(key, device::tools::Action::Dark(dark), cx);
     }
 
     /// A full-size screenshot to Downloads, as t3code's; the toast shows it in the Finder.
@@ -483,7 +507,7 @@ impl Shell {
             self.devices.set_shown(false);
             let area = self.render_web_area(&(format!("{PAGE_PREFIX}{key}"), None), theme, window, cx).children(loading);
             // the rail keeps its strip: the page sits above what GPUI draws there
-            return self.device_stage(key, theme, div().flex_1().min_w_0().h_full().pr(px(56.)).flex().child(area), None, cx);
+            return self.device_stage(key, theme, div().flex_1().min_w_0().h_full().pr(px(56.)).flex().child(area), None, window, cx);
         }
         if let Some((n, frame)) = screen.feed.newer(screen.seen) {
             screen.seen = n;
@@ -508,6 +532,7 @@ impl Shell {
         };
         let image = screen.image.clone();
         let bounds = screen.bounds.clone();
+        let overlay = screen.overlay.as_ref().map(|o| (o.frames.clone(), theme.accent));
         // the screen's own corners: an iPhone's are rounder than a Pixel's
         let round = if screen.device.platform == Platform::Ios { 0.13 } else { 0.07 };
         let painted = bounds.clone();
@@ -525,12 +550,19 @@ impl Shell {
                 painted.set(fitted);
                 let corners = gpui::Corners::all(fitted.size.width.min(fitted.size.height) * round);
                 #[cfg(target_os = "macos")]
-                if let Some(surface) = &frame.surface {
-                    window.paint_surface(fitted, corners, surface.buffer());
-                    return;
-                }
-                if let Some(image) = image.clone() {
+                let surfaced = frame.surface.as_ref().map(|surface| window.paint_surface(fitted, corners, surface.buffer())).is_some();
+                #[cfg(not(target_os = "macos"))]
+                let surfaced = false;
+                if !surfaced && let Some(image) = image.clone() {
                     let _ = window.paint_image(fitted, corners, image, 0, false);
+                }
+                // the accessibility overlay: each element's frame, outlined where it's shown
+                for f in overlay.iter().flat_map(|(frames, _)| frames) {
+                    let [x, y, w, h] = frame.shown_rect(*f);
+                    let at = fitted.origin + gpui::point(fitted.size.width * x as f32, fitted.size.height * y as f32);
+                    let size = gpui::size(fitted.size.width * w as f32, fitted.size.height * h as f32);
+                    let color = overlay.as_ref().map_or(gpui::black(), |(_, c)| *c);
+                    window.paint_quad(gpui::outline(Bounds::new(at, size), color.opacity(0.8), gpui::BorderStyle::Solid));
                 }
             },
         )
@@ -630,18 +662,20 @@ impl Shell {
                     }
                 }
             }));
-        self.device_stage(key, theme, stage, error, cx)
+        self.device_stage(key, theme, stage, error, window, cx)
     }
 
-    /// The device's area: its screen, flat or in 3D, the rail beside it and a note of trouble under it.
-    fn device_stage(&mut self, key: &str, theme: &Theme, stage: impl IntoElement, error: Option<String>, cx: &mut Context<Self>) -> AnyElement {
-        div()
+    /// The device's area: its screen, flat or in 3D, the rail beside it and a note of trouble under it; the Tools
+    /// panel, when open, to the right of it all.
+    fn device_stage(&mut self, key: &str, theme: &Theme, stage: impl IntoElement, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let tools = self.render_device_tools(key, theme, window, cx);
+        let screen = div()
             .id(SharedString::from(format!("device-{key}")))
             .flex_1()
-            .min_h_0()
+            .min_w_0()
+            .h_full()
             .relative()
             .flex()
-            .bg(theme.wash(0.03))
             .child(stage)
             .child(self.render_device_rail(key, theme, cx))
             .when_some(error, |el, e| {
@@ -650,8 +684,8 @@ impl Shell {
                         div().rounded(px(6.)).bg(theme.card).border_1().border_color(theme.border).px(px(8.)).py(px(4.)).text_size(px(12.)).text_color(theme.text_muted).child(e),
                     ),
                 )
-            })
-            .into_any_element()
+            });
+        div().flex_1().min_h_0().flex().bg(theme.wash(0.03)).child(screen).children(tools).into_any_element()
     }
 
     /// t3code's `DeviceControlsRail`: a pill of buttons down the screen's right side.
@@ -661,6 +695,7 @@ impl Shell {
         let dark = screen.dark;
         let capturing = screen.capturing;
         let three_d = screen.three;
+        let tools_open = screen.tools.is_some();
         let menu_open = self.devices.menu.as_ref().is_some_and(|m| m.is_open() && m.value.0 == key);
         let hover = theme.hover;
         let button = |id: &str, icon: &'static str, label: String, enabled: bool| {
@@ -718,6 +753,10 @@ impl Shell {
                     move |this, _: &ClickEvent, _, cx| this.save_device_screenshot(&k, cx)
                 })),
             )
+            .child(button("tools", "icons/solar/tuning-2.svg", "Tools".into(), true).when(tools_open, |el| el.bg(hover)).on_click(cx.listener({
+                let k = k.clone();
+                move |this, _: &ClickEvent, _, cx| this.toggle_device_tools(&k, cx)
+            })))
             .child(button("more", "icons/solar/menu-dots.svg", if menu_open { String::new() } else { "More device actions".into() }, true)
                 .when(menu_open, |el| el.bg(hover))
                 .relative()

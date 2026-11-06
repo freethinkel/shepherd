@@ -1,6 +1,7 @@
 //! Android emulators through their own gRPC (`emulator_controller.proto` in the SDK), as serve-emu's `grpc-screenshot`
 //! source: raw RGB frames streamed on change, touches and keys sent back. A running emulator leaves a discovery file
 //! with its gRPC port and token; booting is the SDK's `emulator`, headless, so the panel is its only window.
+use super::tools::{self, Action, Decision, Settings, Toggle};
 use super::{Button, Check, Device, Feed, Fold, Frame, Hinge, Platform, Touch, Wake};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -233,6 +234,155 @@ pub(super) fn set_dark(id: &str, dark: bool) -> anyhow::Result<()> {
     crate::process::answer(adb(&serial(id)?, &["shell", "cmd", "uimode", "night", if dark { "yes" } else { "no" }])?).map(drop)
 }
 
+/// `adb shell` with `args` quoted for the device's shell: what it printed.
+fn shell(serial: &str, args: &[&str]) -> anyhow::Result<String> {
+    let line: Vec<String> = args.iter().map(|a| tools::shell_word(a)).collect();
+    crate::process::answer(adb(serial, &["shell", &line.join(" ")])?)
+}
+
+/// Read in one go, each answer after a line of its own.
+const READ: &str = "cmd uimode night; echo @@; settings get system font_scale; echo @@; settings get global animator_duration_scale; \
+    echo @@; settings get global wifi_on; echo @@; dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'";
+
+pub(super) fn read_tools(id: &str) -> Settings {
+    let out = serial(id).and_then(|s| Ok(String::from_utf8_lossy(&adb(&s, &["shell", READ])?.stdout).to_string())).unwrap_or_default();
+    read_answers(&out)
+}
+
+fn read_answers(out: &str) -> Settings {
+    let mut part = out.split("@@").map(str::trim);
+    let (night, font, animator, wifi, focus) = (part.next(), part.next(), part.next(), part.next(), part.next());
+    let mut toggles = Vec::new();
+    // `null` is a scale never set: the default, 1
+    let animator = animator.and_then(|a| if a == "null" { Some(1.) } else { a.parse::<f64>().ok() });
+    toggles.extend(animator.map(|a| (Toggle::ReduceMotion, a == 0.)));
+    toggles.extend(wifi.filter(|w| *w == "0" || *w == "1").map(|w| (Toggle::Network, w == "1")));
+    Settings {
+        dark: night.filter(|n| n.contains("Night mode:")).map(|n| n.contains("yes")),
+        text_size: font.and_then(|f| f.parse().ok()).map(tools::text_size_from_android),
+        toggles,
+        app: focus.and_then(focused_package),
+        ..Default::default()
+    }
+}
+
+/// The focused window's package: `mCurrentFocus=Window{8e3a1b u0 com.example/com.example.Main}`.
+fn focused_package(dump: &str) -> Option<String> {
+    let line = dump.lines().find(|l| l.contains("mCurrentFocus=")).or_else(|| dump.lines().find(|l| l.contains("mFocusedApp=")))?;
+    let word = line.split_whitespace().find(|w| w.contains('/'))?;
+    Some(word.split('/').next()?.to_string()).filter(|p| !p.is_empty())
+}
+
+/// t3code's permissions, as Android names them: a group grants each of its names the app declares.
+fn android_permissions(permission: &str) -> &'static [&'static str] {
+    match permission {
+        "camera" => &["android.permission.CAMERA"],
+        "microphone" => &["android.permission.RECORD_AUDIO"],
+        "photos" => &["android.permission.READ_MEDIA_IMAGES", "android.permission.READ_EXTERNAL_STORAGE"],
+        "contacts" => &["android.permission.READ_CONTACTS", "android.permission.WRITE_CONTACTS"],
+        "calendar" => &["android.permission.READ_CALENDAR", "android.permission.WRITE_CALENDAR"],
+        "location" => &["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"],
+        "notifications" => &["android.permission.POST_NOTIFICATIONS"],
+        "motion" => &["android.permission.ACTIVITY_RECOGNITION"],
+        _ => &[],
+    }
+}
+
+/// The emulator's gravity for an orientation, as a portrait-native device shows it: tilting its accelerometer turns
+/// the display for real, where `user-rotation` turns only the windows on recent images.
+fn gravity(orientation: &str) -> &'static str {
+    match orientation {
+        "landscape_left" => "9.81:0:0",
+        "portrait_upside_down" => "0:-9.81:0",
+        "landscape_right" => "-9.81:0:0",
+        _ => "0:9.81:0",
+    }
+}
+
+/// A landscape-native tablet's orientation is a quarter turn further along.
+fn landscape_native(orientation: &str) -> &'static str {
+    match orientation {
+        "landscape_left" => "portrait",
+        "portrait_upside_down" => "landscape_left",
+        "landscape_right" => "portrait_upside_down",
+        _ => "landscape_right",
+    }
+}
+
+pub(super) fn act(id: &str, action: &Action) -> anyhow::Result<()> {
+    let serial = serial(id)?;
+    let sh = |args: &[&str]| shell(&serial, args).map(drop);
+    match action {
+        Action::Dark(dark) => set_dark(id, *dark)?,
+        Action::TextSize(size) => sh(&["settings", "put", "system", "font_scale", tools::android_font_scale(*size)])?,
+        Action::Toggle(Toggle::ReduceMotion, on) => {
+            for key in ["animator_duration_scale", "transition_animation_scale", "window_animation_scale"] {
+                sh(&["settings", "put", "global", key, if *on { "0" } else { "1" }])?;
+            }
+        }
+        Action::Toggle(Toggle::Network, on) => {
+            let state = if *on { "enable" } else { "disable" };
+            sh(&["svc", "wifi", state])?;
+            sh(&["svc", "data", state])?;
+        }
+        Action::Orientation(orientation) => {
+            let size = display_size(&serial);
+            let turned = if size.is_some_and(|(w, h)| w > h) { landscape_native(orientation) } else { orientation };
+            sh(&["settings", "put", "system", "accelerometer_rotation", "1"])?;
+            sh(&["cmd", "window", "user-rotation", "free"])?;
+            crate::process::answer(adb(&serial, &["emu", "sensor", "set", "acceleration", gravity(turned)])?)?;
+        }
+        Action::Location(lat, lon) => {
+            anyhow::ensure!(lat.abs() <= 90. && lon.abs() <= 180., "The latitude or longitude is out of range");
+            crate::process::answer(adb(&serial, &["emu", "geo", "fix", &lon.to_string(), &lat.to_string()])?)?;
+        }
+        Action::Permission { app, permission, decision } => {
+            anyhow::ensure!(*decision != Decision::Reset, "Android has no reset for a permission");
+            // `pm` refuses a permission the app doesn't declare, and Photos names two: it fails only if none took
+            let tried: Vec<_> = android_permissions(permission).iter().map(|p| sh(&["pm", decision.verb(), app, p])).collect();
+            if !tried.iter().any(Result::is_ok) {
+                tried.into_iter().find_map(Result::err).map_or_else(|| anyhow::bail!("Android has no {permission} permission"), Err)?;
+            }
+        }
+        Action::OpenUrl(url) => sh(&["am", "start", "-a", "android.intent.action.VIEW", "-d", url])?,
+        Action::Launch(app) => sh(&["monkey", "-p", app, "-c", "android.intent.category.LAUNCHER", "1"])?,
+        Action::Terminate(app) => sh(&["am", "force-stop", app])?,
+        Action::Toggle(toggle, _) => anyhow::bail!("{} is iOS's", toggle.label()),
+        Action::LiquidGlass(_) | Action::ColorFilter(_) | Action::ClearLocation | Action::Push { .. } => anyhow::bail!("Android has no such setting"),
+    }
+    Ok(())
+}
+
+pub(super) fn elements(id: &str) -> anyhow::Result<Vec<[f64; 4]>> {
+    let serial = serial(id)?;
+    let out = adb(&serial, &["exec-out", "uiautomator", "dump", "/dev/tty"])?;
+    let dump = String::from_utf8_lossy(&out.stdout);
+    let frames = node_bounds(&dump);
+    anyhow::ensure!(!frames.is_empty(), "uiautomator found no elements: {}", String::from_utf8_lossy(&out.stderr).trim());
+    // `wm size` is the natural orientation's; the dump is in the display's as it's turned now
+    let (mut w, mut h) = display_size(&serial).map_or((1., 1.), |(w, h)| (w as f64, h as f64));
+    if frames.iter().any(|f| f[0] + f[2] > w + 1.) {
+        (w, h) = (h, w);
+    }
+    Ok(frames.into_iter().map(|f| [f[0] / w, f[1] / h, f[2] / w, f[3] / h]).collect())
+}
+
+/// Each node's `bounds="[x1,y1][x2,y2]"` in a uiautomator dump, as `[x, y, width, height]` in pixels.
+fn node_bounds(dump: &str) -> Vec<[f64; 4]> {
+    let mut frames = Vec::new();
+    for (_, rest) in dump.match_indices("bounds=\"").map(|(i, m)| (i, &dump[i + m.len()..])) {
+        let Some(text) = rest.split('"').next() else { continue };
+        let n: Vec<f64> = text.split(['[', ']', ',']).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect();
+        if let [x1, y1, x2, y2] = n[..]
+            && x2 > x1
+            && y2 > y1
+        {
+            frames.push([x1, y1, x2 - x1, y2 - y1]);
+        }
+    }
+    frames
+}
+
 /// A foldable's hinge angle, from its sensor; `None` for a phone that has none.
 fn hinge_angle(serial: &str) -> Option<f64> {
     let out = adb(serial, &["emu", "sensor", "get", "hinge-angle0"]).ok()?;
@@ -457,6 +607,26 @@ mod tests {
     fn hinge_sensor_reads() {
         assert_eq!(hinge_reading("hinge-angle0 = 180.000000\nOK\n"), Some(180.));
         assert_eq!(hinge_reading("KO: 'hinge-angle0' sensor is disabled.\n"), None);
+    }
+
+    #[test]
+    fn tools_read_from_one_shell() {
+        let out = "Night mode: yes\n@@\n1.15\n@@\n0.0\n@@\n1\n@@\n  mCurrentFocus=Window{8e3a1b u0 com.example.app/com.example.app.Main}\n  mFocusedApp=ActivityRecord{1 u0 com.example.app/.Main t9}\n";
+        let s = read_answers(out);
+        assert_eq!(s.dark, Some(true));
+        assert_eq!(s.text_size, Some(tools::TextSize::Large));
+        assert_eq!(s.toggles, [(Toggle::ReduceMotion, true), (Toggle::Network, true)]);
+        assert_eq!(s.app.as_deref(), Some("com.example.app"));
+        assert_eq!(read_answers(""), Settings::default());
+        let fresh = read_answers("Night mode: no\n@@\nnull\n@@\nnull\n@@\n0\n@@\n");
+        assert_eq!((fresh.dark, fresh.text_size), (Some(false), None));
+        assert_eq!(fresh.toggles, [(Toggle::ReduceMotion, false), (Toggle::Network, false)]);
+    }
+
+    #[test]
+    fn uiautomator_bounds_read() {
+        let dump = r#"<node bounds="[0,0][1080,2400]"><node text="a" bounds="[10,20][110,70]" /><node bounds="[5,5][5,9]" /></node>"#;
+        assert_eq!(node_bounds(dump), [[0., 0., 1080., 2400.], [10., 20., 100., 50.]]);
     }
 
     #[test]

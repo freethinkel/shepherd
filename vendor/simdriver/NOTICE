@@ -9,3 +9,7 @@ This product includes software developed by Meta Platforms, Inc. and affiliates
     crates/simdriver/helpers/private-headers/LICENSE).
   - The DTUHID transport shapes used by crates/simdriver/helpers/sdhid are modeled on
     FBSimulatorControl.
+
+helpers/sdaxsettings/main.m is serve-sim's sim-ax-settings (Sources/SimAXSettings/sim-ax-settings.m,
+https://github.com/EvanBacon/serve-sim), Copyright Evan Bacon, licensed under the Apache License 2.0
+(https://www.apache.org/licenses/LICENSE-2.0). Unchanged but for the line saying where it's from.

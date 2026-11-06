@@ -443,6 +443,21 @@ pub fn push_notification(udid: &str, bundle_id: &str, payload_path: &str) -> Res
     simctl_ok(&["push", udid, bundle_id, payload_path])
 }
 
+/// Runs `sdaxsettings` inside the simulator: `status` (a JSON object of every key), `get <key>`, `set <key> <value>`,
+/// for the accessibility settings `simctl ui` doesn't cover (reduce-motion, show-borders, reduce-transparency,
+/// voiceover: on|off; color-filter: none|grayscale|red-green|green-red|blue-yellow; liquid-glass: clear|tinted).
+/// What it printed.
+pub fn ax_settings(udid: &str, args: &[&str]) -> Result<String, Error> {
+    let helper = crate::helper::helper_dir(None).join("sdaxsettings");
+    let helper = helper.to_string_lossy();
+    let (ok, out, err) = run_simctl(&[&["spawn", udid, &helper], args].concat(), Duration::from_secs(30))?;
+    if ok {
+        Ok(out)
+    } else {
+        Err(Error::Simctl(format!("sdaxsettings failed: {}", err.trim())))
+    }
+}
+
 pub fn reset_keychain(udid: &str) -> Result<(), Error> {
     simctl_ok(&["keychain", udid, "reset"])
 }

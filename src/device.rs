@@ -12,6 +12,7 @@ mod ios;
 pub mod models;
 #[cfg(target_os = "macos")]
 pub mod surface;
+pub mod tools;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Platform {
@@ -189,6 +190,12 @@ impl Frame {
         if self.screen == Some(3) { (y, 1. - x) } else { (x, y) }
     }
 
+    /// Where a rect on the device's own screen (`[x, y, width, height]`, 0 to 1) shows on the frame: `device_point`'s
+    /// way back.
+    pub fn shown_rect(&self, [x, y, w, h]: [f64; 4]) -> [f64; 4] {
+        if self.screen == Some(3) { [1. - (y + h), x, h, w] } else { [x, y, w, h] }
+    }
+
     /// A JPEG of it, for the 3D view's web page: encoded from the pixels as they came, no copy in between.
     pub fn jpeg(&self) -> anyhow::Result<Vec<u8>> {
         let mut out = Vec::new();
@@ -336,6 +343,14 @@ pub enum Button {
     Recents,
 }
 
+/// What reads a session's device off the window's thread: an iOS session's driver, whose accessibility tree tells the
+/// app in front and its elements. An emulator is read through adb, and needs none.
+#[derive(Clone, Default)]
+pub struct Probe {
+    #[cfg(target_os = "macos")]
+    driver: Option<Arc<simdriver::Driver>>,
+}
+
 /// A device's live screen and its input, until dropped.
 pub enum Session {
     #[cfg(target_os = "macos")]
@@ -352,6 +367,14 @@ impl Session {
             Platform::Android => Ok(Session::Android(android::Session::open(&device.id, rt, feed, wake)?)),
             #[allow(unreachable_patterns)]
             _ => anyhow::bail!("iOS Simulators need macOS"),
+        }
+    }
+
+    pub fn probe(&self) -> Probe {
+        match self {
+            #[cfg(target_os = "macos")]
+            Session::Ios(s) => Probe { driver: Some(s.driver.clone()) },
+            Session::Android(_) => Probe::default(),
         }
     }
 
@@ -446,6 +469,8 @@ mod tests {
         // turned clockwise, the shown top-left was the screen's bottom-left, and the top-right its top-left
         assert_eq!(f.device_point(0., 0.), (0., 1.));
         assert_eq!(f.device_point(1., 0.), (0., 0.));
+        // and back: the device's top-left corner shows at the top-right
+        assert_eq!(f.shown_rect([0., 0., 0.1, 0.2]), [0.8, 0., 0.2, 0.1]);
     }
 
     #[test]

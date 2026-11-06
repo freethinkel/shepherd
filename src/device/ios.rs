@@ -1,7 +1,8 @@
 //! iOS Simulators through `simdriver`: its helpers read the framebuffer's IOSurface and type into the digitizer, so
 //! Shepherd never loads a private framework itself. It supports the Xcode it was built against (27.x) and says so
 //! when started on another.
-use super::{Button, Check, Device, Feed, Frame, Hinge, Platform, Touch, Wake, duo};
+use super::tools::{self, Action, Settings, Toggle};
+use super::{Button, Check, Device, Feed, Frame, Hinge, Platform, Probe, Touch, Wake, duo};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,6 +41,123 @@ pub(super) fn dark(udid: &str) -> Option<bool> {
 pub(super) fn screenshot(udid: &str, to: &Path) -> anyhow::Result<()> {
     let out = crate::process::command("xcrun").args(["simctl", "io", udid, "screenshot"]).arg(to).output()?;
     crate::process::answer(out).map(drop)
+}
+
+/// `xcrun simctl <verb> <udid> <rest…>`: what it printed.
+fn simctl(udid: &str, verb: &str, rest: &[&str]) -> anyhow::Result<String> {
+    let out = crate::process::command("xcrun").args(["simctl", verb, udid]).args(rest).output()?;
+    crate::process::answer(out)
+}
+
+/// sdaxsettings' keys for the toggles it sets.
+fn ax_key(toggle: Toggle) -> Option<&'static str> {
+    Some(match toggle {
+        Toggle::ReduceMotion => "reduce-motion",
+        Toggle::ReduceTransparency => "reduce-transparency",
+        Toggle::ShowBorders => "show-borders",
+        Toggle::VoiceOver => "voiceover",
+        Toggle::IncreaseContrast | Toggle::Network => return None,
+    })
+}
+
+/// The settings, each read at once: simctl takes a second a call.
+pub(super) fn read_tools(device: &Device, probe: &Probe) -> Settings {
+    let udid = device.id.as_str();
+    let ui = |option: &str| simctl(udid, "ui", &[option]).ok().map(|o| o.trim().to_lowercase());
+    let (appearance, size, contrast, ax, app) = std::thread::scope(|s| {
+        let appearance = s.spawn(|| ui("appearance"));
+        let size = s.spawn(|| ui("content_size"));
+        let contrast = s.spawn(|| ui("increase_contrast"));
+        let ax = s.spawn(|| simdriver::ax_settings(udid, &["status"]).ok());
+        let app = s.spawn(|| front_app(udid, probe));
+        let join = |h: std::thread::ScopedJoinHandle<'_, Option<String>>| h.join().ok().flatten();
+        (join(appearance), join(size), join(contrast), join(ax), join(app))
+    });
+    let ax: std::collections::HashMap<String, String> = ax.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
+    let mut toggles = Vec::new();
+    for toggle in [Toggle::ReduceMotion, Toggle::IncreaseContrast, Toggle::ReduceTransparency, Toggle::ShowBorders, Toggle::VoiceOver] {
+        let on = match ax_key(toggle) {
+            Some(key) => ax.get(key).and_then(|v| (v == "on" || v == "off").then(|| v == "on")),
+            None => contrast.as_deref().and_then(|c| (c == "enabled" || c == "disabled").then(|| c == "enabled")),
+        };
+        toggles.extend(on.map(|on| (toggle, on)));
+    }
+    // Liquid Glass came with iOS 26: before it the setting reads but does nothing
+    let glass = device.version.trim_start_matches("iOS ").split('.').next().and_then(|m| m.parse::<u32>().ok()).is_some_and(|m| m >= 26);
+    Settings {
+        dark: appearance.and_then(|a| (a == "dark" || a == "light").then(|| a == "dark")),
+        text_size: size.and_then(|s| tools::text_size_from_ios(&s)),
+        toggles,
+        liquid_glass: ax.get("liquid-glass").filter(|_| glass).and_then(|v| tools::known(&tools::LIQUID_GLASS, v)),
+        color_filter: ax.get("color-filter").and_then(|v| tools::known(&tools::COLOR_FILTERS, v)),
+        app,
+    }
+}
+
+/// The app in front, by bundle id: the accessibility tree names it as the home screen shows it, and the installed
+/// apps say whose name that is.
+// ponytail: two apps of one name read as the first; the app's pid from sdax would tell them apart
+fn front_app(udid: &str, probe: &Probe) -> Option<String> {
+    let name = probe.driver.as_ref()?.accessibility().ok()?.label?;
+    type Apps = std::collections::HashMap<String, (std::time::Instant, Vec<simdriver::App>)>;
+    static APPS: Mutex<Option<Apps>> = Mutex::new(None);
+    let find = |apps: &[simdriver::App]| apps.iter().find(|a| a.name == name).map(|a| a.bundle_id.clone());
+    let mut cache = APPS.lock().ok()?;
+    let cache = cache.get_or_insert_default();
+    if let Some((listed, apps)) = cache.get(udid) {
+        // an app not listed may be newly installed: listed again, at most every half minute
+        if let Some(id) = find(apps) {
+            return Some(id);
+        }
+        if listed.elapsed() < std::time::Duration::from_secs(30) {
+            return None;
+        }
+    }
+    let apps = simdriver::list_apps(udid).ok()?;
+    let id = find(&apps);
+    cache.insert(udid.to_string(), (std::time::Instant::now(), apps));
+    id
+}
+
+pub(super) fn act(udid: &str, action: &Action) -> anyhow::Result<()> {
+    let ax = |key: &str, value: &str| simdriver::ax_settings(udid, &["set", key, value]).map(drop).map_err(anyhow::Error::from);
+    match action {
+        Action::Dark(dark) => simdriver::set_appearance(udid, if *dark { simdriver::Appearance::Dark } else { simdriver::Appearance::Light })?,
+        Action::TextSize(size) => simdriver::set_content_size(udid, tools::ios_text_size(*size))?,
+        Action::Toggle(Toggle::IncreaseContrast, on) => simctl(udid, "ui", &["increase_contrast", if *on { "enabled" } else { "disabled" }]).map(drop)?,
+        Action::Toggle(toggle, on) => ax(ax_key(*toggle).ok_or_else(|| anyhow::anyhow!("{} is Android's", toggle.label()))?, if *on { "on" } else { "off" })?,
+        Action::LiquidGlass(look) => ax("liquid-glass", look)?,
+        Action::ColorFilter(filter) => ax("color-filter", filter)?,
+        Action::Location(lat, lon) => simdriver::set_location(udid, *lat, *lon)?,
+        Action::ClearLocation => simctl(udid, "location", &["clear"]).map(drop)?,
+        Action::Permission { app, permission, decision } => simctl(udid, "privacy", &[decision.verb(), permission, app]).map(drop)?,
+        Action::OpenUrl(url) => simdriver::open_url(udid, url)?,
+        Action::Launch(app) => simdriver::launch(udid, app)?,
+        Action::Terminate(app) => simdriver::terminate(udid, app)?,
+        Action::Push { app, text } => {
+            let payload = serde_json::json!({ "aps": { "alert": text } }).to_string();
+            let mut child = crate::process::command("xcrun")
+                .args(["simctl", "push", udid, app, "-"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                std::io::Write::write_all(&mut stdin, payload.as_bytes())?;
+            }
+            crate::process::answer(child.wait_with_output()?).map(drop)?
+        }
+        Action::Orientation(_) => anyhow::bail!("A simulator turns with its window"),
+    }
+    Ok(())
+}
+
+pub(super) fn elements(probe: &Probe) -> anyhow::Result<Vec<[f64; 4]>> {
+    let driver = probe.driver.as_ref().ok_or_else(|| anyhow::anyhow!("The device is not open"))?;
+    let root = driver.accessibility()?;
+    let (w, h) = driver.screen_points().ok_or_else(|| anyhow::anyhow!("The screen's size is not known yet"))?;
+    // the app itself covers the screen: its elements are what's outlined
+    Ok(root.descendants().into_iter().skip(1).map(|n| [n.frame[0] / w, n.frame[1] / h, n.frame[2] / w, n.frame[3] / h]).collect())
 }
 
 fn options(udid: &str) -> simdriver::Options {
@@ -201,7 +319,7 @@ impl Panels {
 
 pub struct Session {
     /// The device's input, and its only screen's frames; an iPhone Duo's frames are its `Panels`'.
-    driver: Arc<simdriver::Driver>,
+    pub(super) driver: Arc<simdriver::Driver>,
     /// An iPhone Duo's hinge, and its screens.
     duo: Option<(duo::Duo, Arc<Panels>)>,
     /// When a mouse wheel last scrolled: its finger is still down until simdriver lifts it, idle.

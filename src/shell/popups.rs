@@ -542,6 +542,7 @@ impl Shell {
         .children(self.web_menu(theme, cx))
         .children(self.right_plus_menu(theme, cx))
         .children(self.device_menu(theme, cx))
+        .children(self.device_choice(theme, cx))
         .children(self.diff_agents_menu(theme, window, cx))
         .children(self.annotation_agents_menu(theme, cx))
         .children(self.project_menu(theme, snapshot.as_ref(), cx))
