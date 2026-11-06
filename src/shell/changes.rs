@@ -267,6 +267,8 @@ pub(super) enum ChangesEvent {
     Send,
     /// A PR's file's Viewed box.
     Viewed { path: String },
+    /// The working tree's bar made the branch's PR, or its button opens it: the Pull request tab.
+    ShowPr,
 }
 
 /// What the Changes view shows of a PR: the host's patch, never watched. Given every render of the review panel.
@@ -342,6 +344,23 @@ pub(super) struct Changes {
     refocus: bool,
     /// Over a PR's patch instead of the checkout's.
     pr: Option<PrView>,
+    /// The working tree's bar: commit, push, PR.
+    git: GitBar,
+}
+
+/// The working tree's bar under the diff. The field's made on its first draw, and what's put in it waits for a draw
+/// too: its setter wants the window.
+#[derive(Default)]
+struct GitBar {
+    message: Option<Entity<TextareaState>>,
+    /// The step its placeholder was set for.
+    placeholder_for: Option<GitStep>,
+    next_message: Option<String>,
+    /// What runs, as its button says it.
+    busy: Option<&'static str>,
+    /// What git, a hook, gh or claude said when it failed; the message stays.
+    error: Option<SharedString>,
+    _task: Option<Task<()>>,
 }
 
 impl Changes {
@@ -386,6 +405,7 @@ impl Changes {
             back: None,
             refocus: false,
             pr: None,
+            git: GitBar::default(),
         }
     }
 
@@ -494,6 +514,7 @@ impl Changes {
             self.dir = dir.map(str::to_string);
             // A draft belongs to the checkout it was opened over: it doesn't follow the user across.
             self.draft = None;
+            self.git.error = None;
             self.base_ref = None;
             self.branches.clear();
             self.forget_diff(cx);
@@ -2269,6 +2290,221 @@ fn render_file_body_upto(file: &FileDiff, highlight: Option<Arc<DiffHighlights>>
     div().flex().flex_col().pb(px(BODY_BOTTOM_PAD)).children(children).into_any_element()
 }
 
+/// The working tree's bar: one button that commits, pushes, makes the branch's PR, then opens it.
+impl Changes {
+    /// The review cache's key for the shown branch, as the review panel keys it.
+    fn review_key(&self) -> Option<String> {
+        Some(format!("{}\n{}", self.dir.as_ref()?, self.branch.as_ref()?))
+    }
+
+    /// Where the checkout stands, and the button's step from there; `None` with nothing to do.
+    fn git_step(&self, cx: &mut App) -> Option<(GitStep, crate::ui::statusbar::Git, Option<crate::ui::review::Review>)> {
+        use crate::ui::statusbar::{cached, git_of};
+        let dir = self.dir.as_deref()?;
+        let diff = self.diff.as_ref()?;
+        let git = git_of(dir, cx)?;
+        let origin = cached(dir, POLL * 15, find_origin, cx)?;
+        let dirty = !diff.patch.trim().is_empty();
+        // gh goes over the network: asked only once there's nothing left to commit or push
+        let settled = !dirty && git.upstream && git.ahead == 0 && origin != Origin::None;
+        let review = self.review_key().filter(|_| settled).and_then(|key| cached(&key, super::review::REVIEW_TTL, crate::ui::review::read_review, cx));
+        let pr = review.as_ref().map(|r| matches!(r, crate::ui::review::Review::Found { request: Some(_), .. }));
+        let branch = (!git.detached).then_some(git.branch.as_str());
+        let step = next_step(BranchState { dirty, branch, upstream: git.upstream, ahead: git.ahead, remote: origin != Origin::None, pr })?;
+        Some((step, git, review))
+    }
+
+    fn run_git(&mut self, step: GitStep, cx: &mut Context<Self>) {
+        if step == GitStep::OpenPr {
+            return cx.emit(ChangesEvent::ShowPr);
+        }
+        let (Some(dir), None) = (self.dir.clone(), self.git.busy) else { return };
+        let text = self.git.message.as_ref().map(|m| m.read(cx).value().trim().to_string()).unwrap_or_default();
+        if step == GitStep::Commit && text.is_empty() {
+            return;
+        }
+        let branch = self.branch.clone().unwrap_or_default();
+        self.git.busy = Some(match step {
+            GitStep::Commit => "Committing…",
+            GitStep::Publish | GitStep::Push => "Pushing…",
+            GitStep::CreatePr | GitStep::OpenPr => "Creating…",
+        });
+        self.git.error = None;
+        cx.notify();
+        self.git._task = Some(cx.spawn(async move |this, cx| {
+            let (d, b) = (dir.clone(), branch);
+            let done = cx
+                .background_spawn(async move {
+                    match step {
+                        GitStep::Commit => commit_all(&d, &text),
+                        GitStep::Publish => push(&d, true),
+                        GitStep::Push => push(&d, false),
+                        GitStep::CreatePr | GitStep::OpenPr => create_pr(&d, &b, &text),
+                    }
+                })
+                .await;
+            this.update(cx, |changes, cx| {
+                changes.git.busy = None;
+                match done {
+                    Err(e) => changes.git.error = Some(e.into()),
+                    Ok(()) => {
+                        if matches!(step, GitStep::Commit | GitStep::CreatePr) {
+                            changes.git.next_message = Some(String::new());
+                        }
+                        crate::ui::statusbar::refresh_git(&dir, cx);
+                        if let Some(key) = changes.review_key() {
+                            crate::ui::statusbar::refetch::<crate::ui::review::Review>(&key, cx);
+                        }
+                        changes.restart_watch(cx);
+                        if step == GitStep::CreatePr {
+                            cx.emit(ChangesEvent::ShowPr);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The field's words written by `claude -p`: a commit message, or the PR's title and description against the base.
+    fn write_git_message(&mut self, step: GitStep, cx: &mut Context<Self>) {
+        let (Some(dir), None) = (self.dir.clone(), self.git.busy) else { return };
+        let base = (step == GitStep::CreatePr).then(|| self.base_ref.clone().unwrap_or_else(|| "origin/HEAD".into()));
+        self.git.busy = Some("Writing…");
+        self.git.error = None;
+        cx.notify();
+        self.git._task = Some(cx.spawn(async move |this, cx| {
+            let written = cx.background_spawn(async move { write_message(&dir, base.as_deref()) }).await;
+            this.update(cx, |changes, cx| {
+                changes.git.busy = None;
+                match written {
+                    Ok(text) => changes.git.next_message = Some(text),
+                    Err(e) => changes.git.error = Some(e.into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn render_git_bar(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.pr.is_some() || self.scope != DiffScope::WorkingTree {
+            return None;
+        }
+        let (step, git, review) = self.git_step(cx)?;
+        let gitlab = crate::ui::statusbar::cached(self.dir.as_deref()?, POLL * 15, find_origin, cx) == Some(Origin::GitLab);
+        let noun = if gitlab { "MR" } else { "PR" };
+        let field = matches!(step, GitStep::Commit | GitStep::CreatePr);
+        if field && self.git.message.is_none() {
+            let input = cx.new(|cx| TextareaState::new(window, cx));
+            input.update(cx, |input, _| input.set_editor_style(crate::ui::input_style(theme)));
+            self.git.message = Some(input);
+        }
+        let message = self.git.message.clone();
+        if let Some(input) = &message {
+            if let Some(text) = self.git.next_message.take() {
+                input.update(cx, |input, cx| input.set_value(text, window, cx));
+            }
+            if field && self.git.placeholder_for != Some(step) {
+                self.git.placeholder_for = Some(step);
+                let words = match step {
+                    GitStep::Commit => "Commit message".to_string(),
+                    _ => format!("{noun} title, a blank line, its description; empty: from the commits"),
+                };
+                input.update(cx, |input, cx| input.set_placeholder(words, window, cx));
+            }
+        }
+        let empty = message.as_ref().is_none_or(|m| m.read(cx).value().trim().is_empty());
+        let machine = crate::herdr::split(self.dir.as_deref()?).0.unwrap_or_default().to_string();
+        let claude = field && crate::ui::statusbar::cached(&machine, Duration::MAX, find_claude, cx) == Some(HasClaude(true));
+        let busy = self.git.busy;
+        let ready = busy.is_none() && !(step == GitStep::Commit && empty);
+        let number = match &review {
+            Some(crate::ui::review::Review::Found { request: Some(r), .. }) => Some(r.pr.number),
+            _ => None,
+        };
+        let label = match (busy, step) {
+            (Some(busy), _) => busy.to_string(),
+            (None, GitStep::Commit) => "Commit".into(),
+            (None, GitStep::Publish) => "Publish branch".into(),
+            (None, GitStep::Push) => "Push".into(),
+            (None, GitStep::CreatePr) => format!("Create {noun}"),
+            (None, GitStep::OpenPr) => format!("Open {noun}"),
+        };
+        let status = match step {
+            GitStep::Commit => git.branch.clone(),
+            GitStep::Publish => format!("{} isn't on origin yet", git.branch),
+            GitStep::Push => format!("{} {} to push", git.ahead, if git.ahead == 1 { "commit" } else { "commits" }),
+            GitStep::CreatePr => format!("No {noun} for {} yet", git.branch),
+            GitStep::OpenPr => number.map_or_else(|| format!("{noun} open"), |n| format!("{}{n}", if gitlab { "!" } else { "#" })),
+        };
+        let hovered = theme.accent.opacity(0.85);
+        let hover = theme.hover;
+        let button = div()
+            .id("git-step")
+            .flex_none()
+            .h(px(28.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .rounded(px(8.))
+            .text_color(if ready { gpui::white() } else { theme.text_faint })
+            .bg(if ready { theme.accent } else { theme.wash(0.06) })
+            .when(busy.is_some(), |el| el.child(crate::ui::loader::mini_spinner(2., theme.text_faint, window)))
+            .child(label)
+            .when(ready, |el| el.cursor_pointer().hover(move |s| s.bg(hovered)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.run_git(step, cx))));
+        let write = (claude && busy.is_none()).then(|| {
+            div()
+                .id("git-write")
+                .flex_none()
+                .h(px(28.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(px(8.))
+                .cursor_pointer()
+                .text_color(theme.text_muted)
+                .hover(move |s| s.bg(hover))
+                .tooltip(tip(if step == GitStep::Commit { "Write the commit message with claude -p" } else { "Write the title and description with claude -p" }, None))
+                .child(gpui::svg().path("icons/claude-mark.svg").size(px(14.)).flex_none().text_color(theme.text_muted))
+                .child("Write")
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.write_git_message(step, cx)))
+        });
+        Some(
+            div()
+                .flex_none()
+                .px(px(8.))
+                .py(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .border_t_1()
+                .border_color(theme.border)
+                .bg(theme.surface)
+                .text_size(px(12.))
+                .when_some(message.filter(|_| field), |el, input| {
+                    el.child(div().h(px(64.)).px(px(8.)).py(px(6.)).rounded(px(8.)).bg(theme.wash(0.04)).overflow_hidden().child(Textarea::new(&input)))
+                })
+                .when_some(self.git.error.clone(), |el, error| {
+                    el.child(div().id("git-error").max_h(px(96.)).overflow_y_scroll().px(px(4.)).text_size(px(11.)).line_height(px(16.)).text_color(theme.danger).child(error))
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().flex_1().min_w_0().px(px(4.)).truncate().text_color(theme.text_muted).child(status))
+                        .children(write)
+                        .child(button),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for Changes {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::reap_popup(&mut self.scope_menu, window);
@@ -2354,6 +2590,7 @@ impl Render for Changes {
                 el.child(div().flex_none().px(px(12.0)).py(px(4.0)).border_b_1().border_color(theme.border).text_size(px(11.0)).text_color(theme.warning).child(message))
             })
             .child(content)
+            .children(self.render_git_bar(&theme, window, cx))
             .children(self.render_scope_menu(&theme, cx))
             .children(self.render_ref_menu(&theme, cx))
             .children(self.render_file_menu(&theme, cx))
@@ -2377,6 +2614,7 @@ impl Shell {
             ChangesEvent::Open { dir, root, path } => this.edit_diff_file(dir, root, path, cx),
             ChangesEvent::Preview { dir, root, path } => this.preview_diff_file(dir, root, path, window, cx),
             ChangesEvent::Send => this.send_diff_comments(&tab, window, cx),
+            ChangesEvent::ShowPr => this.update_panel(cx, |p| p.add(Surface::PullRequest)),
             ChangesEvent::Viewed { .. } => {}
         })
         .detach();

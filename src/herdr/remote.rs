@@ -133,7 +133,14 @@ pub fn git(dir: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
 
 /// `script` run by `sh` on the machine at `target` (its login shell may be fish), over the shared SSH connection.
 pub fn ssh(target: &str, script: &str) -> std::io::Result<std::process::Output> {
-    crate::process::command("ssh").args(ssh_options()).arg("--").arg(target).arg(format!("sh -c {}", quote(script))).stdin(Stdio::null()).output()
+    ssh_command(target, script).stdin(Stdio::null()).output()
+}
+
+/// [`ssh`]'s command, unstarted: for a script that reads its stdin.
+pub fn ssh_command(target: &str, script: &str) -> std::process::Command {
+    let mut ssh = crate::process::command("ssh");
+    ssh.args(ssh_options()).arg("--").arg(target).arg(format!("sh -c {}", quote(script)));
+    ssh
 }
 
 /// `word` for the remote shell, as one argument.

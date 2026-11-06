@@ -8,7 +8,7 @@ use crate::ui::statusbar::{branch_of, cached, fetching, pane_dir, refetch};
 /// The space between the review body's sections.
 const SECTION: f32 = 16.;
 /// How often gh or glab are asked again about a branch, as the status bar asks about its PR.
-const REVIEW_TTL: Duration = Duration::from_secs(120);
+pub(super) const REVIEW_TTL: Duration = Duration::from_secs(120);
 /// How often while one of its checks runs or waits to.
 pub(super) const REVIEW_POLL: Duration = Duration::from_secs(10);
 /// Past this a swipe over the checks pages when the fingers lift; short of it, the page springs back.
@@ -514,7 +514,7 @@ impl Shell {
             ChangesEvent::Viewed { path } => this.flip_viewed(path, cx),
             ChangesEvent::Open { dir, root, path } => this.edit_diff_file(dir, root, path, cx),
             ChangesEvent::Preview { dir, root, path } => this.preview_diff_file(dir, root, path, window, cx),
-            ChangesEvent::Discard { .. } | ChangesEvent::Send => {}
+            ChangesEvent::Discard { .. } | ChangesEvent::Send | ChangesEvent::ShowPr => {}
         })
         .detach();
         self.review_code = Some(code.clone());

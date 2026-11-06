@@ -25,6 +25,9 @@ pub struct Git {
     pub branch: String,
     pub ahead: u32,
     pub behind: u32,
+    pub upstream: bool,
+    /// HEAD isn't on a branch: `branch` is its short hash.
+    pub detached: bool,
 }
 
 /// `git rev-list --left-right --count HEAD...@{u}`, read: commits (ahead, behind) the upstream.
@@ -173,12 +176,14 @@ fn git_in(dir: &str, args: &[&str]) -> Option<String> {
 /// repo, every [`GIT_TTL`] for each worktree in the sidebar.
 fn read_git(dir: &str) -> Option<Git> {
     let mut branch = git_in(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    if branch == "HEAD" {
-        branch = git_in(dir, &["rev-parse", "--short", "HEAD"])?; // detached
+    let detached = branch == "HEAD";
+    if detached {
+        branch = git_in(dir, &["rev-parse", "--short", "HEAD"])?;
     }
     // no upstream: git fails, nothing to show
-    let (ahead, behind) = git_in(dir, &["rev-list", "--left-right", "--count", "HEAD...@{u}"]).map_or((0, 0), |out| parse_ahead_behind(&out));
-    Some(Git { branch, ahead, behind })
+    let counts = git_in(dir, &["rev-list", "--left-right", "--count", "HEAD...@{u}"]);
+    let (ahead, behind) = counts.as_deref().map_or((0, 0), parse_ahead_behind);
+    Some(Git { branch, ahead, behind, upstream: counts.is_some(), detached })
 }
 
 /// `git diff --shortstat`, read: lines added and removed; `(0, 0)` for no changes.
