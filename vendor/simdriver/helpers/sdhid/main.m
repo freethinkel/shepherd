@@ -45,6 +45,7 @@
  *   {"t":"button","b":"HOME|LOCK|SIDE_BUTTON|SIRI|VOLUME_UP|VOLUME_DOWN","n":presses?,"d":holdSeconds?}
  *   {"t":"key","code":usage,"mods":[usage,...]?} press + release with modifiers held
  *   {"t":"text","s":"..."}             US layout, ASCII
+ *   {"t":"orientation","o":1-4}        how it's held (UIDeviceOrientation), as Simulator.app turns it
  *   {"t":"_invalidate"}                TEST ONLY: cancel the connection and take the same
  *                                      path as XPC_ERROR_CONNECTION_INVALID (displaced)
  * stdout, one JSON object per line:
@@ -453,8 +454,40 @@ static BOOL startsGesture(NSDictionary *cmd) {
   return [t isEqualToString:@"button"] || [t isEqualToString:@"key"] || [t isEqualToString:@"text"];
 }
 
+// How the device is held, as Simulator.app turns it: a GraphicsServices event (UIDeviceOrientation 1 portrait, 2 upside
+// down, 3 landscape right, 4 landscape left) sent to the guest's PurpleWorkspacePort, not the digitizer. Wire format
+// from serve-sim's HIDInjector.sendOrientation (https://github.com/EvanBacon/serve-sim, Apache-2.0), itself idb's.
+static void sendOrientation(uint32_t orientation) {
+  if (orientation < 1 || orientation > 4) {
+    warn([NSString stringWithFormat:@"no orientation %u", orientation]);
+    return;
+  }
+  NSError *error = nil;
+  mach_port_t port = [g_device lookup:@"PurpleWorkspacePort" error:&error];
+  if (port == MACH_PORT_NULL) {
+    warn([NSString stringWithFormat:@"lookup PurpleWorkspacePort failed: %@", error]);
+    return;
+  }
+  uint8_t message[112] = {0};
+  mach_msg_header_t *header = (mach_msg_header_t *)message;
+  header->msgh_bits = MACH_MSG_TYPE_COPY_SEND;
+  header->msgh_size = 108;
+  header->msgh_remote_port = port;
+  header->msgh_id = 0x7B;
+  uint32_t type = 50 | 0x20000, size = 4; // device orientation changed, from the host
+  memcpy(message + 0x18, &type, 4);
+  memcpy(message + 0x48, &size, 4);
+  memcpy(message + 0x4C, &orientation, 4);
+  kern_return_t kr = mach_msg_send(header);
+  if (kr != KERN_SUCCESS) warn([NSString stringWithFormat:@"orientation send failed (%d)", kr]);
+}
+
 static void handle(NSDictionary *cmd) {
   NSString *t = cmd[@"t"];
+  if ([t isEqualToString:@"orientation"]) { // not through the digitizer: no reclaim needed
+    sendOrientation((uint32_t)num(cmd, @"o"));
+    return;
+  }
   if ([t isEqualToString:@"target"]) { // {"t":"target","n":id}: touches go to that screen from now on
     g_target = (uint64_t)num(cmd, @"n");
     return;

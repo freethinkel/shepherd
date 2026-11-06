@@ -94,6 +94,7 @@ addEventListener("resize", resize);
 resize();
 
 let duoScreen: DeviceScreenSize | null = null;
+let phoneScreen: DeviceScreenSize | null = null;
 const screenKey = (s: DeviceScreenSize | null) => JSON.stringify(s);
 
 /** Draws a Duo frame on its screen's canvas, the inner one turned back, and tells the viewer which screen is live. */
@@ -140,7 +141,19 @@ async function pump() {
       } else {
         if (source.width !== bitmap.width || source.height !== bitmap.height)
           Object.assign(source, { width: bitmap.width, height: bitmap.height });
-        source.getContext("2d")!.drawImage(bitmap, 0, 0);
+        // how it's held: t3code's viewer turns the phone to match, and takes a landscape frame as shown but an upside
+        // down one the screen's own way round, which Shepherd sends as shown: turned back here
+        const orientation = (response.headers.get("x-orientation") ?? "portrait") as DeviceScreenSize["orientation"];
+        const context = source.getContext("2d")!;
+        context.save();
+        if (orientation === "portrait_upside_down") {
+          context.translate(bitmap.width, bitmap.height);
+          context.rotate(Math.PI);
+        }
+        context.drawImage(bitmap, 0, 0);
+        context.restore();
+        const next: DeviceScreenSize = { width: bitmap.width, height: bitmap.height, orientation };
+        if (screenKey(next) !== screenKey(phoneScreen)) phone!.setScreen((phoneScreen = next));
         phone!.frameUpdated();
         // an Android foldable's own scene, folded as far as its hinge
         phone!.setFoldAngle(fold && !fold.duo ? fold.angle : null);

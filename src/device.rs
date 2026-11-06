@@ -155,9 +155,12 @@ pub struct Frame {
     pub height: u32,
     pixels: Vec<u8>,
     rgb: bool,
-    /// iPhone Duo's screen it's from: 1 the cover, 3 the inner one, which is mounted a quarter turn from the phone and
-    /// comes turned clockwise, as the phone is held (open like a book); touches on it turn back (`device_point`).
+    /// iPhone Duo's screen it's from: 1 the cover, 3 the inner one.
     pub screen: Option<u8>,
+    /// Quarter turns clockwise it shows the device's own screen turned, as it's held (`tools::ORIENTATIONS`' order): a
+    /// turned emulator's come so, a turned simulator's are turned here, and the Duo's inner screen, mounted a quarter
+    /// turn from the phone, comes turned once. Touches on it turn back (`device_point`).
+    pub turn: u8,
     /// The same pixels in an IOSurface, which the window draws without a copy; `None` when Core Video gave none, and
     /// the frame is drawn as an image.
     #[cfg(target_os = "macos")]
@@ -165,14 +168,15 @@ pub struct Frame {
 }
 
 impl Frame {
-    /// A frame decoded into `surface` already (a phone's), with its BGRA `pixels`.
+    /// A frame decoded into `surface` already (a phone's), with its BGRA `pixels`. scrcpy streams the phone's screen as
+    /// it's held and takes touches in that frame, so it's never turned here.
     #[cfg(target_os = "macos")]
     fn decoded(width: u32, height: u32, pixels: Vec<u8>, surface: surface::Surface) -> Frame {
-        Frame { width, height, pixels, rgb: false, screen: None, surface: Some(surface) }
+        Frame { width, height, pixels, rgb: false, screen: None, turn: 0, surface: Some(surface) }
     }
 
-    /// A frame as it came, its surface made here, on the stream's thread.
-    pub fn new(width: u32, height: u32, pixels: Vec<u8>, rgb: bool, screen: Option<u8>) -> Frame {
+    /// A frame as it came, `turn` quarters from the device's own screen, its surface made here, on the stream's thread.
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>, rgb: bool, screen: Option<u8>, turn: u8) -> Frame {
         #[cfg(target_os = "macos")]
         let surface = surface::Surface::new(width, height, &pixels, rgb);
         Frame {
@@ -181,9 +185,38 @@ impl Frame {
             pixels,
             rgb,
             screen,
+            turn: turn % 4,
             #[cfg(target_os = "macos")]
             surface,
         }
+    }
+
+    /// Its pixels turned a quarter clockwise `turn` times (each pixel `bpp` bytes), and their new width and height.
+    pub fn turn_pixels(pixels: &[u8], width: u32, height: u32, bpp: usize, turn: u8) -> (Vec<u8>, u32, u32) {
+        let (w, h) = (width as usize, height as usize);
+        let turn = turn % 4;
+        if turn == 0 || pixels.len() < w * h * bpp {
+            return (pixels.to_vec(), width, height);
+        }
+        let mut out = vec![0; w * h * bpp];
+        for y in 0..h {
+            for x in 0..w {
+                let to = match turn {
+                    1 => x * h + (h - 1 - y),
+                    2 => (h - 1 - y) * w + (w - 1 - x),
+                    _ => (w - 1 - x) * h + y,
+                };
+                out[to * bpp..(to + 1) * bpp].copy_from_slice(&pixels[(y * w + x) * bpp..(y * w + x + 1) * bpp]);
+            }
+        }
+        if turn == 2 { (out, width, height) } else { (out, height, width) }
+    }
+
+    /// The same screen shown turned `turn` quarters instead.
+    pub fn turned(&self, turn: u8) -> Frame {
+        let bpp = if self.rgb { 3 } else { 4 };
+        let (pixels, w, h) = Frame::turn_pixels(&self.pixels, self.width, self.height, bpp, (turn + 4 - self.turn) % 4);
+        Frame::new(w, h, pixels, self.rgb, self.screen, turn)
     }
 
     /// Its pixels in BGRA, as GPUI draws an image: for a frame with no surface (Linux's). Converting happens where a
@@ -202,13 +235,23 @@ impl Frame {
 
     /// Where a point on the frame (0 to 1 each way) is on the device's own screen.
     pub fn device_point(&self, x: f64, y: f64) -> (f64, f64) {
-        if self.screen == Some(3) { (y, 1. - x) } else { (x, y) }
+        match self.turn {
+            1 => (y, 1. - x),
+            2 => (1. - x, 1. - y),
+            3 => (1. - y, x),
+            _ => (x, y),
+        }
     }
 
     /// Where a rect on the device's own screen (`[x, y, width, height]`, 0 to 1) shows on the frame: `device_point`'s
     /// way back.
     pub fn shown_rect(&self, [x, y, w, h]: [f64; 4]) -> [f64; 4] {
-        if self.screen == Some(3) { [1. - (y + h), x, h, w] } else { [x, y, w, h] }
+        match self.turn {
+            1 => [1. - (y + h), x, h, w],
+            2 => [1. - (x + w), 1. - (y + h), w, h],
+            3 => [y, 1. - (x + w), h, w],
+            _ => [x, y, w, h],
+        }
     }
 
     /// A JPEG of it, for the 3D view's web page: encoded from the pixels as they came, no copy in between.
@@ -242,6 +285,11 @@ impl Feed {
         let f = self.frame.lock().ok()?;
         let (f, _) = self.arrived.wait_timeout_while(f, timeout, |f| f.0 <= seen || f.1.is_none()).ok()?;
         f.1.clone().filter(|_| f.0 > seen).map(|frame| (f.0, frame))
+    }
+
+    /// The latest frame, seen or not.
+    pub fn latest(&self) -> Option<Arc<Frame>> {
+        self.newer(0).map(|(_, f)| f)
     }
 
     pub fn error(&self) -> Option<String> {
@@ -452,6 +500,16 @@ impl Session {
         }
     }
 
+    /// Turns a simulator to be held as `orientation` says (`tools::ORIENTATIONS`' names); its frames turn with it. An
+    /// emulator turns through `tools::act`, off the window's thread.
+    pub fn rotate(&self, orientation: &'static str) {
+        #[cfg(target_os = "macos")]
+        if let Session::Ios(s) = self {
+            s.rotate(orientation);
+        }
+        let _ = orientation;
+    }
+
     /// Moves a foldable's hinge (`Feed::fold` says whether it has one); its feed tells how it went.
     pub fn hinge(&self, hinge: Hinge) {
         match self {
@@ -491,26 +549,48 @@ mod tests {
 
     #[test]
     fn emulator_frames_turn_bgra() {
-        let f = Frame::new(1, 2, vec![1, 2, 3, 4, 5, 6], true, None);
+        let f = Frame::new(1, 2, vec![1, 2, 3, 4, 5, 6], true, None, 0);
         assert_eq!(f.bgra(), [3, 2, 1, 255, 6, 5, 4, 255]);
         assert!(f.jpeg().is_ok_and(|j| j.starts_with(&[0xff, 0xd8])));
     }
 
     #[test]
-    fn duo_inner_touches_turn_back() {
-        let f = Frame::new(3, 2, vec![0; 24], false, Some(3));
+    fn turned_touches_turn_back() {
+        let f = Frame::new(3, 2, vec![0; 24], false, Some(3), 1);
         // turned clockwise, the shown top-left was the screen's bottom-left, and the top-right its top-left
         assert_eq!(f.device_point(0., 0.), (0., 1.));
         assert_eq!(f.device_point(1., 0.), (0., 0.));
         // and back: the device's top-left corner shows at the top-right
         assert_eq!(f.shown_rect([0., 0., 0.1, 0.2]), [0.8, 0., 0.2, 0.1]);
+        // every way round, a point and a rect go there and back
+        for turn in 0..4 {
+            let f = Frame::new(1, 1, vec![0; 4], false, None, turn);
+            let [x, y, ..] = f.shown_rect([0.25, 0.5, 0., 0.]);
+            assert_eq!(f.device_point(x, y), (0.25, 0.5), "turn {turn}");
+        }
+    }
+
+    #[test]
+    fn pixels_turn_as_the_points_do() {
+        // a 3×2 frame, each pixel its own index
+        let px: Vec<u8> = (0..6).collect();
+        assert_eq!(Frame::turn_pixels(&px, 3, 2, 1, 1), (vec![3, 0, 4, 1, 5, 2], 2, 3));
+        assert_eq!(Frame::turn_pixels(&px, 3, 2, 1, 2), (vec![5, 4, 3, 2, 1, 0], 3, 2));
+        assert_eq!(Frame::turn_pixels(&px, 3, 2, 1, 3), (vec![2, 5, 1, 4, 0, 3], 2, 3));
+        // turned once, and then to upside down, is turned twice
+        let f = Frame::new(3, 2, (0..24).collect(), false, None, 0).turned(1).turned(2);
+        assert_eq!((f.width, f.height, f.turn), (3, 2, 2));
+        assert_eq!(f.pixels[..4], [20, 21, 22, 23]);
+        // the device's top-left pixel shows where its point does
+        let [x, y, ..] = f.shown_rect([0., 0., 0., 0.]);
+        assert_eq!((x, y), (1., 1.));
     }
 
     #[test]
     fn a_feed_hands_out_only_newer_frames() {
         let feed = Feed::default();
         assert!(feed.newer(0).is_none());
-        feed.put(Frame::new(1, 1, vec![0; 4], false, None));
+        feed.put(Frame::new(1, 1, vec![0; 4], false, None, 0));
         assert_eq!(feed.newer(0).map(|(n, _)| n), Some(1));
         assert!(feed.newer(1).is_none());
         assert!(feed.wait_newer(1, std::time::Duration::from_millis(10)).is_none());

@@ -13,3 +13,6 @@ This product includes software developed by Meta Platforms, Inc. and affiliates
 helpers/sdaxsettings/main.m is serve-sim's sim-ax-settings (Sources/SimAXSettings/sim-ax-settings.m,
 https://github.com/EvanBacon/serve-sim), Copyright Evan Bacon, licensed under the Apache License 2.0
 (https://www.apache.org/licenses/LICENSE-2.0). Unchanged but for the line saying where it's from.
+
+helpers/sdhid/main.m's sendOrientation follows serve-sim's HIDInjector.sendOrientation
+(Sources/SimNative/HIDInjector.swift), Copyright Evan Bacon, licensed under the Apache License 2.0.

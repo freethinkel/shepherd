@@ -354,10 +354,10 @@ impl Shell {
             let options = dt::COLOR_FILTERS.iter().map(|(_, l)| SharedString::from(*l)).collect();
             device_section = device_section.child(row_of(theme, "Color filter", self.select(theme, key, "color-filter", options, current, None, |s, k, i, _, cx| s.device_act(k, Action::ColorFilter(dt::COLOR_FILTERS[i].0), cx), cx)));
         }
-        if !ios && settings.is_some() {
+        if settings.is_some() {
             // t3code's too: the orientation isn't read back, the select turns it
             let options = dt::ORIENTATIONS.iter().map(|(_, l)| SharedString::from(*l)).collect();
-            device_section = device_section.child(row_of(theme, "Orientation", self.select(theme, key, "orientation", options, None, Some("Rotate to…"), |s, k, i, _, cx| s.device_act(k, Action::Orientation(dt::ORIENTATIONS[i].0), cx), cx)));
+            device_section = device_section.child(row_of(theme, "Orientation", self.select(theme, key, "orientation", options, None, Some("Rotate to…"), |s, k, i, _, cx| s.turn_device(k, i, cx), cx)));
         }
         for (toggle, on) in s.toggles.iter().copied() {
             device_section = device_section.child(switch_row(theme, format!("tools-{toggle:?}-{key}"), toggle.label(), on).on_click(on_act(cx, key, Action::Toggle(toggle, !on))));

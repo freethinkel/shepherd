@@ -2,8 +2,10 @@
 # other than the largest (sdframe --screen-size, iPhone Duo's cover), `Options::touch_target` aims touches at it
 # (sdhid --target) and `Options::rotate_cw` turns frames a quarter (sdframe --rotate-cw, the Duo's inner screen, which
 # is mounted sideways); `FrameStream` streams a second screen beside a `Driver`, and `Driver::set_touch_target` moves
-# touches to it (sdhid's `{"t":"target"}`); `ax_settings` runs sdaxsettings (serve-sim's, see NOTICE) in the
-# simulator for the accessibility settings simctl lacks. Tests and examples are left out. Cargo.toml's [patch.crates-io] points here.
+# touches to it (sdhid's `{"t":"target"}`); `Driver::set_orientation` turns the device as it's held (sdhid's
+# `{"t":"orientation"}`, serve-sim's GraphicsServices event, see NOTICE); `ax_settings` runs sdaxsettings (serve-sim's)
+# in the simulator for the accessibility settings simctl lacks. Tests and examples are left out. Cargo.toml's
+# [patch.crates-io] points here.
 [package]
 edition = "2024"
 name = "simdriver"

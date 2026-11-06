@@ -4,7 +4,7 @@
 use super::tools::{self, Action, Settings, Toggle};
 use super::{Button, Check, Device, Feed, Frame, Hinge, Platform, Probe, Touch, Wake, duo};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(super) fn find() -> (Vec<Device>, Check) {
@@ -147,7 +147,7 @@ pub(super) fn act(udid: &str, action: &Action) -> anyhow::Result<()> {
             }
             crate::process::answer(child.wait_with_output()?).map(drop)?
         }
-        Action::Orientation(_) => anyhow::bail!("A simulator turns with its window"),
+        Action::Orientation(_) => anyhow::bail!("A simulator turns through its open screen"),
     }
     Ok(())
 }
@@ -164,9 +164,17 @@ fn options(udid: &str) -> simdriver::Options {
     simdriver::Options { device: simdriver::DeviceSelector::Udid(udid.into()), ..Default::default() }
 }
 
-/// simdriver's frames are BGRA already, which is what GPUI draws.
+/// simdriver's frames are BGRA already, which is what GPUI draws. The Duo's inner screen comes turned a quarter.
 fn frame(f: simdriver::Frame, screen: Option<u8>) -> Frame {
-    Frame::new(f.width, f.height, f.data, false, screen)
+    Frame::new(f.width, f.height, f.data, false, screen, u8::from(screen == Some(duo::screen(false))))
+}
+
+/// A phone's frame, turned as it's held (`turn` quarters): its framebuffer stays upright when it's turned, as
+/// Simulator.app's does (it turns its window instead), unless it's turned already (t3code's way).
+fn held(f: simdriver::Frame, turn: u8) -> Frame {
+    let turn = if f.width > f.height { 0 } else { turn };
+    let (pixels, w, h) = Frame::turn_pixels(&f.data, f.width, f.height, 4, turn);
+    Frame::new(w, h, pixels, false, None, turn)
 }
 
 /// Streams `options`' screen; each frame to `on_frame`, and `on_back` once it's live again after a restart.
@@ -322,6 +330,10 @@ pub struct Session {
     pub(super) driver: Arc<simdriver::Driver>,
     /// An iPhone Duo's hinge, and its screens.
     duo: Option<(duo::Duo, Arc<Panels>)>,
+    /// How a phone's held, in quarter turns (`tools::ORIENTATIONS`' order), which its frames are turned by.
+    turn: Arc<AtomicU8>,
+    feed: Arc<Feed>,
+    wake: Wake,
     /// When a mouse wheel last scrolled: its finger is still down until simdriver lifts it, idle.
     scrolled: Mutex<Option<std::time::Instant>>,
 }
@@ -334,13 +346,16 @@ impl Session {
     pub(super) fn open(device: &Device, feed: Arc<Feed>, wake: Wake) -> anyhow::Result<Session> {
         let udid = device.id.as_str();
         if !device.duo {
-            let (f, w) = (feed.clone(), wake.clone());
+            // as it was left: Simulator.app, or an earlier session, may have turned it
+            let held_as = duo::orientation(udid, true);
+            let turn = Arc::new(AtomicU8::new(tools::ORIENTATIONS.iter().position(|(o, _)| *o == held_as).unwrap_or(0) as u8));
+            let (f, w, t) = (feed.clone(), wake.clone(), turn.clone());
             let on_frame = move |fr| {
-                f.put(frame(fr, None));
+                f.put(held(fr, t.load(Ordering::Relaxed)));
                 w();
             };
-            let driver = start(options(udid), feed, wake, on_frame, || {})?;
-            return Ok(Session { driver: Arc::new(driver), duo: None, scrolled: Default::default() });
+            let driver = start(options(udid), feed.clone(), wake.clone(), on_frame, || {})?;
+            return Ok(Session { driver: Arc::new(driver), duo: None, turn, feed, wake, scrolled: Default::default() });
         }
         let last = duo::last_settled(udid, duo::RECENT);
         let cover = last.is_none_or(|l| l.0);
@@ -363,11 +378,11 @@ impl Session {
         let panels = Panels::open(udid, cover, feed.clone(), wake.clone())?;
         let _ = back.set((Arc::downgrade(&panels), Arc::downgrade(&driver)));
         let (p, d) = (panels.clone(), driver.clone());
-        let duo = duo::Duo::open(udid, last, feed, wake, move |cover| {
+        let duo = duo::Duo::open(udid, last, feed.clone(), wake.clone(), move |cover| {
             p.show(cover);
             d.set_touch_target(duo::screen(cover).into());
         });
-        Ok(Session { driver, duo: Some((duo, panels)), scrolled: Default::default() })
+        Ok(Session { driver, duo: Some((duo, panels)), turn: Default::default(), feed, wake, scrolled: Default::default() })
     }
 
     fn driver(&self) -> &simdriver::Driver {
@@ -377,6 +392,22 @@ impl Session {
     pub(super) fn hinge(&self, hinge: Hinge) {
         if let Some((duo, _)) = &self.duo {
             duo.hinge(hinge);
+        }
+    }
+
+    /// Turns it to be held as `orientation` says (`tools::ORIENTATIONS`' names); an iPhone Duo as its hinge does.
+    pub(super) fn rotate(&self, orientation: &'static str) {
+        if let Some((duo, _)) = &self.duo {
+            return duo.hinge(Hinge::Hold(orientation));
+        }
+        let turn = tools::ORIENTATIONS.iter().position(|(o, _)| *o == orientation).unwrap_or(0);
+        // UIDeviceOrientation's: portrait, landscape right, upside down, landscape left
+        self.driver().set_orientation([1, 3, 2, 4][turn]);
+        self.turn.store(turn as u8, Ordering::Relaxed);
+        // a screen that doesn't turn with it (an iPhone's home screen) sends no new frame: its last one turns now
+        if let Some(last) = self.feed.latest().filter(|f| f.turn != turn as u8 && (f.turn != 0 || f.width < f.height)) {
+            self.feed.put(last.turned(turn as u8));
+            (self.wake)();
         }
     }
 
@@ -439,7 +470,7 @@ impl Drop for Session {
 mod tests {
     #[test]
     fn dark_screens_read_blank() {
-        let frame = |px: [u8; 4]| super::Frame::new(10, 10, px.repeat(100), false, Some(1));
+        let frame = |px: [u8; 4]| super::Frame::new(10, 10, px.repeat(100), false, Some(1), 0);
         assert!(super::blank(&frame([0, 0, 0, 255])));
         assert!(!super::blank(&frame([200, 200, 200, 255])));
     }
@@ -447,7 +478,7 @@ mod tests {
     #[test]
     fn a_screen_switched_to_keeps_its_last_frame_only_until_it_lights() {
         use super::*;
-        let frame = |v: u8| Frame::new(10, 10, [v, v, v, 255].repeat(100), false, Some(1));
+        let frame = |v: u8| Frame::new(10, 10, [v, v, v, 255].repeat(100), false, Some(1), 0);
         let feed = Arc::new(Feed::default());
         let panels = Panels {
             cover: AtomicBool::new(true),

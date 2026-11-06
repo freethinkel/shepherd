@@ -41,12 +41,13 @@ pub(in crate::shell) fn attach<'a>(
     rt: tokio::runtime::Handle,
     ready: impl Fn() + 'static,
 ) -> wry::WebViewBuilder<'a> {
+    let shown = feed.clone();
     builder
         .with_transparent(cfg!(target_os = "macos"))
         .with_asynchronous_custom_protocol(SCHEME.into(), move |_, request, responder| serve(request, &feed, &rt, responder))
         .with_ipc_handler(move |request| match request.body().as_str() {
             r#"{"ready":true}"# => ready(),
-            message => input(&session, message),
+            message => input(&session, &shown, message),
         })
 }
 
@@ -63,12 +64,14 @@ fn serve(request: Request<Vec<u8>>, feed: &Arc<Feed>, rt: &tokio::runtime::Handl
         "/frame" => {
             let after = request.uri().query().and_then(|q| q.strip_prefix("after=")).and_then(|n| n.parse().ok()).unwrap_or(0);
             let feed = feed.clone();
-            rt.spawn_blocking(move || match feed.wait_newer(after, FRAME_WAIT).and_then(|(n, f)| Some((n, f.screen, f.jpeg().ok()?))) {
-                Some((n, screen, jpeg)) => {
+            rt.spawn_blocking(move || match feed.wait_newer(after, FRAME_WAIT).and_then(|(n, f)| Some((n, f.jpeg().ok()?, f))) {
+                Some((n, jpeg, frame)) => {
                     let mut response = Response::builder().status(200).header("Content-Type", "image/jpeg").header("x-seq", n.to_string());
-                    // a foldable's: which of an iPhone Duo's screens this is, and the hinge
-                    if let Some(screen) = screen {
-                        response = response.header("x-screen", screen.to_string());
+                    // a foldable's: which of an iPhone Duo's screens this is, and the hinge; a phone's, how it's held
+                    match frame.screen {
+                        Some(screen) => response = response.header("x-screen", screen.to_string()),
+                        // t3code's viewer names a phone turned a quarter clockwise landscape_left
+                        None => response = response.header("x-orientation", ["portrait", "landscape_left", "portrait_upside_down", "landscape_right"][usize::from(frame.turn)]),
                     }
                     if let Some(fold) = feed.fold() {
                         response = response.header("x-fold", fold.json());
@@ -91,8 +94,9 @@ fn serve(request: Request<Vec<u8>>, feed: &Arc<Feed>, rt: &tokio::runtime::Handl
     }
 }
 
-/// A touch, key, text or hinge move from the page, for the device.
-fn input(session: &Session, message: &str) {
+/// A touch, key, text or hinge move from the page, for the device. A phone's touches are on its screen as shown,
+/// turned as it's held: they turn back as the flat view's do (an iPhone Duo's viewer sends its screens' own).
+fn input(session: &Session, feed: &Feed, message: &str) {
     let Ok(m) = serde_json::from_str::<serde_json::Value>(message) else { return };
     // a pinch over a foldable, and a Duo turned in the view to face another way
     if let Some(angle) = m["hinge"].as_f64() {
@@ -103,6 +107,7 @@ fn input(session: &Session, message: &str) {
         return session.hinge(Hinge::Hold(held.unwrap_or("portrait")));
     }
     let (x, y) = (m["x"].as_f64().unwrap_or(0.), m["y"].as_f64().unwrap_or(0.));
+    let (x, y) = feed.latest().filter(|f| f.screen.is_none()).map_or((x, y), |f| f.device_point(x, y));
     match (m["touch"].as_str(), m["key"].as_str(), m["text"].as_str(), m["note"].as_str()) {
         (Some("begin"), ..) => session.touch(Touch::Down, x, y),
         (Some("move"), ..) => session.touch(Touch::Move, x, y),

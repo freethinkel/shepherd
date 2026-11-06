@@ -1232,6 +1232,13 @@ impl Driver {
         self.inner.hid.send_raw_line(&format!(r#"{{"t":"target","n":{target}}}"#));
     }
 
+    /// Turns the device to be held as `orientation` says (UIDeviceOrientation: 1 portrait, 2 upside down, 3 landscape
+    /// right, 4 landscape left), as Simulator.app's rotate does. The framebuffer stays the way it was; what's on it turns,
+    /// if the app in front turns.
+    pub fn set_orientation(&self, orientation: u32) {
+        self.inner.hid.send_raw_line(&format!(r#"{{"t":"orientation","o":{orientation}}}"#));
+    }
+
     /// Test seam: make sdhid act as if another client took the touch input.
     #[doc(hidden)]
     pub fn __invalidate_input_for_test(&self) {

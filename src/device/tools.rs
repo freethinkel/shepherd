@@ -48,8 +48,10 @@ pub const COLOR_FILTERS: [(&str, &str); 5] = [
     ("blue-yellow", "Blue / yellow (tritanopia)"),
 ];
 
+/// How a device is held, by t3code's names, each a quarter turn clockwise on from the last (`Frame::turn`): held
+/// landscape left, its top is on the left, as Simulator.app's Rotate Left turns it.
 pub const ORIENTATIONS: [(&str, &str); 4] =
-    [("portrait", "Portrait"), ("landscape_left", "Landscape left"), ("portrait_upside_down", "Upside down"), ("landscape_right", "Landscape right")];
+    [("portrait", "Portrait"), ("landscape_right", "Landscape right"), ("portrait_upside_down", "Upside down"), ("landscape_left", "Landscape left")];
 
 pub const LOCATIONS: [(&str, f64, f64); 5] = [
     ("San Francisco", 37.7749, -122.4194),
@@ -126,7 +128,7 @@ pub enum Action {
     Toggle(Toggle, bool),
     LiquidGlass(&'static str),
     ColorFilter(&'static str),
-    /// Android's, by `ORIENTATIONS`' names.
+    /// Android's, by `ORIENTATIONS`' names (a simulator turns through its `Session::rotate`).
     Orientation(&'static str),
     Location(f64, f64),
     /// iOS's; an emulator keeps its last fix.

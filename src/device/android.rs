@@ -19,10 +19,31 @@ struct ImageFormat {
     /// 2: RGB888.
     #[prost(int32, tag = "1")]
     format: i32,
+    /// The frame's: how the device is held, the image turned to match.
+    #[prost(message, optional, tag = "2")]
+    rotation: Option<Rotation>,
     #[prost(uint32, tag = "3")]
     width: u32,
     #[prost(uint32, tag = "4")]
     height: u32,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct Rotation {
+    /// 0 portrait, 1 landscape (a quarter turn), 2 upside down, 3 the other landscape.
+    #[prost(int32, tag = "1")]
+    rotation: i32,
+}
+
+/// The quarter turns clockwise (`Frame::turn`) a frame of the emulator's `rotation` shows its screen turned by: its
+/// landscape is a turn counterclockwise (the status bar on the left), as Android Studio's emulator view reads it.
+fn turn(rotation: i32) -> u8 {
+    match rotation {
+        1 => 3,
+        2 => 2,
+        3 => 1,
+        _ => 0,
+    }
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -506,8 +527,10 @@ impl Client {
         self.grpc.ready().await.map_err(|e| tonic::Status::unavailable(e.to_string()))?;
         let now = || native.lock().map_or((1080, 2400), |n| *n);
         let asked = now();
-        // ponytail: half the native size, plenty for a panel; a sharper stream if it ever looks soft
-        let request = self.request(ImageFormat { format: 2, width: asked.0 / 2, height: asked.1 / 2 });
+        // ponytail: half the native size, plenty for a panel; a sharper stream if it ever looks soft. A square bound: a
+        // turned screen's image fits it as well as an upright one's
+        let side = asked.0.max(asked.1) / 2;
+        let request = self.request(ImageFormat { format: 2, rotation: None, width: side, height: side });
         let codec = tonic_prost::ProstCodec::<ImageFormat, Image>::default();
         let mut frames = self.grpc.server_streaming(request, Self::path("streamScreenshot"), codec).await?.into_inner();
         while let Some(image) = frames.message().await? {
@@ -516,7 +539,9 @@ impl Client {
             }
             let Some(format) = image.format else { continue };
             if image.image.len() == (format.width * format.height * 3) as usize {
-                feed.put(Frame::new(format.width, format.height, image.image, true, None));
+                // touches are on the screen as it's mounted: a turned one's turn back (`Frame::device_point`)
+                let turn = turn(format.rotation.map_or(0, |r| r.rotation));
+                feed.put(Frame::new(format.width, format.height, image.image, true, None, turn));
                 wake();
             }
         }

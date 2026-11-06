@@ -110,8 +110,9 @@ fn settled(line: &str, (cover, angle): (bool, f64)) -> Option<(bool, f64)> {
     Some((cover, angle))
 }
 
-/// The live screen's UI orientation from `simctl io enumerate`, by t3code's names.
-fn orientation(udid: &str, cover: bool) -> &'static str {
+/// The live screen's UI orientation from `simctl io enumerate`, by t3code's names: a phone's one screen reads as the
+/// Duo's cover, `primary`.
+pub(super) fn orientation(udid: &str, cover: bool) -> &'static str {
     let Ok(out) = crate::process::command("xcrun").args(["simctl", "io", udid, "enumerate"]).output() else { return "portrait" };
     let text = String::from_utf8_lossy(&out.stdout);
     let name = if cover { "primary" } else { "primary-1" };

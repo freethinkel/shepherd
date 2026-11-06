@@ -64,6 +64,9 @@ struct Screen {
     dark: Option<bool>,
     /// A screenshot being saved.
     capturing: bool,
+    /// How the rail's rotate last turned it (`ORIENTATIONS`' index), which its next press turns on from: an app that
+    /// doesn't turn leaves its frames as they were.
+    held: Option<usize>,
     /// Reads the device off the window's thread, for the Tools panel and the overlay.
     probe: device::Probe,
     /// The Tools panel beside the screen, while it's open.
@@ -300,6 +303,7 @@ impl Shell {
                             pressed: false,
                             dark,
                             capturing: false,
+                            held: None,
                             tools: None,
                             overlay: None,
                         };
@@ -372,6 +376,31 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// Turns the device to be held as `ORIENTATIONS[at]`: a simulator through its session, an emulator off this thread.
+    pub(super) fn turn_device(&mut self, key: &str, at: usize, cx: &mut Context<Self>) {
+        let Some(screen) = self.devices.screens.get_mut(key) else { return };
+        let Some((orientation, _)) = device::tools::ORIENTATIONS.get(at) else { return };
+        screen.held = Some(at);
+        if screen.device.platform == Platform::Android {
+            return self.device_act(key, device::tools::Action::Orientation(orientation), cx);
+        }
+        screen.session.rotate(orientation);
+        cx.notify();
+    }
+
+    /// The rail's rotate: a quarter turn clockwise on from how it's held.
+    fn rotate_device(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(screen) = self.devices.screens.get(key) else { return };
+        let os = device::tools::ORIENTATIONS;
+        // a Duo's from its live screen's UI, a phone's from its frames
+        let shown = match screen.feed.fold().filter(|f| f.duo) {
+            Some(fold) => os.iter().position(|(o, _)| *o == fold.orientation).unwrap_or(0),
+            None => screen.feed.latest().map_or(0, |f| usize::from(f.turn)),
+        };
+        let next = (screen.held.unwrap_or(shown) + 1) % os.len();
+        self.turn_device(key, next, cx);
     }
 
     fn toggle_device_dark(&mut self, key: &str, cx: &mut Context<Self>) {
@@ -739,6 +768,10 @@ impl Shell {
                     .child(button("recents", "icons/solar/three-squares.svg", "Recents".into(), true).on_click(press(Button::Recents)))
             })
             .child(divider())
+            .child(button("rotate", "icons/solar/smartphone-rotate-orientation.svg", "Rotate".into(), true).on_click(cx.listener({
+                let k = k.clone();
+                move |this, _: &ClickEvent, _, cx| this.rotate_device(&k, cx)
+            })))
             .child({
                 let next = if dark == Some(true) { "light" } else { "dark" };
                 let icon = if dark == Some(true) { "icons/solar/sun.svg" } else { "icons/solar/moon.svg" };
