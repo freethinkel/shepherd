@@ -136,6 +136,27 @@ pub fn ssh(target: &str, script: &str) -> std::io::Result<std::process::Output> 
     crate::process::command("ssh").args(ssh_options()).arg("--").arg(target).arg(format!("sh -c {}", quote(script))).stdin(Stdio::null()).output()
 }
 
+/// [`ssh`] with `input` on the script's stdin: a file written on the machine.
+pub fn ssh_input(target: &str, script: &str, input: &[u8]) -> std::io::Result<std::process::Output> {
+    use std::io::Write;
+    let mut child = crate::process::command("ssh")
+        .args(ssh_options())
+        .arg("--")
+        .arg(target)
+        .arg(format!("sh -c {}", quote(script)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let input = input.to_vec();
+    // written beside the read: a big file would fill the pipe while ssh waits to be read
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let out = child.wait_with_output()?;
+    writer.join().map_err(|_| std::io::Error::other("couldn't write to ssh"))??;
+    Ok(out)
+}
+
 /// `word` for the remote shell, as one argument.
 pub fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))

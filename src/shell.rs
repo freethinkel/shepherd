@@ -26,6 +26,8 @@ mod browser;
 mod changes;
 mod device;
 mod divider;
+mod file_editor;
+mod files;
 mod floating;
 mod merge;
 mod motion;

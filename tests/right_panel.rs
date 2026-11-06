@@ -121,10 +121,10 @@ fn a_browser_tab_whose_page_is_gone_falls_back() {
 
 #[test]
 fn offers_follow_the_remote_and_the_platform() {
-    assert_eq!(offered(true, true, true), [Offer::Browser, Offer::Diffs, Offer::PullRequest, Offer::Device]);
-    assert_eq!(offered(false, true, true), [Offer::Browser, Offer::Diffs, Offer::Device]);
+    assert_eq!(offered(true, true, true), [Offer::Browser, Offer::Diffs, Offer::Files, Offer::PullRequest, Offer::Device]);
+    assert_eq!(offered(false, true, true), [Offer::Browser, Offer::Diffs, Offer::Files, Offer::Device]);
     assert_eq!(offered(false, false, true), [Offer::Browser, Offer::Device]);
-    assert_eq!(offered(true, true, false), [Offer::Diffs, Offer::PullRequest, Offer::Device]);
+    assert_eq!(offered(true, true, false), [Offer::Diffs, Offer::Files, Offer::PullRequest, Offer::Device]);
     assert_eq!(offered(false, false, false), [Offer::Device]);
 }
 
@@ -141,7 +141,7 @@ fn widths_keep_the_centre_column_and_the_saved_value_survives_a_small_window() {
 
 #[test]
 fn a_tab_strip_key_comes_back_as_its_surface() {
-    for surface in [b("browser-3"), Surface::diff(2), Surface::PullRequest] {
+    for surface in [b("browser-3"), Surface::diff(2), Surface::PullRequest, Surface::Files, Surface::file(4)] {
         assert_eq!(Surface::of_key(surface.key()), surface);
     }
 }

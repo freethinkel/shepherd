@@ -67,7 +67,7 @@ fn main() {
         if std::env::var_os("SHEPHERD_SETTINGS").is_some() {
             shepherd::shell::Shell::toggle_settings(cx);
         }
-        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions|browser|usage|review[:tab]`: opens that panel once the first snapshot is likely in (screenshots).
+        // `SHEPHERD_PANEL=commands|agents|workspaces|sessions|browser|usage|review[:tab]|files[:path]|file:path`: opens that panel once the first snapshot is likely in (screenshots).
         // `devices`, or a device's key (`device:ios:<udid>`), opens the right panel's Device tab on it; `:tools` after it
         // opens its Tools panel, `:tools:overlay` the accessibility overlay too, `:text-size` the rail's Text size menu.
         if let Ok(which) = std::env::var("SHEPHERD_PANEL") {
@@ -92,6 +92,7 @@ fn main() {
                             shell.show_review_tab(tab, window, cx);
                         }
                         (None, None, "browser") => shell.open_blank_tab(window, cx),
+                        (None, None, files) if files.starts_with("file") => shell.show_files(files, window, cx),
                         (None, None, "usage") => shell.open_usage_menu(window, cx),
                         (None, None, _) => shell.toggle_command_panel(kind, window, cx),
                     });

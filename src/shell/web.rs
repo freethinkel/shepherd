@@ -255,7 +255,7 @@ impl Shell {
         match self.panel()?.active.as_ref().filter(|_| self.right_panel_now(window) > 0.)? {
             crate::right_panel::Surface::Browser(id) => Some((id.clone(), None)),
             crate::right_panel::Surface::Device(key) => self.device_page_key(key).map(|id| (id, None)),
-            crate::right_panel::Surface::Diff(_) | crate::right_panel::Surface::PullRequest => None,
+            crate::right_panel::Surface::Diff(_) | crate::right_panel::Surface::PullRequest | crate::right_panel::Surface::Files | crate::right_panel::Surface::File(_) => None,
         }
     }
 

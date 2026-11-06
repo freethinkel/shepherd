@@ -21,7 +21,7 @@ pub use wire::PaneInput;
 pub use remote::{
     Machine, Tunnel, add_machine, find_file, forward, git, locate, machines, quote, read_file, relay, remove_machine, rename_machine, show_machine,
     shown_machine,
-    split, ssh,
+    split, ssh, ssh_input,
 };
 
 /// Why herdr's server cannot carry Shepherd's panes, from its `ping`: it speaks another protocol than Shepherd. Set
