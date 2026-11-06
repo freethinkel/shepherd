@@ -60,6 +60,10 @@ fn ax_key(toggle: Toggle) -> Option<&'static str> {
     })
 }
 
+pub(super) fn text_size(udid: &str) -> Option<tools::TextSize> {
+    tools::text_size_from_ios(&simctl(udid, "ui", &["content_size"]).ok()?.trim().to_lowercase())
+}
+
 /// The settings, each read at once: simctl takes a second a call.
 pub(super) fn read_tools(device: &Device, probe: &Probe) -> Settings {
     let udid = device.id.as_str();

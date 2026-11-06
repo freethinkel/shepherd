@@ -49,7 +49,11 @@ pub(super) struct Overlay {
 
 /// A select's options, open under its button.
 pub(in crate::shell) struct Choice {
+    /// The button it hangs from, its anchor's name.
+    anchor: String,
     at: gpui::Point<Pixels>,
+    /// Which of its corners is at `at`.
+    corner: gpui::Anchor,
     options: Vec<SharedString>,
     current: Option<usize>,
     pick: Rc<dyn Fn(&mut Shell, usize, &mut Window, &mut Context<Shell>)>,
@@ -82,6 +86,7 @@ impl Shell {
         let Some(screen) = self.devices.screens.get_mut(key) else { return };
         let Some(tools) = screen.tools.as_mut().filter(|t| t.serial == serial) else { return };
         screen.dark = settings.dark.or(screen.dark);
+        screen.text_size = settings.text_size.or(screen.text_size);
         tools.settings = Some(settings);
         cx.notify();
     }
@@ -89,12 +94,14 @@ impl Shell {
     /// Runs `action` on the device, then reads it back; what it should show, at once.
     pub(super) fn device_act(&mut self, key: &str, action: Action, cx: &mut Context<Self>) {
         let Some(screen) = self.devices.screens.get_mut(key) else { return };
-        if let Action::Dark(dark) = action {
-            screen.dark = Some(dark);
+        match action {
+            Action::Dark(dark) => screen.dark = Some(dark),
+            Action::TextSize(size) => screen.text_size = Some(size),
+            _ => {}
         }
         let (device, probe) = (screen.device.clone(), screen.probe.clone());
         let Some(tools) = screen.tools.as_mut() else {
-            // the rail's appearance button, with the panel shut: nothing to read back into
+            // the rail's appearance button or text size, with the panel shut: nothing to read back into
             self.device_action(key, cx, move |d| dt::act(d, &action));
             cx.notify();
             return;
@@ -212,7 +219,42 @@ impl Shell {
     /// Opens a select's options under its button.
     fn open_choice(&mut self, anchor: &str, options: Vec<SharedString>, current: Option<usize>, pick: impl Fn(&mut Shell, usize, &mut Window, &mut Context<Shell>) + 'static, press: gpui::Point<Pixels>, cx: &mut Context<Self>) {
         let at = super::super::widgets::under(&self.anchors, anchor, press);
-        self.devices.choice = Some(crate::ui::Popup::new(Choice { at, options, current, pick: Rc::new(pick) }));
+        self.devices.choice = Some(crate::ui::Popup::new(Choice { anchor: anchor.to_string(), at, corner: gpui::Anchor::TopLeft, options, current, pick: Rc::new(pick) }));
+        cx.notify();
+    }
+
+    /// Whether the options open hang from button `anchor`.
+    pub(super) fn choice_open(&self, anchor: &str) -> bool {
+        self.devices.choice.as_ref().is_some_and(|c| c.is_open() && c.value.anchor == anchor)
+    }
+
+    /// The rail's Text size, t3code's: the sizes left of the button, the current one checked, read again as it opens.
+    pub(super) fn open_text_size_menu(&mut self, key: &str, anchor: &str, press: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(screen) = self.devices.screens.get(key) else { return };
+        let (device, known) = (screen.device.clone(), screen.text_size);
+        let index = |size: Option<dt::TextSize>| size.and_then(|s| dt::TEXT_SIZES.iter().position(|(t, _)| *t == s));
+        let at = self.anchors.borrow().get(anchor).map_or(press, |b| b.bottom_right() + gpui::point(px(0.), px(4.)));
+        let k = key.to_string();
+        let pick = move |s: &mut Shell, i: usize, _: &mut Window, cx: &mut Context<Shell>| s.device_act(&k, Action::TextSize(dt::TEXT_SIZES[i].0), cx);
+        let options = dt::TEXT_SIZES.iter().map(|(_, label)| SharedString::from(*label)).collect();
+        let choice = Choice { anchor: anchor.to_string(), at, corner: gpui::Anchor::TopRight, options, current: index(known), pick: Rc::new(pick) };
+        self.devices.choice = Some(crate::ui::Popup::new(choice));
+        let (key, anchor) = (key.to_string(), anchor.to_string());
+        cx.spawn(async move |this, cx| {
+            let Some(size) = cx.background_spawn(async move { dt::text_size(&device) }).await else { return };
+            let _ = this.update(cx, |s, cx| {
+                if let Some(screen) = s.devices.screens.get_mut(&key) {
+                    screen.text_size = Some(size);
+                }
+                if s.choice_open(&anchor)
+                    && let Some(c) = s.devices.choice.as_mut()
+                {
+                    c.value.current = index(Some(size));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -224,7 +266,7 @@ impl Shell {
                 m.close()
             }
         };
-        let at = menu.value.at;
+        let (at, corner) = (menu.value.at, menu.value.corner);
         let items = menu.value.options.iter().enumerate().map(|(i, label)| {
             let pick = menu.value.pick.clone();
             row(theme, false, SharedString::from(format!("device-choice-{i}")))
@@ -246,7 +288,7 @@ impl Shell {
             }))
             .children(items);
         let menu = crate::ui::menu_motion("device-choice-in", menu, card);
-        Some(gpui::deferred(gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(1).into_any_element())
+        Some(gpui::deferred(gpui::anchored().position(at).anchor(corner).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(1).into_any_element())
     }
 
     /// The panel, while it's open.

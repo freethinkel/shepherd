@@ -30,8 +30,8 @@ pub(super) struct Devices {
     screens: HashMap<String, Screen>,
     /// The rail's `…` menu: of which device, and where.
     pub(super) menu: Option<crate::ui::Popup<(String, gpui::Point<Pixels>)>>,
-    /// What `show_devices` opens with the device: its Tools panel, its overlay.
-    open_with: (bool, bool),
+    /// What `show_devices` opens with the device: its Tools panel, its overlay, the rail's Text size.
+    open_with: (bool, bool, bool),
     /// The Tools panel's open select.
     pub(super) choice: Option<crate::ui::Popup<tools::Choice>>,
     /// A screen is on screen: frames of hidden ones wake nothing.
@@ -62,6 +62,8 @@ struct Screen {
     /// A finger is down on it.
     pressed: bool,
     dark: Option<bool>,
+    /// As the device last said, or as the rail last set it.
+    text_size: Option<device::tools::TextSize>,
     /// A screenshot being saved.
     capturing: bool,
     /// How the rail's rotate last turned it (`ORIENTATIONS`' index), which its next press turns on from: an app that
@@ -179,15 +181,17 @@ fn platform_status(theme: &Theme, platform: &'static str, check: Option<&device:
 
 impl Shell {
     /// `SHEPHERD_PANEL=devices`, or a device's key: the Device tab, on that device once it's found (screenshots);
-    /// `:tools` after the key opens its Tools panel, `:overlay` its accessibility overlay too.
+    /// `:tools` after the key opens its Tools panel, `:overlay` its accessibility overlay too; `:text-size` the rail's
+    /// Text size instead.
     pub fn show_devices(&mut self, key: &str, cx: &mut Context<Self>) {
         self.open_device_picker(cx);
         if key == PICKER {
             return;
         }
+        let (key, text) = key.strip_suffix(":text-size").map_or((key, false), |k| (k, true));
         let (key, overlay) = key.strip_suffix(":overlay").map_or((key, false), |k| (k, true));
         let (key, tools) = key.strip_suffix(":tools").map_or((key, overlay), |k| (k, true));
-        self.devices.open_with = (tools, overlay);
+        self.devices.open_with = (tools, overlay, text);
         let key = key.to_string();
         cx.spawn(async move |this, cx| {
             let found = cx.background_spawn(async { device::find() }).await;
@@ -302,18 +306,29 @@ impl Shell {
                             bounds: Default::default(),
                             pressed: false,
                             dark,
+                            text_size: None,
                             capturing: false,
                             held: None,
                             tools: None,
                             overlay: None,
                         };
                         s.devices.screens.insert(key.clone(), screen);
-                        let (tools, overlay) = std::mem::take(&mut s.devices.open_with);
+                        let (tools, overlay, text) = std::mem::take(&mut s.devices.open_with);
                         if tools {
                             s.toggle_device_tools(&key, cx);
                         }
                         if overlay {
                             s.toggle_device_overlay(&key, cx);
+                        }
+                        if text {
+                            // once the rail's laid out, so the menu hangs from its button
+                            let key = key.clone();
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                                let anchor = format!("device-rail-text-size-{key}");
+                                let _ = this.update(cx, |s, cx| s.open_text_size_menu(&key, &anchor, Default::default(), cx));
+                            })
+                            .detach();
                         }
                         s.show_device_tab(&ws, &key, cx);
                         // it's running now
@@ -736,6 +751,8 @@ impl Shell {
         let three_d = screen.three;
         let tools_open = screen.tools.is_some();
         let menu_open = self.devices.menu.as_ref().is_some_and(|m| m.is_open() && m.value.0 == key);
+        let text_anchor = format!("device-rail-text-size-{key}");
+        let text_open = self.choice_open(&text_anchor);
         let hover = theme.hover;
         let button = |id: &str, icon: &'static str, label: String, enabled: bool| {
             div()
@@ -790,6 +807,16 @@ impl Shell {
                     move |this, _: &ClickEvent, _, cx| this.toggle_device_dark(&k, cx)
                 }))
             })
+            .child(
+                button("text-size", "icons/solar/text-format.svg", if text_open { String::new() } else { "Text size".into() }, true)
+                    .when(text_open, |el| el.bg(hover))
+                    .relative()
+                    .child(super::widgets::anchor_probe(&self.anchors, text_anchor.clone()))
+                    .on_click(cx.listener({
+                        let k = k.clone();
+                        move |this, e: &ClickEvent, _, cx| this.open_text_size_menu(&k, &text_anchor, e.position(), cx)
+                    })),
+            )
             .child(
                 button("screenshot", "icons/solar/camera.svg", if capturing { "Capturing screenshot".into() } else { "Save screenshot".into() }, !capturing).on_click(cx.listener({
                     let k = k.clone();

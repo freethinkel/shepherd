@@ -155,6 +155,17 @@ pub fn read(device: &Device, probe: &Probe) -> Settings {
     }
 }
 
+/// Just the text size, for the rail's menu: the whole `read` takes a second or more on iOS.
+pub fn text_size(device: &Device) -> Option<TextSize> {
+    match device.platform {
+        #[cfg(target_os = "macos")]
+        Platform::Ios => super::ios::text_size(&device.id),
+        Platform::Android => super::android::text_size(&device.id),
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
+}
+
 pub fn act(device: &Device, action: &Action) -> anyhow::Result<()> {
     match device.platform {
         #[cfg(target_os = "macos")]
@@ -211,6 +222,12 @@ pub(super) fn android_font_scale(size: TextSize) -> &'static str {
     }
 }
 
+/// `settings get system font_scale`'s answer: `null` is a scale never set, the default 1.
+pub(super) fn text_size_from_font_scale(answer: &str) -> Option<TextSize> {
+    let answer = answer.trim();
+    Some(text_size_from_android(if answer == "null" { 1. } else { answer.parse().ok()? }))
+}
+
 pub(super) fn text_size_from_android(scale: f64) -> TextSize {
     match scale {
         s if s <= 0.9 => TextSize::Small,
@@ -243,6 +260,8 @@ mod tests {
             assert_eq!(text_size_from_android(android_font_scale(size).parse().unwrap()), size);
         }
         assert_eq!(text_size_from_ios("unsupported"), None);
+        assert_eq!(text_size_from_font_scale("null\n"), Some(TextSize::Default));
+        assert_eq!(text_size_from_font_scale(""), None);
     }
 
     #[test]

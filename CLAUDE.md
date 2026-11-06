@@ -9,7 +9,7 @@ Before opening a PR, and in its description:
   macOS (`make linux-shot` on Linux, below), and
   `SHEPHERD_PANEL=commands|agents|workspaces|sessions|browser|usage|review[:summary|timeline|code|checks|menu]` opens a
   panel for the shot (`browser`, a blank browser tab in the right panel; `usage`, the limits popup; `device:ios:<udid>`, a
-  device's tab, `:tools` and `:tools:overlay` after it its Tools panel and accessibility overlay). If a change has
+  device's tab, `:tools` and `:tools:overlay` after it its Tools panel and accessibility overlay, `:text-size` the rail's Text size menu). If a change has
   nothing to see (an internal refactor, a backend fix), say so instead.
   GitHub's API can't attach images: push them to the orphan branch `pr-assets` under `pr-<number>/` and link them as
   `https://raw.githubusercontent.com/freethinkel/shepherd/pr-assets/pr-<number>/<name>.png`.

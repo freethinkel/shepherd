@@ -303,6 +303,10 @@ fn shell(serial: &str, args: &[&str]) -> anyhow::Result<String> {
     crate::process::answer(adb(serial, &["shell", &line.join(" ")])?)
 }
 
+pub(super) fn text_size(id: &str) -> Option<tools::TextSize> {
+    tools::text_size_from_font_scale(&shell(&serial(id).ok()?, &["settings", "get", "system", "font_scale"]).ok()?)
+}
+
 /// Read in one go, each answer after a line of its own.
 const READ: &str = "cmd uimode night; echo @@; settings get system font_scale; echo @@; settings get global animator_duration_scale; \
     echo @@; settings get global wifi_on; echo @@; dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'";
@@ -322,7 +326,7 @@ fn read_answers(out: &str) -> Settings {
     toggles.extend(wifi.filter(|w| *w == "0" || *w == "1").map(|w| (Toggle::Network, w == "1")));
     Settings {
         dark: night.filter(|n| n.contains("Night mode:")).map(|n| n.contains("yes")),
-        text_size: font.and_then(|f| f.parse().ok()).map(tools::text_size_from_android),
+        text_size: font.and_then(tools::text_size_from_font_scale),
         toggles,
         app: focus.and_then(focused_package),
         ..Default::default()
@@ -781,7 +785,7 @@ mod tests {
         assert_eq!(s.app.as_deref(), Some("com.example.app"));
         assert_eq!(read_answers(""), Settings::default());
         let fresh = read_answers("Night mode: no\n@@\nnull\n@@\nnull\n@@\n0\n@@\n");
-        assert_eq!((fresh.dark, fresh.text_size), (Some(false), None));
+        assert_eq!((fresh.dark, fresh.text_size), (Some(false), Some(tools::TextSize::Default)));
         assert_eq!(fresh.toggles, [(Toggle::ReduceMotion, false), (Toggle::Network, false)]);
     }
 
