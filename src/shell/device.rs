@@ -82,7 +82,7 @@ impl Devices {
 fn platform_label(p: Platform) -> &'static str {
     match p {
         Platform::Ios => "iOS Simulators",
-        Platform::Android => "Android Emulators",
+        Platform::Android => "Android",
     }
 }
 
@@ -861,6 +861,8 @@ impl Shell {
     pub(super) fn device_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.devices.menu.as_ref()?;
         let (key, at) = menu.value.clone();
+        // a phone is powered off on the phone
+        let usb = self.devices.screens.get(&key).is_some_and(|s| s.device.usb);
         let close = |this: &mut Shell| {
             if let Some(m) = this.devices.menu.as_mut() {
                 m.close()
@@ -884,14 +886,15 @@ impl Shell {
                     }
                 }),
             ))
-            .child(div().my(px(4.)).h(px(1.)).bg(theme.border))
-            .child(item("device-menu-power", "icons/solar/power.svg", "Power off device", theme.danger).on_pick(
-                at,
-                cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    close(this);
-                    this.power_off_device(&key, cx);
-                }),
-            ));
+            .when(!usb, |el| {
+                el.child(div().my(px(4.)).h(px(1.)).bg(theme.border)).child(item("device-menu-power", "icons/solar/power.svg", "Power off device", theme.danger).on_pick(
+                    at,
+                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        close(this);
+                        this.power_off_device(&key, cx);
+                    }),
+                ))
+            });
         let menu = crate::ui::menu_motion("device-menu-in", menu, card);
         Some(gpui::deferred(gpui::anchored().position(at).anchor(gpui::Anchor::TopRight).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(1).into_any_element())
     }

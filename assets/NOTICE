@@ -126,6 +126,12 @@ simdriver (vendor/simdriver)
   private headers from Meta's idb (MIT). Patched to stream and touch a foldable's other screen and to turn a sideways
   one; its license and NOTICE are in vendor/simdriver, the changes listed in its Cargo.toml.
 
+scrcpy (assets/scrcpy-server-v4.0)
+  scrcpy's server, v4.0 as released at https://github.com/Genymobile/scrcpy (sha256 84924bd564a1eb6089c872c7521f968058977f91f5ff02514a8c74aff3210f3a),
+  Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0), Copyright (C) 2018 Genymobile, Copyright (C) 2018-2026
+  Romain Vimont. Unchanged; pushed to an Android phone to stream its screen (src/device/scrcpy.rs, whose framing follows
+  t3code's serve-emu).
+
 three.js (bundled into assets/device3d/viewer.js)
   https://threejs.org (three 0.187.0), MIT License, Copyright © 2010-2026 three.js authors.
 

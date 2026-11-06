@@ -15,7 +15,7 @@ pub(super) fn find() -> (Vec<Device>, Check) {
     let devices: Vec<Device> = all
         .into_iter()
         .filter(|d| d.runtime.starts_with("iOS"))
-        .map(|d| Device { platform: Platform::Ios, version: version(&d.runtime), running: d.state == "Booted", duo: duo::is_duo(&d.device_type), id: d.udid, name: d.name })
+        .map(|d| Device { platform: Platform::Ios, version: version(&d.runtime), running: d.state == "Booted", duo: duo::is_duo(&d.device_type), usb: false, id: d.udid, name: d.name })
         .collect();
     let check = match devices.is_empty() {
         true => Check { ready: false, message: "Xcode is installed, but no iOS Simulator is available. Install a runtime in Xcode Settings → Components.".into() },

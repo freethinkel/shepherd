@@ -1,5 +1,6 @@
 //! Simulators and emulators for the right panel's Device tabs: t3code's Device panel without its Node hub. iOS goes
-//! through `simdriver` (the simulator's own framebuffer and digitizer, macOS only), Android through the emulator's gRPC.
+//! through `simdriver` (the simulator's own framebuffer and digitizer, macOS only), Android through the emulator's gRPC,
+//! and an Android phone on USB through scrcpy (macOS only).
 //! What here is plain and blocking; the tabs are the Shell's (`shell/device.rs`).
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,8 @@ mod duo;
 #[cfg(target_os = "macos")]
 mod ios;
 pub mod models;
+#[cfg(target_os = "macos")]
+mod scrcpy;
 #[cfg(target_os = "macos")]
 pub mod surface;
 pub mod tools;
@@ -32,7 +35,7 @@ impl Platform {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
     pub platform: Platform,
-    /// The simulator's UDID, or the virtual device's AVD id.
+    /// The simulator's UDID, the virtual device's AVD id, or a phone's adb serial.
     pub id: String,
     pub name: String,
     /// `iOS 27.0`, `API 36`.
@@ -40,6 +43,8 @@ pub struct Device {
     pub running: bool,
     /// iPhone Duo, whose session follows its hinge and two screens.
     pub duo: bool,
+    /// A real phone, on USB: always running, never powered off from here.
+    pub usb: bool,
 }
 
 /// A Device tab's key starts with this; the bare prefix is the tab that lists them.
@@ -88,6 +93,9 @@ fn find_ios() -> (Vec<Device>, Check) {
 
 /// Starts `device` and waits until it's up. Already running is success.
 pub fn boot(device: &Device) -> anyhow::Result<()> {
+    if device.usb {
+        return Ok(());
+    }
     match device.platform {
         #[cfg(target_os = "macos")]
         Platform::Ios => Ok(simdriver::boot(&device.id)?),
@@ -99,6 +107,7 @@ pub fn boot(device: &Device) -> anyhow::Result<()> {
 
 /// Powers `device` off.
 pub fn power_off(device: &Device) -> anyhow::Result<()> {
+    anyhow::ensure!(!device.usb, "A phone is powered off on the phone");
     match device.platform {
         #[cfg(target_os = "macos")]
         Platform::Ios => Ok(simdriver::shutdown(&device.id)?),
@@ -156,6 +165,12 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// A frame decoded into `surface` already (a phone's), with its BGRA `pixels`.
+    #[cfg(target_os = "macos")]
+    fn decoded(width: u32, height: u32, pixels: Vec<u8>, surface: surface::Surface) -> Frame {
+        Frame { width, height, pixels, rgb: false, screen: None, surface: Some(surface) }
+    }
+
     /// A frame as it came, its surface made here, on the stream's thread.
     pub fn new(width: u32, height: u32, pixels: Vec<u8>, rgb: bool, screen: Option<u8>) -> Frame {
         #[cfg(target_os = "macos")]
@@ -356,6 +371,9 @@ pub enum Session {
     #[cfg(target_os = "macos")]
     Ios(ios::Session),
     Android(android::Session),
+    /// A phone on USB.
+    #[cfg(target_os = "macos")]
+    Phone(scrcpy::Session),
 }
 
 impl Session {
@@ -364,6 +382,8 @@ impl Session {
         match device.platform {
             #[cfg(target_os = "macos")]
             Platform::Ios => Ok(Session::Ios(ios::Session::open(device, feed, wake)?)),
+            #[cfg(target_os = "macos")]
+            Platform::Android if device.usb => Ok(Session::Phone(scrcpy::Session::open(android::adb_path()?, &device.id, feed, wake)?)),
             Platform::Android => Ok(Session::Android(android::Session::open(&device.id, rt, feed, wake)?)),
             #[allow(unreachable_patterns)]
             _ => anyhow::bail!("iOS Simulators need macOS"),
@@ -375,6 +395,8 @@ impl Session {
             #[cfg(target_os = "macos")]
             Session::Ios(s) => Probe { driver: Some(s.driver.clone()) },
             Session::Android(_) => Probe::default(),
+            #[cfg(target_os = "macos")]
+            Session::Phone(_) => Probe::default(),
         }
     }
 
@@ -384,6 +406,8 @@ impl Session {
             #[cfg(target_os = "macos")]
             Session::Ios(s) => s.touch(phase, x, y),
             Session::Android(s) => s.touch(phase, x, y),
+            #[cfg(target_os = "macos")]
+            Session::Phone(s) => s.touch(phase, x, y),
         }
     }
 
@@ -402,6 +426,8 @@ impl Session {
             #[cfg(target_os = "macos")]
             Session::Ios(s) => s.button(button),
             Session::Android(s) => s.button(button),
+            #[cfg(target_os = "macos")]
+            Session::Phone(s) => s.button(button),
         }
     }
 
@@ -411,6 +437,8 @@ impl Session {
             #[cfg(target_os = "macos")]
             Session::Ios(s) => s.key(name),
             Session::Android(s) => s.key(name),
+            #[cfg(target_os = "macos")]
+            Session::Phone(s) => s.key(name),
         }
     }
 
@@ -419,6 +447,8 @@ impl Session {
             #[cfg(target_os = "macos")]
             Session::Ios(s) => s.text(text),
             Session::Android(s) => s.text(text),
+            #[cfg(target_os = "macos")]
+            Session::Phone(s) => s.text(text),
         }
     }
 
@@ -428,6 +458,9 @@ impl Session {
             #[cfg(target_os = "macos")]
             Session::Ios(s) => s.hinge(hinge),
             Session::Android(s) => s.hinge(hinge),
+            // a phone that folds is folded by hand
+            #[cfg(target_os = "macos")]
+            Session::Phone(_) => {}
         }
     }
 }
@@ -485,7 +518,7 @@ mod tests {
 
     #[test]
     fn keys_and_tab_keys() {
-        let d = Device { platform: Platform::Android, id: "Pixel_9".into(), name: "Pixel 9".into(), version: "API 36".into(), running: false, duo: false };
+        let d = Device { platform: Platform::Android, id: "Pixel_9".into(), name: "Pixel 9".into(), version: "API 36".into(), running: false, duo: false, usb: false };
         assert_eq!(d.key(), "device:android:Pixel_9");
         assert_eq!(w3c_key("left"), Some("ArrowLeft"));
         assert_eq!(w3c_key("a"), None);

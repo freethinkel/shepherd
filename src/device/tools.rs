@@ -179,6 +179,7 @@ pub fn elements(device: &Device, probe: &Probe) -> anyhow::Result<Vec<[f64; 4]>>
 }
 
 /// iOS's `content_size` categories for the panel's sizes, as t3code maps them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn ios_text_size(size: TextSize) -> &'static str {
     match size {
         TextSize::Small => "small",
@@ -188,6 +189,7 @@ pub(super) fn ios_text_size(size: TextSize) -> &'static str {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn text_size_from_ios(category: &str) -> Option<TextSize> {
     Some(match category {
         "unknown" | "unsupported" | "" => return None,
@@ -223,6 +225,7 @@ pub(super) fn shell_word(word: &str) -> String {
 }
 
 /// A `&'static` name from `table` for what a device printed.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn known(table: &[(&'static str, &'static str)], value: &str) -> Option<&'static str> {
     table.iter().map(|(v, _)| *v).find(|v| *v == value)
 }

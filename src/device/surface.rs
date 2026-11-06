@@ -28,6 +28,11 @@ impl Surface {
         self.0.clone()
     }
 
+    /// A buffer someone else filled: VideoToolbox's, made to `attributes`.
+    pub fn of(buffer: CVPixelBuffer) -> Surface {
+        Surface(buffer)
+    }
+
     /// `pixels` (BGRA, or RGB turned BGRA on the way) in a surface of `width` × `height` from that size's pool;
     /// `None` when they don't fill it or Core Video gives no buffer.
     // ponytail: the pool hands a buffer out once nothing holds it, and the window drops the last frame's as it paints
@@ -81,16 +86,17 @@ impl Surface {
 
 /// A pool of BGRA IOSurface-backed buffers of one size.
 fn pool(width: u32, height: u32) -> Option<CVPixelBufferPool> {
+    CVPixelBufferPool::new(None, Some(&attributes(Some((width, height))))).ok()
+}
+
+/// A BGRA IOSurface-backed buffer's attributes, of a size or any.
+pub fn attributes(size: Option<(u32, u32)>) -> CFDictionary<CFString, CFType> {
     let key = |k: CVPixelBufferKeys| CFString::from(k);
     let number = |n: u32| CFNumber::from(i64::from(n)).as_CFType();
     let io_surface = CFDictionary::<CFString, CFType>::from_CFType_pairs(&[]).as_CFType();
-    let attributes = CFDictionary::from_CFType_pairs(&[
-        (key(CVPixelBufferKeys::PixelFormatType), number(kCVPixelFormatType_32BGRA)),
-        (key(CVPixelBufferKeys::Width), number(width)),
-        (key(CVPixelBufferKeys::Height), number(height)),
-        (key(CVPixelBufferKeys::IOSurfaceProperties), io_surface),
-    ]);
-    CVPixelBufferPool::new(None, Some(&attributes)).ok()
+    let mut pairs = vec![(key(CVPixelBufferKeys::PixelFormatType), number(kCVPixelFormatType_32BGRA)), (key(CVPixelBufferKeys::IOSurfaceProperties), io_surface)];
+    pairs.extend(size.into_iter().flat_map(|(w, h)| [(key(CVPixelBufferKeys::Width), number(w)), (key(CVPixelBufferKeys::Height), number(h))]));
+    CFDictionary::from_CFType_pairs(&pairs)
 }
 
 #[cfg(test)]

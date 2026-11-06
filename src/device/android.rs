@@ -160,9 +160,11 @@ pub(super) fn find() -> (Vec<Device>, Check) {
             let c = config(id);
             let name = c.get("avd.ini.displayname").cloned().unwrap_or_else(|| id.replace('_', " "));
             let version = c.get("image.sysdir.1").and_then(|s| api_level(s)).unwrap_or_default();
-            Device { platform: Platform::Android, id: id.to_string(), name, version, running: live.contains_key(id), duo: false }
+            Device { platform: Platform::Android, id: id.to_string(), name, version, running: live.contains_key(id), duo: false, usb: false }
         })
         .collect();
+    #[cfg(target_os = "macos")]
+    let devices = [devices, phones()].concat();
     let check = match devices.is_empty() {
         true => Check { ready: false, message: "The Android SDK is installed, but no virtual device exists. Create one in Android Studio → Device Manager.".into() },
         false => Check { ready: true, message: "The Android SDK and Emulator are available.".into() },
@@ -170,13 +172,53 @@ pub(super) fn find() -> (Vec<Device>, Check) {
     (devices, check)
 }
 
-fn adb(serial: &str, args: &[&str]) -> anyhow::Result<std::process::Output> {
-    let sdk = sdk().ok_or_else(|| anyhow::anyhow!("The Android SDK was not found"))?;
-    Ok(crate::process::command(tool(&sdk, "platform-tools", "adb")).arg("-s").arg(serial).args(args).output()?)
+pub(super) fn adb_path() -> anyhow::Result<PathBuf> {
+    sdk().map(|sdk| tool(&sdk, "platform-tools", "adb")).ok_or_else(|| anyhow::anyhow!("The Android SDK was not found"))
 }
 
+fn adb(serial: &str, args: &[&str]) -> anyhow::Result<std::process::Output> {
+    Ok(crate::process::command(adb_path()?).arg("-s").arg(serial).args(args).output()?)
+}
+
+/// What adb is connected to and can use: each one's serial and model.
+fn attached() -> Vec<(String, String)> {
+    let out = adb_path().and_then(|adb| Ok(crate::process::command(adb).args(["devices", "-l"]).output()?));
+    out.map(|o| attached_lines(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default()
+}
+
+/// `adb devices -l`'s lines: `R5CT… device usb:1-1 product:… model:SM_S911B …`; an unauthorized or offline one is
+/// left out.
+fn attached_lines(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let mut words = l.split_whitespace();
+            let (serial, state) = (words.next()?, words.next()?);
+            let model = words.find_map(|w| w.strip_prefix("model:")).unwrap_or(serial);
+            (state == "device").then(|| (serial.to_string(), model.replace('_', " ")))
+        })
+        .collect()
+}
+
+/// Phones on USB (or adb over Wi-Fi): the attached devices that aren't emulators.
+// ponytail: listed only where scrcpy's H.264 decodes (VideoToolbox, macOS); openh264 would bring Linux and Windows
+#[cfg(target_os = "macos")]
+fn phones() -> Vec<Device> {
+    let phones = attached().into_iter().filter(|(serial, _)| !serial.starts_with("emulator-"));
+    phones
+        .map(|(serial, name)| {
+            let sdk = adb(&serial, &["shell", "getprop", "ro.build.version.sdk"]).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+            let version = sdk.ok().filter(|v| !v.is_empty()).map(|v| format!("API {v} · USB")).unwrap_or_else(|| "USB".into());
+            Device { platform: Platform::Android, id: serial, name, version, running: true, duo: false, usb: true }
+        })
+        .collect()
+}
+
+/// A running emulator's adb serial, or a phone's own.
 fn serial(id: &str) -> anyhow::Result<String> {
-    running().remove(id).map(|r| r.serial).ok_or_else(|| anyhow::anyhow!("{id} is not running"))
+    if let Some(r) = running().remove(id) {
+        return Ok(r.serial);
+    }
+    attached().into_iter().map(|(s, _)| s).find(|s| s == id).ok_or_else(|| anyhow::anyhow!("{id} is not running"))
 }
 
 pub(super) fn boot(id: &str) -> anyhow::Result<()> {
@@ -627,6 +669,12 @@ mod tests {
     fn uiautomator_bounds_read() {
         let dump = r#"<node bounds="[0,0][1080,2400]"><node text="a" bounds="[10,20][110,70]" /><node bounds="[5,5][5,9]" /></node>"#;
         assert_eq!(node_bounds(dump), [[0., 0., 1080., 2400.], [10., 20., 100., 50.]]);
+    }
+
+    #[test]
+    fn attached_devices_read() {
+        let text = "List of devices attached\nR5CT123 device usb:1-1 product:x model:SM_S911B transport_id:2\nemulator-5554 device product:sdk model:sdk_gphone64 transport_id:1\nZY22 unauthorized usb:1-2 transport_id:3\n\n";
+        assert_eq!(attached_lines(text), [("R5CT123".into(), "SM S911B".into()), ("emulator-5554".into(), "sdk gphone64".into())]);
     }
 
     #[test]

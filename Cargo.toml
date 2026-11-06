@@ -61,6 +61,11 @@ simdriver = "0.2.4"
 # a device's frames as IOSurfaces for GPUI's paint_surface (src/device/surface.rs); gpui's own versions
 core-video = "0.5.2"
 core-foundation = "0.10"
+# phones' H.264 from scrcpy, decoded by the hardware (src/device/scrcpy.rs)
+objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std", "objc2", "block2", "objc2-core-media", "objc2-core-video", "VTBase", "VTDecompressionSession", "VTErrors"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "objc2", "objc2-core-video", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFDictionary"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "objc2", "CVBuffer", "CVImageBuffer"] }
 
 # herdr's named pipes.
 [target.'cfg(windows)'.dependencies]
