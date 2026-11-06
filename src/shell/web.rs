@@ -18,6 +18,24 @@ pub(super) fn embeds_pages(window: &Window) -> bool {
     !matches!(HasWindowHandle::window_handle(window).map(|h| h.as_raw()), Ok(RawWindowHandle::Wayland(_)))
 }
 
+/// The window a page goes in, as wry takes it: GPUI's X11 window hands an XCB handle, and WebKitGTK's wry takes only an
+/// Xlib one; both name the same X window.
+#[cfg(target_os = "linux")]
+struct Parent<'a>(&'a Window);
+
+#[cfg(target_os = "linux")]
+impl wry::raw_window_handle::HasWindowHandle for Parent<'_> {
+    fn window_handle(&self) -> Result<wry::raw_window_handle::WindowHandle<'_>, wry::raw_window_handle::HandleError> {
+        use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle, WindowHandle, XlibWindowHandle};
+        let handle = HasWindowHandle::window_handle(self.0)?;
+        match handle.as_raw() {
+            // SAFETY: the same window as `handle`'s, which lives as long as the borrow of `self.0`
+            RawWindowHandle::Xcb(xcb) => Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Xlib(XlibWindowHandle::new(xcb.window.get().into()))) }),
+            _ => Ok(handle),
+        }
+    }
+}
+
 /// What a web view reports, sent from its handlers (which run without a `cx`) to the Shell.
 pub(super) enum PageEvent {
     Title(String),
@@ -411,6 +429,10 @@ impl Shell {
             Some((session, feed)) => super::device::three::attach(builder, session, feed, self.rt.clone(), move || ready(PageEvent::Ready)),
             None => new_tabs(builder, tab),
         };
+        #[cfg(target_os = "linux")]
+        let parent = Parent(window);
+        #[cfg(not(target_os = "linux"))]
+        let parent = window;
         let view = builder
             .with_url(url)
             .with_devtools(true)
@@ -432,7 +454,7 @@ impl Shell {
                 opened(event);
                 wry::NewWindowResponse::Deny
             })
-            .build_as_child(window)?;
+            .build_as_child(&parent)?;
         // GPUI's deferred layer goes on a plane of its own above native views (macOS only, in this GPUI); the page
         // moves into a view of its own below it. Without it, the page hides under Shepherd's overlays instead.
         #[cfg(target_os = "macos")]
@@ -640,6 +662,11 @@ impl Shell {
             if page.visible != visible {
                 page.visible = visible;
                 let _ = page.view.set_visible(visible);
+                // placed again once shown: WebKitGTK paints a page placed while hidden (a 3D view's, until its
+                // device is drawn) only once it is sized after it shows
+                if visible {
+                    page.placed.set(None);
+                }
                 #[cfg(target_os = "macos")]
                 if let Some(host) = &page.host {
                     host.show(visible);
