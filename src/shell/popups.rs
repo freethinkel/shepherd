@@ -325,7 +325,7 @@ impl Shell {
                             this.open_place_edit(edit.clone(), window, cx)
                         })))
                         .when(place.deletable(), |el| {
-                            let label = if matches!(place, sessions::Place::Machine(_)) { "Forget…" } else { "Delete…" };
+                            let label = if place.remote() { "Forget…" } else { "Delete…" };
                             el.child(div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border)).child(
                                 row(theme, false, "place-menu-delete")
                                     .h(px(28.))
@@ -795,6 +795,11 @@ impl Shell {
                 sessions::Place::Machine(m) => (
                     "Forget machine?",
                     format!("herdr forgets {}. Its session keeps running on {}.", m.label, m.target),
+                    "Forget",
+                ),
+                sessions::Place::Rex(host) => (
+                    "Forget host?",
+                    format!("Rex forgets {}. Its server keeps running there.", host.as_ref().map_or("", |h| h.label.as_str())),
                     "Forget",
                 ),
             };

@@ -15,6 +15,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<anyhow::Result<Value>>>>>;
 
 pub struct Control {
+    /// The server it reached, where a pane's stream goes too.
+    pub server: super::Endpoint,
     send: ws::Sender,
     pending: Pending,
     next: AtomicU64,
@@ -22,9 +24,23 @@ pub struct Control {
 }
 
 impl Control {
-    /// Connects as a new client. `event` runs on the reader thread, in order, with each event's inner `payload`.
-    pub fn open(event: impl FnMut(&Value) + Send + 'static) -> anyhow::Result<Arc<Self>> {
-        let (send, mut receive) = ws::connect(&super::socket()?, "/api/control", "rex.control.v1")?;
+    /// Connects as a new client to the first of `servers` that answers. `event` runs on the reader thread, in order,
+    /// with each event's inner `payload`.
+    pub fn open(servers: &[super::Endpoint], event: impl FnMut(&Value) + Send + 'static) -> anyhow::Result<Arc<Self>> {
+        let mut tried = Vec::new();
+        let (server, (send, mut receive)) = loop {
+            let Some(server) = servers.get(tried.len()) else {
+                return Err(match tried.pop() {
+                    Some(last) if tried.is_empty() => last,
+                    Some(last) => last.context(format!("no address of the server answered ({} tried)", servers.len())),
+                    None => anyhow!("no address to reach Rex at"),
+                });
+            };
+            match ws::connect(server, "/api/control", "rex.control.v1") {
+                Ok(both) => break (server.clone(), both),
+                Err(e) => tried.push(anyhow::Error::from(e).context(format!("{server:?}"))),
+            }
+        };
         let client = json!({"kind": "app", "name": "Shepherd", "version": env!("CARGO_PKG_VERSION")});
         send.text(&json!({"type": "hello", "api_revision": API_REVISION, "api_min_revision": API_REVISION, "client": client}).to_string())?;
         let welcome: Value = serde_json::from_slice(&receive.next().map_err(|why| anyhow!("Rex refused Shepherd: {why}"))?)?;
@@ -34,7 +50,7 @@ impl Control {
         let (pending, lost) = (Pending::default(), Arc::new(AtomicBool::new(false)));
         let (routes, gone) = (pending.clone(), lost.clone());
         std::thread::Builder::new().name("rex-control".into()).spawn(move || read_loop(receive, routes, gone, event))?;
-        Ok(Arc::new(Self { send, pending, next: AtomicU64::new(1), lost }))
+        Ok(Arc::new(Self { server, send, pending, next: AtomicU64::new(1), lost }))
     }
 
     pub fn lost(&self) -> bool {

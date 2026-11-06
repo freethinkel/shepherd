@@ -2,7 +2,7 @@
 //! one socket, one reader and one writer that don't wait for each other, which a WebSocket crate's single object isn't.
 use crate::herdr::socket::{self, Stream};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::Path;
+use super::Endpoint;
 use std::sync::{Arc, Mutex};
 
 const CONTINUATION: u8 = 0;
@@ -22,13 +22,16 @@ pub struct Receiver {
     pong: Sender,
 }
 
-/// Opens `target` (`/api/control`) on the server at `path`, speaking `protocol`.
-pub fn connect(path: &Path, target: &str, protocol: &str) -> io::Result<(Sender, Receiver)> {
-    let mut stream = socket::connect(path)?;
+/// Opens `target` (`/api/control`) on the server at `server`, speaking `protocol`.
+pub fn connect(server: &Endpoint, target: &str, protocol: &str) -> io::Result<(Sender, Receiver)> {
+    let (mut stream, host) = match server {
+        Endpoint::Socket(path) => (socket::connect(path)?, "localhost".to_string()),
+        Endpoint::Net { host, port, tls } => (net(host, *port, *tls)?, format!("{host}:{port}")),
+    };
     // the key only proves to a browser that a server understood it: any 16 bytes do, and the peer here is the user's
     write!(
         stream,
-        "GET {target} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: c2hlcGhlcmQtc2hlcGhlcg==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: {protocol}\r\n\r\n"
+        "GET {target} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: c2hlcGhlcmQtc2hlcGhlcg==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: {protocol}\r\n\r\n"
     )?;
     let sender = Sender(Arc::new(Mutex::new(stream.try_clone()?)));
     let mut read = BufReader::new(stream);
@@ -44,6 +47,16 @@ pub fn connect(path: &Path, target: &str, protocol: &str) -> io::Result<(Sender,
         }
     }
     Ok((sender.clone(), Receiver { read, pong: sender }))
+}
+
+#[cfg(unix)]
+fn net(host: &str, port: u16, tls: bool) -> io::Result<Stream> {
+    super::tunnel::open(host, port, tls)
+}
+
+#[cfg(not(unix))]
+fn net(host: &str, _: u16, _: bool) -> io::Result<Stream> {
+    Err(io::Error::other(format!("reaching Rex at {host} over the network needs macOS or Linux")))
 }
 
 impl Sender {

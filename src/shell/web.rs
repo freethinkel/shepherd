@@ -140,6 +140,7 @@ impl Shell {
     pub(super) fn shown_place_key(&self) -> Option<String> {
         match self.backend.kind() {
             crate::backend::Kind::Herdr => self.places.iter().find(|p| self.places_shown(p)).map(sessions::Place::key),
+            crate::backend::Kind::Rex => Some(sessions::Place::Rex(self.rex_host.clone()).key()),
             kind => Some(kind.key().into()),
         }
     }

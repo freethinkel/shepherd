@@ -277,6 +277,11 @@ impl Backend {
         }
     }
 
+    /// Rex on `host`, or on the server on this machine.
+    pub fn rex(host: Option<&crate::rex::Host>) -> Self {
+        Self::own(Arc::new(crate::rex::Rex::at(host.map(crate::rex::Host::reach).unwrap_or_default())))
+    }
+
     pub fn kind(&self) -> Kind {
         self.mux.kind()
     }

@@ -1,16 +1,17 @@
 //! herdr sessions and saved SSH machines, Arc's spaces: a bar of them under the sidebar, a two-finger swipe to the
-//! next or last, and the dialogs that make and delete them. Only herdr has them: another backend's sessions are its
-//! workspaces, so the bar has no places there.
+//! next or last, and the dialogs that make and delete them. On Rex the places are this machine's server and the hosts
+//! `rex hosts` lists. Another backend's sessions are its workspaces, so the bar has no places there.
 use super::*;
 use crate::backend::Kind;
 use crate::herdr::{Machine, SessionInfo};
 use gpui::{ScrollDelta, ScrollWheelEvent};
 
-/// A session here or a machine elsewhere.
+/// A session here or a machine elsewhere, on herdr; on Rex, a host or (`None`) the server on this machine.
 #[derive(Clone)]
 pub(super) enum Place {
     Session(SessionInfo),
     Machine(Machine),
+    Rex(Option<crate::rex::Host>),
 }
 
 impl Place {
@@ -26,19 +27,28 @@ impl Place {
         match self {
             Place::Session(s) => s.name.clone(),
             Place::Machine(m) => m.label.clone(),
+            Place::Rex(Some(host)) => host.label.clone(),
+            Place::Rex(None) => if cfg!(target_os = "macos") { "This Mac" } else { "This computer" }.into(),
         }
     }
 
-    /// herdr's default session keeps itself: it can be edited, not deleted.
+    /// herdr's default session and Rex's own server keep themselves: they can be edited, not deleted.
     pub(super) fn deletable(&self) -> bool {
-        !matches!(self, Place::Session(s) if s.default)
+        !matches!(self, Place::Session(s) if s.default) && !matches!(self, Place::Rex(None))
     }
 
-    /// The socket its snapshot is read from: a session's own, a machine's relay.
-    fn socket(&self, rt: &tokio::runtime::Handle) -> Option<String> {
+    /// On another machine: a herdr machine or a Rex host.
+    pub(super) fn remote(&self) -> bool {
+        matches!(self, Place::Machine(_) | Place::Rex(Some(_)))
+    }
+
+    /// A backend that reads its snapshot: on a session's own socket, a machine's relay, a Rex host's addresses.
+    fn backend(&self, rt: &tokio::runtime::Handle) -> Option<Backend> {
+        let herdr = |socket: String| Some(Backend::of(Kind::Herdr, Some(socket)));
         match self {
-            Place::Session(s) => s.running.then(|| s.socket_path.clone()),
-            Place::Machine(m) => crate::herdr::relay(m, rt).ok().map(|p| p.to_string_lossy().into_owned()),
+            Place::Session(s) => s.running.then(|| s.socket_path.clone()).and_then(herdr),
+            Place::Machine(m) => crate::herdr::relay(m, rt).ok().and_then(|p| herdr(p.to_string_lossy().into_owned())),
+            Place::Rex(host) => Some(Backend::rex(host.as_ref())),
         }
     }
     /// Where its last snapshot is kept while another place is shown, and its look in the settings.
@@ -46,6 +56,9 @@ impl Place {
         match self {
             Place::Session(s) => s.socket_path.clone(),
             Place::Machine(m) => format!("machine:{}", m.id),
+            // this machine's is the key Rex had before it had places, so its snapshot and pages stay its own
+            Place::Rex(None) => Kind::Rex.key().into(),
+            Place::Rex(Some(host)) => format!("rex:{}", host.id),
         }
     }
 }
@@ -205,9 +218,12 @@ impl Shell {
     }
 
     /// The name of the place shown: its name in Shepherd, else the machine's label or the session's name, or `custom`
-    /// for a socket of one's own. Off herdr, the backend's.
+    /// for a socket of one's own. On Rex, the host's; off those, the backend's.
     pub(super) fn place_label(&self, cx: &App) -> String {
         let kind = self.backend.kind();
+        if kind == Kind::Rex && let Some(host) = &self.rex_host {
+            return Place::Rex(Some(host.clone())).look(cx).0;
+        }
         if kind != Kind::Herdr {
             return kind.name().into();
         }
@@ -221,8 +237,8 @@ impl Shell {
     pub(super) fn prefetch_neighbours(&mut self, cx: &mut Context<Self>) {
         for travel in [-1., 1.] {
             let Some(place) = self.neighbour(travel) else { continue };
-            let Some(socket) = place.socket(&self.rt) else { continue };
-            let (key, backend) = (place.key(), Backend::of(Kind::Herdr, Some(socket)));
+            let Some(backend) = place.backend(&self.rt) else { continue };
+            let key = place.key();
             let call = self.rt.spawn(async move { backend.snapshot().await });
             cx.spawn(async move |this, cx| {
                 let Ok(Ok(snapshot)) = call.await else { return };
@@ -334,23 +350,30 @@ impl Shell {
         cx.notify();
     }
 
-    /// Asks herdr for its sessions and enabled machines off the main thread, for the bar.
+    /// Asks herdr for its sessions and enabled machines, or Rex for its hosts, off the main thread, for the bar.
     pub(super) fn refresh_places(&mut self, cx: &mut Context<Self>) {
-        if self.backend.kind() != Kind::Herdr {
-            return self.places.clear();
-        }
-        let list = cx.background_spawn(async {
-            let sessions = crate::herdr::sessions()?;
-            // an older herdr without machines lists none
-            let machines = crate::herdr::machines().unwrap_or_default();
-            let places = sessions.into_iter().map(Place::Session).chain(machines.into_iter().filter(|m| m.enabled).map(Place::Machine));
-            anyhow::Ok(places.collect::<Vec<_>>())
-        });
+        let kind = self.backend.kind();
+        let list = match kind {
+            Kind::Herdr => cx.background_spawn(async {
+                let sessions = crate::herdr::sessions()?;
+                // an older herdr without machines lists none
+                let machines = crate::herdr::machines().unwrap_or_default();
+                let places = sessions.into_iter().map(Place::Session).chain(machines.into_iter().filter(|m| m.enabled).map(Place::Machine));
+                anyhow::Ok(places.collect::<Vec<_>>())
+            }),
+            // without hosts there is only this machine, and no bar
+            Kind::Rex => cx.background_spawn(async {
+                let hosts = crate::rex::hosts()?;
+                let places = (!hosts.is_empty()).then_some(Place::Rex(None)).into_iter().chain(hosts.into_iter().map(|h| Place::Rex(Some(h))));
+                anyhow::Ok(places.collect::<Vec<_>>())
+            }),
+            _ => return self.places.clear(),
+        };
         cx.spawn(async move |this, cx| {
             let Ok(places) = list.await else { return };
             let _ = this.update(cx, |s, cx| {
-                if s.backend.kind() != Kind::Herdr {
-                    return; // left while herdr answered
+                if s.backend.kind() != kind {
+                    return; // left while the backend answered
                 }
                 s.places = in_order(places, &SettingsGlobal::of(cx).settings.place_order);
                 s.prefetch_neighbours(cx);
@@ -382,13 +405,14 @@ impl Shell {
                 let hint = match place {
                     _ if self.places_shown(place) => Some("current".to_string()),
                     Place::Machine(m) => Some(m.target.clone()),
+                    Place::Rex(host) => host.as_ref().and_then(|h| h.endpoints.first().cloned()),
                     Place::Session(s) if !s.running => Some("stopped".to_string()),
                     Place::Session(_) => None,
                 };
                 Item {
                     key: format!("place:{}", place.key()),
                     section: Section::Sessions,
-                    icon: if matches!(place, Place::Machine(_)) { "icons/remote-server.svg" } else { "icons/monitor.svg" },
+                    icon: if place.remote() { "icons/remote-server.svg" } else { "icons/monitor.svg" },
                     label: place.look(cx).0,
                     hint,
                     chord: None,
@@ -403,7 +427,20 @@ impl Shell {
         match place {
             Place::Session(s) => self.switch_session(s, cx),
             Place::Machine(m) => self.switch_machine(m, cx),
+            Place::Rex(host) => self.switch_rex_host(host, cx),
         }
+    }
+
+    /// To a Rex host, or to the server on this machine; the settings keep it for the next launch.
+    fn switch_rex_host(&mut self, host: Option<crate::rex::Host>, cx: &mut Context<Self>) {
+        // the place left keeps its snapshot under its own key, which names the host shown until now
+        if let (Some(left), Some(snapshot)) = (self.shown_place_key(), self.snapshot.take()) {
+            self.snapshots.insert(left, snapshot);
+        }
+        let saved = host.clone();
+        save_from_sidebar(cx, move |s| s.rex_host = saved);
+        self.rex_host = host;
+        self.move_to(None, None, Kind::Rex, cx);
     }
 
     /// Switch backend: the next one installed.
@@ -418,6 +455,9 @@ impl Shell {
     pub(super) fn set_backend(&mut self, kind: Kind, cx: &mut Context<Self>) {
         if kind == self.backend.kind() {
             return;
+        }
+        if kind == Kind::Rex {
+            self.rex_host = SettingsGlobal::of(cx).settings.rex_host.clone();
         }
         if kind != Kind::Herdr {
             return self.move_to(None, None, kind, cx);
@@ -499,6 +539,9 @@ impl Shell {
 
     /// Whether `place` is the one shown.
     pub(super) fn places_shown(&self, place: &Place) -> bool {
+        if let Place::Rex(host) = place {
+            return host.as_ref().map(|h| &h.id) == self.rex_host.as_ref().map(|h| &h.id);
+        }
         match (place, &self.machine_label) {
             (Place::Machine(m), Some(label)) => &m.label == label,
             (Place::Session(s), None) => crate::herdr::current_session().as_deref() == Some(s.name.as_str()),
@@ -632,10 +675,12 @@ impl Shell {
         }
         crate::herdr::show_machine(None); // a machine's switch names it right after
         self.machine_label = None;
-        self.backend = Backend::of(kind, socket); // the one left loses its connection; its server runs on
+        // the one left loses its connection; its server runs on
+        self.backend = if kind == Kind::Rex { Backend::rex(self.rex_host.as_ref()) } else { Backend::of(kind, socket) };
         self.fitted = None;
         let key = match &machine {
             Some(id) => format!("machine:{id}"),
+            None if kind == Kind::Rex => Place::Rex(self.rex_host.clone()).key(),
             None if kind != Kind::Herdr => kind.key().into(),
             None => self.places.iter().find_map(|p| match p {
                 Place::Session(s) if crate::herdr::current_session().as_deref() == Some(s.name.as_str()) => Some(s.socket_path.clone()),
@@ -753,11 +798,16 @@ impl Shell {
             return cx.notify();
         }
         if self.places_shown(&place) {
-            self.move_to(None, None, Kind::Herdr, cx);
+            match place {
+                Place::Rex(_) => self.switch_rex_host(None, cx),
+                _ => self.move_to(None, None, Kind::Herdr, cx),
+            }
         }
         let (label, task) = match place {
             Place::Session(s) => (s.name.clone(), cx.background_spawn(async move { crate::herdr::delete_session(&s.name, s.running) })),
             Place::Machine(m) => (m.label.clone(), cx.background_spawn(async move { crate::herdr::remove_machine(&m.id) })),
+            Place::Rex(None) => return cx.notify(), // not deletable
+            Place::Rex(Some(h)) => (h.label.clone(), cx.background_spawn(async move { crate::rex::remove_host(&h.label) })),
         };
         cx.spawn(async move |this, cx| {
             let done = task.await;

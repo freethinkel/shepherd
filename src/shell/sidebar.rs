@@ -763,8 +763,8 @@ impl Shell {
             .child(self.place_bar(theme, list_offset, window, cx))
     }
 
-    /// Arc's space bar: a button for each herdr session and machine, the shown one lit, and + for a new one. Off herdr
-    /// there are none, and only the settings stay.
+    /// Arc's space bar: a button for each herdr session and machine, or Rex host, the shown one lit, and + for a new
+    /// herdr session. Off those there are none, and only the settings stay.
     /// `offset` is the workspace list's: the lit square under the buttons moves as far toward the next place as the list
     /// has moved toward it.
     fn place_bar(&self, theme: &Theme, offset: f32, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -782,7 +782,7 @@ impl Shell {
         let placeholder = held.as_ref().and_then(|key| keys.iter().position(|k| k == key)).map(|i| {
             let place = &self.places[i];
             let (name, icon) = place.look(cx);
-            let mark = sessions::place_mark(&name, icon.as_deref(), matches!(place, sessions::Place::Machine(_)), theme.text_muted);
+            let mark = sessions::place_mark(&name, icon.as_deref(), place.remote(), theme.text_muted);
             div()
                 .absolute()
                 .top_0()
@@ -800,7 +800,7 @@ impl Shell {
         let buttons = self.places.iter().enumerate().filter(|(i, _)| held.as_ref() != Some(&keys[*i])).map(|(i, place)| {
             let shown = self.places_shown(place);
             let (name, icon) = place.look(cx);
-            let machine = matches!(place, sessions::Place::Machine(_));
+            let machine = place.remote();
             let mark = sessions::place_mark(&name, icon.as_deref(), machine, if shown { theme.accent } else { theme.text_faint });
             let dragged = sessions::DraggedPlace {
                 index: i,

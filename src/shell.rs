@@ -333,6 +333,8 @@ pub struct Shell {
     session_delete: Option<crate::ui::Popup<sessions::Place>>,
     /// The saved machine shown, by its label; `None` for a session on this Mac.
     machine_label: Option<String>,
+    /// On Rex, the host shown; `None` for the server on this machine.
+    rex_host: Option<crate::rex::Host>,
 }
 
 /// New worktree: the repo's workspace and the branch name being typed.
@@ -513,7 +515,10 @@ impl Shell {
                     fitted: None,
                     backend: {
                         let settings = &SettingsGlobal::of(cx).settings;
-                        Backend::of(settings.backend, settings.herdr_socket.clone())
+                        match settings.backend {
+                            crate::backend::Kind::Rex => Backend::rex(settings.rex_host.as_ref()),
+                            kind => Backend::of(kind, settings.herdr_socket.clone()),
+                        }
                     },
                     rt: rt.clone(),
                     plugin_actions: Vec::new(),
@@ -636,6 +641,7 @@ impl Shell {
                     session_dialog: None,
                     session_delete: None,
                     machine_label: None,
+                    rex_host: SettingsGlobal::of(cx).settings.rex_host.clone(),
                 };
                 shell.resume_machine(cx);
                 shell.connect(cx);

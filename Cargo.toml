@@ -32,6 +32,9 @@ bincode = { version = "2", features = ["serde"] }
 tiny-skia = "0.11"
 tokio = { version = "1", features = ["full"] }
 ureq = "3.4.2"
+# a Rex host's HTTPS (src/rex/tunnel.rs), on the rustls and roots ureq already brings
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
 # URLs of web integrations; the same crate ureq and wry use
 http = "1"
 # web integrations' pages, in the system web view

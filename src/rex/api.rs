@@ -1,6 +1,7 @@
 //! [`Rex`] as a backend: a session is a workspace, a window a tab and a block a pane. Rex's ids name one thing, the
 //! window's commands take only a pane or a tab: `session/block` and `session/window`.
 use super::TERMINAL;
+use super::Endpoint;
 use super::conn::Control;
 use crate::agents::{Report, plain_title};
 use crate::backend::{Attached, Change, Kind, Made, Mode, Mux, Reply};
@@ -18,6 +19,8 @@ const SHELL: &str = "com.superlogical.terminal.shell";
 /// The connection to the server, opened when first asked. Dropped, the server runs on.
 #[derive(Default)]
 pub struct Rex {
+    /// A host's ways to reach it, tried in turn; none for the server on this machine.
+    servers: Vec<Endpoint>,
     control: Arc<Mutex<Option<Arc<Control>>>>,
     shared: Arc<Shared>,
 }
@@ -87,21 +90,24 @@ struct Block {
     stale: bool,
 }
 
-fn connect(held: &Mutex<Option<Arc<Control>>>, shared: &Arc<Shared>) -> anyhow::Result<Arc<Control>> {
+fn connect(held: &Mutex<Option<Arc<Control>>>, shared: &Arc<Shared>, servers: &[Endpoint]) -> anyhow::Result<Arc<Control>> {
     let mut held = held.lock().unwrap();
     if let Some(core) = held.as_ref().filter(|c| !c.lost()) {
         return Ok(core.clone());
     }
+    let here = servers.is_empty();
+    let servers = if here { Endpoint::local()? } else { servers.to_vec() };
     let open = || {
         let shared = shared.clone();
-        Control::open(move |event| {
+        Control::open(&servers, move |event| {
             if heard(event, &mut shared.state.lock().unwrap()) {
                 shared.say();
             }
         })
     };
     let core = open().or_else(|e| {
-        if !crate::herdr::no_server(&e) {
+        // a host's server is started on the host, not from here
+        if !here || !servers.iter().all(Endpoint::is_local) || !crate::herdr::no_server(&e) {
             return Err(e);
         }
         super::start_server()?;
@@ -114,9 +120,14 @@ fn connect(held: &Mutex<Option<Arc<Control>>>, shared: &Arc<Shared>) -> anyhow::
 }
 
 impl Rex {
+    /// The server at `servers`, the ways to reach a host in the order to try them.
+    pub fn at(servers: Vec<Endpoint>) -> Self {
+        Self { servers, control: Arc::default(), shared: Arc::default() }
+    }
+
     async fn connected(&self) -> anyhow::Result<Arc<Control>> {
-        let (held, shared) = (self.control.clone(), self.shared.clone());
-        tokio::task::spawn_blocking(move || connect(&held, &shared)).await?
+        let (held, shared, servers) = (self.control.clone(), self.shared.clone(), self.servers.clone());
+        tokio::task::spawn_blocking(move || connect(&held, &shared, &servers)).await?
     }
 
     /// A new session on one shell in `cwd`.
@@ -325,7 +336,9 @@ impl Mux for Rex {
     }
 
     fn attach(&self, pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), mode: Mode) -> anyhow::Result<Attached> {
-        let (attached, events) = super::attach(pane, cols, rows, cell_px, mode == Mode::Observe)?;
+        // the stream goes to the address the backend's connection reached, not to each in turn again
+        let server = connect(&self.control, &self.shared, &self.servers)?.server.clone();
+        let (attached, events) = super::attach(&server, pane, cols, rows, cell_px, mode == Mode::Observe)?;
         Ok((Box::new(attached), events))
     }
 
@@ -905,7 +918,7 @@ mod tests {
         let tree = shot.workspaces.iter().find(|w| w.workspace_id == linked).unwrap().worktree.clone().unwrap();
         assert!(tree.is_linked_worktree);
         assert_eq!(shot.workspaces.iter().find(|w| w.workspace_id == linked).unwrap().label, "fix-rex");
-        let core = tokio::task::spawn_blocking(|| Control::open(|_| {})).await.unwrap().unwrap();
+        let core = tokio::task::spawn_blocking(|| Control::open(&Endpoint::local().unwrap(), |_| {})).await.unwrap().unwrap();
         let listed = core.call("session.list", json!({})).await.unwrap();
         let kept = format!("\u{f126} {}/fix-rex", crate::worktree::repo_name(&tree).unwrap());
         assert!(listed["sessions"].as_array().unwrap().iter().any(|s| s["label"] == kept.as_str()), "{listed}");

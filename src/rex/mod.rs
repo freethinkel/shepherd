@@ -5,6 +5,8 @@
 mod api;
 mod conn;
 pub mod facts;
+#[cfg(unix)]
+mod tunnel;
 mod ws;
 pub use api::Rex;
 
@@ -24,15 +26,107 @@ const STREAM: &str = "rex.data.terminal.v1";
 /// Bytes of one `write` call: a larger message than the server's limit would close the connection.
 const WRITE: usize = 64 * 1024;
 
-/// The server's socket: `REX_SERVER` as a `rex` command reads it, else where Rex.app's server listens.
-fn socket() -> anyhow::Result<PathBuf> {
-    if let Ok(server) = std::env::var("REX_SERVER") {
-        return server.strip_prefix("unix://").map(PathBuf::from).ok_or_else(|| anyhow!("REX_SERVER is not a local socket: {server}"));
+/// Where a Rex server answers: a socket on this machine, or a host's address on the network.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Endpoint {
+    Socket(PathBuf),
+    Net { host: String, port: u16, tls: bool },
+}
+
+impl Endpoint {
+    /// The server here: `REX_SERVER` as a `rex` command reads it, else where Rex.app's server listens.
+    pub(super) fn local() -> anyhow::Result<Vec<Endpoint>> {
+        if let Ok(server) = std::env::var("REX_SERVER") {
+            return Endpoint::parse(&server);
+        }
+        if !cfg!(target_os = "macos") {
+            bail!("Rex's server is only found on macOS: set REX_SERVER");
+        }
+        Ok(vec![Endpoint::Socket(crate::settings::home().join("Library/Application Support/rex/server.sock"))])
     }
-    if !cfg!(target_os = "macos") {
-        bail!("Rex's server is only found on macOS: set REX_SERVER");
+
+    /// An address as `rex -S` takes one, as the ways to try it in turn: `unix:///path` (escaped as a URL) or a path,
+    /// `http://host:port`, `https://host[:port]`, or a bare host, which is HTTPS on 443, then on 7297, then HTTP on
+    /// 7297.
+    pub fn parse(address: &str) -> anyhow::Result<Vec<Endpoint>> {
+        let address = address.trim();
+        if let Some(path) = address.strip_prefix("unix://") {
+            return Ok(vec![Endpoint::Socket(percent_encoding::percent_decode_str(path).decode_utf8()?.into_owned().into())]);
+        }
+        if address.starts_with('/') {
+            return Ok(vec![Endpoint::Socket(address.into())]);
+        }
+        let net = |host: &str, port, tls| Endpoint::Net { host: host.to_string(), port, tls };
+        if !address.contains("://") {
+            let host = address.trim_end_matches('/');
+            if host.is_empty() || host.contains(['/', '@', ':']) {
+                bail!("not a Rex server's address: {address}");
+            }
+            return Ok(vec![net(host, 443, true), net(host, 7297, true), net(host, 7297, false)]);
+        }
+        let uri: http::Uri = address.parse().with_context(|| format!("not a Rex server's address: {address}"))?;
+        let tls = match uri.scheme_str() {
+            Some("https") => true,
+            Some("http") => false,
+            _ => bail!("not a Rex server's address: {address}"),
+        };
+        let authority = uri.authority().with_context(|| format!("no host in {address}"))?;
+        // ponytail: a login server's account (`https://root@host`) isn't passed on yet, so it is refused, not ignored
+        if authority.as_str().contains('@') {
+            bail!("choosing an account on a login server isn't supported yet: {address}");
+        }
+        Ok(vec![net(authority.host(), authority.port_u16().unwrap_or(if tls { 443 } else { 80 }), tls)])
     }
-    Ok(crate::settings::home().join("Library/Application Support/rex/server.sock"))
+
+    pub(super) fn is_local(&self) -> bool {
+        matches!(self, Endpoint::Socket(_))
+    }
+}
+
+/// One of `rex hosts`: another Rex server, by its label.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Host {
+    pub id: String,
+    pub label: String,
+    /// Its addresses, as `rex -S` takes them, tried in turn.
+    pub endpoints: Vec<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+impl Host {
+    /// The ways to reach it, in the order its addresses are listed; an address that isn't one is left out.
+    pub fn reach(&self) -> Vec<Endpoint> {
+        self.endpoints.iter().filter_map(|a| Endpoint::parse(a).ok()).flatten().collect()
+    }
+}
+
+/// `rex hosts remove`: the host is forgotten; its server runs on there.
+pub fn remove_host(label: &str) -> anyhow::Result<()> {
+    let binary = binary().context("Rex isn't installed")?;
+    let out = crate::process::command(binary).args(["hosts", "remove", label]).output().context("rex hosts remove")?;
+    if !out.status.success() {
+        bail!("rex hosts remove: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// The hosts `rex hosts` lists, from the home server and this machine's.
+pub fn hosts() -> anyhow::Result<Vec<Host>> {
+    #[derive(serde::Deserialize)]
+    struct Listed {
+        hosts: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        host: Host,
+    }
+    let binary = binary().context("Rex isn't installed")?;
+    let out = crate::process::command(binary).args(["hosts", "list", "--json"]).output().context("rex hosts list")?;
+    if !out.status.success() {
+        bail!("rex hosts list: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(serde_json::from_slice::<Listed>(&out.stdout)?.hosts.into_iter().map(|e| e.host).collect())
 }
 
 /// `rex`: `SHEPHERD_REX`, else on PATH, else inside the server Rex.app keeps, which doesn't put it on PATH.
@@ -44,7 +138,8 @@ fn binary() -> Option<PathBuf> {
 
 /// Whether Rex can be offered. Not in a fixture (`SHEPHERD_MOCK`), whose window shows only what it holds.
 pub fn installed() -> bool {
-    crate::mock::dir().is_none() && (socket().is_ok_and(|s| s.exists()) || binary().is_some())
+    let here = || Endpoint::local().is_ok_and(|e| matches!(e.first(), Some(Endpoint::Socket(s)) if s.exists()));
+    crate::mock::dir().is_none() && (here() || binary().is_some())
 }
 
 /// Starts the server, which Rex.app otherwise does, when it isn't up. Returns once it answers or it is plain it won't.
@@ -54,7 +149,7 @@ fn start_server() -> anyhow::Result<()> {
     if !status.success() {
         bail!("rex server start: {status}");
     }
-    let socket = socket()?;
+    let Some(Endpoint::Socket(socket)) = Endpoint::local()?.into_iter().next() else { bail!("REX_SERVER is not a local socket") };
     for _ in 0..20 {
         if socket.exists() {
             return Ok(());
@@ -137,9 +232,10 @@ fn split(mut text: &str, size: usize) -> Vec<&str> {
 
 /// Attaches to pane `pane`: a snapshot of its terminal first, then what its program writes. Blocks: run it off the
 /// main thread. Unless `observe`, this pane sets the block's size, as Rex.app's does: Rex.app follows it while it lasts.
-fn attach(pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), observe: bool) -> anyhow::Result<(Attached, UnboundedReceiver<SessionEvent>)> {
+/// `server` is the one the backend's own connection reached.
+fn attach(server: &Endpoint, pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), observe: bool) -> anyhow::Result<(Attached, UnboundedReceiver<SessionEvent>)> {
     let (session, block) = api::ids(pane)?;
-    let block = Block { control: Control::open(|_| {})?, session: session.to_string(), block: block.to_string() };
+    let block = Block { control: Control::open(std::slice::from_ref(server), |_| {})?, session: session.to_string(), block: block.to_string() };
     block.control.blocking_call("session.attach", json!({"session_id": session}))?;
     if !observe {
         block.control.blocking_call("session.own_block", json!({"session_id": session, "block_ids": [block.block], "mode": "take"}))?;
@@ -147,7 +243,7 @@ fn attach(pane: &str, cols: u16, rows: u16, cell_px: (u32, u32), observe: bool) 
     }
     let ticket = block.control.blocking_call("data.connect", json!({"session_id": session, "block_id": block.block, "data_ref_id": "terminal", "subprotocol": STREAM}))?;
     let ticket = B64.decode(ticket["ticket"].as_str().context("data.connect gave no ticket")?)?;
-    let (data, mut stream) = ws::connect(&socket()?, "/api/data", STREAM)?;
+    let (data, mut stream) = ws::connect(server, "/api/data", STREAM)?;
     data.binary(&[&[1u8][..], &ticket[..]].concat())?;
     let welcome = stream.next().map_err(|why| anyhow!("Rex refused the stream: {why}"))?;
     let nonce = nonce(&welcome).ok_or_else(|| anyhow!("Rex refused the stream: {welcome:?}"))?;
@@ -213,6 +309,24 @@ fn read_stream(mut stream: ws::Receiver, nonce: u64, tx: UnboundedSender<Session
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addresses_read_as_rex_reads_them() {
+        let net = |host: &str, port, tls| Endpoint::Net { host: host.into(), port, tls };
+        assert_eq!(Endpoint::parse("unix:///Users/me/Library/Application%20Support/rex/server.sock").unwrap(), [Endpoint::Socket("/Users/me/Library/Application Support/rex/server.sock".into())]);
+        assert_eq!(Endpoint::parse("https://build.tail.ts.net").unwrap(), [net("build.tail.ts.net", 443, true)]);
+        assert_eq!(Endpoint::parse("http://build.tail.ts.net:7297/").unwrap(), [net("build.tail.ts.net", 7297, false)]);
+        assert_eq!(Endpoint::parse("build.tail.ts.net").unwrap(), [net("build.tail.ts.net", 443, true), net("build.tail.ts.net", 7297, true), net("build.tail.ts.net", 7297, false)]);
+        assert!(Endpoint::parse("https://root@build.tail.ts.net").is_err(), "an account is refused, not dropped");
+        assert!(Endpoint::parse("ssh://build").is_err());
+    }
+
+    #[test]
+    fn a_host_is_read_from_rex_hosts() {
+        let listed = r#"{"host": {"id": "host:1", "label": "studio", "endpoints": ["https://studio.ts.net", "nonsense://x"], "icon": "server", "added_from": "mac"}, "from": "home", "held": false}"#;
+        let host: Host = serde_json::from_value(serde_json::from_str::<Value>(listed).unwrap()["host"].clone()).unwrap();
+        assert_eq!(host.reach(), [Endpoint::Net { host: "studio.ts.net".into(), port: 443, tls: true }], "an address that isn't one is left out");
+    }
 
     #[test]
     fn a_stream_is_a_snapshot_up_to_rexs_first_message() {
