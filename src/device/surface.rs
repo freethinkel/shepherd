@@ -57,7 +57,7 @@ impl Surface {
             let row = unsafe { std::slice::from_raw_parts_mut(base.add(y * stride), w * 4) };
             let src = &pixels[y * w * bpp..(y + 1) * w * bpp];
             if rgb {
-                for (o, p) in row.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+                for (o, p) in row.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<3>().0) {
                     (o[0], o[1], o[2], o[3]) = (p[2], p[1], p[0], 255);
                 }
             } else {

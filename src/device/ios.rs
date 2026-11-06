@@ -80,9 +80,9 @@ const LIGHTING: std::time::Duration = std::time::Duration::from_secs(10);
 // just switched to shows it only after LIGHTING; telling them apart needs the display's power state, which simctl
 // doesn't give (both read On)
 fn blank(frame: &Frame) -> bool {
-    let pixels = frame.pixels.chunks_exact(4);
+    let (pixels, _) = frame.pixels.as_chunks::<4>();
     let step = (pixels.len() / 64).max(1);
-    pixels.step_by(step).all(|p| p[0] < 8 && p[1] < 8 && p[2] < 8)
+    pixels.iter().step_by(step).all(|p| p[0] < 8 && p[1] < 8 && p[2] < 8)
 }
 
 /// iPhone Duo's two screens, as serve-sim's: each streamed all along, so a fold shows the other one's latest frame at
