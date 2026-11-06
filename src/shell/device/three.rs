@@ -1,4 +1,4 @@
-//! The 3D device view (macOS): t3code's viewer, bundled with three.js into `assets/device3d/viewer.js` from
+//! The 3D device view: t3code's viewer, bundled with three.js into `assets/device3d/viewer.js` from
 //! `web/device3d`, as a page of the panel's like a browser tab's (`shell/web.rs` makes, places and shows it). Its
 //! page asks the `shepherd-device` scheme for the session's newest frame (a JPEG, each request waiting for one newer
 //! than its last) and for Apple's model of the device (`crate::device::models`); touches and keys come back over IPC.
@@ -13,11 +13,23 @@ const VIEWER: &[u8] = include_bytes!("../../../assets/device3d/viewer.js");
 /// How long a frame request waits for a new frame before the page asks again.
 const FRAME_WAIT: Duration = Duration::from_secs(2);
 
-/// The page's address: which device, for its shape and model.
-pub(super) fn url(device: &Device) -> String {
+/// The page's address: which device, for its shape and model, and the `backdrop` it paints under it.
+pub(super) fn url(device: &Device, backdrop: &str) -> String {
     let name = percent_encoding::utf8_percent_encode(&device.name, percent_encoding::NON_ALPHANUMERIC);
     let platform = if device.platform == Platform::Android { "android" } else { "ios" };
-    format!("{SCHEME}://localhost/index.html?platform={platform}&name={name}")
+    format!("{SCHEME}://localhost/index.html?platform={platform}&name={name}{backdrop}")
+}
+
+/// The page's own background, as its address's query: none on macOS, where the page is see-through over the panel.
+/// Elsewhere a child web view is opaque (WebView2's over GPUI's window, WebKitGTK's in an X11 child window), so it
+/// paints the device tab's stage: the window's fill under the panel's wash and the stage's.
+pub(super) fn backdrop(theme: &Theme) -> String {
+    if cfg!(target_os = "macos") {
+        return String::new();
+    }
+    let gpui::Rgba { r, g, b, .. } = theme.surface.blend(theme.wash(0.05)).blend(theme.wash(0.03)).into();
+    let byte = |c: f32| (c.clamp(0., 1.) * 255.).round() as u8;
+    format!("&bg=%23{:02x}{:02x}{:02x}", byte(r), byte(g), byte(b))
 }
 
 /// The page's scheme and IPC on the web view `builder` makes.
@@ -30,7 +42,7 @@ pub(in crate::shell) fn attach<'a>(
     ready: impl Fn() + 'static,
 ) -> wry::WebViewBuilder<'a> {
     builder
-        .with_transparent(true)
+        .with_transparent(cfg!(target_os = "macos"))
         .with_asynchronous_custom_protocol(SCHEME.into(), move |_, request, responder| serve(request, &feed, &rt, responder))
         .with_ipc_handler(move |request| match request.body().as_str() {
             r#"{"ready":true}"# => ready(),

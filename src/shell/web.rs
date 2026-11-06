@@ -38,7 +38,6 @@ pub(super) enum PageEvent {
     /// What a poll of the annotation picker returned.
     Picked(String),
     /// A device's 3D view has drawn the device: its page may show.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Ready,
 }
 
@@ -94,7 +93,6 @@ pub(super) struct Pages {
     /// again each launch.
     pub(super) favicons: HashMap<PageKey, (String, Favicon)>,
     /// Where pages keep their cookies and storage between launches; macOS keeps WKWebView's default store.
-    #[cfg(not(target_os = "macos"))]
     context: Option<wry::WebContext>,
     pub(super) events: Option<UnboundedSender<(PageKey, u64, PageEvent)>>,
     /// The agent last picked for each page's annotations, until Shepherd quits.
@@ -244,15 +242,15 @@ impl Shell {
     }
 
     /// The panel's pages' entries: browser tabs' and devices' 3D views'.
-    fn panel_entries(&self) -> impl Iterator<Item = WebEntry> + '_ {
-        self.browser.entries().chain(self.device_pages())
+    fn panel_entries(&self, cx: &App) -> impl Iterator<Item = WebEntry> + '_ {
+        self.browser.entries().chain(self.device_pages(Theme::of(cx)))
     }
 
     /// The page on screen and its entry: a sidebar page's, else the panel's. Never both: a sidebar page hides the panel.
     fn visible_entry(&self, window: &Window, cx: &App) -> Option<(PageKey, WebEntry)> {
         self.shown_page(cx).or_else(|| {
             let key = self.panel_page(window)?;
-            let entry = self.panel_entries().find(|e| e.id == key.0)?;
+            let entry = self.panel_entries(cx).find(|e| e.id == key.0)?;
             Some((key, entry))
         })
     }
@@ -272,7 +270,7 @@ impl Shell {
     /// Entry `id`'s page, made if it isn't yet; false when it can't be, a toast saying why, or on Wayland, where a web
     /// view can't sit in Shepherd's window, with its URL in the browser.
     pub(super) fn ensure_page(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let entries = SettingsGlobal::of(cx).settings.web_entries.iter().cloned().chain(self.panel_entries());
+        let entries = SettingsGlobal::of(cx).settings.web_entries.iter().cloned().chain(self.panel_entries(cx));
         let Some(entry) = entries.into_iter().find(|e| e.id == id) else { return false };
         let url = normalize(&entry.url);
         if !embeds_pages(window) {
@@ -383,7 +381,6 @@ impl Shell {
     fn make_page(&mut self, key: PageKey, entry_url: &str, url: &str, window: &Window, cx: &mut Context<Self>) -> wry::Result<Page> {
         let events = self.page_events(window, cx);
         let browser = browser::is_tab(&key.0);
-        #[cfg(target_os = "macos")]
         let device = self.device_page_session(&key.0);
         self.pages.made += 1;
         let serial = self.pages.made;
@@ -391,7 +388,6 @@ impl Shell {
             let _ = events.unbounded_send((key.clone(), serial, event));
         };
         let (title, loaded, opened, followed, tabbed) = (send.clone(), send.clone(), send.clone(), send.clone(), send.clone());
-        #[cfg(target_os = "macos")]
         let ready = send.clone();
         #[cfg(target_os = "macos")]
         let key_event = send;
@@ -402,20 +398,19 @@ impl Shell {
         let opens_outside = follows_outside.clone();
         let tabs_outside = follows_outside.clone();
         let tab = move |to: String| tabbed(if tabs_outside(&to) { PageEvent::Outside(to) } else { PageEvent::NewTab(to) });
-        #[cfg(not(target_os = "macos"))]
-        let context = self.pages.context.get_or_insert_with(|| wry::WebContext::new(Some(crate::settings::cache_dir().join("web"))));
-        #[cfg(not(target_os = "macos"))]
-        let builder = wry::WebViewBuilder::new_with_web_context(context);
-        #[cfg(target_os = "macos")]
-        let builder = wry::WebViewBuilder::new();
+        // WebKitGTK takes a scheme once per context: a 3D view, which keeps nothing between launches, has its own
+        let shared = cfg!(not(target_os = "macos")) && !(cfg!(target_os = "linux") && device.is_some());
+        let builder = match shared {
+            true => wry::WebViewBuilder::new_with_web_context(
+                self.pages.context.get_or_insert_with(|| wry::WebContext::new(Some(crate::settings::cache_dir().join("web")))),
+            ),
+            false => wry::WebViewBuilder::new(),
+        };
         // a device's 3D view: its frames, model and input go over a scheme and IPC of its own
-        #[cfg(target_os = "macos")]
         let builder = match device {
             Some((session, feed)) => super::device::three::attach(builder, session, feed, self.rt.clone(), move || ready(PageEvent::Ready)),
             None => new_tabs(builder, tab),
         };
-        #[cfg(not(target_os = "macos"))]
-        let builder = new_tabs(builder, tab);
         let view = builder
             .with_url(url)
             .with_devtools(true)
@@ -592,7 +587,7 @@ impl Shell {
         self.fetch_favicons(cx);
         self.sync_browser(window, cx);
         let mut entries = SettingsGlobal::of(cx).settings.web_entries.clone();
-        entries.extend(self.panel_entries());
+        entries.extend(self.panel_entries(cx));
         // a page on a machine also goes when its entry no longer opens there
         let still_opened = |id: &String, machine: &Option<String>| {
             machine.is_none() || entries.iter().any(|e| &e.id == id && e.open_from == OpenFrom::Machine)
