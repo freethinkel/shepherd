@@ -11,8 +11,11 @@ use crate::ui::surface_chrome::toolbar;
 use gpui::{AnyElement, ListAlignment, ListSizingBehavior, ListState, Task, list};
 use std::sync::Arc;
 
-const TREE_ROW_HEIGHT: f32 = 27.0;
-const TREE_INDENT: f32 = 14.0;
+const TREE_ROW_HEIGHT: f32 = 28.0;
+const TREE_INDENT: f32 = 16.0;
+/// A tree row's icon and name, a size up from Zeron's, near the diffs' file headers.
+const TREE_ICON: f32 = 16.0;
+const TREE_TEXT: f32 = 13.0;
 /// Between looks at the checkout, while a tab is shown in a window in use.
 const POLL: Duration = Duration::from_secs(2);
 /// A pause after a key in the search, so a word typed is one search.
@@ -37,8 +40,8 @@ fn with_indent_guides(row: AnyElement, depth: usize, theme: &Theme) -> AnyElemen
         .h(px(TREE_ROW_HEIGHT))
         .w_full()
         .flex_none()
-        // the centre of the ancestor's 14 px disclosure slot
-        .children((0..depth).map(|level| div().absolute().top_0().bottom_0().left(px(8.0 + 7.0 + level as f32 * TREE_INDENT)).w(px(1.0)).bg(theme.border)))
+        // the centre of the ancestor's disclosure slot
+        .children((0..depth).map(|level| div().absolute().top_0().bottom_0().left(px(8.0 + TREE_INDENT / 2.0 + level as f32 * TREE_INDENT)).w(px(1.0)).bg(theme.border)))
         .child(row)
         .into_any_element()
 }
@@ -73,19 +76,19 @@ fn sync_list_rows(list: &ListState, old: &[VisibleTreeRow], new: &[VisibleTreeRo
 
 fn entry_icon(name: &str, kind: EntryKind, expanded: bool, theme: &Theme) -> AnyElement {
     match kind {
-        EntryKind::Directory => gpui::svg().path(if expanded { "icons/solar/folder-open.svg" } else { "icons/folder.svg" }).size(px(14.0)).flex_none().text_color(theme.text_muted).into_any_element(),
-        _ => crate::ui::file_icons::icon(name, theme.appearance).size(px(14.0)).into_any_element(),
+        EntryKind::Directory => gpui::svg().path(if expanded { "icons/solar/folder-open.svg" } else { "icons/folder.svg" }).size(px(TREE_ICON)).flex_none().text_color(theme.text_muted).into_any_element(),
+        _ => crate::ui::file_icons::icon(name, theme.appearance).size(px(TREE_ICON)).flex_none().into_any_element(),
     }
 }
 
 fn chevron(open: bool, shown: bool, theme: &Theme) -> Div {
     div()
-        .size(px(14.0))
+        .size(px(TREE_INDENT))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .when(shown, |el| el.child(gpui::svg().path(if open { "icons/alt-arrow-down.svg" } else { "icons/alt-arrow-right.svg" }).size(px(11.0)).text_color(theme.text_faint)))
+        .when(shown, |el| el.child(gpui::svg().path(if open { "icons/alt-arrow-down.svg" } else { "icons/alt-arrow-right.svg" }).size(px(13.0)).text_color(theme.text_faint)))
 }
 
 fn centered(message: impl Into<SharedString>, color: Hsla) -> AnyElement {
@@ -93,7 +96,7 @@ fn centered(message: impl Into<SharedString>, color: Hsla) -> AnyElement {
 }
 
 fn status_row(index: usize, padding: f32, label: &'static str, color: Hsla) -> AnyElement {
-    div().id(("files-tree-status", index)).h(px(TREE_ROW_HEIGHT)).w_full().flex_none().pl(px(padding)).pr(px(8.0)).flex().items_center().text_size(px(10.5)).text_color(color).child(label).into_any_element()
+    div().id(("files-tree-status", index)).h(px(TREE_ROW_HEIGHT)).w_full().flex_none().pl(px(padding)).pr(px(8.0)).flex().items_center().text_size(px(12.)).text_color(color).child(label).into_any_element()
 }
 
 /// The explorer: the shown pane's checkout as a tree, git's marks on it, and a search by name over it.
@@ -704,7 +707,7 @@ impl Files {
                     .pr(px(8.0))
                     .flex()
                     .items_center()
-                    .gap(px(4.0))
+                    .gap(px(6.0))
                     .cursor_pointer()
                     .when(node.entry.ignored && decoration.is_none(), |el| el.opacity(0.52))
                     .when(selected, |el| el.bg(theme.wash(match (self.keys, distinct_cursor) {
@@ -734,7 +737,7 @@ impl Files {
                     )
                     .child(chevron(expanded, is_directory, &theme))
                     .child(entry_icon(&node.entry.name, node.entry.kind, expanded, &theme))
-                    .child(div().min_w_0().truncate().text_size(px(12.)).text_color(text_color).child(node.entry.name))
+                    .child(div().min_w_0().truncate().text_size(px(TREE_TEXT)).text_color(text_color).child(node.entry.name))
                     .into_any_element()
             }
             VisibleRowKind::Loading { .. } => status_row(index, padding + TREE_INDENT, "Loading…", theme.text_faint),
@@ -753,7 +756,7 @@ impl Files {
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.load_directory(directory.clone(), cx)))
-                    .child(div().min_w_0().truncate().text_size(px(10.5)).text_color(theme.danger.opacity(0.82)).child(format!("{message} — Retry")))
+                    .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme.danger.opacity(0.82)).child(format!("{message} — Retry")))
                     .into_any_element()
             }
         };
@@ -798,7 +801,7 @@ impl Files {
             .pr(px(8.0))
             .flex()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(6.0))
             .cursor_pointer()
             .when(selected, |el| el.bg(theme.wash(0.1)))
             .when(!selected, |el| el.hover(move |s| s.bg(hover)))
@@ -814,7 +817,7 @@ impl Files {
                 }
             })))
             .child(entry_icon(&row.name, row.kind, expanded, &theme))
-            .child(div().min_w_0().truncate().text_size(px(12.)).text_color(match decoration {
+            .child(div().min_w_0().truncate().text_size(px(TREE_TEXT)).text_color(match decoration {
                 Some(value) => value.color(&theme),
                 None if is_directory => theme.text_muted,
                 None => theme.text,
