@@ -29,7 +29,8 @@ fn agent_icon(agent: Option<&str>) -> &'static str {
 /// inverted tile for agents without a mark, a muted one for a shell.
 fn agent_tint(agent: Option<&str>, theme: &Theme) -> (Hsla, Hsla) {
     match agent {
-        // a shell's `>_` in the theme's accent, as the terminal icon elsewhere
+        // a shell's `>_` in the theme's accent, as the terminal icon elsewhere; on a light theme the tile goes pale, so the accent reads on it
+        None if theme.appearance == crate::theme::Appearance::Light => (theme.text_muted.opacity(0.2), theme.accent),
         None => (plain_tint(theme).0, theme.accent),
         Some("claude") => brand(0xD97757, 0xFFFFFF),
         Some("codex") => brand(0x10A37F, 0xFFFFFF),
