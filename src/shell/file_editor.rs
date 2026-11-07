@@ -2,9 +2,9 @@
 //! `EditorState`, colored by `zeron_syntax` through a highlighter that shifts its spans with each edit until the next
 //! highlight lands. Its colors are the panes' (`crate::ui::markdown::syntax_color`), not Zeron's palette.
 use crate::theme::Theme;
-use gpui::{AppContext as _, Context, Entity, HighlightStyle, SharedString, Window};
+use gpui::{AppContext as _, Context, DispatchPhase, Entity, HighlightStyle, IntoElement, ScrollWheelEvent, SharedString, Styled as _, Window, canvas, px};
 use gpui_base::input::{EditorState, FoldRange, HighlightStyleResolver, InputEdit, InputEditorStyle, InputHighlighter, Rope};
-use std::{ops::Range, rc::Rc, sync::Arc};
+use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc};
 use zeron_syntax::{HighlightKind, HighlightedDocument};
 
 /// The theme's color for each highlight name.
@@ -140,6 +140,31 @@ pub(super) fn replace_file_contents<T: 'static>(editor: &Entity<EditorState>, te
         state.set_selected_range(selection.start.min(end)..selection.end.min(end), cx);
         state.set_scroll_offset(scroll_offset, cx);
     });
+}
+
+/// The terminal's wheel speed over the editor, which scrolls 1:1: laid over it, this takes the wheel first. Offsets
+/// land after the next layout, so a frame's events add up from the one before rather than the editor's stale offset.
+pub(super) fn terminal_wheel(editor: Entity<EditorState>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let pending = Rc::new(Cell::new(None));
+            window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture || !bounds.contains(&e.position) {
+                    return;
+                }
+                editor.update(cx, |state, cx| {
+                    let delta = e.delta.pixel_delta(state.line_height().unwrap_or(px(20.))) * crate::terminal::pane::WHEEL_SPEED;
+                    let at = pending.get().unwrap_or(state.scroll_offset()) + delta;
+                    pending.set(Some(at));
+                    state.set_scroll_offset(at, cx);
+                });
+                cx.stop_propagation();
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 fn absolute_spans(source: &str, document: &HighlightedDocument) -> Vec<(Range<usize>, HighlightKind)> {

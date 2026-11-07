@@ -162,7 +162,7 @@ pub fn reveal_offset(s: ScrollState, line: usize, rows: usize) -> Option<u32> {
 }
 
 /// Lines per line-height of wheel/trackpad travel.
-const WHEEL_SPEED: f32 = 1.5;
+pub(crate) const WHEEL_SPEED: f32 = 1.5;
 /// How much faster the wheel scrolls with Option held (iTerm's and VS Code's fast scroll).
 const FAST_WHEEL: f32 = 5.0;
 

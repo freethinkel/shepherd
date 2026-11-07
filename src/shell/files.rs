@@ -74,6 +74,14 @@ fn sync_list_rows(list: &ListState, old: &[VisibleTreeRow], new: &[VisibleTreeRo
     list.scroll_to(anchor);
 }
 
+/// `entry_icon`'s asset, and its tint when it is an SVG drawn in the theme's color.
+fn entry_icon_asset(name: &str, kind: EntryKind, expanded: bool, theme: &Theme) -> (SharedString, Option<Hsla>) {
+    match kind {
+        EntryKind::Directory => ((if expanded { "icons/solar/folder-open.svg" } else { "icons/folder.svg" }).into(), Some(theme.text_muted)),
+        _ => (crate::ui::file_icons::asset_path(name, theme.appearance), None),
+    }
+}
+
 fn entry_icon(name: &str, kind: EntryKind, expanded: bool, theme: &Theme) -> AnyElement {
     match kind {
         EntryKind::Directory => gpui::svg().path(if expanded { "icons/solar/folder-open.svg" } else { "icons/folder.svg" }).size(px(TREE_ICON)).flex_none().text_color(theme.text_muted).into_any_element(),
@@ -677,6 +685,29 @@ impl Files {
             .into_any_element()
     }
 
+    /// A row lifted to drag its file out (with the rest of the selection, when it is in it): to a pane, which pastes
+    /// the paths, Finder or another app. Only here, where the files are on this disk.
+    fn ghost(&self, path: &str, name: &str, icon: (SharedString, Option<Hsla>), indent: f32, in_selection: bool, theme: &Theme) -> Option<crate::ui::drag::Ghost> {
+        let place = self.place.as_ref().filter(|place| place.machine().is_none())?;
+        let paths = if in_selection && self.tree.selection_len() > 1 { self.tree.selection_roots() } else { vec![path.to_string()] };
+        let title = if paths.len() > 1 { format!("{} items", paths.len()) } else { name.to_string() };
+        Some(crate::ui::drag::Ghost {
+            paths: paths.iter().map(|path| place.full(path)).collect(),
+            title: title.into(),
+            icon: icon.0,
+            tint: icon.1,
+            size: gpui::size(px(indent + TREE_INDENT + 6. + 220.), px(TREE_ROW_HEIGHT)),
+            radius: px(7.),
+            pad: (px(indent + TREE_INDENT + 6.), px(10.)),
+            icon_size: px(TREE_ICON),
+            gap: px(6.),
+            text_size: px(TREE_TEXT),
+            bg: theme.surface,
+            border: theme.border,
+            text: theme.text,
+        })
+    }
+
     fn render_tree_row(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.tree.visible_rows().get(index).cloned() else { return gpui::Empty.into_any_element() };
         let theme = Theme::of(cx).clone();
@@ -698,6 +729,7 @@ impl Files {
                     None => theme.text_muted,
                 };
                 let hover = theme.wash(0.055);
+                let ghost = self.ghost(&path, &node.entry.name, entry_icon_asset(&node.entry.name, node.entry.kind, expanded, &theme), padding, selected, &theme);
                 div()
                     .id(SharedString::from(format!("files-tree-entry:{}", row.path)))
                     .h(px(TREE_ROW_HEIGHT))
@@ -735,6 +767,10 @@ impl Files {
                             this.open_menu(menu_path.clone(), event.position, cx);
                         }),
                     )
+                    .when_some(ghost, |el, ghost| el.on_drag(crate::ui::drag::Dragged(ghost), |dragged, grab, window, cx| {
+                        crate::ui::drag::go_native(dragged.0.clone(), grab, window, cx);
+                        cx.new(|_| dragged.clone())
+                    }))
                     .child(chevron(expanded, is_directory, &theme))
                     .child(entry_icon(&node.entry.name, node.entry.kind, expanded, &theme))
                     .child(div().min_w_0().truncate().text_size(px(TREE_TEXT)).text_color(text_color).child(node.entry.name))
@@ -792,6 +828,8 @@ impl Files {
         let decoration = self.marks.get(&row.path, is_directory);
         let hover = theme.wash(0.055);
         let toggled = row.path.clone();
+        let indent = 8.0 + row.depth as f32 * TREE_INDENT;
+        let ghost = self.ghost(&row.path, &row.name, entry_icon_asset(&row.name, row.kind, expanded, &theme), indent, false, &theme);
         let content = div()
             .id(("files-search-result", index))
             .h(px(TREE_ROW_HEIGHT))
@@ -816,6 +854,10 @@ impl Files {
                     cx.notify();
                 }
             })))
+            .when_some(ghost, |el, ghost| el.on_drag(crate::ui::drag::Dragged(ghost), |dragged, grab, window, cx| {
+                crate::ui::drag::go_native(dragged.0.clone(), grab, window, cx);
+                cx.new(|_| dragged.clone())
+            }))
             .child(entry_icon(&row.name, row.kind, expanded, &theme))
             .child(div().min_w_0().truncate().text_size(px(TREE_TEXT)).text_color(match decoration {
                 Some(value) => value.color(&theme),
@@ -1259,6 +1301,7 @@ impl Render for FilePreview {
                         .text_size(px(theme.terminal_font_size))
                         .line_height(px((theme.terminal_font_size * theme.terminal_line_height).round()))
                         .child(gpui_base::input::Editor::new(&editor))
+                        .child(super::file_editor::terminal_wheel(editor.clone()))
                 });
                 div()
                     .flex_1()

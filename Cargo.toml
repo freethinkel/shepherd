@@ -49,11 +49,11 @@ prost = "0.14"
 # the 3D device view's frames: it takes a simulator's BGRA as is, which `image`'s encoder would need converted first
 jpeg-encoder = "0.7.1"
 
-# The Dock, notifications' authorization, Secure Keyboard Entry and the trackpad's haptics.
+# The Dock, notifications' authorization, Secure Keyboard Entry, the trackpad's haptics and files dragged out (src/ui/drag.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSDockTile", "NSEvent", "NSGraphics", "NSHapticFeedback", "NSImage", "NSResponder", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSGeometry", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSApplication", "NSAttributedString", "NSBezierPath", "NSColor", "NSDockTile", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSFont", "NSGraphics", "NSGraphicsContext", "NSHapticFeedback", "NSImage", "NSParagraphStyle", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSShadow", "NSStringDrawing", "NSText", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSDictionary", "NSGeometry", "NSObject", "NSString", "NSURL"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter"] }
 block2 = "0.6"
 # iOS Simulators' screens and input (src/device/ios.rs); its helpers build against Xcode's CoreSimulator
