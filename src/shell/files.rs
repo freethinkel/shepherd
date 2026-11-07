@@ -13,8 +13,6 @@ use std::sync::Arc;
 
 const TREE_ROW_HEIGHT: f32 = 27.0;
 const TREE_INDENT: f32 = 14.0;
-const PREVIEW_LINE_HEIGHT: f32 = 20.0;
-const PREVIEW_TEXT_SIZE: f32 = 12.0;
 /// Between looks at the checkout, while a tab is shown in a window in use.
 const POLL: Duration = Duration::from_secs(2);
 /// A pause after a key in the search, so a word typed is one search.
@@ -1255,8 +1253,8 @@ impl Render for FilePreview {
                         .relative()
                         .overflow_hidden()
                         .font_family(theme.font_terminal.clone())
-                        .text_size(px(PREVIEW_TEXT_SIZE))
-                        .line_height(px(PREVIEW_LINE_HEIGHT))
+                        .text_size(px(theme.terminal_font_size))
+                        .line_height(px((theme.terminal_font_size * theme.terminal_line_height).round()))
                         .child(gpui_base::input::Editor::new(&editor))
                 });
                 div()
