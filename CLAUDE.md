@@ -1,4 +1,48 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Shepherd
+
+A native GPUI client for herdr (and, as experiments, herdr-core, Rex and tmux): sidebar, tabs, panes, agents.
+
+## Build and test
+
+`make help` lists the targets. libghostty-vt builds with Zig 0.16: an environment `ZIG` wins over the one-machine
+path in `.cargo/config.toml`.
+
+- `make test`, `make lint` (clippy, `-D warnings`, as CI). One test: `cargo test --lib <module>::tests::<name>`.
+- `#[ignore]` tests are live: they drive a real backend server and close what they open, so give them an isolated
+  one. Each one's doc comment names its env and command (`SHEPHERD_TMUX_SOCKET`, `REX_SERVER`, `HC_SESSION`).
+- `cargo run` starts the app from inside `target/debug/Shepherd.app` (`scripts/run-bundled.sh`, the cargo runner)
+  and attaches to the user's live herdr session. To look at UI yourself, run on the fixture: `SHEPHERD_MOCK=docs/mock`
+  with `SHEPHERD_SETTINGS_FILE`, as `docs/mock/shot.sh` does.
+- Releases: bumping `version` in `Cargo.toml` on `main` makes CI (`.github/workflows/release.yml`) build, sign,
+  notarize and publish; `/make-new-release` does it.
+
+## Architecture
+
+- **Backends.** `src/backend.rs` is the seam: `Mux` (terminals and their layout, the one trait a new backend
+  writes), `Terminal` (a pane's attached stream of bytes, fed to its emulator), `Worktrees`, `Agents`. herdr
+  (`src/herdr`, JSON over its unix socket) has its own worktrees and agents, plus what only it has (plugins,
+  popups, SSH machines), reached through `Mux::herdr`. `src/hc` keeps the layout itself (`hc/tree.rs`, optionally
+  shared with the Herdr app); `src/rex` and `src/tmux` translate their server's sessions/windows/panes. Those three
+  share `worktree::Git` and `agents::Own`.
+- **Snapshot is the one truth.** `model::Snapshot` is the whole layout; `shell/sync.rs` subscribes to
+  `Mux::changes` and refetches a snapshot on each change. Never apply an event onto a snapshot (herdr's events have
+  no shared sequence with it).
+- **UI.** `Shell` (`src/shell.rs` + `src/shell/`) is the window: sidebar, tab bar, panes, right panel (diffs,
+  review, browser, device), popups. `src/ui` holds the reusable views (command panel, settings, status bar).
+  `src/terminal` is a pane: libghostty-vt wrapped as a state machine (`emulator.rs`) and Shepherd's own glyph
+  renderer (`element.rs`, `sprite/`).
+- **gpui** is zeronsh/zui patched to the `freethinkel/zui` fork (`[patch]` in `Cargo.toml` says what the fork adds);
+  a gpui change goes to that fork. Much UI code is ported from Zeron (MIT, `assets/NOTICE`).
+- `shepherd hooks …` (`main.rs`) is the CLI behind the worktree hooks plugin Shepherd installs into herdr
+  (`assets/herdr-plugin`).
+- `SHEPHERD_*` env vars (`grep -rhoE 'SHEPHERD_[A-Z_]+' src`) override binaries (`SHEPHERD_HERDR`, `_HC`, `_REX`,
+  `_TMUX`), the settings file, and open panels for screenshots.
+
+Comments explain why, in full sentences; `ponytail:` marks a deliberate simplification and its ceiling.
 
 ## Pull requests
 
