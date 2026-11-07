@@ -29,7 +29,8 @@ fn agent_icon(agent: Option<&str>) -> &'static str {
 /// inverted tile for agents without a mark, a muted one for a shell.
 fn agent_tint(agent: Option<&str>, theme: &Theme) -> (Hsla, Hsla) {
     match agent {
-        None => plain_tint(theme),
+        // a shell's `>_` in the theme's accent, as the terminal icon elsewhere
+        None => (plain_tint(theme).0, theme.accent),
         Some("claude") => brand(0xD97757, 0xFFFFFF),
         Some("codex") => brand(0x10A37F, 0xFFFFFF),
         Some("agy" | "gemini") => brand(0x4285F4, 0xFFFFFF),
