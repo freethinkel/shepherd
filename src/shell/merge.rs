@@ -213,14 +213,18 @@ impl Shell {
     pub(super) fn merge_delete_dialog(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let dialog = self.merge_delete.as_ref()?;
         let ask = &dialog.value;
+        // A long branch name is cut short in the chip so `→ base` stays in view; the line under it names it whole.
         let chip = div()
+            .min_w_0()
+            .flex()
             .px(px(8.))
             .py(px(3.))
             .rounded(px(6.))
             .bg(theme.wash(0.06))
             .text_size(px(12.))
             .font_family("Geist Mono")
-            .child(format!("{} → {}", ask.branch, ask.base));
+            .child(div().min_w_0().truncate().child(ask.branch.clone()))
+            .child(div().flex_none().child(format!(" → {}", ask.base)));
         let files = (!ask.files.is_empty()).then(|| {
             let n = ask.files.len();
             div()
