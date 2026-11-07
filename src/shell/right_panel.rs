@@ -13,6 +13,7 @@ use gpui::AnyElement;
 /// The tab an empty panel shows in its strip, whose `×` closes the panel.
 const NEW: &str = "right-surface-new";
 const DIFF_ICON: &str = "icons/solar/list.svg";
+const FILES_ICON: &str = "icons/solar/folder-with-files.svg";
 
 pub(super) struct RightPanel {
     /// By workspace id.
@@ -50,6 +51,12 @@ pub(super) struct RightPanel {
     pub(super) diff_agents: HashMap<String, String>,
     /// Each workspace's agents' turns, watched whether or not a diff is open: a turn can't be seen afterwards.
     pub(super) turns: HashMap<String, super::changes::Turn>,
+    /// Each workspace's explorer, by its id.
+    pub(super) files: HashMap<String, Entity<super::files::Files>>,
+    /// The file tabs of all workspaces, by their tab's key.
+    pub(super) file_tabs: HashMap<String, Entity<super::files::FilePreview>>,
+    /// How many file tabs were made: their ids.
+    pub(super) made_files: u64,
 }
 
 impl RightPanel {
@@ -73,6 +80,9 @@ impl RightPanel {
             agents: None,
             diff_agents: HashMap::new(),
             turns: HashMap::new(),
+            files: HashMap::new(),
+            file_tabs: HashMap::new(),
+            made_files: 0,
         }
     }
 }
@@ -107,6 +117,7 @@ fn offer_row(offer: Offer) -> (&'static str, &'static str) {
     match offer {
         Offer::Browser => ("icons/solar/global.svg", "Browser"),
         Offer::Diffs => (DIFF_ICON, "Diffs"),
+        Offer::Files => (FILES_ICON, "Files"),
         Offer::PullRequest => ("icons/git-pull-request.svg", "Pull request"),
         Offer::Device => ("icons/solar/smartphone.svg", "Device"),
     }
@@ -310,6 +321,7 @@ impl Shell {
         match offer {
             Offer::PullRequest => self.update_panel(cx, |p| p.add(Surface::PullRequest)),
             Offer::Diffs => self.add_diff_surface(window, cx),
+            Offer::Files => self.add_files_surface(window, cx),
             Offer::Device => self.open_device_picker(cx),
             Offer::Browser => {
                 if let Some(tab) = self.shown_tab() {
@@ -334,6 +346,14 @@ impl Shell {
                 Surface::Diff(id) => (self.right.diffs.get(id).map_or("Diff".to_string(), |c| c.read(cx).tab_title().to_string()), mark(DIFF_ICON)),
                 Surface::PullRequest => (pull_request_title(shown), if fetching_review { Leading::Spinner } else { mark("icons/git-pull-request.svg") }),
                 Surface::Device(key) => (self.device_label(key), mark("icons/solar/smartphone.svg")),
+                Surface::Files => ("Files".to_string(), mark(FILES_ICON)),
+                Surface::File(id) => match self.right.file_tabs.get(id) {
+                    Some(preview) => {
+                        let path = preview.read(cx).path.clone();
+                        (preview.read(cx).tab_title(), Leading::Asset(crate::ui::file_icons::asset_path(&path, theme.appearance)))
+                    }
+                    None => ("File".to_string(), mark(FILES_ICON)),
+                },
             };
             Tab::titled(s.key(), title, leading, theme, window)
         };
@@ -347,7 +367,19 @@ impl Shell {
                 self.right.diffs.remove(id);
                 self.update_panel(cx, |p| p.close(surface));
             }
-            Surface::PullRequest => self.update_panel(cx, |p| p.close(surface)),
+            Surface::PullRequest | Surface::Files => self.update_panel(cx, |p| p.close(surface)),
+            Surface::File(id) => {
+                // unsaved changes: the first close only says so, the next one lets them go
+                if let Some(preview) = self.right.file_tabs.get(id).cloned()
+                    && preview.update(cx, |p, _| p.dirty && !std::mem::replace(&mut p.close_armed, true))
+                {
+                    let name = preview.read(cx).path.clone();
+                    let save = if cfg!(target_os = "macos") { "⌘S" } else { "Ctrl+S" };
+                    return crate::ui::toast::info(cx, format!("{name} has unsaved changes: {save} saves them, closing again discards them"), None);
+                }
+                self.right.file_tabs.remove(id);
+                self.update_panel(cx, |p| p.close(surface));
+            }
             Surface::Device(_) => {
                 self.update_panel(cx, |p| p.close(surface));
                 self.sync_devices();
@@ -384,7 +416,9 @@ impl Shell {
                     .into_any_element()
             }
             Some(Surface::Device(key)) => self.render_device(&key, theme, window, cx),
-            Some(Surface::Diff(_)) | None => self.render_surface_picker(theme, cx).into_any_element(),
+            Some(Surface::Files) if self.files_of_shown().is_some() => self.render_files(cx),
+            Some(Surface::File(id)) if self.right.file_tabs.contains_key(&id) => self.render_file(&id, cx),
+            Some(Surface::Diff(_) | Surface::Files | Surface::File(_)) | None => self.render_surface_picker(theme, cx).into_any_element(),
         };
         let panel = div().id("right-panel").w(px(width)).h_full().flex_none().flex().flex_col().overflow_hidden().bg(theme.wash(0.05)).border_l_1().border_color(theme.border).child(strip).child(body);
         // the sidebar's slide, mirrored but for the content, which rides the edge: a native page can't be clipped by
@@ -454,7 +488,7 @@ impl Shell {
                         cx.stop_propagation();
                         this.update_panel(cx, |p| p.activate(&surface));
                         // a page takes the keyboard from a click on its tab; the pull request has no use for it
-                        let typed_into = matches!(&surface, Surface::Browser(_)) || matches!(&surface, Surface::Device(k) if k != crate::device::KEY);
+                        let typed_into = matches!(&surface, Surface::Browser(_) | Surface::Files) || matches!(&surface, Surface::Device(k) if k != crate::device::KEY);
                         this.focus_panel(typed_into, window, cx);
                     }))
                     .into_any_element(),

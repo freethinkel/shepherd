@@ -350,6 +350,7 @@ impl Render for Shell {
         // nothing to show outside a repo with a remote, and no PR label to close it from: it waits for one
         let has_remote = shown.key.is_some() && !matches!(shown.review, Some(crate::ui::review::Review::NoRemote));
         self.sync_diffs(&shown, window, cx);
+        self.sync_files(&shown, window, cx);
         let kept_width = self.right_panel_grown().then(|| f32::from(window.viewport_size().width) - sidebar_w - self.right_panel_now(window));
         let device_tab = match self.panel().and_then(|p| p.active.as_ref()) {
             Some(crate::right_panel::Surface::Device(k)) if panel_drawn && self.right_panel_shown(window) && k != crate::device::KEY => Some(k.clone()),
@@ -410,6 +411,20 @@ impl Render for Shell {
                     Some(crate::right_panel::Surface::Diff(id)) if this.panel_focused() => this.right.diffs.get(&id).cloned(),
                     _ => None,
                 };
+                // the explorer with the keyboard: its tree's keys; Esc it doesn't take gives the panes theirs back
+                if this.panel_focused()
+                    && this.panel().is_some_and(|p| p.active == Some(crate::right_panel::Surface::Files))
+                    && let Some(files) = this.files_of_shown()
+                {
+                    let taken = files.update(cx, |f, cx| f.nav_key(key, m.shift, window, cx));
+                    if !taken && key == "escape" {
+                        this.focus_panel(false, window, cx);
+                    }
+                    if taken || key == "escape" {
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
                 let taken = match diff {
                     Some(_) if key == "escape" => {
                         this.focus_panel(false, window, cx);

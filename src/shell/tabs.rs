@@ -45,6 +45,8 @@ pub(super) enum Leading {
     Image(std::sync::Arc<gpui::Image>),
     /// Something on its way.
     Spinner,
+    /// An image asset in its own colors: a file's icon.
+    Asset(SharedString),
 }
 
 /// One tab as drawn.
@@ -398,6 +400,7 @@ fn leading(t: &Tab, ring: Hsla, theme: &Theme, window: &mut Window) -> AnyElemen
         },
         Leading::Image(image) => slot().child(gpui::img(image.clone()).size(px(16.)).rounded(px(3.))).into_any_element(),
         Leading::Spinner => slot().child(crate::ui::loader::mini_spinner(2., theme.text_faint, window)).into_any_element(),
+        Leading::Asset(path) => slot().child(gpui::img(path.clone()).size(px(14.))).into_any_element(),
     }
 }
 

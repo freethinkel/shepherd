@@ -13,10 +13,16 @@ pub enum Surface {
     PullRequest,
     /// A simulator or emulator, by `Device::key`; the bare `device` lists them.
     Device(String),
+    /// The shown pane's checkout as a tree, Zeron's explorer.
+    Files,
+    /// A file opened from the tree, by its tab's id, as Zeron opens one in its own tab.
+    File(String),
 }
 
 const PULL_REQUEST_KEY: &str = "pull-request";
 const DIFF_PREFIX: &str = "diff-";
+const FILES_KEY: &str = "files";
+const FILE_PREFIX: &str = "file-";
 
 impl Surface {
     /// Diff `n`.
@@ -24,17 +30,25 @@ impl Surface {
         Surface::Diff(format!("{DIFF_PREFIX}{n}"))
     }
 
+    /// File tab `n`.
+    pub fn file(n: u64) -> Self {
+        Surface::File(format!("{FILE_PREFIX}{n}"))
+    }
+
     /// What the strip knows the tab by.
     pub fn key(&self) -> &str {
         match self {
-            Surface::Browser(id) | Surface::Diff(id) | Surface::Device(id) => id,
+            Surface::Browser(id) | Surface::Diff(id) | Surface::Device(id) | Surface::File(id) => id,
             Surface::PullRequest => PULL_REQUEST_KEY,
+            Surface::Files => FILES_KEY,
         }
     }
 
     pub fn of_key(key: &str) -> Self {
         match key {
             PULL_REQUEST_KEY => Surface::PullRequest,
+            FILES_KEY => Surface::Files,
+            id if id.starts_with(FILE_PREFIX) => Surface::File(id.to_string()),
             id if id.starts_with(DIFF_PREFIX) => Surface::Diff(id.to_string()),
             id if id.starts_with(crate::device::KEY) => Surface::Device(id.to_string()),
             id => Surface::Browser(id.to_string()),
@@ -155,17 +169,18 @@ pub fn page_takes_keyboard(sidebar_page: bool, focus_in_panel: bool, popup: bool
 pub enum Offer {
     Browser,
     Diffs,
+    Files,
     PullRequest,
     Device,
 }
 
-/// A page needs a window that can embed it; a diff, a repo; a pull request, a remote to ask. Devices are always offered:
-/// their tab says what the machine lacks.
+/// A page needs a window that can embed it; a diff and the files, a repo; a pull request, a remote to ask. Devices are
+/// always offered: their tab says what the machine lacks.
 pub fn offered(has_remote: bool, in_repo: bool, embeds_pages: bool) -> Vec<Offer> {
     let browser = embeds_pages.then_some(Offer::Browser);
-    let diffs = in_repo.then_some(Offer::Diffs);
+    let repo = in_repo.then_some([Offer::Diffs, Offer::Files]).into_iter().flatten();
     let request = has_remote.then_some(Offer::PullRequest);
-    browser.into_iter().chain(diffs).chain(request).chain([Offer::Device]).collect()
+    browser.into_iter().chain(repo).chain(request).chain([Offer::Device]).collect()
 }
 
 /// Whether the panel slides, between two renders' (workspace shown, its panel open): it does when opened or closed in
