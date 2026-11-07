@@ -1,10 +1,12 @@
 //! The right panel's diffs, Zeron's `crates/ui/src/changes.rs` (MIT): what's plain of it. The patch parser, the split
 //! pairing, the row model and the labels are its own; `git_status` and the capture are from its engine's
-//! `diff_sync.rs`, asked of `git` here (or on the machine shown) rather than over its RPC. There's no commit tab and no
-//! composer here: History and *Commit* are left out, and a comment goes to an agent from the panel
-//! (`shell/changes.rs`, the entity and all that draws). The last turn is herdr-reviewr's `turn.rs` (MIT) cut down.
+//! `diff_sync.rs`, asked of `git` here (or on the machine shown) rather than over its RPC. There's no History tab and no
+//! composer here: a comment goes to an agent from the panel (`shell/changes.rs`, the entity and all that draws). The
+//! working tree commits, pushes and opens its PR from one button, t3code's git actions cut down to `git`, gh and glab.
+//! The last turn is herdr-reviewr's `turn.rs` (MIT) cut down.
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::Stdio;
 use std::sync::Arc;
 use unicode_width::UnicodeWidthChar as _;
 use zeron_syntax::LanguageId as Lang;
@@ -1446,6 +1448,197 @@ pub fn file_location(dir: &str, root: &str, path: &str) -> (Option<String>, std:
     (machine.map(str::to_string), full)
 }
 
+// ---------------------------------------------------------------------------
+// Commit, push, pull request: the working tree's bar, by `git`, gh or glab, and `claude -p` for the words
+// ---------------------------------------------------------------------------
+
+/// What the working tree's one button does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitStep {
+    Commit,
+    /// The branch's first push: `-u`, so it has an upstream.
+    Publish,
+    Push,
+    CreatePr,
+    OpenPr,
+}
+
+/// Where the checkout stands, as far as the button cares.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BranchState<'a> {
+    pub dirty: bool,
+    /// `None` detached.
+    pub branch: Option<&'a str>,
+    pub upstream: bool,
+    pub ahead: u32,
+    /// The repo has an origin.
+    pub remote: bool,
+    /// The branch has a PR or MR (any state); `None` while gh or glab haven't said.
+    pub pr: Option<bool>,
+}
+
+// ponytail: the default branch by name; a repo whose default is `develop` gets offered a PR from it, and gh says why not.
+/// Commit while anything's uncommitted, then push, then the PR: open it once it's there. Nothing on a detached HEAD, a
+/// repo without an origin, or the default branch once it's pushed.
+pub fn next_step(s: BranchState) -> Option<GitStep> {
+    if s.dirty {
+        return Some(GitStep::Commit);
+    }
+    let branch = s.branch.filter(|_| s.remote)?;
+    if !s.upstream {
+        return Some(GitStep::Publish);
+    }
+    if s.ahead > 0 {
+        return Some(GitStep::Push);
+    }
+    if matches!(branch, "main" | "master") {
+        return None;
+    }
+    Some(if s.pr? { GitStep::OpenPr } else { GitStep::CreatePr })
+}
+
+/// The repo's origin, by its host: what the PR's made with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    None,
+    GitHub,
+    GitLab,
+}
+
+/// For the cache: `dir`'s origin. A GitHub Enterprise host without "github" in it is GitLab's, as the review panel has it.
+pub fn find_origin(dir: &str) -> Option<Origin> {
+    let out = crate::herdr::git(dir, &["remote", "get-url", "origin"]).ok()?;
+    let host = crate::ui::review::host(&String::from_utf8_lossy(&out.stdout));
+    Some(match (out.status.success(), host) {
+        (true, Some(host)) if host.contains("github") => Origin::GitHub,
+        (true, Some(_)) => Origin::GitLab,
+        _ => Origin::None,
+    })
+}
+
+/// git in `dir`; on failure all it said, stdout too: a hook prints its complaint there.
+fn run_said(dir: &str, args: &[&str]) -> Result<(), String> {
+    let out = crate::herdr::git(dir, args).map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let said = [out.stderr, out.stdout].map(|b| String::from_utf8_lossy(&b).trim().to_string());
+    let said = said.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
+    Err(if said.is_empty() { format!("git {} failed", args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"")) } else { said })
+}
+
+/// Everything in the working tree, untracked files in, committed with `message`; its hooks run.
+pub fn commit_all(dir: &str, message: &str) -> Result<(), String> {
+    let root = repo_root(dir)?;
+    run_said(dir, &at_root(&root, &["add", "-A"]))?;
+    run_said(dir, &at_root(&root, &["commit", "-m", message]))
+}
+
+/// The branch to its upstream; `publish`, to origin under its own name, which becomes its upstream.
+pub fn push(dir: &str, publish: bool) -> Result<(), String> {
+    run_said(dir, if publish { &["push", "-u", "origin", "HEAD"] } else { &["push"] })
+}
+
+/// A message's title and body: its first line, and the rest past the blank line.
+pub fn title_and_body(text: &str) -> (&str, &str) {
+    let text = text.trim();
+    let (title, body) = text.split_once('\n').unwrap_or((text, ""));
+    (title.trim(), body.trim())
+}
+
+/// `gh pr create` or `glab mr create` for `branch`, already pushed, into the repo's default branch: titled and described
+/// by `text`, or from its commits when it's empty. GitHub or GitLab by origin's host, as the review panel tells them.
+pub fn create_pr(dir: &str, branch: &str, text: &str) -> Result<(), String> {
+    let github = find_origin(dir) == Some(Origin::GitHub);
+    let (title, body) = title_and_body(text);
+    let (tool, mut args) = match github {
+        true => ("gh", vec!["pr", "create", "--head", branch]),
+        false => ("glab", vec!["mr", "create", "--yes", "--source-branch", branch]),
+    };
+    match (title.is_empty(), github) {
+        (true, _) => args.push("--fill"),
+        (false, true) => args.extend(["--title", title, "--body", body]),
+        (false, false) => args.extend(["--title", title, "--description", body]),
+    }
+    let out = crate::ui::review::cli(tool, &args, dir).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("{tool} isn't installed"),
+        _ => format!("{tool}: {e}"),
+    })?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
+}
+
+/// Where `claude` is on the machine at `target`: the user's `~/.local/bin` too, where its installer puts it, which a
+/// non-login shell's PATH may not have.
+const CLAUDE_PATH: &str = "PATH=\"$HOME/.local/bin:$HOME/.claude/local:$PATH\"";
+
+/// Claude Code is on the machine of `dir` (here, or its SSH target): the bar's button to write the words shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HasClaude(pub bool);
+
+/// For the cache: keyed by the machine, `""` here.
+pub fn find_claude(machine: &str) -> Option<HasClaude> {
+    if machine.is_empty() {
+        return Some(HasClaude(crate::herdr::find_program("claude").is_some()));
+    }
+    let out = crate::herdr::ssh(machine, &format!("{CLAUDE_PATH}; command -v claude")).ok()?;
+    Some(HasClaude(out.status.success()))
+}
+
+const COMMIT_PROMPT: &str = "Write a git commit message for the diff on stdin. A summary line in the imperative, at most 72 characters; then, only if the change needs explaining, a blank line and a short body wrapped at 72. Reply with the message alone: no preamble, no code fences.";
+const PR_PROMPT: &str = "Write a pull request for the branch whose commits and diff are on stdin. First line: the title, at most 72 characters. Then a blank line and a description in Markdown: what changes and why. Reply with the title and description alone: no preamble, no code fences.";
+/// How much of a diff goes to Claude.
+const MAX_PROMPT_BYTES: usize = 200 * 1024;
+
+/// A commit message for the working tree, or with `base` a PR's title and description for the branch against it,
+/// written by `claude -p` on the checkout's machine.
+pub fn write_message(dir: &str, base: Option<&str>) -> Result<String, String> {
+    let (prompt, mut input) = match base {
+        None => (COMMIT_PROMPT, capture(dir, None)?.patch),
+        Some(base) => {
+            let range = format!("{base}..HEAD");
+            let log = line(run(dir, &["log", "--format=%s%n%n%b", &range])?);
+            (PR_PROMPT, format!("Commits:\n{log}\n\nDiff:\n{}", capture(dir, Some(base))?.patch))
+        }
+    };
+    if input.trim().is_empty() {
+        return Err("nothing to write about".into());
+    }
+    input.truncate(input.floor_char_boundary(MAX_PROMPT_BYTES));
+    let (machine, path) = crate::herdr::split(dir);
+    let mut claude = match machine {
+        None => {
+            let mut claude = crate::process::command(crate::herdr::find_program("claude").ok_or("claude isn't installed")?);
+            claude.args(["-p", prompt]).current_dir(path);
+            claude
+        }
+        Some(target) => {
+            let q = crate::herdr::quote;
+            crate::herdr::ssh_command(target, &format!("{CLAUDE_PATH}; cd {} && claude -p {}", q(path), q(prompt)))
+        }
+    };
+    let mut child = claude.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("claude: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("claude: no stdin")?;
+    // written from its own thread: claude may answer before it has read all of it
+    let feed = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, input.as_bytes()));
+    let out = child.wait_with_output().map_err(|e| format!("claude: {e}"))?;
+    let _ = feed.join();
+    let said = String::from_utf8_lossy(&out.stdout);
+    let text = strip_fence(said.trim());
+    match out.status.success() && !text.is_empty() {
+        true => Ok(text.to_string()),
+        false => Err(format!("claude: {}", String::from_utf8_lossy(&out.stderr).trim())),
+    }
+}
+
+/// An answer wrapped in a code fence anyway, unwrapped.
+pub fn strip_fence(text: &str) -> &str {
+    let Some(inner) = text.strip_prefix("```").and_then(|t| t.strip_suffix("```")) else { return text };
+    inner.split_once('\n').map_or(inner, |(_, rest)| rest).trim()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2157,6 +2350,48 @@ rename to new_name.rs
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["b.txt", "f.txt"]);
         assert_eq!(list_branches(dir.path().to_str().unwrap()).unwrap()[0], "feature");
+    }
+
+    #[test]
+    fn the_button_commits_then_pushes_then_makes_the_pr_then_opens_it() {
+        let at = |dirty, upstream, ahead, pr| BranchState { dirty, branch: Some("feature"), upstream, ahead, remote: true, pr };
+        assert_eq!(next_step(at(true, true, 0, Some(true))), Some(GitStep::Commit));
+        assert_eq!(next_step(at(false, false, 0, None)), Some(GitStep::Publish));
+        assert_eq!(next_step(at(false, true, 2, Some(true))), Some(GitStep::Push));
+        assert_eq!(next_step(at(false, true, 0, Some(false))), Some(GitStep::CreatePr));
+        assert_eq!(next_step(at(false, true, 0, Some(true))), Some(GitStep::OpenPr));
+        // gh hasn't said yet; no origin; detached; the default branch
+        assert_eq!(next_step(at(false, true, 0, None)), None);
+        assert_eq!(next_step(BranchState { remote: false, ..at(false, false, 0, None) }), None);
+        assert_eq!(next_step(BranchState { branch: None, ..at(false, false, 0, None) }), None);
+        assert_eq!(next_step(BranchState { branch: Some("main"), ..at(false, true, 0, Some(false)) }), None);
+        assert_eq!(next_step(BranchState { remote: false, ..at(true, false, 0, None) }), Some(GitStep::Commit));
+    }
+
+    #[test]
+    fn a_message_splits_into_title_and_body_and_loses_its_fence() {
+        assert_eq!(title_and_body("  Fix it\n\nBecause.\n"), ("Fix it", "Because."));
+        assert_eq!(title_and_body("Fix it"), ("Fix it", ""));
+        assert_eq!(strip_fence("```text\nFix it\n```"), "Fix it");
+        assert_eq!(strip_fence("Fix it"), "Fix it");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commits_everything_pushes_with_an_upstream_and_keeps_a_hooks_complaint() {
+        let upstream = repo();
+        let clone = tempfile::tempdir().unwrap();
+        sh(clone.path(), &format!("git clone -q {} . && git config user.email t@t && git config user.name t && git switch -qc feature && printf 'new\n' > n.txt && printf 'edit\n' >> a.txt", upstream.path().display()));
+        let dir = clone.path().to_str().unwrap();
+        commit_all(dir, "Add n").unwrap();
+        assert!(capture(dir, None).unwrap().patch.is_empty());
+        push(dir, true).unwrap();
+        sh(clone.path(), "test \"$(git rev-parse --abbrev-ref @{u})\" = origin/feature");
+        // a hook that says no, on stdout: its words come back, the tree stays as it was
+        sh(clone.path(), "printf '#!/bin/sh\necho lint failed\nexit 1\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && printf 'more\n' >> n.txt");
+        let said = commit_all(dir, "More").unwrap_err();
+        assert!(said.contains("lint failed"), "{said}");
+        assert!(!capture(dir, None).unwrap().patch.is_empty());
     }
 
     #[cfg(unix)]

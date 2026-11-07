@@ -262,7 +262,7 @@ impl Shell {
 
     /// The diff's key: as the pull request's, but a workspace may have no diff yet. In a repo, its first is made.
     /// The keyboard goes along: to the diff shown, back to the panes when it closes.
-    pub(super) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let seen = self.right_panel_shown(window);
         let mut missing = false;
         self.update_panel(cx, |p| missing = !p.toggle_diff(seen));
