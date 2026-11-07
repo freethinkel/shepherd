@@ -537,8 +537,12 @@ impl gpui::Element for TerminalElement {
                 }
             });
         }
+        let rounded = self.panel.read(cx).rounded(cx);
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-            for quad in prepaint.bg_quads.drain(..) {
+            for mut quad in prepaint.bg_quads.drain(..) {
+                if rounded {
+                    quad.corner_radii = card_corners(quad.bounds, bounds);
+                }
                 window.paint_quad(quad);
             }
             for (bounds, image, _) in prepaint.images.iter().filter(|i| i.2) {
@@ -620,6 +624,20 @@ fn selection_outlines(rows: &[(usize, Range<usize>)]) -> Vec<Vec<Point<usize>>> 
             corners
         })
         .collect()
+}
+
+/// A cell background's corners inside a card's rounded ones: a corner of the card's within its radius takes the
+/// arc of the same centre, so a full-width colored line doesn't square the card's corner.
+/// ponytail: only the backgrounds; a selection or an image in a corner still squares it.
+fn card_corners(quad: Bounds<Pixels>, card: Bounds<Pixels>) -> gpui::Corners<Pixels> {
+    let r = super::pane::CARD_RADIUS;
+    let corner = |dx: Pixels, dy: Pixels| px((r - f32::from(dx.max(dy))).max(0.));
+    gpui::Corners {
+        top_left: corner(quad.left() - card.left(), quad.top() - card.top()),
+        top_right: corner(card.right() - quad.right(), quad.top() - card.top()),
+        bottom_right: corner(card.right() - quad.right(), card.bottom() - quad.bottom()),
+        bottom_left: corner(quad.left() - card.left(), card.bottom() - quad.bottom()),
+    }
 }
 
 /// A filled path through `corners`, each one rounded by `radius`, those facing in as well as out.
@@ -1122,6 +1140,18 @@ fn paint_custom_glyph(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cell_background_in_a_cards_corner_rounds_with_it() {
+        let card = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        // a full-width line on the first row, the grid inset by its padding
+        let line = Bounds::new(point(px(2.), px(2.)), size(px(396.), px(17.)));
+        let c = card_corners(line, card);
+        assert_eq!((c.top_left, c.top_right), (px(6.), px(6.)), "concentric with the card's 8 px arc");
+        assert_eq!((c.bottom_left, c.bottom_right), (px(0.), px(0.)), "far from the card's foot");
+        let inner = Bounds::new(point(px(50.), px(50.)), size(px(10.), px(17.)));
+        assert_eq!(card_corners(inner, card), gpui::Corners::default());
+    }
 
     #[test]
     fn a_jump_trails_the_cursor_leading_corners_first() {

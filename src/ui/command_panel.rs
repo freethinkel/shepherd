@@ -137,6 +137,8 @@ pub(crate) fn action_icon(name: &str) -> &'static str {
         "FocusUp" => "icons/arrow-up.svg",
         "FocusDown" => "icons/arrow-down.svg",
         "ToggleZoom" => "icons/expand-arrows.svg",
+        "FloatPane" => "icons/window-restore.svg",
+        "MinimizeFloating" | "MinimizeAllFloating" => "icons/alt-arrow-down.svg",
         "PreviousTab" => "icons/alt-arrow-left.svg",
         "NextTab" => "icons/alt-arrow-right.svg",
         "PreviousWorkspace" => "icons/alt-arrow-up.svg",

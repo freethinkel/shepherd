@@ -197,6 +197,8 @@ struct Drag {
 
 pub struct PaneTerminal {
     pane_id: String,
+    /// Floats over the tab as a card: rounded in any pane style.
+    pub card: bool,
     /// What is shown: the live grid, or while scrolled back, a local copy of herdr's history.
     emulator: Emulator,
     /// While `emulator` shows the history copy: the live grid, which herdr's frames keep updating.
@@ -259,6 +261,11 @@ pub struct PaneTerminal {
 }
 
 impl PaneTerminal {
+    /// Whether the pane is a card with rounded corners: every pane in the comfortable style, a floating one in any.
+    pub fn rounded(&self, cx: &App) -> bool {
+        self.card || crate::settings::SettingsGlobal::of(cx).settings.pane_style == crate::settings::PaneStyle::Comfortable
+    }
+
     pub fn new(pane_id: String, cx: &mut Context<Self>) -> Self {
         // The scrollbar's drags arrive here: the handle has no context to scroll herdr with.
         let (wanted, mut drags) = futures::channel::mpsc::unbounded::<u32>();
@@ -279,6 +286,7 @@ impl PaneTerminal {
         }));
         PaneTerminal {
             pane_id,
+            card: false,
             emulator: Emulator::new(80, 24),
             live: None,
             history_pending: None,
@@ -1083,7 +1091,13 @@ async fn pump(this: WeakEntity<PaneTerminal>, mut rx: UnboundedReceiver<SessionE
                     }
                     SessionEvent::Restart => pane.emulator = Emulator::raw(pane.emulator.cols() as u16, pane.emulator.rows() as u16),
                     SessionEvent::Snapshot(bytes) => match Emulator::restored(&bytes, pane.emulator.cols() as u16, pane.emulator.rows() as u16) {
-                        Ok(emulator) => pane.emulator = emulator,
+                        // Rex sends one again when a click gives Shepherd the pane: a selection being dragged
+                        // out goes on in the new grid, on its text
+                        Ok(mut emulator) => {
+                            let shift = emulator.history_lines() as isize - pane.emulator.history_lines() as isize;
+                            emulator.restore_selection(pane.emulator.selection_state(), shift);
+                            pane.emulator = emulator;
+                        }
                         Err(e) => eprintln!("shepherd: a terminal's snapshot does not decode, so it starts blank: {e:#}"),
                     },
                     SessionEvent::MouseCapture(enabled) => pane.mouse_capture = enabled,
@@ -1230,8 +1244,8 @@ impl Render for PaneTerminal {
             .relative()
             .size_full()
             .bg(theme.terminal.background)
-            // ponytail: only the fill is rounded; a cell's own background in a corner still squares it
-            .when(crate::settings::SettingsGlobal::of(cx).settings.pane_style == crate::settings::PaneStyle::Comfortable, |el| el.rounded(px(CARD_RADIUS)))
+            // the cells' own backgrounds round their corners to match (`TerminalElement`)
+            .when(self.rounded(cx), |el| el.rounded(px(CARD_RADIUS)))
             .key_context("Terminal")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))

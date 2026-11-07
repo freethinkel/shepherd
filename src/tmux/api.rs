@@ -114,6 +114,7 @@ fn snapshot(listing: &str, focused: Option<&str>, report: impl Fn(&str, &str) ->
                 panes: root.as_ref().map(|r| r.laid(&focused_pane)).unwrap_or_default(),
                 splits: root.as_ref().map(layout::Node::splits).unwrap_or_default(),
                 focused_pane_id: focused_pane,
+                minimized: Vec::new(),
             });
             out.tabs.push(Tab { tab_id: tab, workspace_id: id.clone(), label: text(window, 8), number, agent_status: AgentStatus::Unknown });
         }

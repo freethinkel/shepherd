@@ -191,6 +191,10 @@ pub enum Float {
     Raise,
     /// Its layer moved or resized to this frame of the tab.
     Place(crate::model::Frac),
+    /// Its layer down to a button at the tab's foot, its panes running on.
+    Minimize,
+    /// A minimized layer back where it was, in front.
+    Restore,
 }
 
 pub type Attached = (Box<dyn Terminal>, UnboundedReceiver<SessionEvent>);

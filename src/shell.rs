@@ -112,6 +112,10 @@ pub struct Shell {
     /// A floating layer being moved or resized, and one let go, shown until the backend's snapshot catches up.
     layer_drag: Option<layer::LayerDrag>,
     layer_settling: Option<(String, crate::model::Frac)>,
+    /// Floating layers turning into their buttons at the tab's foot, or back.
+    morphs: Vec<layer::Morph>,
+    /// Where each minimized layer's button was drawn, by the pane it restores: where a morph ends or starts.
+    pill_bounds: Rc<std::cell::RefCell<HashMap<String, Bounds<Pixels>>>>,
     /// The tab or workspace label being edited in place.
     renaming: Option<Rename>,
     folded: std::collections::HashSet<String>,
@@ -531,6 +535,8 @@ impl Shell {
                     settling: None,
                     layer_drag: None,
                     layer_settling: None,
+                    morphs: Vec::new(),
+                    pill_bounds: Rc::default(),
                     renaming: None,
                     folded: SettingsGlobal::of(cx).settings.folded.iter().cloned().collect(),
                     agents_folded: SettingsGlobal::of(cx).settings.agents_folded.iter().cloned().collect(),

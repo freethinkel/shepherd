@@ -6,7 +6,7 @@ use super::conn::Control;
 use crate::agents::{Report, plain_title};
 use crate::backend::{Attached, Change, Float, Kind, Made, Mode, Mux, Reply};
 use crate::commands::Command;
-use crate::model::{AREA, AgentStatus, Frac, Layout, LayoutPane, LayoutSplit, Pane, Rect, Snapshot, Tab, Workspace, Worktree};
+use crate::model::{AREA, AgentStatus, Frac, Layout, LayoutPane, LayoutSplit, Minimized, Pane, Rect, Snapshot, Tab, Workspace, Worktree};
 use crate::worktree::Checkouts;
 use anyhow::{anyhow, bail};
 use serde_json::{Value, json};
@@ -231,6 +231,20 @@ impl Mux for Rex {
                 }
                 Command::ClosePane { pane_id } => {
                     let (session, block) = ids(&pane_id)?;
+                    // The split's last pane, closed under floating ones, would leave the tab nothing to dock them
+                    // into, and Rex has no way to start a split again there: the front floating pane takes its place.
+                    // ponytail: a program in it that exits on its own still leaves them floating; Rex would have to
+                    // place a block in an empty split for that.
+                    let view = view(core, session).await?;
+                    let windows = view["windows"].as_array().map(Vec::as_slice).unwrap_or_default();
+                    let window = windows.iter().find(|w| frames(tree(w)).0.iter().any(|(b, _)| b == block));
+                    if let Some(window) = window.filter(|w| frames(tree(w)).0.len() == 1) {
+                        let floating: Vec<_> = layers(window).iter().filter(|l| l["kind"] == "floating").collect();
+                        let front = floating.iter().rev().find(|l| l["state"] != "minimized").or(floating.last());
+                        if let Some((other, _)) = front.and_then(|l| frames(&l["layout"]).0.into_iter().next()) {
+                            core.call("session.swap_blocks", json!({"session_id": session, "block_id": block, "other_block_id": other})).await?;
+                        }
+                    }
                     core.call("block.close", json!({"session_id": session, "block_id": block})).await?;
                     Made::default()
                 }
@@ -338,6 +352,8 @@ impl Mux for Rex {
                 }
                 Float::Raise if floats => at("session.raise_layer", json!({"layer_id": layer_id})).await?,
                 Float::Place(frame) if floats => at("session.resize_layer", json!({"layer_id": layer_id, "bounds": bounds(frame)})).await?,
+                Float::Minimize if floats => at("session.set_layer_state", json!({"layer_id": layer_id, "state": "minimized"})).await?,
+                Float::Restore if floats => at("session.set_layer_state", json!({"layer_id": layer_id, "state": "normal", "focus": true})).await?,
                 _ => return Ok(()),
             };
             Ok(())
@@ -359,7 +375,7 @@ impl Mux for Rex {
         Box::pin(async move {
             let process = on_block(self.connected().await?.as_ref(), &pane, "process", json!({})).await?;
             let fg = &process["foreground"];
-            Ok(if fg["pid"] == *shell_pid(&process) { None } else { fg["name"].as_str().map(str::to_string) })
+            Ok(if fg["pid"] == *shell_pid(&process) { None } else { program_name(fg) })
         })
     }
 
@@ -444,6 +460,19 @@ fn laid(window: &Value) -> (Vec<(String, Rect, Option<String>)>, Vec<LayoutSplit
     (panes, splits)
 }
 
+/// A window's minimized layers, front first: the first pane of each, named by its title or Rex's label.
+fn minimized(window: &Value, session: &str, state: &State) -> Vec<Minimized> {
+    let layers = layers(window).iter().rev().filter(|l| l["kind"] == "floating" && l["state"] == "minimized");
+    layers
+        .filter_map(|l| {
+            let (block, _) = frames(&l["layout"]).0.into_iter().next()?;
+            let title = state.blocks.get(&block).map(|k| plain_title(&k.title).to_string()).filter(|t| !t.is_empty());
+            let label = title.unwrap_or_else(|| text_of(&l["blocks"][0]["label"]).to_string());
+            Some(Minimized { pane_id: format!("{session}/{block}"), label })
+        })
+        .collect()
+}
+
 /// Where a session's focused pane is now.
 async fn session_cwd(core: &Control, session: &str) -> Option<String> {
     let view = view(core, session).await.ok()?;
@@ -459,6 +488,12 @@ fn text_of(value: &Value) -> &str {
 fn shell_pid(process: &Value) -> &Value {
     let ancestors = process["ancestors"].as_array().map(Vec::as_slice).unwrap_or_default();
     ancestors.iter().rev().find(|p| p["name"] != "login").map_or(&process["foreground"]["pid"], |shell| &shell["pid"])
+}
+
+/// A process's name as it was started: Claude Code's binary is named for its version (`2.1.319`) and run as `claude`.
+fn program_name(process: &Value) -> Option<String> {
+    let argv0 = process["argv0"].as_str().map(|a| a.rsplit('/').next().unwrap_or(a).trim_start_matches('-')).filter(|a| !a.is_empty());
+    argv0.or(process["name"].as_str()).map(str::to_string)
 }
 
 fn tail(text: &str, lines: usize) -> String {
@@ -575,7 +610,10 @@ fn snapshot(views: &[Value], state: &State, checkouts: &Checkouts) -> Snapshot {
             let (frames, splits) = laid(window);
             let focused = focused_block(window, &frames);
             let mut laid = Vec::new();
-            for (block, rect, layer) in &frames {
+            // a minimized layer's panes aren't laid out, but run on: their agents and programs mark their buttons
+            let resting = layers(window).iter().filter(|l| l["kind"] == "floating" && l["state"] == "minimized");
+            let resting: Vec<String> = resting.flat_map(|l| self::frames(&l["layout"]).0).map(|(block, _)| block).collect();
+            for block in frames.iter().map(|(block, ..)| block).chain(&resting) {
                 let known = state.blocks.get(block).cloned().unwrap_or_default();
                 let pane = format!("{session}/{block}");
                 out.panes.push(Pane {
@@ -589,7 +627,9 @@ fn snapshot(views: &[Value], state: &State, checkouts: &Checkouts) -> Snapshot {
                     report: Some(known.report),
                     ..Pane::default()
                 });
-                laid.push(LayoutPane { pane_id: pane, focused: block == focused, rect: *rect, layer: layer.clone() });
+            }
+            for (block, rect, layer) in &frames {
+                laid.push(LayoutPane { pane_id: format!("{session}/{block}"), focused: block == focused, rect: *rect, layer: layer.clone() });
             }
             out.tabs.push(Tab { tab_id: tab.clone(), workspace_id: session.to_string(), label: tab_label(window, t_at + 1), number: t_at as u32 + 1, agent_status: AgentStatus::Unknown });
             out.layouts.push(Layout {
@@ -599,6 +639,7 @@ fn snapshot(views: &[Value], state: &State, checkouts: &Checkouts) -> Snapshot {
                 area: Rect { x: 0, y: 0, width: AREA, height: AREA },
                 panes: laid,
                 splits,
+                minimized: minimized(window, session, state),
             });
         }
         out.workspaces.push(Workspace {
@@ -790,6 +831,16 @@ mod tests {
         let s = read(&floating, &state());
         assert_eq!(s.focused_pane_id.as_deref(), Some("session:1/block:a"), "a minimized layer leaves the keys to the layout");
         assert_eq!(s.pane_frames("session:1/window:2").len(), 2);
+        assert!(s.panes.iter().any(|p| p.pane_id == "session:1/block:float"), "it runs on: its agent and program mark its button");
+    }
+
+    #[test]
+    fn a_program_goes_by_the_name_it_was_started_as() {
+        let claude = json!({"name": "2.1.319", "path": "/Users/me/.local/share/claude/versions/2.1.319", "argv0": "claude"});
+        assert_eq!(program_name(&claude).as_deref(), Some("claude"));
+        assert_eq!(program_name(&json!({"name": "nvim", "argv0": "/opt/homebrew/bin/nvim"})).as_deref(), Some("nvim"));
+        assert_eq!(program_name(&json!({"name": "zsh", "argv0": "-zsh"})).as_deref(), Some("zsh"), "a login shell's dash");
+        assert_eq!(program_name(&json!({"name": "htop"})).as_deref(), Some("htop"));
     }
 
     #[test]
@@ -974,12 +1025,25 @@ mod tests {
         mux.float(second.clone(), Float::Place(Frac { x: 0.5, y: 0.5, w: 0.4, h: 0.4 })).await.unwrap();
         mux.float(second.clone(), Float::Raise).await.unwrap();
         until(b, "a moved floating pane", |s| floats(s).is_some_and(|f| (f.frame.x - 0.5).abs() < 0.01 && (f.frame.w - 0.4).abs() < 0.01)).await;
+        // minimized to a button at the tab's foot, and back
+        let minimized = |s: &Snapshot| s.layouts.iter().find(|l| l.tab_id == tab).is_some_and(|l| l.minimized.iter().any(|m| m.pane_id == second));
+        mux.float(second.clone(), Float::Minimize).await.unwrap();
+        let shot = until(b, "a minimized pane", minimized).await;
+        assert!(floats(&shot).is_none(), "not drawn while minimized");
+        mux.float(second.clone(), Float::Restore).await.unwrap();
+        until(b, "a restored pane", |s| !minimized(s) && floats(s).is_some()).await;
         mux.float(second.clone(), Float::Dock).await.unwrap();
         until(b, "a docked pane", |s| s.split_frames(&tab).len() == 1 && floats(s).is_none()).await;
         let moved = mux.run(Command::MovePaneToNewTab { pane_id: second.clone(), workspace_id: None }).await.unwrap().tab_id.unwrap();
         let shot = until(b, "a pane in its own tab", |s| s.panes.iter().any(|p| p.pane_id == second && p.tab_id == moved)).await;
         assert_eq!(shot.pane_frames(&moved).len(), 1, "the shell that held its place is gone");
         assert!(mux.run(Command::MovePaneToNewTab { pane_id: second.clone(), workspace_id: Some("session:other".into()) }).await.is_err());
+        // the split's last pane closed under a floating one: that one takes its place, not a tab of layers alone
+        let third = mux.run(Command::Split { pane_id: second.clone(), down: false, cwd: None }).await.unwrap().pane_id.unwrap();
+        mux.float(third.clone(), Float::Out).await.unwrap();
+        until(b, "a floating third pane", |s| s.pane_frames(&moved).iter().any(|f| f.pane_id == third && f.layer.is_some())).await;
+        mux.run(Command::ClosePane { pane_id: second.clone() }).await.unwrap();
+        until(b, "the floating pane docked", |s| s.pane_frames(&moved).iter().map(|f| (f.pane_id.as_str(), f.layer.is_none())).eq([(third.as_str(), true)])).await;
 
         mux.run(Command::ClosePane { pane_id: first.clone() }).await.unwrap();
         until(b, "a closed pane", |s| !s.panes.iter().any(|p| p.pane_id == first)).await;

@@ -177,6 +177,16 @@ pub struct Layout {
     pub panes: Vec<LayoutPane>,
     #[serde(default)]
     pub splits: Vec<LayoutSplit>,
+    /// Floating layers minimized to a button at the tab's foot, front first.
+    #[serde(default)]
+    pub minimized: Vec<Minimized>,
+}
+
+/// A minimized floating layer: a pane of it, which restores it, and what its button says.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Minimized {
+    pub pane_id: String,
+    pub label: String,
 }
 
 impl Layout {

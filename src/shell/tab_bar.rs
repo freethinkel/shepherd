@@ -140,21 +140,19 @@ fn program_mark(name: &str, theme: &Theme) -> Option<Mark> {
     })
 }
 
-/// A tab's favicons from what its panes run, as (agent, program): agents, then programs, each kind once, the
-/// terminal's only when nothing else shows.
+/// A tab's favicons from what its panes run, as (agent, program): a tile per pane as Rex's tabs have, agents first,
+/// then programs, then shells (a program without a mark is its shell's), at most [`MAX_MARKS`].
 fn marks(panes: &[(Option<&str>, Option<&str>)], theme: &Theme) -> Vec<Mark> {
-    let agents = panes.iter().filter_map(|p| p.0).map(|a| (agent_icon(Some(a)), agent_tint(Some(a), theme)));
-    let programs = panes.iter().filter(|p| p.0.is_none()).filter_map(|p| program_mark(p.1?, theme));
-    let mut out: Vec<Mark> = Vec::new();
-    for mark in agents.chain(programs) {
-        if out.len() < MAX_MARKS && !out.iter().any(|m| m.0 == mark.0) {
-            out.push(mark);
-        }
-    }
-    if out.is_empty() {
-        out.push((agent_icon(None), agent_tint(None, theme)));
-    }
-    out
+    let mut out: Vec<(u8, Mark)> = panes
+        .iter()
+        .map(|&(agent, program)| match (agent, program.and_then(|p| program_mark(p, theme))) {
+            (Some(_), _) => (0, (agent_icon(agent), agent_tint(agent, theme))),
+            (None, Some(mark)) => (1, mark),
+            (None, None) => (2, (agent_icon(None), agent_tint(None, theme))),
+        })
+        .collect();
+    out.sort_by_key(|(rank, _)| *rank);
+    out.into_iter().take(MAX_MARKS).map(|(_, mark)| mark).collect()
 }
 
 /// The program a pane runs, from herdr's `pane.process_info`: the leader of its foreground group, `None` when that
@@ -227,6 +225,12 @@ fn name_spans(label: &str, agents: &[&str]) -> (String, Vec<std::ops::Range<usiz
 }
 
 impl Shell {
+    /// A pane's favicon as its tab shows it: its agent's mark, else its program's, else the terminal's.
+    pub(super) fn pane_mark(&self, pane_id: &str, theme: &Theme) -> Mark {
+        let agent = self.snapshot.as_ref().and_then(|s| s.panes.iter().find(|p| p.pane_id == pane_id)).and_then(|p| p.agent.as_deref());
+        marks(&[(agent, self.tab_bar.programs.get(pane_id).map(String::as_str))], theme)[0]
+    }
+
     /// The shown workspace's panes without an agent: an agent's pane shows its mark.
     fn plain_panes(&self) -> Vec<String> {
         let (Some(s), Some(ws)) = (&self.snapshot, &self.tab_bar.tabs.scope) else { return Vec::new() };
@@ -398,15 +402,19 @@ mod tests {
     }
 
     #[test]
-    fn a_tab_shows_each_kind_once_agents_first() {
+    fn a_tab_shows_a_tile_per_pane_agents_first() {
         let theme = Theme::for_appearance(gpui::WindowAppearance::Dark);
         let icons = |panes: &[(Option<&str>, Option<&str>)]| marks(panes, &theme).into_iter().map(|m| m.0).collect::<Vec<_>>();
-        assert_eq!(icons(&[(None, None), (None, None)]), ["icons/prompt.svg"]);
-        assert_eq!(icons(&[(None, Some("nvim")), (Some("claude"), None), (None, None), (None, Some("nvim"))]), ["icons/claude-mark.svg", "icons/neovim-mark.svg"]);
-        // a program without a mark, and an agent's stale program, are nothing to show
-        assert_eq!(icons(&[(None, Some("some-tool"))]), ["icons/prompt.svg"]);
+        const SHELL: &str = "icons/prompt.svg";
+        assert_eq!(icons(&[(None, None), (None, None)]), [SHELL, SHELL]);
+        assert_eq!(
+            icons(&[(None, Some("nvim")), (Some("claude"), None), (None, None), (Some("claude"), None)]),
+            ["icons/claude-mark.svg", "icons/claude-mark.svg", "icons/neovim-mark.svg", SHELL]
+        );
+        // a program without a mark is its shell's, and an agent's stale program is nothing to show
+        assert_eq!(icons(&[(None, Some("some-tool"))]), [SHELL]);
         assert_eq!(icons(&[(Some("claude"), Some("nvim"))]), ["icons/claude-mark.svg"]);
-        assert_eq!(icons(&[(None, Some("Python")), (None, Some("python3.14"))]), ["icons/python-mark.svg"]);
+        assert_eq!(icons(&[(None, Some("Python"))]), ["icons/python-mark.svg"]);
         assert_eq!(icons(&[(None, Some("btop"))]), ["icons/btop-mark.svg"]);
         assert_eq!(icons(&[(None, Some("top"))]), ["icons/solar/pulse.svg"]);
         let many: Vec<_> = ["git", "go", "cargo", "node", "docker", "tmux"].map(|p| (None, Some(p))).to_vec();

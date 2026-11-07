@@ -178,7 +178,18 @@ impl Render for Shell {
         let pane_drop = self.pane_drop_overlay(&frames, &shown_tab_id, &theme, window, cx);
         let edges: Vec<f32> = splits.iter().map(|s| crate::model::split_edge(&frames, s)).collect();
         let floating = self.render_floating(&theme, window, cx);
+        // a layer shrinking into its button or growing out of it: a bare card in its place, and neither of them
+        let (morphing, hidden_pills, morph_cards) = self.morph_cards(&frames, &theme, window, cx);
         let all = frames.clone();
+        // a floating pane is a card in any pane style: its terminal rounds its corners
+        for f in &frames {
+            if let Some(pane) = self.panes.get(&f.pane_id).filter(|p| p.read(cx).card != f.layer.is_some()) {
+                pane.update(cx, |pane, cx| {
+                    pane.card = !pane.card;
+                    cx.notify();
+                });
+            }
+        }
         // the layer in front, which a click on another one's pane raises over it
         let front = frames.iter().rev().find_map(|f| f.layer.clone());
         // a pane's cell: the split's go under its dividers, the floating ones over them
@@ -209,6 +220,8 @@ impl Render for Shell {
                     };
                     let raise = (floats && f.layer != front).then(|| pane_id.clone());
                     cell.group(group)
+                        // a floating card takes the mouse from the panes under it, or a drag in it selects in them too
+                        .when(floats, |el| el.occlude())
                         .when_some(raise, |el, pane_id| {
                             el.on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                                 this.float_pane(pane_id.clone(), crate::backend::Float::Raise, cx);
@@ -249,6 +262,26 @@ impl Render for Shell {
             el.into_any_element()
         };
         let (floating_frames, frames): (Vec<PaneFrame>, Vec<PaneFrame>) = frames.into_iter().partition(|f| f.layer.is_some());
+        // floating layers minimized: a button each at the tab's foot, which brings it back
+        let minimized = snapshot.as_ref().zip(tab.as_ref()).and_then(|(s, t)| s.layouts.iter().find(|l| l.tab_id == t.tab_id)).map(|l| l.minimized.clone()).unwrap_or_default();
+        let minimized_bar = (!minimized.is_empty()).then(|| {
+            // in the tab's bottom-right corner, the front one in it
+            div().absolute().bottom(px(layer::PILL_FOOT)).right(px(layer::PILL_FOOT)).flex().flex_row_reverse().gap(px(6.)).children(minimized.into_iter().map(|m| {
+                let hover = theme.hover;
+                let (pills, pane_id) = (self.pill_bounds.clone(), m.pane_id.clone());
+                // the tab's own look: its favicon and label
+                tabs::tab_chip(self.pane_mark(&m.pane_id, &theme), m.label.into(), &theme)
+                    .id(SharedString::from(format!("minimized-{}", m.pane_id)))
+                    .relative()
+                    // laid out while its layer's card morphs, so the card knows where it goes
+                    .when(hidden_pills.contains(&m.pane_id), |el| el.invisible())
+                    .child(canvas(move |b, _, _| { pills.borrow_mut().insert(pane_id, b); }, |_, _, _, _| {}).absolute().size_full())
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .occlude()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.restore_layer(m.pane_id.clone(), cx)))
+            }))
+        });
         let grid = div()
             .id("pane-grid")
             .flex_1()
@@ -325,7 +358,13 @@ impl Render for Shell {
                         }),
                     )
             }))
-            .children(floating_frames.into_iter().map(&pane_cell))
+            .children(floating_frames.into_iter().map(|f| {
+                // laid out, so its terminal keeps its size, but not drawn
+                let hidden = f.layer.as_ref().is_some_and(|l| morphing.contains(l));
+                div().absolute().size_full().when(hidden, |el| el.invisible()).child(pane_cell(f))
+            }))
+            .children(minimized_bar)
+            .children(morph_cards)
             .children(pane_drop)
             .children(floating);
 
@@ -488,6 +527,9 @@ impl Render for Shell {
                 }
                 this.pane_command(w, cx, |pane_id| Command::Zoom { pane_id })
             }))
+            .on_action(cx.listener(|this, _: &FloatPane, w, cx| this.toggle_float(w, cx)))
+            .on_action(cx.listener(|this, _: &MinimizeFloating, w, cx| this.toggle_minimize(false, w, cx)))
+            .on_action(cx.listener(|this, _: &MinimizeAllFloating, w, cx| this.toggle_minimize(true, w, cx)))
             .on_action(cx.listener(|this, _: &crate::bindings::SwitchBackend, _, cx| this.next_backend(cx)))
             .on_action(cx.listener(|this, _: &FocusLeft, w, cx| {
                 if this.panel_focused() {
@@ -541,13 +583,27 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &WorkspacesPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Workspaces, w, cx)))
             .on_action(cx.listener(|this, _: &SessionsPanel, w, cx| this.toggle_command_panel(crate::ui::command_panel::Kind::Sessions, w, cx)))
             .on_action(cx.listener(|this, c: &crate::herdr::keys::HerdrCommand, w, cx| this.run_herdr_command(c, w, cx)))
-            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
-                this.drag_divider(e.position, cx);
-                this.drag_layer(e.position, cx);
-                this.drag_sidebar(e.position.x, cx);
-                this.drag_right_panel(e.position.x, w, cx);
-                this.drag_agents(e.position.y, w, cx);
-            }))
+            // The window's moves, not the root's: a floating pane takes the mouse from what is under it (the root
+            // too), and its own move or resize goes on over it.
+            .child({
+                let shell = cx.entity().downgrade();
+                canvas(|_, _, _| {}, move |_, _, window, _| {
+                    window.on_mouse_event(move |e: &MouseMoveEvent, phase, w, cx| {
+                        if phase != gpui::DispatchPhase::Bubble {
+                            return;
+                        }
+                        let _ = shell.update(cx, |this, cx| {
+                            this.drag_divider(e.position, cx);
+                            this.drag_layer(e.position, cx);
+                            this.drag_sidebar(e.position.x, cx);
+                            this.drag_right_panel(e.position.x, w, cx);
+                            this.drag_agents(e.position.y, w, cx);
+                        });
+                    });
+                })
+                .absolute()
+                .size_full()
+            })
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
                 this.end_layer_drag(cx);

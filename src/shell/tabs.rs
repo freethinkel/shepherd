@@ -425,6 +425,32 @@ pub(super) fn tile(icon: &'static str, (bg, fg): (Hsla, Hsla)) -> Div {
         .child(gpui::svg().path(icon).size(px(11.)).text_color(fg))
 }
 
+/// A tab's chip outside the bar, a minimized floating layer's button, a size up from a tab: over a pane, not in a bar.
+pub(super) const CHIP_H: f32 = 34.;
+
+/// A tab's look outside the bar, a minimized floating layer's button: its favicon and label on a card.
+pub(super) fn tab_chip(mark: Mark, label: SharedString, theme: &Theme) -> Div {
+    div()
+        .h(px(CHIP_H))
+        .min_w(px(MIN_W + 24.))
+        .max_w(px(MAX_W + 40.))
+        .flex()
+        .items_center()
+        .gap(px(INNER_GAP + 2.))
+        .pl(px(PAD_L + 3.))
+        .pr(px(PAD_L + INNER_GAP + 4.))
+        .rounded_full()
+        .bg(theme.card)
+        .border_1()
+        .border_color(theme.border)
+        .shadow_lg()
+        .font_family(theme.font_ui.clone())
+        .text_size(px(FONT_SIZE + 1.))
+        .text_color(theme.text)
+        .child(tile(mark.0, mark.1))
+        .child(div().flex_1().min_w_0().truncate().child(label))
+}
+
 /// A tab's face at full width: favicon, label, trailing slot.
 fn face(theme: &Theme, t: &Tab, width: f32, selected: bool, window: &mut Window) -> Div {
     // ponytail: a hovered tab's wash and a dragged tab's card differ a shade from this; the group hover can follow if it shows

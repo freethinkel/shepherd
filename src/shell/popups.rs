@@ -1067,12 +1067,16 @@ impl Shell {
                 ("ClosePane", |pane_id| Command::ClosePane { pane_id }),
             ];
             // Rex floats panes over the tab's split; the others have none
-            let float = (self.backend.kind() == crate::backend::Kind::Rex).then(|| match self.pane_layer(&pane_id) {
-                Some(_) => ("Dock pane", "icons/window-minimize.svg", crate::backend::Float::Dock),
-                None => ("Float pane", "icons/window-restore.svg", crate::backend::Float::Out),
-            })
-            // the split's last pane stays in it
-            .filter(|(_, _, change)| *change != crate::backend::Float::Out || self.can_float(&pane_id));
+            let float: Vec<(&str, &str, crate::backend::Float)> = match (self.backend.kind() == crate::backend::Kind::Rex, self.pane_layer(&pane_id)) {
+                (false, _) => Vec::new(),
+                (true, Some(_)) => vec![
+                    ("Minimize pane", "icons/alt-arrow-down.svg", crate::backend::Float::Minimize),
+                    ("Dock pane", "icons/window-minimize.svg", crate::backend::Float::Dock),
+                ],
+                // the split's last pane stays in it
+                (true, None) if self.can_float(&pane_id) => vec![("Float pane", "icons/window-restore.svg", crate::backend::Float::Out)],
+                (true, None) => Vec::new(),
+            };
             // a zoomed pane's menu unzooms it
             let zoomed = self.snapshot.as_ref().is_some_and(|s| s.layouts.iter().any(|l| l.zoomed && l.focused_pane_id == pane_id));
             gpui::deferred(
@@ -1092,19 +1096,22 @@ impl Shell {
                             let close = action == "ClosePane";
                             let pane_id = pane_id.clone();
                             let separator = close.then(|| div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border).into_any_element());
-                            let float = float.filter(|_| close).map(|(label, icon, change)| {
+                            let float = float.iter().filter(|_| close).enumerate().map(|(n, &(label, icon, change))| {
                                 let pane_id = pane_id.clone();
-                                row(theme, false, "pane-menu-float")
+                                row(theme, false, ("pane-menu-float", n))
                                     .h(px(28.))
                                     .rounded(px(6.))
                                     .child(menu_mark(icon, theme.text_muted))
                                     .child(div().flex_1().child(label))
                                     .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         if let Some(m) = this.pane_menu.as_mut() { m.close() }
-                                        this.float_pane(pane_id.clone(), change, cx);
+                                        match change {
+                                            crate::backend::Float::Minimize => this.minimize_pane(&pane_id, cx),
+                                            change => this.float_pane(pane_id.clone(), change, cx),
+                                        }
                                     }))
                                     .into_any_element()
-                            });
+                            }).collect::<Vec<_>>();
                             let item = row(theme, false, ("pane-menu-item", i))
                                 .h(px(28.))
                                 .rounded(px(6.))

@@ -420,6 +420,7 @@ fn snapshot(doc: &Doc, terminals: &[Value]) -> Snapshot {
                 area: Rect { x: 0, y: 0, width: AREA, height: AREA },
                 panes: frames.iter().map(|(a, r)| LayoutPane { pane_id: a.clone(), focused: *a == tab.focused, rect: rect(*r), layer: None }).collect(),
                 splits: splits.iter().map(|s| LayoutSplit { id: s.id.clone(), direction: if s.right { "right" } else { "down" }.into(), ratio: s.ratio, rect: rect(s.rect) }).collect(),
+                minimized: Vec::new(),
             });
         }
         let first = w.tabs.first().map(|t| t.focused.as_str()).and_then(find);

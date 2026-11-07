@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// The revision of the API this speaks, which the server translates to from a newer one (the doc at `/llms.txt`).
-const API_REVISION: u64 = 8;
+const API_REVISION: u64 = 9;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<anyhow::Result<Value>>>>>;
