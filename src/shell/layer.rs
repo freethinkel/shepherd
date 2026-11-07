@@ -1,4 +1,4 @@
-//! Panes that float over a tab's split (Rex's floating layers): moved by their grip, resized by their corner,
+//! Panes that float over a tab's split (Rex's floating layers): moved by their grip, resized by their edges and corners,
 //! raised by a click, floated out of the split and docked back from the pane's menu.
 use super::*;
 use crate::backend::Float;
@@ -7,17 +7,26 @@ use gpui::{AnyElement, CursorStyle, Transformation, radians};
 
 /// The smallest a floating layer is resized to, as a fraction of the tab.
 const MIN: f32 = 0.1;
-/// The resize corner's side.
+/// A resize corner's side.
 const CORNER: f32 = 14.;
+/// A resize edge's thickness, half of it outside the card.
+const EDGE: f32 = 6.;
 
-/// A floating layer being moved, or resized by its corner.
+/// What a drag on a floating layer takes: the whole layer, or the sides of it that a resize handle moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Grab {
+    Move,
+    Resize { left: bool, top: bool, right: bool, bottom: bool },
+}
+
+/// A floating layer being moved or resized.
 pub(super) struct LayerDrag {
     pane_id: String,
     layer: String,
     from: Frac,
     now: Frac,
     start: gpui::Point<Pixels>,
-    resize: bool,
+    grab: Grab,
 }
 
 impl Shell {
@@ -31,9 +40,9 @@ impl Shell {
         self.layer_drag.as_ref().map(|d| (d.layer.clone(), d.now)).or_else(|| self.layer_settling.clone())
     }
 
-    fn start_layer_drag(&mut self, pane_id: String, layer: String, from: Frac, resize: bool, start: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+    fn start_layer_drag(&mut self, pane_id: String, layer: String, from: Frac, grab: Grab, start: gpui::Point<Pixels>, cx: &mut Context<Self>) {
         cx.set_global(GridHold(true));
-        self.layer_drag = Some(LayerDrag { pane_id, layer, from, now: from, start, resize });
+        self.layer_drag = Some(LayerDrag { pane_id, layer, from, now: from, start, grab });
         cx.notify();
     }
 
@@ -41,7 +50,7 @@ impl Shell {
         let (Some(drag), Some(grid)) = (&mut self.layer_drag, self.grid_bounds.get()) else { return };
         let dx = f32::from(position.x - drag.start.x) / f32::from(grid.size.width).max(1.);
         let dy = f32::from(position.y - drag.start.y) / f32::from(grid.size.height).max(1.);
-        drag.now = dragged(drag.from, dx, dy, drag.resize);
+        drag.now = dragged(drag.from, dx, dy, drag.grab);
         cx.notify();
     }
 
@@ -77,22 +86,30 @@ impl Shell {
         });
     }
 
+    /// Whether `pane_id` may float out of its tab's split: not the split's last pane, which would leave the tab
+    /// nothing under its layers to dock them back into.
+    pub(super) fn can_float(&self, pane_id: &str) -> bool {
+        let Some(snapshot) = &self.snapshot else { return false };
+        let Some(layout) = snapshot.layouts.iter().find(|l| l.panes.iter().any(|p| p.pane_id == pane_id)) else { return false };
+        layout.panes.iter().any(|p| p.pane_id != pane_id && p.layer.is_none())
+    }
+
     /// The floating layer `pane_id` is in, if it floats.
     pub(super) fn pane_layer(&self, pane_id: &str) -> Option<String> {
         let layouts = &self.snapshot.as_ref()?.layouts;
         layouts.iter().flat_map(|l| &l.panes).find(|p| p.pane_id == pane_id)?.layer.clone()
     }
 
-    /// A floating pane's grip, which moves its layer, and its corner, which resizes it.
-    pub(super) fn layer_handles(&self, f: &PaneFrame, frames: &[PaneFrame], group: &SharedString, theme: &Theme, cx: &Context<Self>) -> [AnyElement; 2] {
+    /// A floating pane's grip, which moves its layer, and the handles on its edges and corners, which resize it.
+    pub(super) fn layer_handles(&self, f: &PaneFrame, frames: &[PaneFrame], group: &SharedString, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
         let (Some(layer), Some(from)) = (f.layer.clone(), f.layer.as_deref().and_then(|l| layer_frame(frames, l))) else {
-            return [div().into_any_element(), div().into_any_element()];
+            return Vec::new();
         };
-        let start = move |resize: bool| {
+        let start = move |grab: Grab| {
             let (pane_id, layer) = (f.pane_id.clone(), layer.clone());
             cx.listener(move |this: &mut Shell, e: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                this.start_layer_drag(pane_id.clone(), layer.clone(), from, resize, e.position, cx);
+                this.start_layer_drag(pane_id.clone(), layer.clone(), from, grab, e.position, cx);
             })
         };
         let grip = div().absolute().top_0().left_0().w_full().flex().justify_center().child(
@@ -113,7 +130,7 @@ impl Shell {
                 .hover(|s| s.opacity(1.).bg(theme.hover))
                 .cursor(CursorStyle::OpenHand)
                 .occlude()
-                .on_mouse_down(MouseButton::Left, start(false))
+                .on_mouse_down(MouseButton::Left, start(Grab::Move))
                 .child(
                     gpui::svg()
                         .path("icons/drag-handle.svg")
@@ -122,16 +139,38 @@ impl Shell {
                         .text_color(theme.text_muted),
                 ),
         );
-        let corner = div()
-            .id(SharedString::from(format!("layer-corner-{}", f.pane_id)))
-            .absolute()
-            .bottom_0()
-            .right_0()
-            .size(px(CORNER))
-            .cursor(CursorStyle::ResizeUpLeftDownRight)
-            .occlude()
-            .on_mouse_down(MouseButton::Left, start(true));
-        [grip.into_any_element(), corner.into_any_element()]
+        // edges first, corners over them: (left, top, right, bottom) each handle moves
+        let sides = [
+            (true, false, false, false),
+            (false, true, false, false),
+            (false, false, true, false),
+            (false, false, false, true),
+            (true, true, false, false),
+            (false, true, true, false),
+            (true, false, false, true),
+            (false, false, true, true),
+        ];
+        let handles = sides.into_iter().map(|(left, top, right, bottom)| {
+            let corner = (left || right) && (top || bottom);
+            let cursor = match (left, top, right, bottom) {
+                _ if !corner && (left || right) => CursorStyle::ResizeLeftRight,
+                _ if !corner => CursorStyle::ResizeUpDown,
+                (true, true, ..) | (_, _, true, true) => CursorStyle::ResizeUpLeftDownRight,
+                _ => CursorStyle::ResizeUpRightDownLeft,
+            };
+            let (thick, inset) = (px(if corner { CORNER } else { EDGE }), px(-EDGE / 2.));
+            let el = div()
+                .id(SharedString::from(format!("layer-edge-{}-{}{}{}{}", f.pane_id, left as u8, top as u8, right as u8, bottom as u8)))
+                .absolute()
+                .cursor(cursor)
+                .occlude()
+                .on_mouse_down(MouseButton::Left, start(Grab::Resize { left, top, right, bottom }));
+            // along an edge between the corners; a corner square at its corner
+            let el = if left { el.left(inset).w(thick) } else if right { el.right(inset).w(thick) } else { el.left(px(CORNER)).right(px(CORNER)) };
+            let el = if top { el.top(inset).h(thick) } else if bottom { el.bottom(inset).h(thick) } else { el.top(px(CORNER)).bottom(px(CORNER)) };
+            el.into_any_element()
+        });
+        std::iter::once(grip.into_any_element()).chain(handles).collect()
     }
 }
 
@@ -162,14 +201,26 @@ pub(super) fn place_layer(frames: &[PaneFrame], layer: &str, to: Frac) -> Vec<Pa
         .collect()
 }
 
-/// The layer at `from` moved by (`dx`, `dy`) of the tab, or resized by its bottom-right corner; it stays in the tab.
-fn dragged(from: Frac, dx: f32, dy: f32, resize: bool) -> Frac {
-    if resize {
-        let (w, h) = ((from.w + dx).clamp(MIN, 1. - from.x), (from.h + dy).clamp(MIN, 1. - from.y));
-        Frac { w, h, ..from }
-    } else {
-        Frac { x: (from.x + dx).clamp(0., 1. - from.w), y: (from.y + dy).clamp(0., 1. - from.h), ..from }
+/// The layer at `from` moved by (`dx`, `dy`) of the tab, or the sides a resize grabbed moved by it; it stays in the
+/// tab, no smaller than [`MIN`].
+fn dragged(from: Frac, dx: f32, dy: f32, grab: Grab) -> Frac {
+    let Grab::Resize { left, top, right, bottom } = grab else {
+        return Frac { x: (from.x + dx).clamp(0., 1. - from.w), y: (from.y + dy).clamp(0., 1. - from.h), ..from };
+    };
+    let (mut x0, mut y0, mut x1, mut y1) = (from.x, from.y, from.x + from.w, from.y + from.h);
+    if left {
+        x0 = (x0 + dx).clamp(0., x1 - MIN);
     }
+    if right {
+        x1 = (x1 + dx).clamp(x0 + MIN, 1.);
+    }
+    if top {
+        y0 = (y0 + dy).clamp(0., y1 - MIN);
+    }
+    if bottom {
+        y1 = (y1 + dy).clamp(y0 + MIN, 1.);
+    }
+    Frac { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
 }
 
 fn close(a: Frac, b: Frac) -> bool {
@@ -193,8 +244,14 @@ mod tests {
         let from = layer_frame(&frames, "l").unwrap();
         assert!(close(from, Frac { x: 0.2, y: 0.2, w: 0.4, h: 0.4 }));
 
-        assert!(close(dragged(from, 0.9, -0.5, false), Frac { x: 0.6, y: 0., w: 0.4, h: 0.4 }), "kept inside");
-        assert!(close(dragged(from, -0.9, 0.1, true), Frac { x: 0.2, y: 0.2, w: MIN, h: 0.5 }), "no smaller than MIN");
+        let corner = Grab::Resize { left: false, top: false, right: true, bottom: true };
+        assert!(close(dragged(from, 0.9, -0.5, Grab::Move), Frac { x: 0.6, y: 0., w: 0.4, h: 0.4 }), "kept inside");
+        assert!(close(dragged(from, -0.9, 0.1, corner), Frac { x: 0.2, y: 0.2, w: MIN, h: 0.5 }), "no smaller than MIN");
+        let top_left = Grab::Resize { left: true, top: true, right: false, bottom: false };
+        assert!(close(dragged(from, -0.1, 0.1, top_left), Frac { x: 0.1, y: 0.3, w: 0.5, h: 0.3 }), "the far sides stay put");
+        assert!(close(dragged(from, -0.5, -0.5, top_left), Frac { x: 0., y: 0., w: 0.6, h: 0.6 }), "kept inside");
+        let left = Grab::Resize { left: true, top: false, right: false, bottom: false };
+        assert!(close(dragged(from, 0.9, 0.3, left), Frac { x: 0.6 - MIN, y: 0.2, w: MIN, h: 0.4 }), "an edge moves one side");
 
         let placed = place_layer(&frames, "l", Frac { x: 0., y: 0., w: 0.8, h: 0.8 });
         assert_eq!(placed[0], tiled, "the split stays");

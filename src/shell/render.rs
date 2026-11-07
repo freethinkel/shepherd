@@ -203,9 +203,9 @@ impl Render for Shell {
                     let edge = (comfortable || floats) && !focused;
                     let pane_id = f.pane_id.clone();
                     let group = SharedString::from(format!("pane-{}", f.pane_id));
-                    let [grip, corner] = match floats {
+                    let handles = match floats {
                         true => self.layer_handles(&f, &all, &group, &theme, cx),
-                        false => [self.pane_grip(&f.pane_id, &shown_tab_id, &group, &theme, cx).into_any_element(), div().into_any_element()],
+                        false => vec![self.pane_grip(&f.pane_id, &shown_tab_id, &group, &theme, cx).into_any_element()],
                     };
                     let raise = (floats && f.layer != front).then(|| pane_id.clone());
                     cell.group(group)
@@ -235,8 +235,7 @@ impl Render for Shell {
                             .when(focused, |el| el.child(div().absolute().inset_0().rounded(corner_r).border(px(ACTIVE_RING)).border_color(ring)))
                             .when(edge, |el| el.child(div().absolute().inset_0().rounded(corner_r).border_1().border_color(theme.border_strong))),
                     )
-                    .child(grip)
-                    .child(corner)
+                    .children(handles)
                 }
                 None => cell.child(
                     div()

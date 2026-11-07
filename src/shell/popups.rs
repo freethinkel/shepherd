@@ -1070,7 +1070,11 @@ impl Shell {
             let float = (self.backend.kind() == crate::backend::Kind::Rex).then(|| match self.pane_layer(&pane_id) {
                 Some(_) => ("Dock pane", "icons/window-minimize.svg", crate::backend::Float::Dock),
                 None => ("Float pane", "icons/window-restore.svg", crate::backend::Float::Out),
-            });
+            })
+            // the split's last pane stays in it
+            .filter(|(_, _, change)| *change != crate::backend::Float::Out || self.can_float(&pane_id));
+            // a zoomed pane's menu unzooms it
+            let zoomed = self.snapshot.as_ref().is_some_and(|s| s.layouts.iter().any(|l| l.zoomed && l.focused_pane_id == pane_id));
             gpui::deferred(
                 gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
                     "pane-menu-in",
@@ -1081,7 +1085,9 @@ impl Shell {
                             cx.notify();
                         }))
                         .children(items.into_iter().enumerate().flat_map(|(i, (action, make))| {
-                            let label = ACTIONS.iter().find(|(a, _)| *a == action).map_or(action, |(_, l)| l);
+                            let unzoom = zoomed && action == "ToggleZoom";
+                            let label = if unzoom { "Unzoom pane" } else { ACTIONS.iter().find(|(a, _)| *a == action).map_or(action, |(_, l)| l) };
+                            let icon = if unzoom { "icons/collapse-arrows.svg" } else { crate::ui::command_panel::action_icon(action) };
                             let chord = chords.iter().find(|(a, _)| a == action).map(|(_, k)| crate::ui::settings::display_chord(k));
                             let close = action == "ClosePane";
                             let pane_id = pane_id.clone();
@@ -1103,7 +1109,7 @@ impl Shell {
                                 .h(px(28.))
                                 .rounded(px(6.))
                                 .when(close, |el| el.text_color(theme.danger))
-                                .child(crate::ui::icon(crate::ui::command_panel::action_icon(action), 14., if close { theme.danger } else { theme.text_muted }, theme.accent))
+                                .child(crate::ui::icon(icon, 14., if close { theme.danger } else { theme.text_muted }, theme.accent))
                                 .child(div().flex_1().child(label))
                                 .when_some(chord, |el, chord| el.child(div().text_size(px(11.)).text_color(theme.text_faint).child(chord)))
                                 .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {

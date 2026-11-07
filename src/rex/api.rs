@@ -325,6 +325,8 @@ impl Mux for Rex {
                 core.call(method, args)
             };
             match change {
+                // the split's last pane stays: a tab of layers alone has nothing to dock them back into
+                Float::Out if !floats && frames(tree(window)).0.len() < 2 => bail!("the split's last pane can't float"),
                 Float::Out if !floats => at("session.float_block", json!({"block_id": block, "bounds": OUT})).await?,
                 Float::Dock if floats => {
                     let tiled = frames(tree(window)).0;
