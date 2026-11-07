@@ -74,6 +74,9 @@ impl Render for Shell {
         if let Some((path, ratio)) = live {
             (frames, splits) = crate::model::preview(&frames, &splits, &path, ratio);
         }
+        if let Some((layer, to)) = self.layer_override(&frames) {
+            frames = layer::place_layer(&frames, &layer, to);
+        }
         let own = self.own_pane.clone();
         let shown: Vec<PaneFrame> = frames.iter().filter(|f| attachable(&f.pane_id, own.as_deref())).cloned().collect();
         if let Some(snapshot) = &snapshot {
@@ -175,6 +178,78 @@ impl Render for Shell {
         let pane_drop = self.pane_drop_overlay(&frames, &shown_tab_id, &theme, window, cx);
         let edges: Vec<f32> = splits.iter().map(|s| crate::model::split_edge(&frames, s)).collect();
         let floating = self.render_floating(&theme, window, cx);
+        let all = frames.clone();
+        // the layer in front, which a click on another one's pane raises over it
+        let front = frames.iter().rev().find_map(|f| f.layer.clone());
+        // a pane's cell: the split's go under its dividers, the floating ones over them
+        let pane_cell = |f: PaneFrame| -> gpui::AnyElement {
+            let cell = div()
+                .absolute()
+                .left(relative(f.frame.x))
+                .top(relative(f.frame.y))
+                .w(relative(f.frame.w))
+                .h(relative(f.frame.h))
+                .when(comfortable, |el| el.p(px(PANE_GAP / 2.)));
+            let floats = f.layer.is_some();
+            // a floating pane is a card in any pane style
+            let corner_r = if floats { px(crate::terminal::pane::CARD_RADIUS) } else { radius };
+            let el = match self.panes.get(&f.pane_id) {
+                Some(pane) => {
+                    // a lone pane needs no marker of which pane has focus
+                    let is_active = active.as_deref() == Some(f.pane_id.as_str());
+                    let (focused, dimmed) = (highlight && split && is_active, split && !is_active);
+                    // comfortable: every card has an edge, the highlighted one the accent's; one that floats has
+                    // it in any style
+                    let edge = (comfortable || floats) && !focused;
+                    let pane_id = f.pane_id.clone();
+                    let group = SharedString::from(format!("pane-{}", f.pane_id));
+                    let [grip, corner] = match floats {
+                        true => self.layer_handles(&f, &all, &group, &theme, cx),
+                        false => [self.pane_grip(&f.pane_id, &shown_tab_id, &group, &theme, cx).into_any_element(), div().into_any_element()],
+                    };
+                    let raise = (floats && f.layer != front).then(|| pane_id.clone());
+                    cell.group(group)
+                        .when_some(raise, |el, pane_id| {
+                            el.on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                this.float_pane(pane_id.clone(), crate::backend::Float::Raise, cx);
+                            }))
+                        })
+                        .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            this.pane_menu = Some(crate::ui::Popup::new((pane_id.clone(), e.position)));
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        // cached: a frame the pane did not cause (a spinner, a hover elsewhere) reuses its grid
+                        div()
+                            .size_full()
+                            .relative()
+                            .when(floats, |el| el.rounded(corner_r).shadow_lg().overflow_hidden())
+                            .child(pane.clone().cached(gpui::StyleRefinement::default().size_full()))
+                            // the pane at 60%: its background over it, not `opacity`, which a cached pane's
+                            // replayed frame may not pick up
+                            .when(dimmed, |el| el.child(div().absolute().inset_0().rounded(corner_r).bg(theme.terminal.background.opacity(1. - INACTIVE_PANE))))
+                            // ponytail: overlays, not a border on the container, which shrank the grid by its width
+                            .when(focused, |el| el.child(div().absolute().inset_0().rounded(corner_r).border(px(ACTIVE_RING)).border_color(ring)))
+                            .when(edge, |el| el.child(div().absolute().inset_0().rounded(corner_r).border_1().border_color(theme.border_strong))),
+                    )
+                    .child(grip)
+                    .child(corner)
+                }
+                None => cell.child(
+                    div()
+                        .size_full()
+                        .p_4()
+                        .bg(theme.terminal.background)
+                        .text_color(theme.text_muted)
+                        .child(format!("{} is this Shepherd's own pane", f.pane_id)),
+                ),
+            };
+            el.into_any_element()
+        };
+        let (floating_frames, frames): (Vec<PaneFrame>, Vec<PaneFrame>) = frames.into_iter().partition(|f| f.layer.is_some());
         let grid = div()
             .id("pane-grid")
             .flex_1()
@@ -209,56 +284,7 @@ impl Render for Shell {
                         .child(div().text_size(px(12.)).text_color(theme.text_muted).child(format!("Connecting to {}…", self.place_label(cx)))),
                 )
             })
-            .children(frames.into_iter().map(|f| {
-                let cell = div()
-                    .absolute()
-                    .left(relative(f.frame.x))
-                    .top(relative(f.frame.y))
-                    .w(relative(f.frame.w))
-                    .h(relative(f.frame.h))
-                    .when(comfortable, |el| el.p(px(PANE_GAP / 2.)));
-                match self.panes.get(&f.pane_id) {
-                    Some(pane) => {
-                        // a lone pane needs no marker of which pane has focus
-                        let is_active = active.as_deref() == Some(f.pane_id.as_str());
-                        let (focused, dimmed) = (highlight && split && is_active, split && !is_active);
-                        // comfortable: every card has an edge, the highlighted one the accent's
-                        let edge = comfortable && !focused;
-                        let pane_id = f.pane_id.clone();
-                        let group = SharedString::from(format!("pane-{}", f.pane_id));
-                        let grip = self.pane_grip(&f.pane_id, &shown_tab_id, &group, &theme, cx);
-                        cell.group(group).on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                                this.pane_menu = Some(crate::ui::Popup::new((pane_id.clone(), e.position)));
-                                cx.notify();
-                            }),
-                        )
-                        .child(
-                            // cached: a frame the pane did not cause (a spinner, a hover elsewhere) reuses its grid
-                            div()
-                                .size_full()
-                                .relative()
-                                .child(pane.clone().cached(gpui::StyleRefinement::default().size_full()))
-                                // the pane at 60%: its background over it, not `opacity`, which a cached pane's
-                                // replayed frame may not pick up
-                                .when(dimmed, |el| el.child(div().absolute().inset_0().rounded(radius).bg(theme.terminal.background.opacity(1. - INACTIVE_PANE))))
-                                // ponytail: overlays, not a border on the container, which shrank the grid by its width
-                                .when(focused, |el| el.child(div().absolute().inset_0().rounded(radius).border(px(ACTIVE_RING)).border_color(ring)))
-                                .when(edge, |el| el.child(div().absolute().inset_0().rounded(radius).border_1().border_color(theme.border_strong))),
-                        )
-                        .child(grip)
-                    }
-                    None => cell.child(
-                        div()
-                            .size_full()
-                            .p_4()
-                            .bg(theme.terminal.background)
-                            .text_color(theme.text_muted)
-                            .child(format!("{} is this Shepherd's own pane", f.pane_id)),
-                    ),
-                }
-            }));
+            .children(frames.into_iter().map(&pane_cell));
         // comfortable: the gap shows the seam, which lights up only to be dragged
         let (seam, seam_lit) = (if comfortable { gpui::transparent_black() } else { theme.border_strong }, theme.accent);
         let grid = grid
@@ -300,6 +326,7 @@ impl Render for Shell {
                         }),
                     )
             }))
+            .children(floating_frames.into_iter().map(&pane_cell))
             .children(pane_drop)
             .children(floating);
 
@@ -517,18 +544,21 @@ impl Render for Shell {
             .on_action(cx.listener(|this, c: &crate::herdr::keys::HerdrCommand, w, cx| this.run_herdr_command(c, w, cx)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| {
                 this.drag_divider(e.position, cx);
+                this.drag_layer(e.position, cx);
                 this.drag_sidebar(e.position.x, cx);
                 this.drag_right_panel(e.position.x, w, cx);
                 this.drag_agents(e.position.y, w, cx);
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
+                this.end_layer_drag(cx);
                 this.end_sidebar_drag(cx);
                 this.end_right_panel_drag(cx);
                 this.end_agents_drag(cx);
             }))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 this.end_divider(cx);
+                this.end_layer_drag(cx);
                 this.end_sidebar_drag(cx);
                 this.end_right_panel_drag(cx);
                 this.end_agents_drag(cx);

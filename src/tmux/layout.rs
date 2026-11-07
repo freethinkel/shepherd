@@ -74,7 +74,7 @@ impl Node {
 
     /// As the window lays panes out, `focused` marked.
     pub(super) fn laid(&self, focused: &str) -> Vec<LayoutPane> {
-        self.panes().into_iter().map(|(pane_id, rect)| LayoutPane { focused: pane_id == focused, pane_id, rect }).collect()
+        self.panes().into_iter().map(|(pane_id, rect)| LayoutPane { focused: pane_id == focused, pane_id, rect, layer: None }).collect()
     }
 
     /// Its splits, two sides each. A split's id is its path, which [`crate::model::split_path`] reads back.

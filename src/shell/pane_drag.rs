@@ -484,8 +484,8 @@ mod tests {
         // p1 on the left half, p2 on the right
         let half = |x| Frac { x, y: 0., w: 0.5, h: 1. };
         vec![
-            PaneFrame { pane_id: "w1:p1".into(), frame: half(0.), focused: true },
-            PaneFrame { pane_id: "w1:p2".into(), frame: half(0.5), focused: false },
+            PaneFrame { pane_id: "w1:p1".into(), frame: half(0.), focused: true, layer: None },
+            PaneFrame { pane_id: "w1:p2".into(), frame: half(0.5), focused: false, layer: None },
         ]
     }
 

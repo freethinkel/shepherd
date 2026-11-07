@@ -27,6 +27,7 @@ mod changes;
 mod device;
 mod divider;
 mod floating;
+mod layer;
 mod merge;
 mod motion;
 mod pane_drag;
@@ -108,6 +109,9 @@ pub struct Shell {
     divider: Option<DividerDrag>,
     /// A released divider's ratio, shown until herdr's snapshot catches up (no jump back to the old layout).
     settling: Option<(Vec<bool>, f32)>,
+    /// A floating layer being moved or resized, and one let go, shown until the backend's snapshot catches up.
+    layer_drag: Option<layer::LayerDrag>,
+    layer_settling: Option<(String, crate::model::Frac)>,
     /// The tab or workspace label being edited in place.
     renaming: Option<Rename>,
     folded: std::collections::HashSet<String>,
@@ -525,6 +529,8 @@ impl Shell {
                     grid_bounds: Rc::new(Cell::new(None)),
                     divider: None,
                     settling: None,
+                    layer_drag: None,
+                    layer_settling: None,
                     renaming: None,
                     folded: SettingsGlobal::of(cx).settings.folded.iter().cloned().collect(),
                     agents_folded: SettingsGlobal::of(cx).settings.agents_folded.iter().cloned().collect(),
@@ -1378,7 +1384,7 @@ mod tests {
 
     fn shown(ids: &[&str]) -> Vec<PaneFrame> {
         let frame = Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
-        ids.iter().map(|id| PaneFrame { pane_id: id.to_string(), frame, focused: false }).collect()
+        ids.iter().map(|id| PaneFrame { pane_id: id.to_string(), frame, focused: false, layer: None }).collect()
     }
 
     /// Surfaces stand in as "has its process exited?".

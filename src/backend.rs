@@ -180,6 +180,19 @@ pub trait Terminal: Send {
     }
 }
 
+/// What [`Mux::float`] does to a pane.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Float {
+    /// Out of the tab's split, into a layer of its own over it.
+    Out,
+    /// Back into the split, beside the pane last focused there.
+    Dock,
+    /// Its layer in front of the others.
+    Raise,
+    /// Its layer moved or resized to this frame of the tab.
+    Place(crate::model::Frac),
+}
+
 pub type Attached = (Box<dyn Terminal>, UnboundedReceiver<SessionEvent>);
 
 /// Terminals and their layout: workspaces, tabs and panes, each with its id.
@@ -191,6 +204,11 @@ pub trait Mux: Send + Sync {
     /// the panes running one, which herdr follows pane by pane.
     fn changes(&self, agents: Vec<String>) -> Reply<'_, mpsc::UnboundedReceiver<Change>>;
     fn run(&self, command: Command) -> Reply<'_, Made>;
+    /// Floats the pane over its tab, or changes the floating layer it is in. Only Rex floats panes.
+    fn float(&self, _pane: String, _change: Float) -> Reply<'_, ()> {
+        let name = self.kind().name();
+        Box::pin(async move { anyhow::bail!("{name} has no floating panes") })
+    }
     /// Where the pane's foreground program is now.
     fn cwd(&self, pane: String) -> Reply<'_, Option<String>>;
     /// The pane's last `lines` of text, with its colors if `ansi`.

@@ -217,7 +217,7 @@ fn pick_tab_stays_in_the_shown_workspace_when_its_tab_closes() {
 }
 
 fn pane(id: &str, x: f32, y: f32, w: f32, h: f32) -> shepherd::model::PaneFrame {
-    shepherd::model::PaneFrame { pane_id: id.into(), frame: Frac { x, y, w, h }, focused: false }
+    shepherd::model::PaneFrame { pane_id: id.into(), frame: Frac { x, y, w, h }, focused: false, layer: None }
 }
 
 fn split(path: Vec<bool>, vertical: bool, ratio: f32, frame: Frac) -> shepherd::model::SplitFrame {

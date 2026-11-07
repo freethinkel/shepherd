@@ -1066,6 +1066,11 @@ impl Shell {
                 ("ToggleZoom", |pane_id| Command::Zoom { pane_id }),
                 ("ClosePane", |pane_id| Command::ClosePane { pane_id }),
             ];
+            // Rex floats panes over the tab's split; the others have none
+            let float = (self.backend.kind() == crate::backend::Kind::Rex).then(|| match self.pane_layer(&pane_id) {
+                Some(_) => ("Dock pane", "icons/window-minimize.svg", crate::backend::Float::Dock),
+                None => ("Float pane", "icons/window-restore.svg", crate::backend::Float::Out),
+            });
             gpui::deferred(
                 gpui::anchored().position(at).snap_to_window_with_margin(px(8.)).child(crate::ui::menu_motion(
                     "pane-menu-in",
@@ -1081,6 +1086,19 @@ impl Shell {
                             let close = action == "ClosePane";
                             let pane_id = pane_id.clone();
                             let separator = close.then(|| div().mx(px(-4.)).my(px(4.)).h(px(1.)).bg(theme.border).into_any_element());
+                            let float = float.filter(|_| close).map(|(label, icon, change)| {
+                                let pane_id = pane_id.clone();
+                                row(theme, false, "pane-menu-float")
+                                    .h(px(28.))
+                                    .rounded(px(6.))
+                                    .child(menu_mark(icon, theme.text_muted))
+                                    .child(div().flex_1().child(label))
+                                    .on_pick(at, cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        if let Some(m) = this.pane_menu.as_mut() { m.close() }
+                                        this.float_pane(pane_id.clone(), change, cx);
+                                    }))
+                                    .into_any_element()
+                            });
                             let item = row(theme, false, ("pane-menu-item", i))
                                 .h(px(28.))
                                 .rounded(px(6.))
@@ -1092,7 +1110,7 @@ impl Shell {
                                     if let Some(m) = this.pane_menu.as_mut() { m.close() }
                                     this.send(make(pane_id.clone()), cx, |_, _, _| {});
                                 }));
-                            separator.into_iter().chain([item.into_any_element()])
+                            float.into_iter().chain(separator).chain([item.into_any_element()])
                         })),
                 )),
             )

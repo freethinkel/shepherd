@@ -188,7 +188,8 @@ impl Layout {
     /// The pane on that side of `pane_id`: the nearest, then the one sharing most of that side.
     pub fn neighbor(&self, pane_id: &str, direction: crate::commands::Direction) -> Option<&str> {
         use crate::commands::Direction::*;
-        let r = &self.panes.iter().find(|p| p.pane_id == pane_id).filter(|_| !self.zoomed)?.rect;
+        // a floating pane has no side, and the split's panes are beside one another, not beside what floats over them
+        let r = &self.panes.iter().find(|p| p.pane_id == pane_id && p.layer.is_none()).filter(|_| !self.zoomed)?.rect;
         let shared = |a: u16, a_len: u16, b: u16, b_len: u16| i32::from((a + a_len).min(b + b_len)) - i32::from(a.max(b));
         let beside = |q: &Rect| match direction {
             Left => (i32::from(r.x) - i32::from(q.x + q.width), shared(r.y, r.height, q.y, q.height)),
@@ -198,7 +199,7 @@ impl Layout {
         };
         self.panes
             .iter()
-            .filter(|p| p.pane_id != pane_id && p.rect.width > 0 && p.rect.height > 0)
+            .filter(|p| p.pane_id != pane_id && p.layer.is_none() && p.rect.width > 0 && p.rect.height > 0)
             .filter_map(|p| {
                 let (gap, side) = beside(&p.rect);
                 (gap >= 0 && side > 0).then_some((gap, -side, p.pane_id.as_str()))
@@ -250,6 +251,9 @@ pub struct LayoutPane {
     pub pane_id: String,
     pub focused: bool,
     pub rect: Rect,
+    /// The floating layer it floats in, over the tab's split; panes of later layers float over earlier ones.
+    #[serde(default)]
+    pub layer: Option<String>,
 }
 
 /// The grid of a backend that lays panes out in fractions, as herdr's cells: fine enough for a pane's edge.
@@ -277,6 +281,8 @@ pub struct PaneFrame {
     pub pane_id: String,
     pub frame: Frac,
     pub focused: bool,
+    /// As [`LayoutPane::layer`].
+    pub layer: Option<String>,
 }
 
 impl Snapshot {
@@ -508,12 +514,12 @@ impl Snapshot {
         let Some(layout) = self.layouts.iter().find(|l| l.tab_id == tab_id) else { return Vec::new() };
         if layout.zoomed {
             let full = Frac { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
-            return vec![PaneFrame { pane_id: layout.focused_pane_id.clone(), frame: full, focused: true }];
+            return vec![PaneFrame { pane_id: layout.focused_pane_id.clone(), frame: full, focused: true, layer: None }];
         }
         layout
             .panes
             .iter()
-            .filter_map(|p| Some(PaneFrame { pane_id: p.pane_id.clone(), frame: frac(&layout.area, &p.rect)?, focused: p.focused }))
+            .filter_map(|p| Some(PaneFrame { pane_id: p.pane_id.clone(), frame: frac(&layout.area, &p.rect)?, focused: p.focused, layer: p.layer.clone() }))
             .collect()
     }
 }
